@@ -424,6 +424,12 @@ cache_root_problem() {
 # Hard guard before provisioning (start/scale/validate/boot): print the problem
 # and fail. cache_root_problem() carries the detail and remediation.
 check_cache_root() {
+  # Location guard FIRST: CACHE_ROOT must resolve under /mnt/<pool> and not a system
+  # dir or share root. This gates the mkdir/chown -R (ensure_dirs) and the bind mount
+  # into every runner (build_args), so a value like /boot or /mnt/user/... — which
+  # passes the fs-type check below — is rejected here before it can chown the flash
+  # or expose a host path (and the PAT) to untrusted workflow code.
+  crf_safe_cache_root >/dev/null 2>&1 || { err "CACHE_ROOT ($CACHE_ROOT) is unsafe — point it at a pool dataset under /mnt/<pool>, not a share root or system dir"; return 1; }
   local p; p="$(cache_root_problem)"
   [ -z "$p" ] && return 0
   err "$p"
@@ -443,10 +449,12 @@ check_cache_root() {
 # failure). Requires ACCESS_TOKEN. Used for the token + deregistration calls below.
 gh_api() {
   [ -n "$ACCESS_TOKEN" ] || return 1
-  curl -fsSL -m 10 -X "$1" \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com$2" 2>/dev/null
+  # Pass the bearer token via --config on stdin so the PAT never appears in argv
+  # (/proc/<pid>/cmdline is world-readable), unlike a -H flag on the command line.
+  printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+    | curl -fsSL -m 10 -X "$1" --config - \
+      -H "Accept: application/vnd.github+json" \
+      "https://api.github.com$2" 2>/dev/null
 }
 
 # Mint a runner registration token for a scope. $1 = "org:<name>" or
@@ -556,7 +564,7 @@ registry_login() {
     esac
   fi
   [ -n "$user" ] && [ -n "$pass" ] || return 0
-  if printf '%s' "$pass" | docker login "$REGISTRY_SERVER" -u "$user" --password-stdin >/dev/null 2>&1; then
+  if printf '%s' "$pass" | docker login -u "$user" --password-stdin -- "$REGISTRY_SERVER" >/dev/null 2>&1; then
     log "registry: logged in to $REGISTRY_SERVER as $user"
   else
     err "registry: docker login to $REGISTRY_SERVER failed (check server/username/token; GHCR needs read:packages on the PAT)"
@@ -569,7 +577,7 @@ ensure_dirs() {
   local m dir
   for m in $CACHE_MOUNTS; do
     [ -n "$m" ] || continue
-    dir="$CACHE_ROOT/${m%%:*}"
+    dir="$(crf_safe_mount_subdir "${m%%:*}")" || { err "skipping unsafe cache mount '${m%%:*}' — it escapes CACHE_ROOT"; continue; }
     mkdir -p "$dir"
     # Unless runners run as root, they write caches as the non-root 'runner' user
     # (RUNNER_UID:RUNNER_GID). Make the host cache dirs owned by it — chown only
@@ -589,7 +597,11 @@ ensure_network() {
   [ "$NETWORK_ISOLATION" = "off" ] && return 0
   docker network inspect "$RUNNER_NETWORK" >/dev/null 2>&1 && return 0
   log "creating isolated runner network $RUNNER_NETWORK"
-  docker network create --driver bridge "$RUNNER_NETWORK" >/dev/null \
+  # Label our networks so they're identifiable as plugin-created. (RUNNER_NETWORK
+  # defaults to the plugin-specific 'ci-runner-net'; a foreign network deliberately
+  # pointed at by a hand-edited RUNNER_NETWORK is not verified here to preserve
+  # upgrade compatibility with pre-label networks — see docs on isolation caveats.)
+  docker network create --driver bridge --label net.unraid.ci-runner-farm=1 "$RUNNER_NETWORK" >/dev/null \
     || err "could not create network $RUNNER_NETWORK"
 }
 
@@ -631,8 +643,14 @@ ensure_mirror() {
       netargs=( --network "$RUNNER_NETWORK" )
       log "starting shared image cache ($MIRROR_NAME) on $RUNNER_NETWORK"
     else
-      netargs=( -p "${MIRROR_PORT}:5000" )
-      log "starting shared image cache ($MIRROR_NAME) on :$MIRROR_PORT"
+      # Bind the published mirror to the docker0 bridge gateway (where runners reach
+      # it via host.docker.internal:host-gateway) instead of 0.0.0.0 — so it is NOT an
+      # open, unauthenticated Docker Hub proxy exposed to the LAN/WAN. Fall back to
+      # localhost if the gateway can't be resolved (safe: the mirror is only a cache,
+      # so an unreachable one just means direct pulls — never a wildcard bind).
+      local gwip; gwip="$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)"
+      netargs=( -p "${gwip:-127.0.0.1}:${MIRROR_PORT}:5000" )
+      log "starting shared image cache ($MIRROR_NAME) on ${gwip:-127.0.0.1}:$MIRROR_PORT"
     fi
     docker run -d --restart=unless-stopped --name "$MIRROR_NAME" \
       "${netargs[@]}" \
@@ -757,7 +775,9 @@ build_args() {
   # warm caches mounted into the runner, configurable via CACHE_MOUNTS
   local m
   for m in $CACHE_MOUNTS; do
-    [ -n "$m" ] && ARGS+=( -v "$CACHE_ROOT/${m%%:*}:${m#*:}" )
+    [ -n "$m" ] || continue
+    local hostdir; hostdir="$(crf_safe_mount_subdir "${m%%:*}")" || { err "skipping unsafe cache mount '${m%%:*}'"; continue; }
+    ARGS+=( -v "$hostdir:${m#*:}" )
   done
   [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
   [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
@@ -1071,6 +1091,18 @@ crf_safe_cache_root() {
     /mnt/*) printf '%s' "$root"; return 0 ;;
     *) echo not-under-mnt >&2; return 1 ;;
   esac
+}
+
+# Resolve a CACHE_MOUNTS host subdir against the (canonical) cache root and confirm
+# it stays UNDER that root — rejecting `../` traversal or absolute paths in the
+# space-separated, web-settable CACHE_MOUNTS list before they reach mkdir/chown -R
+# (ensure_dirs) or a bind mount into every runner (build_args). Echoes the safe
+# absolute path on success; returns 1 (caller logs + skips the entry) otherwise.
+crf_safe_mount_subdir() {
+  local root real
+  root="$(realpath -m -- "$CACHE_ROOT" 2>/dev/null)" || return 1
+  real="$(realpath -m -- "$CACHE_ROOT/$1" 2>/dev/null)" || return 1
+  case "$real" in "$root"/*) printf '%s' "$real"; return 0 ;; *) return 1 ;; esac
 }
 
 cmd_cache_usage_refresh() {

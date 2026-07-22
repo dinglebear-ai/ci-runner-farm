@@ -251,7 +251,7 @@ _(Network isolation)_:
 >
 > **isolate** — runners run on a dedicated bridge (`ci-runner-net`), so they can't reach your **other Unraid containers**. The shared image cache joins the same network. Low-risk; recommended.
 >
-> **strict** — everything `isolate` does, **plus** firewall rules (Docker's `DOCKER-USER` chain) that stop runners from reaching the **Unraid host and your LAN**, while still allowing the internet and the shared cache. Best when runners might touch less-trusted code. Requires `iptables` on the host; if it can't be applied, Start logs a warning and continues without the egress rules.
+> **strict** — everything `isolate` does, **plus** IPv4 firewall rules (Docker's `DOCKER-USER`/`INPUT` chains) that block runners from reaching the **Unraid host and your LAN** while still allowing the internet and the shared cache. Treat this as **defense-in-depth against accidental egress** (a build script phoning home by mistake), **not a hard boundary**: with Docker-in-Docker on (the default) runners are **privileged** and determined malicious code could break out and remove these rules, and the rules are IPv4-only. For genuinely untrusted code, prefer non-privileged runners and treat strict as an extra layer, not the wall. Requires `iptables`; if it can't be applied, Start logs a warning and continues without the egress rules.
 :end
 
 ### Image auto-update
