@@ -103,36 +103,9 @@ switch ($action) {
     break;
 
   case 'build-image':
-    // launch the build in the background; UI polls 'build-log'
-    $log  = "$CFGDIR/build.log";
-    $lock = "$CFGDIR/build.lock";
-    @mkdir($CFGDIR, 0755, true);
-    // Serialize builds ATOMICALLY and only report success once the lock is ours.
-    // The launcher opens fd 9 on the lock and takes a non-blocking flock IN THIS
-    // synchronous call, then branches on the exit code:
-    //   0  -> won it: truncate the log HERE (under the lock, before we return, so a
-    //         poll can never read a prior build's __BUILD_RC__), launch the build in
-    //         a nohup'd child that INHERITS fd 9 (holding the flock for the whole
-    //         build, released only when that child exits — even on SIGKILL), STARTED.
-    //   1  -> lock held by a running build: BUSY.
-    //   other (127 = flock not on PATH, etc.): NOLOCK.
-    // A failed `exec 9>` redirect (unwritable flash) exits the shell with no output.
-    // So only the exact STARTED/BUSY sentinels map to ok/busy; anything else is a
-    // real launch failure surfaced as such, never masked as "already running".
-    $inner = escapeshellarg($SCRIPT) . ' build-image >> ' . escapeshellarg($log) . ' 2>&1; '
-           . 'echo "__BUILD_RC__=$?" >> ' . escapeshellarg($log);
-    $launcher = 'exec 9> ' . escapeshellarg($lock) . '; '
-              . 'flock -n 9; rc=$?; '
-              . 'if [ "$rc" -eq 0 ]; then '
-              .   ': > ' . escapeshellarg($log) . '; '
-              .   'nohup sh -c ' . escapeshellarg($inner) . ' </dev/null >/dev/null 2>&1 & '
-              .   'echo STARTED; '
-              . 'elif [ "$rc" -eq 1 ]; then echo BUSY; '
-              . 'else echo NOLOCK; fi';
-    $out = trim((string)shell_exec('sh -c ' . escapeshellarg($launcher)));
-    if      ($out === 'STARTED') { echo json_encode(['ok' => true, 'action' => 'build-image']); }
-    else if ($out === 'BUSY')    { echo json_encode(['ok' => false, 'error' => 'a build is already running']); }
-    else                         { echo json_encode(['ok' => false, 'error' => 'could not start the build — check that flock is available and ' . $CFGDIR . ' is writable']); }
+    // The engine owns the flock/launch state machine (build-async verb); thin shim.
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' build-async');
+    echo $out !== '' ? $out : json_encode(['ok'=>false,'error'=>'build launch failed']);
     break;
 
   case 'queued-json':
@@ -188,22 +161,15 @@ switch ($action) {
     break;
 
   case 'farm-log':
-    // Live farm activity for the Fleet log's idle state: the autoscale daemon
-    // log (or boot.log before the daemon ever ran), minus docker's noisy
-    // per-invocation swap-limit warning.
-    $as = "$RUNDIR/autoscale.log"; $bt = "$CFGDIR/boot.log";
-    $src = is_file($as) ? $as : $bt;
-    $txt = is_file($src) ? shell_exec('tail -n 150 ' . escapeshellarg($src) . " | grep -v 'swap limit capabilities' | tail -n 60") : '';
-    echo json_encode(['ok' => true, 'log' => $txt ?: '']);
+    // engine owns the source selection + filtering (farm-log verb); thin shim.
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' farm-log');
+    echo $out !== '' ? $out : json_encode(['ok'=>true,'log'=>'']);
     break;
 
   case 'build-log':
-    $log = "$CFGDIR/build.log";
-    $txt = is_file($log) ? (string)shell_exec('tail -n 120 ' . escapeshellarg($log)) : '';
-    $running = trim(shell_exec("pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1 && echo 1 || echo 0")) === '1';
-    $rc = (!$running && preg_match('/__BUILD_RC__=(\d+)/', $txt, $m)) ? (int)$m[1] : null;
-    $disp = preg_replace('/\n?__BUILD_RC__=\d+\n?/', "\n", $txt);
-    echo json_encode(['ok' => true, 'running' => $running, 'rc' => $rc, 'log' => $disp]);
+    // engine owns the liveness/rc/log parsing (build-status verb); thin shim.
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' build-status');
+    echo $out !== '' ? $out : json_encode(['ok'=>true,'running'=>false,'rc'=>null,'log'=>'']);
     break;
 
   default:

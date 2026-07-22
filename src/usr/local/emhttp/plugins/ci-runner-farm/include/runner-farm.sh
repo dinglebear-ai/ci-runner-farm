@@ -1047,6 +1047,16 @@ cmd_status() {
 }
 
 json_escape() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\000-\037'; }
+# JSON-encode stdin as a string literal (with surrounding quotes), preserving newlines
+# as \n — for multi-line log payloads where json_escape's control-char stripping would
+# collapse the log into one line.
+json_string() {
+  local str; str="$(cat)"
+  str="${str//\\/\\\\}"; str="${str//\"/\\\"}"
+  str="${str//$'\t'/\\t}"; str="${str//$'\r'/\\r}"; str="${str//$'\n'/\\n}"
+  str="$(printf '%s' "$str" | tr -d '\000-\010\013\014\016-\037')"
+  printf '"%s"' "$str"
+}
 
 cmd_image_info_json() {
   # Image facts for the settings page's Runner image tab: existence, id, age,
@@ -1473,6 +1483,57 @@ cmd_prune_cache() {
   rm -rf "${root:?}/"* && log "cache cleared: $root"
 }
 
+# --- Runner-image build orchestration. The engine owns the flock/launch/liveness
+#     state machine (previously inlined in exec.php); exec.php now just runs the verb. ---
+
+# Start a build serialized by an flock, reporting success only once the lock is held.
+# Open fd 9 on the lock, take it non-blocking, branch on the exit code: 0 = won ->
+# truncate the log HERE (before returning, so a poll can't read a prior build's
+# __BUILD_RC__) then run the build in a nohup'd child that INHERITS fd 9 (holding the
+# lock for the whole build, released only when that child exits — even on SIGKILL);
+# 1 = held; anything else (flock missing / unwritable flash) -> launch error.
+cmd_build_async() {
+  local log="$CFGDIR/build.log" lock="$CFGDIR/build.lock" inner
+  mkdir -p "$CFGDIR" 2>/dev/null
+  exec 9> "$lock" || { echo '{"ok":false,"error":"could not open the build lock (config dir not writable?)"}'; return 0; }
+  flock -n 9; local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    : > "$log"
+    inner="'$0' build-image >> '$log' 2>&1; echo \"__BUILD_RC__=\$?\" >> '$log'"
+    nohup sh -c "$inner" </dev/null >/dev/null 2>&1 &
+    echo '{"ok":true,"action":"build-image"}'
+  elif [ "$rc" -eq 1 ]; then
+    echo '{"ok":false,"error":"a build is already running"}'
+  else
+    echo '{"ok":false,"error":"could not start the build (is flock available and the config dir writable?)"}'
+  fi
+}
+
+# {ok,running,rc,log} for the current/last build. running = the build-image process is
+# live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
+# from the __BUILD_RC__ sentinel only once the build is no longer running.
+cmd_build_status() {
+  local log="$CFGDIR/build.log" txt running rc n disp
+  txt="$([ -f "$log" ] && tail -n 120 "$log")"
+  if pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1; then running=true; else running=false; fi
+  rc=null
+  if [ "$running" = false ]; then
+    n="$(printf '%s' "$txt" | grep -oE '__BUILD_RC__=[0-9]+' | tail -1 | grep -oE '[0-9]+')"
+    [ -n "$n" ] && rc="$n"
+  fi
+  disp="$(printf '%s' "$txt" | grep -v '__BUILD_RC__=')"
+  printf '{"ok":true,"running":%s,"rc":%s,"log":%s}\n' "$running" "$rc" "$(printf '%s' "$disp" | json_string)"
+}
+
+# {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
+# (tmpfs) or boot.log before the daemon ran, minus docker's noisy swap-limit warning.
+cmd_farm_log() {
+  local as="$RUNDIR/autoscale.log" bt="$CFGDIR/boot.log" src txt
+  src="$as"; [ -f "$as" ] || src="$bt"
+  txt="$([ -f "$src" ] && tail -n 150 "$src" | grep -v 'swap limit capabilities' | tail -n 60)"
+  printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
+}
+
 cmd_build_image() {
   # Build the runner image from the editable Dockerfile. Uses a CLEAN temp
   # context (only the Dockerfile) so the token/config never enter the build.
@@ -1536,6 +1597,9 @@ case "${1:-status}" in
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         cmd_validate ;;
   build-image)      cmd_build_image ;;
+  build-async)      cmd_build_async ;;
+  build-status)     cmd_build_status ;;
+  farm-log)         cmd_farm_log ;;
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
