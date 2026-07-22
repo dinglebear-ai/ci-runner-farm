@@ -100,7 +100,7 @@ IMAGE_DRAIN_TIMEOUT="3600"           # max seconds to wait for a busy runner to 
 CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
-SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK AUTOSCALE AUTOSCALE_MIN \
+SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
 AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT"
 
@@ -953,6 +953,21 @@ with_fleet_lock() {
 }
 cmd_restart() { cmd_stop; cmd_start; }
 
+# Operator convenience: (re)start the shared image cache + regenerate the runner DinD
+# config to match — WITHOUT a full fleet Start/Restart (useful after changing
+# SHARED_IMAGE_CACHE / MIRROR_PORT, or to clear a failed mirror). The mirror is a
+# separate container so this doesn't disrupt runners; already-running runners pick up
+# the new mirror endpoint only when they are next recreated.
+cmd_mirror_up() {
+  ensure_mirror
+  write_dind_config
+  if docker ps --format '{{.Names}}' | grep -qx "$MIRROR_NAME"; then
+    log "shared image cache ($MIRROR_NAME) is up"
+  elif [ "$SHARED_IMAGE_CACHE" = "true" ] && [ "$DIND" = "true" ]; then
+    err "shared image cache is not running — see the error above"
+  fi
+}
+
 cmd_start() {
   [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
@@ -1593,6 +1608,7 @@ case "${1:-status}" in
   boot-autostart)   cmd_boot_autostart ;;
   stop)         with_fleet_lock wait cmd_stop ;;
   restart)      with_fleet_lock wait cmd_restart ;;
+  mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
   scale)        with_fleet_lock wait cmd_scale "${2:?usage: scale <N>}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
