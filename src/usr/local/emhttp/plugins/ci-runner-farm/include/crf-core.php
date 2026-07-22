@@ -51,7 +51,13 @@ function crfDark(){ return /Theme--(black|gray)\b/.test(document.documentElement
    bundle ships without) with the uui tokens, rescoped for shadow DOM. */
 window.CRF_UUI = (async () => {
   try {
-    const man = await (await fetch(CRF_UUI_BASE + 'ui.manifest.json')).json();
+    // Fetch the manifest and the standalone utility CSS concurrently: the util CSS URL is
+    // resolved server-side (PHP glob) and doesn't depend on the manifest, so there's no
+    // reason to await one before starting the other. Cuts a round-trip off first paint.
+    const [man, utilCss] = await Promise.all([
+      fetch(CRF_UUI_BASE + 'ui.manifest.json').then(r => r.json()),
+      CRF_UTIL_CSS ? fetch(CRF_UTIL_CSS).then(r => r.text()) : Promise.resolve('')
+    ]);
     // Distinguish a manifest SHAPE change (bundle updated, entries renamed) from an
     // absent bundle (fetch throws -> outer catch), so a future @unraid/ui update logs
     // an actionable message rather than a generic "unavailable".
@@ -59,17 +65,19 @@ window.CRF_UUI = (async () => {
       console.warn('ci-runner-farm: @unraid/ui manifest shape changed (style.css/register.ts entries missing) — bundle updated; using fallback. Update the crf-core.php loader.');
       return false;
     }
-    const parts = [];
-    if (CRF_UTIL_CSS) parts.push(await (await fetch(CRF_UTIL_CSS)).text());
-    parts.push(await (await fetch(CRF_UUI_BASE + man['style.css'].file)).text());
-    const css = parts.join('\n')
+    // The uui stylesheet and the register.ts module are independent — fetch the CSS and
+    // import the module concurrently, then merge + rescope for shadow DOM and register.
+    const [uuiCss, mod] = await Promise.all([
+      fetch(CRF_UUI_BASE + man['style.css'].file).then(r => r.text()),
+      import(CRF_UUI_BASE + man['src/register.ts'].file)
+    ]);
+    const css = [utilCss, uuiCss].filter(Boolean).join('\n')
       .replace(/\.unapi\.dark\b/g, ':host(.dark)')
       .replace(/\.unapi\b/g, ':host')
       .replace(/:root\b/g, ':host')
       .replace(/\.dark\b/g, ':host(.dark)')
       + '\n:host([size="xs"]) .inline-flex{font-size:12px;line-height:1.2;padding:3px 10px;gap:4px}'
       + '\n:host(.crf-stat) [class~="p-4"]{padding:8px 14px}';
-    const mod = await import(CRF_UUI_BASE + man['src/register.ts'].file);
     mod.registerAllComponents({ sharedCssContent: css });
     if (crfDark()) document.querySelectorAll('uui-button,uui-brand-button,uui-badge,uui-card-wrapper').forEach(e => e.classList.add('dark'));
     return true;
