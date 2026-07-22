@@ -23,7 +23,7 @@ $defaults = [
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
   'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
-  'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'NETWORK_ISOLATION'=>'off',
+  'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
   'AUTOSCALE'=>'false', 'AUTOSCALE_MIN'=>'2', 'AUTOSCALE_MAX'=>'16', 'AUTOSCALE_MIN_IDLE'=>'2',
   'AUTOSCALE_STEP'=>'2', 'AUTOSCALE_INTERVAL'=>'30', 'AUTOSCALE_IDLE_GRACE'=>'5',
@@ -235,6 +235,16 @@ _(Share host docker.sock)_:
 
 :crf_sock_plug:
 > Mount the host Docker socket so jobs can start service containers (e.g. postgres for integration tests). PRIVATE repos only — never expose this to public/fork-PR code (root-equivalent host access).
+:end
+
+_(Shared image cache)_:
+: <select name="SHARED_IMAGE_CACHE">
+  <option value="true" <?=crf_sel($cfg,'SHARED_IMAGE_CACHE','true','true')?>>true (pull-through registry mirror)</option>
+  <option value="false" <?=crf_sel($cfg,'SHARED_IMAGE_CACHE','false','true')?>>false</option>
+</select>
+
+:crf_mirror_plug:
+> Runs a shared `registry:2` pull-through cache (Docker-in-Docker only) so images used across the fleet are pulled from Docker Hub once, not once per runner. Bound to the Docker bridge gateway, not the LAN. Turn off if you don't want the extra container.
 :end
 
 _(Network isolation)_:
