@@ -3,7 +3,10 @@ Title="Settings"
 Tag="gear"
 ---
 <?php
-/* CI Runner Farm settings page - native Unraid markdown form + inline help */
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
+/* CI Runner Farm settings page - native Unraid markdown form + inline help.
+   The crf* JS core (crfPost etc.) + shared .crf-* styles come from
+   include/crf-core.php (above, shared by all tabs via include_once). */
 $plugin   = 'ci-runner-farm';
 /* parse_plugin_cfg reads /boot/config/plugins/$plugin/$plugin.cfg (empty [] if
    absent). Defaults are NOT stored on flash — they live in $defaults below, so

@@ -3,28 +3,13 @@ Title="Fleet"
 Tag="server"
 ---
 <?php
-/* Fleet hub tab: live stats, actions, runner bays with usage, and the fleet
-   log. Shares one document with the other RunnerFarm tabs (dynamix xmenu
-   tabs), so the crf* JS core, the uui loader, and the .crf-* stylesheet
-   defined here serve all tabs.
-
-   Modern components: Unraid ships the @unraid/ui web-component bundle on every
-   page but never registers it, and its stylesheet is missing the Tailwind
-   utilities layer (they live in the standalone apps css). The CRF_UUI loader below
-   force-registers the bundle with a merged, shadow-rescoped stylesheet. Both
-   hashed filenames are resolved at render/runtime (manifest + PHP glob), so
-   Unraid updates don't break it — and if any piece is missing the custom
-   elements stay unregistered, which still renders their slotted text and
-   still fires their onclick handlers, so the page degrades to plain-looking
-   but functional controls. */
-$crf_csrf = $var['csrf_token'] ?? '';
-$crf_uui_base = '/plugins/dynamix.my.servers/unraid-components/uui/';
-$crf_util_css = '';
-foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/standalone/standalone-apps-*.css') ?: [] as $f) {
-  $crf_util_css = '/plugins/dynamix.my.servers/unraid-components/standalone/' . basename($f);
-  break;
-}
+/* Fleet hub tab: live stats, actions, runner bays with usage, and the fleet log.
+   The shared crf* JS core, the @unraid/ui force-loader, and the shared .crf-*
+   styles are included from include/crf-core.php (below, via include_once) so all
+   three RunnerFarm tabs share one declared dependency regardless of tab load
+   order. Only Fleet-specific pollers, rendering, and styles live in this file. */
 ?>
+<?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
 <div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
 <div id="crf-warn" class="crf-banner crf-banner-warn" style="display:none"></div>
 
@@ -149,79 +134,11 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
 </style>
 
 <script>
-const CRF_CSRF = "<?=$crf_csrf?>";
-const CRF_URL  = "/plugins/ci-runner-farm/include/exec.php";
-const CRF_UUI_BASE = "<?=$crf_uui_base?>";
-const CRF_UTIL_CSS = "<?=$crf_util_css?>";
-function crfDark(){ return /Theme--(black|gray)\b/.test(document.documentElement.className); }
-/* Force-register @unraid/ui (see header comment). Resolves both hashed asset
-   names at runtime; merges the standalone Tailwind utilities (which the uui
-   bundle ships without) with the uui tokens, rescoped for shadow DOM. */
-window.CRF_UUI = (async () => {
-  try {
-    const man = await (await fetch(CRF_UUI_BASE + 'ui.manifest.json')).json();
-    const parts = [];
-    if (CRF_UTIL_CSS) parts.push(await (await fetch(CRF_UTIL_CSS)).text());
-    parts.push(await (await fetch(CRF_UUI_BASE + man['style.css'].file)).text());
-    const css = parts.join('\n')
-      .replace(/\.unapi\.dark\b/g, ':host(.dark)')
-      .replace(/\.unapi\b/g, ':host')
-      .replace(/:root\b/g, ':host')
-      .replace(/\.dark\b/g, ':host(.dark)')
-      + '\n:host([size="xs"]) .inline-flex{font-size:12px;line-height:1.2;padding:3px 10px;gap:4px}'
-      + '\n:host(.crf-stat) [class~="p-4"]{padding:8px 14px}';
-    const mod = await import(CRF_UUI_BASE + man['src/register.ts'].file);
-    mod.registerAllComponents({ sharedCssContent: css });
-    if (crfDark()) document.querySelectorAll('uui-button,uui-brand-button,uui-badge,uui-card-wrapper').forEach(e => e.classList.add('dark'));
-    return true;
-  } catch (e) { console.warn('ci-runner-farm: @unraid/ui unavailable, using fallback styling', e); return false; }
-})();
-function crfPost(p){
-  p.csrf_token = CRF_CSRF;
-  return fetch(CRF_URL,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:Object.entries(p).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&')})
-    .then(r=>r.text().then(t=>{
-      // fetch() only rejects on network failure, not on 4xx/5xx — so an expired
-      // CSRF token (403 after a reboot/array restart) or a backend 500 arrives
-      // here with a JSON body that would otherwise parse and resolve as if it were
-      // real data, making the fleet look empty and buttons silently no-op. Reject
-      // instead, so callers' .catch paints "connection lost / reload".
-      if(!r.ok) throw new Error('http '+r.status+(r.status===403?' — session expired, reload the page':'')+': '+t.slice(0,100));
-      try{ return JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); }
-    }));
-}
 /* Poll only when the Fleet tab is actually on screen. document.hidden covers a
    backgrounded browser tab; offsetParent covers the inactive dynamix sub-tab
    (all tabs share one document, so document.hidden stays false on Settings/Image
    while Fleet's pollers would otherwise keep hitting docker on the NAS). */
 function crfFleetActive(){ const b=document.getElementById('crf-bays-body'); return !document.hidden && !!b && b.offsetParent!==null; }
-/* Copy text to the clipboard, feature-detecting the async Clipboard API (absent
-   in insecure contexts — Unraid's LAN webGUI is often plain HTTP, where
-   navigator.clipboard is undefined and .writeText would throw synchronously) and
-   falling back to execCommand('copy'). Shared by every tab (one document). */
-function crfCopyText(t){
-  if(navigator.clipboard&&navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-  return new Promise((res,rej)=>{ try{ const ta=document.createElement('textarea'); ta.value=t; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); document.body.removeChild(ta); ok?res():rej(new Error('copy rejected')); }catch(e){ rej(e); } });
-}
-/* Copy the text content of an element to the clipboard, with button feedback. */
-function crfCopyFrom(id, btn){
-  const t=(document.getElementById(id)||{}).textContent||'';
-  crfCopyText(t).then(()=>{ const o=btn.textContent; btn.textContent='Copied'; setTimeout(()=>btn.textContent=o,1500); }).catch(()=>{ const o=btn.textContent; btn.textContent='Copy failed'; setTimeout(()=>btn.textContent=o,1500); });
-}
-function crfEsc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-/* Semantic log tinting: escape first, then dim structural prefixes and tint
-   error/warn lines and known lifecycle phrases. Applies to both consoles. */
-function crfColorize(t){
-  return String(t||'').split('\n').map(line=>{
-    let l=crfEsc(line);
-    l=l.replace(/^(\[ci-runner-farm\]|\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?|#\d+\s)/,'<span class="crf-lg-dim">$1</span>');
-    if(/error|fatal|failed|failure/i.test(line)) return '<span class="crf-lg-err">'+l+'</span>';
-    if(/warn/i.test(line)) return '<span class="crf-lg-warn">'+l+'</span>';
-    l=l.replace(/\b(shrink by \d+|removing idle [\w-]+|deregistered [\w-]+|reaping [\w-]+|stopping|stopped)\b/gi,'<span class="crf-lg-warn">$1</span>');
-    l=l.replace(/\b(grow to \d+|daemon up|started|registered|Listening for Jobs|successfully|DONE|CACHED|FINISHED|build complete)\b/gi,'<span class="crf-lg-ok">$1</span>');
-    return l;
-  }).join('\n');
-}
 let crfUserLog=false;
 function crfLog(o){ crfUserLog=true; document.getElementById('crf-log').innerHTML = crfColorize(o.log||JSON.stringify(o)); }
 /* Until the user triggers an action, the Fleet log shows live farm activity
@@ -236,12 +153,6 @@ function crfFarmLog(){
 }
 crfFarmLog(); setInterval(crfFarmLog,10000);
 /* Lightweight theme-following toast for action feedback. */
-function crfToast(msg){
-  let t=document.getElementById('crf-toast');
-  if(!t){ t=document.createElement('div'); t.id='crf-toast'; t.className='crf-toast'; document.body.appendChild(t); }
-  t.textContent=msg; t.classList.add('crf-toast-show');
-  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('crf-toast-show'),2600);
-}
 const CRF_TOAST_MSG={start:'Fleet started',stop:'Fleet stopped',restart:'Fleet restarted',validate:'Validation finished'};
 function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
 function crfAction(a){

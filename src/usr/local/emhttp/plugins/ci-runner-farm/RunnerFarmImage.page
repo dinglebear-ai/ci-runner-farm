@@ -3,9 +3,11 @@ Title="Runner image"
 Tag="cube"
 ---
 <?php
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 /* Runner image builder tab: image status band, ACE-powered Dockerfile editor
    (core dynamix ships ace with a dockerfile mode), and the build pipeline.
-   The crf* JS core and .crf-* styles live on the Fleet tab (same document). */
+   The crf* JS core + .crf-* styles come from include/crf-core.php (above, shared
+   by all tabs via include_once). */
 $crf_plugin = 'ci-runner-farm';
 $crf_df     = "/boot/config/plugins/$crf_plugin/Dockerfile";
 $crf_df_saved = is_file($crf_df);
