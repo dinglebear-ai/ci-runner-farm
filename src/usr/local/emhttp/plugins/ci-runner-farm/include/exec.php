@@ -19,10 +19,23 @@ $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action  = $_REQUEST['action'] ?? 'status-json';
 
 function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [implode("\n", $out), $rc]; }
+// For actions whose stdout is a JSON body the frontend parses: keep stderr OUT of
+// it, so a stray docker/system warning can't corrupt the JSON (JSON.parse would
+// throw and the consumer's .catch would silently freeze the panel). run() keeps
+// 2>&1 for the action responses where the merged log IS the payload.
+function run_json($cmd) { exec($cmd . ' 2>/dev/null', $out, $rc); return [implode("\n", $out), $rc]; }
+// The last non-empty stdout line, if it is a JSON object — lets an emitter print
+// progress logs then its {ok,error?} verdict as the final line and have us pass
+// that verdict through with its specific reason intact.
+function last_json($out) {
+  $lines = array_values(array_filter(explode("\n", $out), fn($l) => trim($l) !== ''));
+  $last = $lines ? trim(end($lines)) : '';
+  return (strlen($last) && $last[0] === '{') ? $last : '';
+}
 
 switch ($action) {
   case 'status-json':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' status-json');
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' status-json');
     // runner-farm.sh already emits JSON; pass it through verbatim
     echo $out !== '' ? $out : json_encode(['count'=>0,'runners'=>[]]);
     break;
@@ -87,52 +100,65 @@ switch ($action) {
     @mkdir($CFGDIR, 0755, true);
     // Serialize builds ATOMICALLY and only report success once the lock is ours.
     // The launcher opens fd 9 on the lock and takes a non-blocking flock IN THIS
-    // synchronous call: lose the race and it prints BUSY (we reject); win it and
-    // the build runs in a nohup'd child that INHERITS fd 9, so the flock is held
-    // for the whole build (released only when that child exits — even on SIGKILL).
-    // There is no probe/launch gap where two callers could both be told the build
-    // started: whoever loses `flock -n 9` is told BUSY. The child truncates the log
-    // under the lock so a poll can't read a prior build's __BUILD_RC__.
-    $inner = ': > ' . escapeshellarg($log) . '; '
-           . escapeshellarg($SCRIPT) . ' build-image >> ' . escapeshellarg($log) . ' 2>&1; '
+    // synchronous call, then branches on the exit code:
+    //   0  -> won it: truncate the log HERE (under the lock, before we return, so a
+    //         poll can never read a prior build's __BUILD_RC__), launch the build in
+    //         a nohup'd child that INHERITS fd 9 (holding the flock for the whole
+    //         build, released only when that child exits — even on SIGKILL), STARTED.
+    //   1  -> lock held by a running build: BUSY.
+    //   other (127 = flock not on PATH, etc.): NOLOCK.
+    // A failed `exec 9>` redirect (unwritable flash) exits the shell with no output.
+    // So only the exact STARTED/BUSY sentinels map to ok/busy; anything else is a
+    // real launch failure surfaced as such, never masked as "already running".
+    $inner = escapeshellarg($SCRIPT) . ' build-image >> ' . escapeshellarg($log) . ' 2>&1; '
            . 'echo "__BUILD_RC__=$?" >> ' . escapeshellarg($log);
     $launcher = 'exec 9> ' . escapeshellarg($lock) . '; '
-              . 'if flock -n 9; then '
+              . 'flock -n 9; rc=$?; '
+              . 'if [ "$rc" -eq 0 ]; then '
+              .   ': > ' . escapeshellarg($log) . '; '
               .   'nohup sh -c ' . escapeshellarg($inner) . ' </dev/null >/dev/null 2>&1 & '
               .   'echo STARTED; '
-              . 'else echo BUSY; fi';
+              . 'elif [ "$rc" -eq 1 ]; then echo BUSY; '
+              . 'else echo NOLOCK; fi';
     $out = trim((string)shell_exec('sh -c ' . escapeshellarg($launcher)));
-    if ($out === 'STARTED') { echo json_encode(['ok' => true, 'action' => 'build-image']); }
-    else                    { echo json_encode(['ok' => false, 'error' => 'a build is already running']); }
+    if      ($out === 'STARTED') { echo json_encode(['ok' => true, 'action' => 'build-image']); }
+    else if ($out === 'BUSY')    { echo json_encode(['ok' => false, 'error' => 'a build is already running']); }
+    else                         { echo json_encode(['ok' => false, 'error' => 'could not start the build — check that flock is available and ' . $CFGDIR . ' is writable']); }
     break;
 
   case 'queued-json':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' queued-json');
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' queued-json');
     echo $out !== '' ? $out : json_encode(['queued' => -1]);
     break;
 
   case 'stats-json':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' stats-json');
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' stats-json');
     echo $out !== '' ? $out : json_encode(['total' => -1]);
     break;
 
   case 'cache-usage':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' cache-usage-json');
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' cache-usage-json');
     echo $out !== '' ? $out : json_encode(['total' => -1]);
     break;
 
   case 'cache-clear':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' cache-clear-pkg');
-    // cmd_cache_clear_pkg logs before its JSON; trust the exit code, not stdout.
-    echo json_encode(['ok' => $rc === 0, 'action' => 'cache-clear']);
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' cache-clear-pkg');
+    // cmd_cache_clear_pkg emits its {ok,error?} verdict as the final stdout line;
+    // pass it through so a specific reason (unsafe root / could not remove N dirs)
+    // reaches the UI, else fall back to the exit-code envelope.
+    $j = last_json($out);
+    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'cache-clear']);
     break;
 
   case 'recycle':
     $n = $_REQUEST['name'] ?? '';
     if (!preg_match('/^ci-runner-[0-9]+$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' recycle ' . escapeshellarg($n));
-    // cmd_recycle emits log lines before its JSON; trust the exit code, not stdout.
-    echo json_encode(['ok' => $rc === 0, 'action' => 'recycle']);
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' recycle ' . escapeshellarg($n));
+    // cmd_recycle emits progress logs then its {ok,error?} verdict as the final
+    // stdout line; pass it through so the specific reason (removed-not-recreated,
+    // preflight-aborted, no-token …) reaches the UI, else fall back to exit code.
+    $j = last_json($out);
+    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'recycle']);
     break;
 
   case 'runner-log':
@@ -143,7 +169,7 @@ switch ($action) {
     break;
 
   case 'image-info':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' image-info-json');
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' image-info-json');
     echo $out !== '' ? $out : json_encode(['exists' => false]);
     break;
 
