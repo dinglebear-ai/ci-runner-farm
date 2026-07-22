@@ -15,6 +15,7 @@ if (!$csrf || !hash_equals($csrf, $given)) {
 
 $PLUGIN  = 'ci-runner-farm';
 $CFGDIR  = "/boot/config/plugins/$PLUGIN";
+$RUNDIR  = "/var/local/emhttp/$PLUGIN";   // tmpfs — daemon logs/state live here, not on flash
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action  = $_REQUEST['action'] ?? 'status-json';
 
@@ -52,7 +53,9 @@ switch ($action) {
     break;
 
   case 'scale':
-    $n = (int)($_REQUEST['n'] ?? 0);
+    // Clamp server-side too — the form max is presentation-only and the engine
+    // hard-caps; this is defense-in-depth against a crafted POST (n=99999).
+    $n = max(0, min(64, (int)($_REQUEST['n'] ?? 0)));
     [$out, $rc] = run(escapeshellarg($SCRIPT) . ' scale ' . escapeshellarg((string)$n));
     echo json_encode(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
     break;
@@ -188,7 +191,7 @@ switch ($action) {
     // Live farm activity for the Fleet log's idle state: the autoscale daemon
     // log (or boot.log before the daemon ever ran), minus docker's noisy
     // per-invocation swap-limit warning.
-    $as = "$CFGDIR/autoscale.log"; $bt = "$CFGDIR/boot.log";
+    $as = "$RUNDIR/autoscale.log"; $bt = "$CFGDIR/boot.log";
     $src = is_file($as) ? $as : $bt;
     $txt = is_file($src) ? shell_exec('tail -n 150 ' . escapeshellarg($src) . " | grep -v 'swap limit capabilities' | tail -n 60") : '';
     echo json_encode(['ok' => true, 'log' => $txt ?: '']);

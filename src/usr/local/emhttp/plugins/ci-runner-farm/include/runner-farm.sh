@@ -128,7 +128,7 @@ load_cfg
 [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
 AUTOSCALE_PID="${CFGDIR}/autoscale.pid"
 IMAGEUPDATE_PID="${CFGDIR}/imageupdate.pid"
-SECURITY_CACHE="${CFGDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
+SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 
 log()  { echo "[ci-runner-farm] $*"; }
@@ -225,7 +225,7 @@ autoscale_tick() {
   reap_dead_runners        # drop dead containers first so idle accounting is real
   local cur busy idle statef over target
   cur=$(current_count); busy=$(busy_count); idle=$((cur - busy))
-  statef="${CFGDIR}/autoscale.state"; over=0
+  statef="${RUNDIR}/autoscale.state"; over=0
   [ -f "$statef" ] && over=$(cat "$statef" 2>/dev/null || echo 0)
 
   # runner churn (crash, reap, or ephemeral exit) can drop the fleet below the
@@ -272,7 +272,7 @@ autoscale_daemon() {
 autoscale_start() {
   [ "$AUTOSCALE" = "true" ] || return 0
   autoscale_stop
-  nohup "$0" autoscale-daemon >>"${CFGDIR}/autoscale.log" 2>&1 &
+  nohup "$0" autoscale-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
   echo $! > "$AUTOSCALE_PID"
   log "autoscale daemon started (pid $(cat "$AUTOSCALE_PID"))"
 }
@@ -384,7 +384,7 @@ imageupdate_daemon() {
 imageupdate_start() {
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
   imageupdate_stop
-  nohup "$0" imageupdate-daemon >>"${CFGDIR}/imageupdate.log" 2>&1 &
+  nohup "$0" imageupdate-daemon >>"${RUNDIR}/imageupdate.log" 2>&1 &
   echo $! > "$IMAGEUPDATE_PID"
   log "image-update daemon started (pid $(cat "$IMAGEUPDATE_PID"))"
 }
@@ -989,7 +989,16 @@ cmd_stop() {
 }
 
 cmd_scale() {
-  local target="$1"; ensure_dirs; registry_login
+  local target="$1"
+  # Server-side validate + clamp. The form's max="20" is presentation-only, so a
+  # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
+  # a container + a minted GitHub registration token per iteration (host / API
+  # exhaustion). The autoscale path is already bounded by AUTOSCALE_MAX; bound the
+  # manual path with a hard ceiling too.
+  case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
+  local HARD_MAX=64
+  [ "$target" -gt "$HARD_MAX" ] && { log "scale: clamping requested $target to hard max $HARD_MAX"; target=$HARD_MAX; }
+  ensure_dirs; registry_login
   local current; current="$(managed_names | wc -l)"
   if [ "$target" -gt "$current" ]; then
     [ -z "$ACCESS_TOKEN" ] && { err "no token configured"; return 1; }
