@@ -387,7 +387,9 @@ imageupdate_status() {
 
 repo_for_index() {
   # round-robin assign a target repo to runner index (repo scope, multi-repo)
-  local idx="$1"; local arr=($GH_REPOS); local n=${#arr[@]}
+  local idx="$1"
+  # shellcheck disable=SC2206  # GH_REPOS is a deliberately space-separated list
+  local arr=($GH_REPOS); local n=${#arr[@]}
   [ "$n" -eq 0 ] && { echo ""; return; }
   echo "${arr[$(( (idx-1) % n ))]}"
 }
@@ -491,8 +493,14 @@ deregister_runner_api() {
       /"os"[[:space:]]*:/   { if (nm == want) { print cur; exit } }
     ')"
   [ -n "$id" ] || return 0
-  gh_api DELETE "${base}/actions/runners/${id}" >/dev/null 2>&1 \
-    && log "deregistered $rname from GitHub (id $id)" || true
+  # Best-effort (all callers force-remove the container regardless), but surface a
+  # DELETE failure in the fleet log so a lingering "offline" registration on GitHub
+  # isn't completely silent — recycle/scale-down otherwise report only success.
+  if gh_api DELETE "${base}/actions/runners/${id}" >/dev/null 2>&1; then
+    log "deregistered $rname from GitHub (id $id)"
+  else
+    log "warning: could not deregister $rname (id $id) from GitHub — a stale offline runner may linger"
+  fi
 }
 
 # The single biggest footgun: pointing privileged runners at a PUBLIC repo. A
@@ -852,26 +860,33 @@ start_stopped_managed() {
   done
 }
 
-# Provisioning prerequisites shared by every path that then runs start_one — Start,
-# Scale, and the Fleet recycle button. Validates the cache root (hard guard: aborts
-# on FUSE for DIND, etc.), creates the cache dirs / isolated network / image-cache
-# mirror, (re)applies strict egress rules, and logs in to a remote registry.
-# Returns non-zero (problem already logged) when the cache-root guard fails so
-# callers can bail before provisioning; a registry-login failure is left for
-# start_one to surface per-runner, matching the historical Start behavior.
-provision_preflight() {
+# Cache/network provisioning shared by cmd_start and the Fleet recycle path before
+# they run start_one: validate the cache root (hard guard — aborts on FUSE for
+# DIND, etc.), create the cache dirs / isolated network / image-cache mirror, and
+# log in to a remote registry. Returns non-zero (problem already logged) when the
+# cache-root guard OR a real registry login fails, so callers can bail before
+# provisioning (registry_login is a no-op returning 0 for the built-in image or
+# when no remote registry/creds are set, so it only bites an actually-failed remote
+# auth). Firewall handling is deliberately NOT here: the strict-mode egress rules
+# are keyed on the runner subnet, not per container, so a replacement rejoining
+# that subnet is already covered by the fleet's existing rules. cmd_start
+# (re)programs them via provision_preflight; recycle must NOT clear+reapply them
+# mid-recycle, which would briefly drop egress protection for every strict runner.
+# (cmd_scale runs its own lighter inline subset and is intentionally not a caller.)
+provision_base() {
   check_cache_root || return 1
   ensure_dirs
   ensure_network
   ensure_mirror
+  registry_login || return 1
+}
+
+# Full Start preflight: the shared base provisioning, then (re)program the strict
+# egress firewall (firewall_apply is a no-op unless NETWORK_ISOLATION=strict).
+provision_preflight() {
+  provision_base || return 1
   firewall_clear                                # drop stale rules (e.g. strict -> off/isolate)
   firewall_apply                                # re-add egress rules (no-op unless strict)
-  # Propagate a real registry-login failure: on Start it avoids launching runners
-  # that can't pull; on the destructive recycle path it aborts BEFORE removing a
-  # runner it then couldn't repull. registry_login is a no-op (returns 0) for the
-  # built-in image or when no remote registry/creds are set, so this only bites an
-  # actually-failed remote auth.
-  registry_login || return 1
 }
 
 cmd_start() {
@@ -1020,14 +1035,18 @@ cmd_queued_refresh() {
   # Sum queued workflow runs across GH_REPOS into a cache file. Invoked in the
   # background from cmd_queued_json so the UI poll never blocks on 20+ curls.
   [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-  [ -n "$ACCESS_TOKEN" ] || return 0
-  local total=0 r n
+  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
+  local total=0 got=0 r n body
   for r in $GH_REPOS; do
-    n="$(curl -s --max-time 10 -H "Authorization: Bearer $ACCESS_TOKEN" \
-      "https://api.github.com/repos/$r/actions/runs?status=queued&per_page=1" \
-      | grep -m1 -oE '"total_count":[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)"
+    body="$(curl -s --max-time 10 -H "Authorization: Bearer $ACCESS_TOKEN" \
+      "https://api.github.com/repos/$r/actions/runs?status=queued&per_page=1")"
+    case "$body" in *'"total_count"'*) got=1 ;; esac
+    n="$(printf '%s' "$body" | grep -m1 -oE '"total_count":[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)"
     total=$(( total + ${n:-0} ))
   done
+  # total=-1 signals "unavailable" (no token / every repo query failed) so the UI
+  # shows a dash instead of a confident "0 queued" — same sentinel as stats/usage.
+  [ "$got" = "1" ] || total=-1
   echo "$(date +%s) $total" > "$RUNDIR/queued.cache"
 }
 
@@ -1162,14 +1181,15 @@ cmd_recycle() {
   echo "$name" | grep -qE "^${NAME_PREFIX}-[0-9]+$" || { echo '{"ok":false,"error":"bad name"}'; return 1; }
   idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$name" 2>/dev/null)"
   [ -z "$idx" ] && idx="${name##*-}"
-  # Mirror cmd_start's FULL provisioning preflight before removing the old
-  # container: validate the cache root (a DIND fleet moved onto FUSE would recreate
-  # and fail), create the isolated network + cache dirs + mirror, and (re)apply
-  # strict egress rules so the replacement is never started unprotected. A config
-  # change since the last Start therefore can't leave the runner removed-but-not-
-  # replaced, or replaced without its firewall. Abort with the runner intact if a
-  # hard prerequisite (cache root) or the isolated network is unavailable.
-  provision_preflight || { echo '{"ok":false,"error":"provisioning preflight failed (see log)"}'; return 1; }
+  # Provision what the replacement needs (cache-root guard, dirs, isolated network,
+  # mirror, registry login) BEFORE removing the old container, so a config change
+  # since the last Start can't leave the runner removed-but-not-replaced. NOT the
+  # firewall: strict-mode egress rules are subnet-keyed, so the replacement rejoins
+  # a subnet the fleet's existing rules already cover — a clear+reapply here would
+  # briefly drop egress protection for every strict runner (and the rules already
+  # protect the new one). Abort with the runner intact if the cache-root guard,
+  # registry login, or isolated network is unavailable.
+  provision_base || { echo '{"ok":false,"error":"provisioning preflight failed (see log)"}'; return 1; }
   if [ "$NETWORK_ISOLATION" != "off" ] && ! docker network inspect "$RUNNER_NETWORK" >/dev/null 2>&1; then
     log "recycle: $name left in place — runner network $RUNNER_NETWORK unavailable"
     echo '{"ok":false,"error":"runner network unavailable"}'; return 1
@@ -1221,6 +1241,7 @@ cmd_usage_refresh() {
   local names; names="$(managed_names)"
   [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
   : > "$RUNDIR/usage.cache.tmp"
+  # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null | \
   while IFS='|' read -r n cpu mem; do
     cpu="$(echo "$cpu" | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
@@ -1259,10 +1280,8 @@ cmd_status_json() {
       jline="$(docker logs --timestamps --tail 60 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
       job="$(echo "$jline" | sed 's/.*Running job: //' | json_escape)"
       jstarted="$(echo "$jline" | awk '{print $1}' | grep -oE '^[0-9T:.Z-]+' | head -1)"
-      # The newest Worker diag log holds the job message JSON: repository,
-      # ref (PR or branch), and run_id — enough to deep-link the run.
-      # Live job context from any step process's environment inside the
-      # runner (GITHUB_* vars): exact repo, run id, and ref, no log parsing.
+      # Live job context (repo, run id, ref) from any step process's environment
+      # inside the runner (GITHUB_* vars) — exact, no log parsing.
       # Between steps there can briefly be no step process; the next poll
       # fills the fields in again.
       local jenv jref
@@ -1337,10 +1356,10 @@ cmd_validate() {
 # user share. The ':?' already stops an empty value; this blocks the dangerous
 # non-empty ones too. Refuses anything shallower than /mnt/<name>/... or /mnt/<pool>.
 cmd_prune_cache() {
-  # Strip ALL trailing slashes, not just one: "${CACHE_ROOT%/}" leaves "/mnt/user//"
-  # as "/mnt/user/", which slips past the exact blocklist into the /mnt/* allow arm
-  # and then 'rm -rf /mnt/user/*' wipes every share. Normalize exhaustively and use
-  # the normalized value for BOTH the guard and the rm.
+  # Delegate the root-shape guard + canonicalization to crf_safe_cache_root:
+  # realpath -m collapses ..///. and trailing slashes (so "/mnt/user//" can't slip
+  # past the blocklist into the /mnt/* allow arm), and the rm below uses that same
+  # canonical path for BOTH the guard and the delete.
   local root
   root="$(crf_safe_cache_root)" || { err "refusing to prune-cache: CACHE_ROOT='$CACHE_ROOT' is unsafe (system dir, share, or unresolvable)"; return 1; }
   rm -rf "${root:?}/"* && log "cache cleared: $root"
