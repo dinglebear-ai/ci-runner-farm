@@ -10,7 +10,7 @@ Tag="server"
 
    Modern components: Unraid ships the @unraid/ui web-component bundle on every
    page but never registers it, and its stylesheet is missing the Tailwind
-   utilities layer (they live in the standalone apps css). crfUuiLoad() below
+   utilities layer (they live in the standalone apps css). The CRF_UUI loader below
    force-registers the bundle with a merged, shadow-rescoped stylesheet. Both
    hashed filenames are resolved at render/runtime (manifest + PHP glob), so
    Unraid updates don't break it — and if any piece is missing the custom
@@ -180,7 +180,15 @@ function crfPost(p){
   p.csrf_token = CRF_CSRF;
   return fetch(CRF_URL,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:Object.entries(p).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&')})
-    .then(r=>r.text()).then(t=>{ try{ return JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); } });
+    .then(r=>r.text().then(t=>{
+      // fetch() only rejects on network failure, not on 4xx/5xx — so an expired
+      // CSRF token (403 after a reboot/array restart) or a backend 500 arrives
+      // here with a JSON body that would otherwise parse and resolve as if it were
+      // real data, making the fleet look empty and buttons silently no-op. Reject
+      // instead, so callers' .catch paints "connection lost / reload".
+      if(!r.ok) throw new Error('http '+r.status+(r.status===403?' — session expired, reload the page':'')+': '+t.slice(0,100));
+      try{ return JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); }
+    }));
 }
 /* Poll only when the Fleet tab is actually on screen. document.hidden covers a
    backgrounded browser tab; offsetParent covers the inactive dynamix sub-tab
@@ -235,7 +243,7 @@ function crfToast(msg){
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('crf-toast-show'),2600);
 }
 const CRF_TOAST_MSG={start:'Fleet started',stop:'Fleet stopped',restart:'Fleet restarted',validate:'Validation finished'};
-function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
+function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
 function crfAction(a){
   /* Stop/Restart kill whatever the runners are building — confirm with the
      live impact when any runner is mid-job (sweetalert ships with the webgui). */
@@ -252,7 +260,7 @@ function crfAction(a){
   }
   crfDoAction(a);
 }
-function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n);}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
+function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
 
 function crfElapsed(iso){
   const t=Date.parse(iso); if(isNaN(t)) return null;
@@ -280,6 +288,10 @@ function crfRefresh(){
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
+    // Capture the open drawer's LIVE scroll before the rebuild below destroys the
+    // node, so crfDrawerMount can restore the user's position (not snap to tail).
+    const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]');
+    if(odr){ window.CRF_DRAWER_PINNED=crfDrawerPinned(odr); window.CRF_DRAWER_SCROLL=odr.scrollTop; }
     if(!rs.length){
       tb.innerHTML='<div class="crf-empty"><span class="crf-ball"></span>'+
         '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
@@ -328,7 +340,15 @@ function crfRefresh(){
       '</div>';
     }).join('');
     crfDrawerMount();
-  }).catch(()=>{});
+  }).catch(e=>{
+    // A rejected status poll (network down, or a 403 from a CSRF token that expired
+    // on a reboot/array restart) must NOT look like an empty fleet — surface it in
+    // the warning banner and keep the last-rendered bays in place. Cleared by the
+    // next successful poll (the d.warning handling above overwrites/hides it).
+    const warn=document.getElementById('crf-warn');
+    if(warn){ warn.textContent='⚠ '+(String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…'); warn.style.display='block'; }
+    console.error('ci-runner-farm status:',e);
+  });
 }
 crfRefresh(); setInterval(crfRefresh,5000);
 function crfQueued(){
@@ -385,13 +405,25 @@ function crfRecycle(name){
     swal({title:'Recycle '+name+'?',text:'It is mid-job'+(r.job?': '+r.job:'')+'.\nThe job will fail and re-queue.',type:'warning',showCancelButton:true,confirmButtonText:'Recycle',cancelButtonText:'Cancel'},ok=>{ if(ok) go(); });
   } else go();
 }
-/* Click a bay to open a live log drawer for that runner (persists across the
-   5s re-render; content refreshes each poll while open). */
-window.CRF_DRAWER=null;
+/* Click a bay to open a live log drawer for that runner. It persists across the
+   5s re-render: crfRefresh rebuilds crf-bays-body's innerHTML (destroying this
+   node), so we cache the last log + scroll position and restore them on re-mount
+   rather than flashing "loading…" and yanking the view back to the tail. The live
+   scroll is captured in crfRefresh just before the rebuild (see CRF_DRAWER_SCROLL). */
+window.CRF_DRAWER=null; window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true;
+function crfDrawerPinned(el){ return el.scrollHeight-el.scrollTop-el.clientHeight < 24; }
 function crfDrawerFill(name){
   crfPost({action:'runner-log',name}).then(d=>{
     const el=document.querySelector('.crf-bay-drawer[data-for="'+name+'"]');
-    if(el&&window.CRF_DRAWER===name){ el.innerHTML=crfColorize(d.log||'(no output)'); el.scrollTop=el.scrollHeight; }
+    if(el&&window.CRF_DRAWER===name){
+      const pinned=crfDrawerPinned(el), prev=el.scrollTop;
+      window.CRF_DRAWER_HTML=crfColorize(d.log||'(no output)');
+      el.innerHTML=window.CRF_DRAWER_HTML;
+      // Stick to the tail only if the user was already there; otherwise keep their
+      // place so reading a mid-log error isn't interrupted on the next poll.
+      el.scrollTop = pinned ? el.scrollHeight : prev;
+      window.CRF_DRAWER_SCROLL=el.scrollTop; window.CRF_DRAWER_PINNED=pinned;
+    }
   }).catch(()=>{});
 }
 function crfDrawerMount(){
@@ -404,13 +436,19 @@ function crfDrawerMount(){
   const row=document.querySelector('#crf-bays-body .crf-bay[data-name="'+window.CRF_DRAWER+'"]');
   if(!row) return;
   const d=document.createElement('div'); d.className='crf-bay-drawer'; d.dataset.for=window.CRF_DRAWER;
-  d.innerHTML='<span class="crf-muted">loading log...</span>';
-  row.after(d); crfDrawerFill(window.CRF_DRAWER);
+  // Re-seed with the last log so a 5s re-render doesn't flash "loading…"; only the
+  // very first open (no cached HTML) shows the placeholder.
+  d.innerHTML=window.CRF_DRAWER_HTML||'<span class="crf-muted">loading log...</span>';
+  row.after(d);
+  if(window.CRF_DRAWER_HTML) d.scrollTop = window.CRF_DRAWER_PINNED ? d.scrollHeight : window.CRF_DRAWER_SCROLL;
+  crfDrawerFill(window.CRF_DRAWER);
 }
 function crfToggleDrawer(name){
-  window.CRF_DRAWER = window.CRF_DRAWER===name ? null : name;
+  const opening = window.CRF_DRAWER!==name;
+  window.CRF_DRAWER = opening ? name : null;
+  window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true; // fresh cache per open
   const row=document.querySelector('#crf-bays-body .crf-bay[data-name="'+name+'"]');
-  if(row) row.setAttribute('aria-expanded', window.CRF_DRAWER===name?'true':'false');
+  if(row) row.setAttribute('aria-expanded', opening?'true':'false');
   crfDrawerMount();
 }
 document.getElementById('crf-bays-body').addEventListener('click',e=>{
