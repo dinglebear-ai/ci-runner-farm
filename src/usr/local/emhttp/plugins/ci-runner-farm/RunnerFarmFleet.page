@@ -273,7 +273,10 @@ function crfBar(pct){
   return '<span class="crf-ubar'+cls+'"><span style="width:'+p+'%"></span></span>';
 }
 function crfRefresh(){
-  if(!crfFleetActive()) return;
+  // In-flight guard: never stack a new status poll while the previous is still
+  // outstanding, so a slow backend can't spiral into overlapping polls.
+  if(!crfFleetActive() || window.__crfBusyStatus) return;
+  window.__crfBusyStatus=true;
   crfPost({action:'status-json'}).then(d=>{
     window.CRF_LAST=d;
     const warn=document.getElementById('crf-warn');
@@ -348,7 +351,7 @@ function crfRefresh(){
     const warn=document.getElementById('crf-warn');
     if(warn){ warn.textContent='⚠ '+(String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…'); warn.style.display='block'; }
     console.error('ci-runner-farm status:',e);
-  });
+  }).finally(()=>{ window.__crfBusyStatus=false; });
 }
 crfRefresh(); setInterval(crfRefresh,5000);
 function crfQueued(){

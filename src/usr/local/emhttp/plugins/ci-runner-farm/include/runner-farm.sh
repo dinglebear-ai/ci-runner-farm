@@ -142,9 +142,23 @@ managed_names() {
 current_count() { managed_names | grep -c . ; }
 
 # is a runner actively running a job? (last meaningful log line)
-runner_busy() {
-  docker logs --tail 8 "$1" 2>&1 | grep -iE "Running job|Listening for Jobs|completed" | tail -1 | grep -qi "Running job"
+# Single busy/idle/starting/error predicate shared by the autoscaler (scale-down
+# safety) and the UI status, so the two can never disagree. Deterministic: ask the
+# runner which agent process is live (Runner.Worker = running a job, Runner.Listener
+# = idle-waiting) in one docker exec, matching the image's own healthcheck, with a
+# log-tail fallback for non-standard images or the brief gap between agent processes.
+runner_state() {
+  local c="$1" p
+  p="$(docker exec "$c" sh -c 'pgrep -x Runner.Worker >/dev/null 2>&1 && echo busy || { pgrep -x Runner.Listener >/dev/null 2>&1 && echo idle; }' 2>/dev/null)"
+  case "$p" in busy) echo busy; return;; idle) echo idle; return;; esac
+  case "$(docker logs --tail 15 "$c" 2>&1 | grep -iE 'Running job|Listening for Jobs|Job .* completed|error' | tail -1)" in
+    *"Running job"*)                      echo busy ;;
+    *"Listening for Jobs"*|*"completed"*) echo idle ;;
+    *[Ee]rror*)                           echo error ;;
+    *)                                    echo starting ;;
+  esac
 }
+runner_busy() { [ "$(runner_state "$1")" = busy ]; }
 busy_count() {
   local b=0 c
   for c in $(managed_names); do [ -n "$c" ] && runner_busy "$c" && b=$((b+1)); done
@@ -993,19 +1007,6 @@ cmd_scale() {
   log "scaled to $(managed_names | wc -l) runner(s)"
 }
 
-runner_phase() {
-  # crude busy/idle heuristic from the last meaningful log line
-  local c="$1" line
-  line="$(docker logs --tail 25 "$c" 2>&1 | grep -iE 'Running job|Listening for Jobs|Job .* completed|Configuration|error' | tail -1)"
-  case "$line" in
-    *"Running job"*)        echo "busy" ;;
-    *"Listening for Jobs"*) echo "idle" ;;
-    *"completed"*)          echo "idle" ;;
-    *[Ee]rror*)             echo "error" ;;
-    *)                      echo "starting" ;;
-  esac
-}
-
 cmd_status() {
   local names; names="$(managed_names)"
   printf "%-22s %-10s %-8s %-10s %s\n" "NAME" "STATE" "PHASE" "CPU/MEM" "IMAGE"
@@ -1015,7 +1016,7 @@ cmd_status() {
     local st; st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
     local cpus mem; cpus="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$c" 2>/dev/null)"
     mem="$(docker inspect -f '{{.HostConfig.Memory}}' "$c" 2>/dev/null)"
-    printf "%-22s %-10s %-8s %-10s %s\n" "$c" "$st" "$(runner_phase "$c")" "$((cpus/1000000000))c/$((mem/1024/1024/1024))g" "$(effective_image)"
+    printf "%-22s %-10s %-8s %-10s %s\n" "$c" "$st" "$(runner_state "$c")" "$((cpus/1000000000))c/$((mem/1024/1024/1024))g" "$(effective_image)"
   done
 }
 
@@ -1111,7 +1112,10 @@ cmd_cache_usage_refresh() {
   local root total=0 pkg=0 d n
   root="$(crf_safe_cache_root 2>/dev/null)" || { echo "$(date +%s) -1 0" > "$RUNDIR/cache-usage.cache"; return 0; }
   [ -d "$root" ] || { echo "$(date +%s) 0 0" > "$RUNDIR/cache-usage.cache"; return 0; }
-  total="$(du -sb "$root" 2>/dev/null | cut -f1)"; [ -n "$total" ] || total=-1
+  # Scope the "cache" total to the warm caches — exclude each runner's Docker data
+  # root (docker/), the workspace (work/), the image mirror, and DinD logs, which are
+  # the fleet's Docker storage (tens of GB per runner), not clearable cache.
+  total="$(du -sb --exclude=docker --exclude=work --exclude=registry-mirror --exclude=dind-logs "$root" 2>/dev/null | cut -f1)"; [ -n "$total" ] || total=-1
   for d in $CACHE_PKG_DIRS; do
     [ -d "$root/$d" ] && { n="$(du -sb "$root/$d" 2>/dev/null | cut -f1)"; pkg=$(( pkg + ${n:-0} )); }
   done
@@ -1284,27 +1288,64 @@ cmd_logs_tail() {
   docker logs --tail "${2:-150}" "$1" 2>&1
 }
 
+# base64 a value for the space-delimited cache (empty -> "_" placeholder); _d64 reverses.
+_b64() { local v; v="$(printf '%s' "$1" | base64 -w0 2>/dev/null)"; printf '%s' "${v:-_}"; }
+_d64() { [ "$1" = "_" ] && return 0; printf '%s' "$1" | base64 -d 2>/dev/null; }
+_uu()  { [ "$1" = "_" ] && return 0; printf '%s' "$1"; }
+
 cmd_usage_refresh() {
-  # docker stats --no-stream is the one slow (~1-2s CPU-sampling) call in the
-  # status path. Run it out-of-band and cache "name cpu_pct mem_mib" per runner
-  # so cmd_status_json never blocks on it — the table paints from fast inspects
-  # and the usage bars fill from this cache.
+  # Everything the 5s status poll would otherwise fork per runner, computed ONCE
+  # out-of-band: batched docker stats (cpu/mem), the unified phase, and — for busy
+  # runners — the job context. cmd_status_json then paints from this cache + a single
+  # batched inspect, so the hot path no longer runs docker logs/exec per runner.
+  # Line: "name cpu_pct mem_mib phase b64(job) jstarted b64(repo) pr b64(branch) run_id"
+  # Also refresh the status-envelope verdicts here, OFF the poll hot path: cache the
+  # cache-root (df) warning and keep the public-repo security cache warm, so
+  # cmd_status_json never runs df or the per-repo curls inline (and there's no
+  # unlocked stampede — this refresher is flock-guarded via usage.lock).
+  cache_root_problem > "$RUNDIR/warn.cache" 2>/dev/null
+  public_repo_problem >/dev/null 2>&1
   local names; names="$(managed_names)"
   [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
-  : > "$RUNDIR/usage.cache.tmp"
+  local statsraw
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null | \
-  while IFS='|' read -r n cpu mem; do
-    cpu="$(echo "$cpu" | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
-    echo "$n ${cpu:-0} $(to_mib "$(echo "$mem" | awk -F' / ' '{print $1}')")"
-  done >> "$RUNDIR/usage.cache.tmp"
+  statsraw="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null)"
+  : > "$RUNDIR/usage.cache.tmp"
+  local c
+  for c in $names; do
+    [ -z "$c" ] && continue
+    local srow cpu="" mem_mib=0
+    srow="$(printf '%s\n' "$statsraw" | grep -m1 -- "^${c}|")"
+    cpu="$(printf '%s' "$srow" | cut -d'|' -f2 | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
+    mem_mib="$(to_mib "$(printf '%s' "$srow" | cut -d'|' -f3 | awk -F' / ' '{print $1}')")"
+    local phase; phase="$(runner_state "$c")"
+    local job="" jstarted="_" jrepo="" jpr="_" jbranch="" jrun="_"
+    if [ "$phase" = "busy" ]; then
+      local jline
+      jline="$(docker logs --timestamps --tail 60 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
+      job="${jline##*Running job: }"
+      jstarted="$(echo "$jline" | awk '{print $1}' | grep -oE '^[0-9T:.Z-]+' | head -1)"; jstarted="${jstarted:-_}"
+      local jenv jref
+      jenv="$(docker exec "$c" sh -c 'for p in /proc/[0-9]*/environ; do if tr "\0" "\n" < $p 2>/dev/null | grep -q "^GITHUB_REPOSITORY="; then tr "\0" "\n" < $p | grep -E "^GITHUB_(REPOSITORY|RUN_ID|REF_NAME)="; break; fi; done' 2>/dev/null)"
+      if [ -n "$jenv" ]; then
+        jrepo="$(echo "$jenv" | grep '^GITHUB_REPOSITORY=' | head -1 | cut -d= -f2)"
+        jrun="$(echo "$jenv" | grep '^GITHUB_RUN_ID=' | head -1 | cut -d= -f2 | grep -oE '^[0-9]+' | head -1)"; jrun="${jrun:-_}"
+        jref="$(echo "$jenv" | grep '^GITHUB_REF_NAME=' | head -1 | cut -d= -f2-)"
+        if echo "$jref" | grep -qE '^[0-9]+/merge$'; then jpr="${jref%%/merge*}"; else jbranch="$jref"; fi
+      fi
+    fi
+    printf '%s %s %s %s %s %s %s %s %s %s\n' "$c" "${cpu:-0}" "${mem_mib:-0}" "$phase" \
+      "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$RUNDIR/usage.cache.tmp"
+  done
   mv "$RUNDIR/usage.cache.tmp" "$RUNDIR/usage.cache" 2>/dev/null
 }
 
 cmd_status_json() {
   local names; names="$(managed_names)"
-  # Per-runner CPU/mem is read from a background-refreshed cache (see
-  # cmd_usage_refresh) so this call stays fast; trigger a refresh when stale.
+  # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
+  # cmd_usage_refresh) so this 5s-per-tab call forks docker at most ONCE (a single
+  # batched inspect for live state + resource limits), never per runner; trigger a
+  # cache refresh when stale.
   local usage="" uage=999 nowu
   nowu=$(date +%s)
   if [ -f "$RUNDIR/usage.cache" ]; then
@@ -1314,46 +1355,36 @@ cmd_status_json() {
   if [ -n "$names" ] && [ "$uage" -gt 4 ]; then
     ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
   fi
+  # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
+  # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
+  local inspraw=""
+  # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
+  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $names 2>/dev/null)"
   local out="["; local first=1
   for c in $names; do
     [ -z "$c" ] && continue
-    local st cpus mem phase
-    st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
-    cpus="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$c" 2>/dev/null)"
-    mem="$(docker inspect -f '{{.HostConfig.Memory}}' "$c" 2>/dev/null)"
-    phase="$(runner_phase "$c")"
-    # Current job name (busy runners only): the runner listener logs
-    # "Running job: <name>" when it picks one up — cheap to scrape and lets the
-    # settings page show what each runner is working on.
-    local job="" jrepo="" jpr="" jbranch="" jrun="" jstarted=""
-    if [ "$phase" = "busy" ]; then
-      local jline
-      jline="$(docker logs --timestamps --tail 60 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
-      job="$(echo "$jline" | sed 's/.*Running job: //' | json_escape)"
-      jstarted="$(echo "$jline" | awk '{print $1}' | grep -oE '^[0-9T:.Z-]+' | head -1)"
-      # Live job context (repo, run id, ref) from any step process's environment
-      # inside the runner (GITHUB_* vars) — exact, no log parsing.
-      # Between steps there can briefly be no step process; the next poll
-      # fills the fields in again.
-      local jenv jref
-      jenv="$(docker exec "$c" sh -c 'for p in /proc/[0-9]*/environ; do if tr "\0" "\n" < $p 2>/dev/null | grep -q "^GITHUB_REPOSITORY="; then tr "\0" "\n" < $p | grep -E "^GITHUB_(REPOSITORY|RUN_ID|REF_NAME)="; break; fi; done' 2>/dev/null)"
-      if [ -n "$jenv" ]; then
-        jrepo="$(echo "$jenv" | grep '^GITHUB_REPOSITORY=' | head -1 | cut -d= -f2 | json_escape)"
-        jrun="$(echo "$jenv" | grep '^GITHUB_RUN_ID=' | head -1 | cut -d= -f2 | grep -oE '^[0-9]+' | head -1)"
-        jref="$(echo "$jenv" | grep '^GITHUB_REF_NAME=' | head -1 | cut -d= -f2-)"
-        if echo "$jref" | grep -qE '^[0-9]+/merge$'; then jpr="${jref%%/merge*}"; else jbranch="$(echo "$jref" | json_escape)"; fi
-      fi
-    fi
-    # -1 = usage not yet sampled (first paint / just-started runner); the UI
-    # renders that as a pending "…" instead of a misleading 0%.
-    local urow cpu_pct=-1 mem_used_mib=-1
-    urow="$(echo "$usage" | grep -m1 "^${c} ")"
+    local irow st cpus mem
+    irow="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|")"
+    st="$(printf '%s' "$irow" | cut -d'|' -f2)"
+    cpus="$(printf '%s' "$irow" | cut -d'|' -f3)"
+    mem="$(printf '%s' "$irow" | cut -d'|' -f4)"
+    # phase + cpu/mem usage + job context: all from the background cache line
+    # "name cpu mem phase b64(job) jstarted b64(repo) pr b64(branch) run_id".
+    local urow phase="starting" cpu_pct=-1 mem_used_mib=-1
+    local job="" jstarted="" jrepo="" jpr="" jbranch="" jrun=""
+    urow="$(printf '%s\n' "$usage" | grep -m1 -- "^${c} ")"
     if [ -n "$urow" ]; then
-      cpu_pct="$(echo "$urow" | awk '{print $2}')"
-      mem_used_mib="$(echo "$urow" | awk '{print $3}')"
+      # shellcheck disable=SC2086  # deliberate positional split of the fixed cache line
+      set -- $urow
+      cpu_pct="$2"; mem_used_mib="$3"; phase="$4"
+      job="$(_d64 "$5" | json_escape)"; jstarted="$(_uu "$6")"
+      jrepo="$(_d64 "$7" | json_escape)"; jpr="$(_uu "$8")"
+      jbranch="$(_d64 "$9" | json_escape)"; jrun="$(_uu "${10}")"
     fi
     case "$cpu_pct" in ''|*[!0-9.-]*) cpu_pct=-1 ;; esac
     case "$mem_used_mib" in ''|*[!0-9-]*) mem_used_mib=-1 ;; esac
+    case "$jpr" in *[!0-9]*) jpr="" ;; esac
+    case "$jrun" in *[!0-9]*) jrun="" ;; esac
     [ $first -eq 0 ] && out+=","
     out+="{\"name\":\"$(echo "$c"|json_escape)\",\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0}}"
     first=0
@@ -1361,7 +1392,7 @@ cmd_status_json() {
   out+="]"
   local as="off"; [ "$AUTOSCALE" = "true" ] && as="$(autoscale_status)"
   local iu="off"; [ "$IMAGE_AUTOUPDATE" = "true" ] && iu="$(imageupdate_status) (every $((IMAGE_AUTOUPDATE_INTERVAL/60))m)"
-  local warn; warn="$(cache_root_problem | json_escape)"
+  local warn; warn="$(cat "$RUNDIR/warn.cache" 2>/dev/null | json_escape)"
   local sec; sec="$(public_repo_problem | json_escape)"
   echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"runners\":${out}}"
 }
