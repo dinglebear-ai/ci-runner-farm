@@ -183,6 +183,24 @@ function crfBar(pct){
   const cls=p>90?' crf-hot':p>60?' crf-mid':'';
   return '<span class="crf-ubar'+cls+'"><span style="width:'+p+'%"></span></span>';
 }
+/* The per-poll VOLATILE cells — the elapsed timer and the CPU/mem bars, which tick
+   every 5s for a busy runner. Factored out so the full row builder and crfRefresh's
+   in-place fast-path render them identically from ONE source of truth (no drift). */
+function crfVolatile(r){
+  const running=r.state==='running';
+  let elapsedHtml='';
+  if(running&&r.phase==='busy'&&r.job_started){
+    const e=crfElapsed(r.job_started);
+    if(e) elapsedHtml=' <span class="crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':'')+'" title="running for '+e.txt+'">'+e.txt+'</span>';
+  }
+  const cpuMax=(r.cpus&&r.cpus>0)?r.cpus*100:100;
+  const cpuKnown=running&&r.cpu_pct>=0, memKnown=running&&r.mem_used_mib>=0&&r.mem_gb;
+  const cpuPct=cpuKnown?(100*r.cpu_pct/cpuMax):0;
+  const memPct=memKnown?100*r.mem_used_mib/(r.mem_gb*1024):0;
+  const cpuTxt=cpuKnown?Math.round(r.cpu_pct)+'%':(running?'…':'&ndash;');
+  const memTxt=memKnown?((r.mem_used_mib>=1024?( (r.mem_used_mib/1024).toFixed(1)+'g'):(r.mem_used_mib+'m'))+'/'+r.mem_gb+'g'):(running?'…':'&ndash;');
+  return {elapsedHtml,cpuPct,cpuTxt,memPct,memTxt};
+}
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
   // outstanding, so a slow backend can't spiral into overlapping polls.
@@ -213,17 +231,37 @@ function crfRefresh(){
       return;
     }
     const dark=crfDark()?' class="dark"':'';
+    // In-place fast-path: rebuilding crf-bays-body's innerHTML every 5s recreates every
+    // <uui-badge> web component and drops keyboard focus / text selection on each poll.
+    // Most polls are steady-state — same runners and jobs, only CPU/mem/elapsed ticking —
+    // so when the STRUCTURE is unchanged we refresh just those volatile cells in place and
+    // leave the rows (and the open drawer sibling) alive. Any structural change (runner
+    // added/removed, phase flip, new job, theme or drawer toggle) changes the signature
+    // and falls through to the full rebuild below. busy-with-job_started is in the
+    // signature so the .crf-elapsed span's presence always matches what the row was built
+    // with — the in-place branch can then update it without ever needing to create it.
+    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
+    if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
+      rs.forEach(r=>{
+        const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
+        const v=crfVolatile(r);
+        const u=row.querySelectorAll('.crf-usage');
+        if(u[0]) u[0].innerHTML=crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span>';
+        if(u[1]) u[1].innerHTML=crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span>';
+        const el=row.querySelector('.crf-elapsed');
+        if(el&&r.job_started){ const e=crfElapsed(r.job_started); if(e){ el.textContent=e.txt; el.title='running for '+e.txt; el.className='crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':''); } }
+      });
+      crfDrawerMount();
+      return;
+    }
+    tb.__crfSig=sig;
     tb.innerHTML=rs.map(r=>{
       const running=r.state==='running';
       const ph=running?r.phase:'exited';
       const ball=running?('crf-ball-'+r.phase):'crf-ball';
       const bvar=ph==='busy'?'orange':ph==='idle'?'green':ph==='error'?'red':'gray';
       let jobHtml;
-      let elapsedHtml='';
-      if(running&&r.phase==='busy'&&r.job_started){
-        const e=crfElapsed(r.job_started);
-        if(e) elapsedHtml=' <span class="crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':'')+'" title="running for '+e.txt+'">'+e.txt+'</span>';
-      }
+      const v=crfVolatile(r);
       if(running&&r.phase==='busy'){
         const repoShort=r.repo?crfEsc(String(r.repo).split('/').pop()):'';
         const runOk=/^\d+$/.test(r.run_id||'');
@@ -232,24 +270,18 @@ function crfRefresh(){
         jobHtml=(runOk&&r.repo)?'<a href="https://github.com/'+crfEsc(r.repo)+'/actions/runs/'+r.run_id+'" target="_blank" rel="noopener" title="open run">'+core+'</a>':core;
         if(/^\d+$/.test(r.pr||'')&&r.repo) jobHtml+='<a class="crf-ref" href="https://github.com/'+crfEsc(r.repo)+'/pull/'+r.pr+'" target="_blank" rel="noopener">#'+r.pr+'</a>';
         else if(r.branch) jobHtml+='<span class="crf-ref">'+crfEsc(r.branch)+'</span>';
-        jobHtml+=elapsedHtml;
+        jobHtml+=v.elapsedHtml;
       } else {
         jobHtml=crfEsc(running?'waiting for jobs':r.state);
       }
       const jobCls=running&&r.phase==='busy'&&r.job?'crf-job':'crf-job crf-muted';
-      const cpuMax=(r.cpus&&r.cpus>0)?r.cpus*100:100;
-      const cpuKnown=running&&r.cpu_pct>=0, memKnown=running&&r.mem_used_mib>=0&&r.mem_gb;
-      const cpuPct=cpuKnown?(100*r.cpu_pct/cpuMax):0;
-      const memPct=memKnown?100*r.mem_used_mib/(r.mem_gb*1024):0;
-      const cpuTxt=cpuKnown?Math.round(r.cpu_pct)+'%':(running?'…':'&ndash;');
-      const memTxt=memKnown?((r.mem_used_mib>=1024?( (r.mem_used_mib/1024).toFixed(1)+'g'):(r.mem_used_mib+'m'))+'/'+r.mem_gb+'g'):(running?'…':'&ndash;');
       return '<div class="crf-bay" data-name="'+crfEsc(r.name)+'" tabindex="0" role="button" aria-expanded="'+(window.CRF_DRAWER===r.name?'true':'false')+'" aria-label="Runner '+crfEsc(r.name)+', toggle log">'+
         '<span class="crf-ball '+ball+'"></span>'+
         '<span class="crf-name">'+crfEsc(r.name)+'</span>'+
         '<span class="crf-phase"><uui-badge variant="'+bvar+'" size="xs"'+dark+'>'+crfEsc(ph)+'</uui-badge></span>'+
         '<span class="'+jobCls+'" title="'+crfEsc(r.job||'')+'">'+jobHtml+'</span>'+
-        '<span class="crf-usage">'+crfBar(cpuPct)+'<span class="crf-uval">'+cpuTxt+'</span></span>'+
-        '<span class="crf-usage">'+crfBar(memPct)+'<span class="crf-uval">'+memTxt+'</span></span>'+
+        '<span class="crf-usage">'+crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span></span>'+
+        '<span class="crf-usage">'+crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span></span>'+
         '<span class="crf-recycle" tabindex="0" role="button" aria-label="Recycle '+crfEsc(r.name)+'" title="Recycle this runner">&#10227;</span>'+
       '</div>';
     }).join('');
