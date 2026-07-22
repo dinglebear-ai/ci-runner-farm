@@ -664,13 +664,26 @@ ensure_mirror() {
       # so an unreachable one just means direct pulls — never a wildcard bind).
       local gwip; gwip="$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)"
       netargs=( -p "${gwip:-127.0.0.1}:${MIRROR_PORT}:5000" )
+      # Pre-flight: a wildcard 0.0.0.0:PORT held by ANY other container/process blocks
+      # the publish on every interface (Docker's allocator treats the port as globally
+      # taken), so give an actionable error up front instead of a doomed docker run.
+      if command -v ss >/dev/null 2>&1 && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${MIRROR_PORT}$"; then
+        err "shared image cache: host port ${MIRROR_PORT} is already in use by another service — set MIRROR_PORT in the plugin config to a free port"
+        return 1
+      fi
       log "starting shared image cache ($MIRROR_NAME) on ${gwip:-127.0.0.1}:$MIRROR_PORT"
     fi
-    docker run -d --restart=unless-stopped --name "$MIRROR_NAME" \
-      "${netargs[@]}" \
-      -v "$CACHE_ROOT/registry-mirror:/var/lib/registry" \
-      -e REGISTRY_PROXY_REMOTEURL="https://registry-1.docker.io" \
-      registry:2 >/dev/null 2>&1 || err "could not start $MIRROR_NAME"
+    # Capture the real docker error (don't swallow it): "port is already allocated",
+    # an image-pull failure, etc. were otherwise lost, leaving only a generic message.
+    local mout
+    if ! mout="$(docker run -d --restart=unless-stopped --name "$MIRROR_NAME" \
+        "${netargs[@]}" \
+        -v "$CACHE_ROOT/registry-mirror:/var/lib/registry" \
+        -e REGISTRY_PROXY_REMOTEURL="https://registry-1.docker.io" \
+        registry:2 2>&1)"; then
+      err "could not start $MIRROR_NAME: ${mout##*: }"
+      docker rm -f "$MIRROR_NAME" >/dev/null 2>&1   # clear the Created residue so the next cycle retries clean
+    fi
   fi
 }
 
