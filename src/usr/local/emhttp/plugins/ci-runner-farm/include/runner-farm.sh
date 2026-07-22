@@ -264,7 +264,7 @@ autoscale_daemon() {
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ "$AUTOSCALE" = "true" ] || { log "autoscale disabled -> daemon exit"; rm -f "$AUTOSCALE_PID"; break; }
-    autoscale_tick
+    with_fleet_lock try autoscale_tick
     sleep "${AUTOSCALE_INTERVAL:-30}"
   done
 }
@@ -376,7 +376,7 @@ imageupdate_daemon() {
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
     [ "$IMAGE_AUTOUPDATE" = "true" ] || { log "image auto-update disabled -> daemon exit"; rm -f "$IMAGEUPDATE_PID"; break; }
-    imageupdate_tick
+    with_fleet_lock try imageupdate_tick
     sleep "${IMAGE_AUTOUPDATE_INTERVAL:-1800}"
   done
 }
@@ -922,6 +922,23 @@ provision_preflight() {
   firewall_clear                                # drop stale rules (e.g. strict -> off/isolate)
   firewall_apply                                # re-add egress rules (no-op unless strict)
 }
+
+# Serialize all fleet mutation (UI start/stop/restart/scale/recycle AND the autoscale
+# / image-update daemon ticks) behind one lock (fd 8), so a manual action and a daemon
+# tick can't race into a duplicate docker-run or a false "removed but not recreated"
+# (e.g. a "Scale to N" silently reverted by the next autoscale tick). Mode "wait": UI
+# commands block briefly. Mode "try": daemon ticks take it non-blocking and simply
+# skip a contended tick (retried next interval), so a stuck UI action can never
+# deadlock the daemons. Runs the command in a subshell that holds fd 8 for its duration.
+with_fleet_lock() {
+  local mode="$1"; shift
+  if [ "$mode" = try ]; then
+    ( flock -n 8 || exit 0; "$@" ) 8>"$RUNDIR/fleet.lock"
+  else
+    ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$RUNDIR/fleet.lock"
+  fi
+}
+cmd_restart() { cmd_stop; cmd_start; }
 
 cmd_start() {
   [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
@@ -1498,11 +1515,11 @@ cmd_boot_autostart() {
 }
 
 case "${1:-status}" in
-  start)        cmd_start ;;
+  start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   cmd_boot_autostart ;;
-  stop)         cmd_stop ;;
-  restart)      cmd_stop; cmd_start ;;
-  scale)        cmd_scale "${2:?usage: scale <N>}" ;;
+  stop)         with_fleet_lock wait cmd_stop ;;
+  restart)      with_fleet_lock wait cmd_restart ;;
+  scale)        with_fleet_lock wait cmd_scale "${2:?usage: scale <N>}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   image-info-json) cmd_image_info_json ;;
@@ -1514,7 +1531,7 @@ case "${1:-status}" in
   cache-clear-pkg) cmd_cache_clear_pkg ;;
   stats-json)   cmd_stats_json ;;
   stats-refresh) cmd_stats_refresh ;;
-  recycle)      cmd_recycle "${2:?usage: recycle <name>}" ;;
+  recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         cmd_validate ;;
