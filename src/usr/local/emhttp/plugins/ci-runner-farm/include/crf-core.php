@@ -52,6 +52,13 @@ function crfDark(){ return /Theme--(black|gray)\b/.test(document.documentElement
 window.CRF_UUI = (async () => {
   try {
     const man = await (await fetch(CRF_UUI_BASE + 'ui.manifest.json')).json();
+    // Distinguish a manifest SHAPE change (bundle updated, entries renamed) from an
+    // absent bundle (fetch throws -> outer catch), so a future @unraid/ui update logs
+    // an actionable message rather than a generic "unavailable".
+    if (!(man['style.css'] && man['style.css'].file && man['src/register.ts'] && man['src/register.ts'].file)) {
+      console.warn('ci-runner-farm: @unraid/ui manifest shape changed (style.css/register.ts entries missing) — bundle updated; using fallback. Update the crf-core.php loader.');
+      return false;
+    }
     const parts = [];
     if (CRF_UTIL_CSS) parts.push(await (await fetch(CRF_UTIL_CSS)).text());
     parts.push(await (await fetch(CRF_UUI_BASE + man['style.css'].file)).text());
