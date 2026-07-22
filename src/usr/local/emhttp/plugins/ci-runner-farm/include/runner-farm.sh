@@ -1473,10 +1473,10 @@ cmd_status_json() {
   for c in $names; do
     [ -z "$c" ] && continue
     local irow st cpus mem
+    # {{.Name}} carries a leading '/', so field 1 is "/name"; split the pipe-delimited
+    # inspect row with one read builtin instead of three cut subshells per runner.
     irow="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|")"
-    st="$(printf '%s' "$irow" | cut -d'|' -f2)"
-    cpus="$(printf '%s' "$irow" | cut -d'|' -f3)"
-    mem="$(printf '%s' "$irow" | cut -d'|' -f4)"
+    IFS='|' read -r _ st cpus mem <<< "$irow"
     # phase + cpu/mem usage + job context: all from the background cache line
     # "name cpu mem phase b64(job) jstarted b64(repo) pr b64(branch) run_id".
     local urow phase="starting" cpu_pct=-1 mem_used_mib=-1
