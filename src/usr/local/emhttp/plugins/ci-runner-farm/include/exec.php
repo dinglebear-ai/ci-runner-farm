@@ -36,8 +36,14 @@ function last_json($out) {
 switch ($action) {
   case 'status-json':
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' status-json');
-    // runner-farm.sh already emits JSON; pass it through verbatim
-    echo $out !== '' ? $out : json_encode(['count'=>0,'runners'=>[]]);
+    // runner-farm.sh already emits JSON; pass it through verbatim. Empty stdout means
+    // the backend script itself failed (missing/non-executable/crash) — not a real
+    // empty fleet — so on a non-zero exit surface an HTTP error, which makes crfPost
+    // reject and the UI show "lost connection" instead of a misleading "No managed
+    // runners" card.
+    if      ($out !== '') { echo $out; }
+    elseif  ($rc === 0)   { echo json_encode(['count'=>0,'runners'=>[]]); }
+    else                  { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'backend unavailable']); }
     break;
 
   case 'start': case 'stop': case 'restart': case 'validate':

@@ -1194,6 +1194,25 @@ cmd_recycle() {
     log "recycle: $name left in place — runner network $RUNNER_NETWORK unavailable"
     echo '{"ok":false,"error":"runner network unavailable"}'; return 1
   fi
+  # Recycle deliberately skips the full firewall_clear+reapply cmd_start runs — on a
+  # healthy strict fleet the replacement rejoins a subnet the existing rules already
+  # cover, and clear+reapply would briefly drop egress for EVERY strict runner. But
+  # re-assert when the firewall state is genuinely STALE: (a) strict was enabled since
+  # the last Start so no rules exist yet (the replacement would start unprotected), or
+  # (b) provision_base recreated the image mirror with a new IP so the strict mirror
+  # allow rule now dangles and DinD pull-through would break. Steady state (rules
+  # present + current mirror IP still allowed) skips, so there is no per-recycle
+  # blackout. firewall_apply reprograms from the live subnet + mirror IP.
+  if [ "$NETWORK_ISOLATION" = "strict" ] && command -v iptables >/dev/null 2>&1; then
+    local fwrules mip
+    fwrules="$(iptables -w -L DOCKER-USER -n 2>/dev/null)"
+    mip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MIRROR_NAME" 2>/dev/null)"
+    if ! printf '%s' "$fwrules" | grep -qF "$FW_TAG" \
+       || { [ -n "$mip" ] && ! printf '%s' "$fwrules" | grep -qF "$mip"; }; then
+      log "recycle: (re)applying strict egress rules — firewall state was stale"
+      firewall_apply
+    fi
+  fi
   # Validate the REPLACEMENT can be fully provisioned BEFORE touching the old
   # container. build_args assembles everything start_one needs — it mints a fresh
   # GitHub registration token and resolves the image. A cleared token (no
