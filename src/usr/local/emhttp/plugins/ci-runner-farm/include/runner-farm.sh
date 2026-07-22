@@ -40,7 +40,7 @@ RUNNER_COUNT=4
 RUNNER_LABELS="self-hosted,unraid,build"
 RUNNER_CPUS=""                        # per-runner CPU cap; empty = uncapped (CFS time-shares fairly)
 RUNNER_MEMORY="16g"                   # per-runner memory cap (kept: memory isn't time-shared like CPU)
-CACHE_ROOT="/mnt/github-runner"
+CACHE_ROOT="/mnt/cache/github-runner" # must be a dedicated SUBDIR under a pool/disk, never a bare mount root (see crf_safe_cache_root)
 WORK_TMPFS_SIZE="8g"                  # empty => bind workdir to pool instead of RAM
 IMAGE_SOURCE="builtin"                # builtin = run the locally-built image; remote = pull IMAGE from a registry
 BUILTIN_IMAGE="ci-runner-farm-runner:latest"  # tag produced by the in-plugin image builder (build-image)
@@ -525,6 +525,29 @@ deregister_runner_api() {
   fi
 }
 
+# Fetch one GitHub REST endpoint for EVERY repo in GH_REPOS concurrently, writing each
+# repo's raw response body to "$outdir/<n>" (n = 1-based position of the non-empty repo
+# in GH_REPOS). The three background refreshers (queued, stats, public-repo) each sweep
+# every target repo; doing it serially made refresh latency scale with repo count
+# (N x per-call round-trip). Fan-out is chunked — drain every $maxpar — so a large repo
+# list can't spawn hundreds of simultaneous curls or trip GitHub's concurrent-request
+# secondary limit. Callers re-walk GH_REPOS with the SAME skip-empty rule so file <n>
+# lines up with the right repo. Requires $ACCESS_TOKEN in scope.
+gh_fetch_all() {
+  local suffix="$1" outdir="$2" maxpar="${3:-8}" timeout="${4:-10}"
+  local n=0 r
+  for r in $GH_REPOS; do
+    [ -n "$r" ] || continue
+    n=$((n+1))
+    curl -s --max-time "$timeout" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${r}${suffix}" > "$outdir/$n" 2>/dev/null &
+    [ $((n % maxpar)) -eq 0 ] && wait
+  done
+  wait
+}
+
 # The single biggest footgun: pointing privileged runners at a PUBLIC repo. A
 # fork PR on a public repo runs attacker-controlled code, and here that code runs
 # in a --privileged DinD container (or with the host docker.sock mounted) — i.e.
@@ -543,19 +566,21 @@ public_repo_problem() {
     local age; age=$(( $(date +%s) - $(stat -c %Y "$SECURITY_CACHE" 2>/dev/null || echo 0) ))
     [ "$age" -ge 0 ] && [ "$age" -lt "$SECURITY_TTL" ] && { cat "$SECURITY_CACHE"; return; }
   fi
-  local pub="" repo vis
+  local pub="" repo vis tmpd n=0
+  tmpd="$(mktemp -d 2>/dev/null)"
+  [ -n "$tmpd" ] || { echo ""; return; }   # transient temp failure: don't cache, retry next call
+  # One concurrent visibility probe per repo (see gh_fetch_all). GitHub's repo API
+  # returns "visibility":"public|private|internal"; a 404 (a repo the PAT can't see)
+  # returns a JSON error body with no "visibility" field, so it reads as unknown and is
+  # not flagged — the same outcome the old per-repo `curl -f` gave.
+  gh_fetch_all "" "$tmpd" 8 5
   for repo in $GH_REPOS; do
     [ -n "$repo" ] || continue
-    # GitHub's repo API returns "visibility":"public|private|internal". A 404 (curl
-    # -f fails, vis empty) means the PAT can't see it — treat as unknown, don't warn.
-    vis="$(curl -fsSL -m 5 \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${repo}" 2>/dev/null \
-        | grep -o '"visibility"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
-        | sed 's/.*"\([^"]*\)"$/\1/')"
+    n=$((n+1))
+    vis="$(grep -o '"visibility"[[:space:]]*:[[:space:]]*"[^"]*"' "$tmpd/$n" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
     [ "$vis" = "public" ] && pub="$pub ${repo}"
   done
+  rm -rf "$tmpd"
   local msg=""
   [ -n "$pub" ] && msg="PUBLIC repo(s) targeted while runners are privileged (DinD / host docker.sock):${pub}. Fork-PR code on a public repo would run as root on this server. Use trusted/private repos only, or an org runner-group restricted to private repos. See the Security section of the plugin README."
   printf '%s' "$msg" > "$SECURITY_CACHE" 2>/dev/null || true
@@ -1121,14 +1146,18 @@ cmd_queued_refresh() {
   # background from cmd_queued_json so the UI poll never blocks on 20+ curls.
   [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
   [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
-  local total=0 got=0 r n body
+  local total=0 got=0 r n body tmpd i=0
+  tmpd="$(mktemp -d 2>/dev/null)"
+  [ -n "$tmpd" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
+  gh_fetch_all "/actions/runs?status=queued&per_page=1" "$tmpd"
   for r in $GH_REPOS; do
-    body="$(curl -s --max-time 10 -H "Authorization: Bearer $ACCESS_TOKEN" \
-      "https://api.github.com/repos/$r/actions/runs?status=queued&per_page=1")"
+    [ -n "$r" ] || continue
+    i=$((i+1)); body="$(cat "$tmpd/$i" 2>/dev/null)"
     case "$body" in *'"total_count"'*) got=1 ;; esac
     n="$(printf '%s' "$body" | grep -m1 -oE '"total_count":[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)"
     total=$(( total + ${n:-0} ))
   done
+  rm -rf "$tmpd"
   # total=-1 signals "unavailable" (no token / every repo query failed) so the UI
   # shows a dash instead of a confident "0 queued" — same sentinel as stats/usage.
   [ "$got" = "1" ] || total=-1
@@ -1140,21 +1169,33 @@ cmd_queued_refresh() {
 # and docker/, which hold running runners' live workspaces and DinD data.
 CACHE_PKG_DIRS="cargo-registry cargo-git sccache npm yarn pnpm-store ms-playwright"
 
-# Resolve + validate CACHE_ROOT for destructive/expensive ops. realpath -m
-# collapses ../ and . lexically (target need not exist) so the guard checks the
-# real location, not the raw string; the blocklist covers share subpaths too.
-# Echoes the canonical root on success; a reason on stderr and returns 1 otherwise.
+# Resolve + validate CACHE_ROOT for destructive/expensive ops (rm -rf in
+# cmd_prune_cache / cmd_cache_clear_pkg, chown -R in ensure_dirs). realpath -m
+# collapses ../ . and trailing slashes lexically (target need not exist) so the guard
+# checks the REAL location, not the raw string. CACHE_ROOT must be a dedicated
+# SUBDIRECTORY under a pool/disk — /mnt/<mount>/<subdir> — never a bare mount root: a
+# pool root (/mnt/cache), an array disk (/mnt/disk1), a UD device (/mnt/disks), or a
+# share root (/mnt/user) all hold the operator's OTHER data (appdata, VM vdisks,
+# docker.img, unrelated shares), so rm -rf / chown -R must never target one. The
+# legacy shipped default /mnt/github-runner (a dedicated pool) is grandfathered so
+# already-configured installs keep working. Echoes the canonical root on success; a
+# reason on stderr and returns 1 otherwise.
 crf_safe_cache_root() {
   local root
   root="$(realpath -m -- "$CACHE_ROOT" 2>/dev/null)" || { echo unresolvable >&2; return 1; }
+  [ "$root" = "/mnt/github-runner" ] && { printf '%s' "$root"; return 0; }   # legacy default — grandfathered
+  # System dirs and FUSE user-share roots are always unsafe.
   case "$root" in
     ""|"/"|"/mnt" \
     |"/mnt/user"|"/mnt/user"/*|"/mnt/user0"|"/mnt/user0"/* \
-    |"/mnt/disks"|"/mnt/addons"|"/mnt/rootshare" \
-    |"/boot"|"/boot"/*|"/usr"|"/usr"/*|"/etc"|"/etc"/*|"/var"|"/var"/*|"/root"|"/root"/*|"/bin"*|"/sbin"*|"/lib"*)
+    |"/boot"*|"/usr"*|"/etc"*|"/var"*|"/root"*|"/bin"*|"/sbin"*|"/lib"*)
       echo unsafe >&2; return 1 ;;
-    /mnt/*) printf '%s' "$root"; return 0 ;;
-    *) echo not-under-mnt >&2; return 1 ;;
+  esac
+  # Require a dedicated subdirectory (>=2 levels under /mnt); reject a bare mount root.
+  case "$root" in
+    /mnt/*/*) printf '%s' "$root"; return 0 ;;
+    /mnt/*)   echo "bare-mount-root (point CACHE_ROOT at a subdirectory, e.g. /mnt/<pool>/github-runner)" >&2; return 1 ;;
+    *)        echo not-under-mnt >&2; return 1 ;;
   esac
 }
 
@@ -1222,10 +1263,13 @@ cmd_stats_refresh() {
   # the per-repo API sweep never blocks the UI (see queued for the pattern).
   [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
   [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
-  local ok=0 fail=0 cancel=0 other=0 total got=0 r body c
+  local ok=0 fail=0 cancel=0 other=0 total got=0 r body c tmpd i=0
+  tmpd="$(mktemp -d 2>/dev/null)"
+  [ -n "$tmpd" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
+  gh_fetch_all "/actions/runs?per_page=50" "$tmpd"
   for r in $GH_REPOS; do
-    body="$(curl -s --max-time 10 -H "Authorization: Bearer $ACCESS_TOKEN" \
-      "https://api.github.com/repos/$r/actions/runs?per_page=50")"
+    [ -n "$r" ] || continue
+    i=$((i+1)); body="$(cat "$tmpd/$i" 2>/dev/null)"
     case "$body" in *'"workflow_runs"'*) got=1 ;; esac
     while IFS= read -r c; do
       case "$c" in
@@ -1237,6 +1281,7 @@ cmd_stats_refresh() {
       esac
     done <<< "$(echo "$body" | grep -oE '"conclusion": ?(null|"[a-z_]+")')"
   done
+  rm -rf "$tmpd"
   # total=-1 signals "stats unavailable" (bad token / API down) vs a real zero.
   if [ "$got" = "1" ]; then total=$((ok+fail+cancel+other)); else total=-1; fi
   echo "$(date +%s) $ok $fail $cancel $other $total" > "$RUNDIR/stats.cache"
@@ -1502,13 +1547,22 @@ cmd_validate() {
 # user share. The ':?' already stops an empty value; this blocks the dangerous
 # non-empty ones too. Refuses anything shallower than /mnt/<name>/... or /mnt/<pool>.
 cmd_prune_cache() {
-  # Delegate the root-shape guard + canonicalization to crf_safe_cache_root:
-  # realpath -m collapses ..///. and trailing slashes (so "/mnt/user//" can't slip
-  # past the blocklist into the /mnt/* allow arm), and the rm below uses that same
-  # canonical path for BOTH the guard and the delete.
-  local root
-  root="$(crf_safe_cache_root)" || { err "refusing to prune-cache: CACHE_ROOT='$CACHE_ROOT' is unsafe (system dir, share, or unresolvable)"; return 1; }
-  rm -rf "${root:?}/"* && log "cache cleared: $root"
+  # Guard + canonicalize the root, then delete ONLY the subdirectories THIS plugin
+  # creates under it — the warm package caches, each runner's DinD data root +
+  # workspace, the image mirror, the DinD logs, and the generated daemon config.
+  # NEVER a bare "$root"/* glob: even if CACHE_ROOT is somehow mis-pointed at a
+  # shared location, prune then cannot wipe unrelated data (appdata, VMs, other
+  # shares) that happens to sit alongside our subdirs on the same pool.
+  local root d m dirs removed=0
+  root="$(crf_safe_cache_root)" || { err "refusing to prune-cache: CACHE_ROOT='$CACHE_ROOT' is unsafe (system dir, share/pool root, or unresolvable — point it at /mnt/<pool>/<subdir>)"; return 1; }
+  dirs="docker work dind-logs registry-mirror $CACHE_PKG_DIRS"
+  for m in $CACHE_MOUNTS; do dirs="$dirs ${m%%:*}"; done
+  for d in $dirs; do
+    case "$d" in ''|.|..|*/*) continue ;; esac   # simple child names only — never a path/traversal
+    [ -e "$root/$d" ] && { rm -rf "${root:?}/${d:?}" && removed=$((removed+1)); }
+  done
+  rm -f "${root:?}/dind-daemon.json" 2>/dev/null
+  log "cache pruned ($removed dir(s)) under $root"
 }
 
 # --- Runner-image build orchestration. The engine owns the flock/launch/liveness
