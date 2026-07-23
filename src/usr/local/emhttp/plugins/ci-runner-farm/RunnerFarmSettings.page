@@ -24,7 +24,7 @@ $defaults = [
   'RUNNER_GROUP'=>'', 'RUNNER_COUNT'=>'4', 'RUNNER_LABELS'=>'self-hosted,unraid,build',
   'RUNNER_CPUS'=>'', 'RUNNER_MEMORY'=>'16g', 'EPHEMERAL'=>'false', 'RUN_AS_ROOT'=>'false',
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
-  'CACHE_ROOT'=>'/mnt/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
+  'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
   'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
   'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
@@ -192,12 +192,12 @@ _(Registry username)_:
 ### Storage &amp; caches
 
 _(Cache root)_:
-: <input type="text" id="CACHE_ROOT" name="CACHE_ROOT" autocomplete="off" spellcheck="false" value="<?=crf_g($cfg,'CACHE_ROOT','/mnt/github-runner')?>" data-pickroot="/mnt" data-pickfolders="true" data-pickfilter="HIDE_FILES_FILTER" placeholder="/mnt/github-runner">
+: <input type="text" id="CACHE_ROOT" name="CACHE_ROOT" autocomplete="off" spellcheck="false" value="<?=crf_g($cfg,'CACHE_ROOT','/mnt/cache/github-runner')?>" data-pickroot="/mnt" data-pickfolders="true" data-pickfilter="HIDE_FILES_FILTER" placeholder="/mnt/cache/github-runner">
 
 :crf_cache_plug:
 > Pool path for warm shared caches (pnpm/npm/yarn), each Docker-in-Docker runner's Docker data root, and (if tmpfs is off) the bind workspaces. Click the field to browse and pick a folder.
 >
-> **Use a real pool dataset (e.g. `/mnt/<pool>/github-runner`), not a `/mnt/user/...` user share.** User shares are FUSE (fuse.shfs), and with Docker-in-Docker on, overlay2 cannot run on FUSE — so `buildx` and `services:` jobs fail with `mount overlay ... invalid argument`. The fleet status below warns you if this path is unsafe.
+> **Use a dedicated subdirectory of a pool dataset (e.g. `/mnt/<pool>/github-runner`), not a bare pool/disk root and not a `/mnt/user/...` user share.** A bare mount root (`/mnt/cache`, `/mnt/disk1`) is rejected because clearing caches deletes under this path — it must not sit on top of your appdata, VMs, or other shares. User shares are FUSE (fuse.shfs), and with Docker-in-Docker on, overlay2 cannot run on FUSE — so `buildx` and `services:` jobs fail with `mount overlay ... invalid argument`. The fleet status below warns you if this path is unsafe.
 :end
 
 _(Workspace tmpfs size)_:
@@ -247,7 +247,7 @@ _(Shared image cache)_:
 </select>
 
 :crf_mirror_plug:
-> Runs a shared `registry:2` pull-through cache (Docker-in-Docker only) so images used across the fleet are pulled from Docker Hub once, not once per runner. Bound to the Docker bridge gateway, not the LAN. Turn off if you don't want the extra container.
+> Runs a shared `registry:2` pull-through cache (Docker-in-Docker only) so images used across the fleet are pulled from Docker Hub once, not once per runner. Bound to the Docker bridge gateway, not the LAN — so it is not exposed off the host, though (being on the bridge gateway) it is reachable unauthenticated by any container on the default Docker bridge, not only this plugin's runners. It only caches public Docker Hub images. Turn off if you don't want the extra container.
 :end
 
 _(Network isolation)_:

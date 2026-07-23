@@ -15,7 +15,6 @@ if (!$csrf || !hash_equals($csrf, $given)) {
 
 $PLUGIN  = 'ci-runner-farm';
 $CFGDIR  = "/boot/config/plugins/$PLUGIN";
-$RUNDIR  = "/var/local/emhttp/$PLUGIN";   // tmpfs — daemon logs/state live here, not on flash
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action  = $_REQUEST['action'] ?? 'status-json';
 
@@ -63,6 +62,13 @@ switch ($action) {
   case 'set-token':
     $tok = trim($_REQUEST['token'] ?? '');
     if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    // Shape-check the PAT: every GitHub token form (ghp_/gho_/ghs_/ghr_/github_pat_
+    // + classic 40-char hex) is [A-Za-z0-9_] only. Rejecting anything else keeps a
+    // stray quote/newline/backslash out of the curl `--config` header the engine
+    // builds from this value (where it could break or inject curl directives).
+    if (!preg_match('/^[A-Za-z0-9_]{20,255}$/', $tok)) {
+      echo json_encode(['ok'=>false,'error'=>'that does not look like a GitHub token (expected letters, digits, and underscores only)']); break;
+    }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/token", $tok);
     chmod("$CFGDIR/token", 0600);

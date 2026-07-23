@@ -126,8 +126,11 @@ load_cfg() {
 load_cfg
 [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
 [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
-AUTOSCALE_PID="${CFGDIR}/autoscale.pid"
-IMAGEUPDATE_PID="${CFGDIR}/imageupdate.pid"
+# PID files live on tmpfs (RUNDIR), not flash: they're pure per-boot runtime state,
+# so this both spares the USB stick and means a stale PID can't survive a reboot to
+# later match an unrelated reused PID that autoscale_stop would then kill.
+AUTOSCALE_PID="${RUNDIR}/autoscale.pid"
+IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 
@@ -165,12 +168,15 @@ busy_count() {
   echo "$b"
 }
 
+# Effective autoscale floor: AUTOSCALE_MIN, clamped to AUTOSCALE_MAX so a floor
+# misconfigured above the ceiling can never bypass the resource cap.
+autoscale_floor() { local f="$AUTOSCALE_MIN"; [ "$f" -gt "$AUTOSCALE_MAX" ] && f="$AUTOSCALE_MAX"; echo "$f"; }
+
 # remove up to $1 IDLE runners (highest index first), never below the effective
 # floor (MIN clamped to MAX), never busy ones
 scale_down_idle() {
   local want="$1" removed=0 c floor
-  floor=$AUTOSCALE_MIN
-  [ "$floor" -gt "$AUTOSCALE_MAX" ] && floor=$AUTOSCALE_MAX
+  floor="$(autoscale_floor)"
   for c in $(managed_names | sort -rV); do
     [ "$removed" -ge "$want" ] && break
     [ "$(current_count)" -le "$floor" ] && break
@@ -234,8 +240,7 @@ autoscale_tick() {
   # floor to AUTOSCALE_MAX so a floor misconfigured above the ceiling can
   # never bypass the resource cap.
   local floor
-  floor=$AUTOSCALE_MIN
-  [ "$floor" -gt "$AUTOSCALE_MAX" ] && floor=$AUTOSCALE_MAX
+  floor="$(autoscale_floor)"
   if [ "$cur" -lt "$floor" ]; then
     log "autoscale: count $cur < floor $floor -> grow to $floor"
     cmd_scale "$floor" >/dev/null; echo 0 > "$statef"
@@ -336,13 +341,24 @@ imageupdate_pull() {
 drain_and_recreate() {
   local c="$1" waited=0 idx limit
   limit="${IMAGE_DRAIN_TIMEOUT:-3600}"
+  # Wait for the runner to finish its job WITHOUT holding the fleet lock across the
+  # (up to IMAGE_DRAIN_TIMEOUT — hours) idle-wait. fd 8 is the fleet mutex, held by our
+  # with_fleet_lock caller; we hand it back during each sleep and re-take it only to
+  # mutate, so the operator's Stop/Scale/Recycle (and daemon ticks) aren't starved for
+  # the whole drain — and Stop can actually abort a runaway rollover.
   while runner_busy "$c"; do
     if [ "$limit" -gt 0 ] && [ "$waited" -ge "$limit" ]; then
       log "image-update: $c still busy after ${limit}s — leaving on old image this cycle"
       return 1
     fi
+    flock -u 8 2>/dev/null                 # release the fleet lock while idle-waiting
     sleep 15; waited=$((waited+15))
+    flock -w 20 8 2>/dev/null || { log "image-update: fleet busy elsewhere — deferring $c to next cycle"; return 1; }
   done
+  # Re-holding the lock here. If the runner vanished while we were unlocked (the
+  # operator hit Stop/Recycle mid-drain), do NOT recreate it — never resurrect a
+  # runner the operator just removed.
+  docker ps -a --format '{{.Names}}' | grep -qx "$c" || { log "image-update: $c no longer present — skipping recreate"; return 0; }
   idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$c" 2>/dev/null)"
   [ -z "$idx" ] && idx="${c##*-}"
   log "image-update: $c idle -> recreating on new image"
@@ -539,10 +555,14 @@ gh_fetch_all() {
   for r in $GH_REPOS; do
     [ -n "$r" ] || continue
     n=$((n+1))
-    curl -s --max-time "$timeout" \
-      -H "Authorization: Bearer $ACCESS_TOKEN" \
-      -H "Accept: application/vnd.github+json" \
-      "https://api.github.com/repos/${r}${suffix}" > "$outdir/$n" 2>/dev/null &
+    # PAT via --config on stdin so it never lands in argv (/proc/<pid>/cmdline is
+    # world-readable and reachable from a broken-out privileged runner) — same
+    # hardening as gh_api. printf is a shell builtin (no argv exposure) and the whole
+    # printf|curl pipeline is backgrounded as a unit, so each curl gets its own stdin.
+    printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+      | curl -s --max-time "$timeout" --config - \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${r}${suffix}" > "$outdir/$n" 2>/dev/null &
     [ $((n % maxpar)) -eq 0 ] && wait
   done
   wait
@@ -617,13 +637,16 @@ ensure_dirs() {
   for m in $CACHE_MOUNTS; do
     [ -n "$m" ] || continue
     dir="$(crf_safe_mount_subdir "${m%%:*}")" || { err "skipping unsafe cache mount '${m%%:*}' — it escapes CACHE_ROOT"; continue; }
-    mkdir -p "$dir"
-    # Unless runners run as root, they write caches as the non-root 'runner' user
-    # (RUNNER_UID:RUNNER_GID). Make the host cache dirs owned by it — chown only
-    # when the owner differs so this stays fast on warm caches.
-    if [ "$RUN_AS_ROOT" != "true" ] && [ "$(stat -c %u "$dir" 2>/dev/null)" != "$RUNNER_UID" ]; then
-      chown -R "$RUNNER_UID:$RUNNER_GID" "$dir" 2>/dev/null || true
-    fi
+    # Only ever chown -R a cache dir WE create here. A pre-existing dir is left
+    # untouched: we never recurse ownership into a tree we didn't make — on a shared
+    # cache root that could be the operator's own data whose name happens to collide
+    # with a cache mount (e.g. a 'docker'/'npm' dir already on the pool). When runners
+    # are non-root, a freshly created (empty) dir is handed to RUNNER_UID:RUNNER_GID so
+    # the 'runner' user can populate it. (Re-owning an existing cache after a
+    # RUN_AS_ROOT flip is a one-time 'prune-cache', not a silent chown -R of live data.)
+    [ -d "$dir" ] && continue
+    mkdir -p "$dir" || { err "could not create cache dir '$dir'"; continue; }
+    [ "$RUN_AS_ROOT" != "true" ] && chown -R "$RUNNER_UID:$RUNNER_GID" "$dir" 2>/dev/null || true
   done
   write_dind_config
 }
@@ -1024,10 +1047,12 @@ cmd_start() {
 # the pool is reclaimed instead of leaking a tree per retired runner.
 remove_runner() {
   local c="$1"
+  [ -n "$c" ] || return 0                      # never let an empty name make the rm below target docker/
   deregister_runner_api "$c"                  # host-side (PAT stays off the container)
   docker stop -t 30 "$c" >/dev/null 2>&1
   docker rm "$c" >/dev/null 2>&1
-  rm -rf "$CACHE_ROOT/docker/$c" 2>/dev/null || true
+  # $c is a managed container name (ci-runner-N) — no '/' or '..'; path stays under our docker/ subtree.
+  [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$c" 2>/dev/null || true
 }
 
 # Full teardown: daemons, runner containers, and the shared pull-through mirror.
@@ -1068,6 +1093,9 @@ cmd_scale() {
   case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
   local HARD_MAX=64
   [ "$target" -gt "$HARD_MAX" ] && { log "scale: clamping requested $target to hard max $HARD_MAX"; target=$HARD_MAX; }
+  # Guard the cache-root shape BEFORE ensure_dirs runs mkdir/chown under it — on every
+  # scale path (down/same, not just up), so an unsafe CACHE_ROOT never gets provisioned.
+  crf_safe_cache_root >/dev/null 2>&1 || { err "refusing to scale: CACHE_ROOT ($CACHE_ROOT) is unsafe — point it at a dedicated subdir under /mnt/<pool>, not a bare pool/disk/share root or system dir"; return 1; }
   ensure_dirs; registry_login
   local current; current="$(managed_names | wc -l)"
   if [ "$target" -gt "$current" ]; then
@@ -1326,6 +1354,16 @@ cmd_recycle() {
   echo "$name" | grep -qE "^${NAME_PREFIX}-[0-9]+$" || { echo '{"ok":false,"error":"bad name"}'; return 1; }
   idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$name" 2>/dev/null)"
   [ -z "$idx" ] && idx="${name##*-}"
+  # Warn (don't block) if the rest of the fleet is on a different network than the
+  # current NETWORK_ISOLATION setting: build_args below uses the LIVE config, so a lone
+  # recycle after an isolation change silently places this one runner on the new
+  # network while its siblings stay on the old — a half-isolated fleet is a false sense
+  # of security. Tell the operator to restart the fleet to make it consistent.
+  local other
+  for other in $(managed_names); do
+    [ -n "$other" ] && [ "$other" != "$name" ] || continue
+    on_expected_network "$other" || { log "recycle: WARNING — $other is not on the network the current NETWORK_ISOLATION setting expects; recycling $name will place it on the new network, leaving the fleet split. Restart the fleet to reconcile."; break; }
+  done
   # Provision what the replacement needs (cache-root guard, dirs, isolated network,
   # mirror, registry login) BEFORE removing the old container, so a config change
   # since the last Start can't leave the runner removed-but-not-replaced. NOT the
@@ -1349,11 +1387,18 @@ cmd_recycle() {
   # present + current mirror IP still allowed) skips, so there is no per-recycle
   # blackout. firewall_apply reprograms from the live subnet + mirror IP.
   if [ "$NETWORK_ISOLATION" = "strict" ] && command -v iptables >/dev/null 2>&1; then
-    local fwrules mip
+    local fwrules mip subnet
     fwrules="$(iptables -w -L DOCKER-USER -n 2>/dev/null)"
     mip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MIRROR_NAME" 2>/dev/null)"
+    # The current runner-network subnet: provision_base above may have RECREATED
+    # $RUNNER_NETWORK (e.g. after a docker network prune) with a fresh auto-allocated
+    # subnet. The existing rules are subnet-scoped (-s <cidr>), so if the live subnet
+    # no longer appears in them the fleet is sitting on a range the DROP rules were
+    # never written for — strict egress is silently unenforced until we reapply.
+    subnet="$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' "$RUNNER_NETWORK" 2>/dev/null)"
     if ! printf '%s' "$fwrules" | grep -qF "$FW_TAG" \
-       || { [ -n "$mip" ] && ! printf '%s' "$fwrules" | grep -qF "$mip"; }; then
+       || { [ -n "$mip" ] && ! printf '%s' "$fwrules" | grep -qF "$mip"; } \
+       || { [ -n "$subnet" ] && ! printf '%s' "$fwrules" | grep -qF "$subnet"; }; then
       log "recycle: (re)applying strict egress rules — firewall state was stale"
       firewall_apply
     fi
@@ -1380,6 +1425,12 @@ cmd_recycle() {
     log "recycle: $name left in place — built-in replacement image $image is unavailable"
     echo '{"ok":false,"error":"built-in replacement image is unavailable"}'; return 1
   fi
+  # Stop gracefully first so the runner's inner dockerd can flush its overlay2 /
+  # containerd metadata before removal. The DinD data root ($CACHE_ROOT/docker/$name)
+  # is preserved and reused WARM by the replacement, so a bare SIGKILL (docker rm -f
+  # with no stop) risks handing the new container an unclean data root that fails to
+  # mount. Then force-remove.
+  docker stop -t 30 "$name" >/dev/null 2>&1
   if ! docker rm -f "$name" >/dev/null 2>&1; then
     log "recycle: docker rm failed for $name"; echo '{"ok":false,"error":"remove failed"}'; return 1
   fi
@@ -1413,7 +1464,10 @@ cmd_usage_refresh() {
   # cmd_status_json never runs df or the per-repo curls inline (and there's no
   # unlocked stampede — this refresher is flock-guarded via usage.lock).
   cache_root_problem > "$RUNDIR/warn.cache" 2>/dev/null
-  public_repo_problem >/dev/null 2>&1
+  # Write the public-repo security verdict to a cache the poll reads (empty when
+  # there's nothing to warn about, which also clears a stale warning after the config
+  # is fixed) — so cmd_status_json never runs the per-repo curls on its own hot path.
+  public_repo_problem > "$RUNDIR/sec.cache" 2>/dev/null
   local names; names="$(managed_names)"
   [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
   local statsraw
@@ -1452,16 +1506,19 @@ cmd_usage_refresh() {
 cmd_status_json() {
   local names; names="$(managed_names)"
   # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
-  # cmd_usage_refresh) so this 5s-per-tab call forks docker at most ONCE (a single
-  # batched inspect for live state + resource limits), never per runner; trigger a
-  # cache refresh when stale.
+  # cmd_usage_refresh) so this 5s-per-tab call makes just TWO docker calls total (the
+  # `docker ps` in managed_names + one batched inspect for live state and resource
+  # limits), never per runner; trigger a cache refresh when stale.
   local usage="" uage=999 nowu
   nowu=$(date +%s)
   if [ -f "$RUNDIR/usage.cache" ]; then
     usage="$(cat "$RUNDIR/usage.cache" 2>/dev/null)"
     uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
   fi
-  if [ -n "$names" ] && [ "$uage" -gt 4 ]; then
+  # Trigger the background refresh whenever the cache is stale — even with an EMPTY
+  # fleet, so the cache-root (df) and public-repo security warnings stay fresh during
+  # first-time setup (before any runner exists), which is exactly when they matter.
+  if [ "$uage" -gt 4 ]; then
     ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
@@ -1502,7 +1559,10 @@ cmd_status_json() {
   local as="off"; [ "$AUTOSCALE" = "true" ] && as="$(autoscale_status)"
   local iu="off"; [ "$IMAGE_AUTOUPDATE" = "true" ] && iu="$(imageupdate_status) (every $((IMAGE_AUTOUPDATE_INTERVAL/60))m)"
   local warn; warn="$(cat "$RUNDIR/warn.cache" 2>/dev/null | json_escape)"
-  local sec; sec="$(public_repo_problem | json_escape)"
+  # Read the security verdict from cache (written by cmd_usage_refresh) — never call
+  # public_repo_problem inline here: on a cold/expired cache that would run the
+  # per-repo GitHub curls on the poll's own response path and stall it.
+  local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
   echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"runners\":${out}}"
 }
 
@@ -1538,14 +1598,15 @@ cmd_validate() {
   echo "--- docker.sock reachable inside container ---"
   docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
   docker rm -f "$name" >/dev/null 2>&1
-  rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || true
+  [ -n "$name" ] && [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || true
   log "validate: OK (container removed). Provisioning mechanics verified on this host."
 }
 
-# Clear the cache root. Guard against a misconfigured CACHE_ROOT that points at a
-# system dir or a bare pool/share root — 'rm -rf /mnt/user/*' would wipe every
-# user share. The ':?' already stops an empty value; this blocks the dangerous
-# non-empty ones too. Refuses anything shallower than /mnt/<name>/... or /mnt/<pool>.
+# Clear the plugin's caches under CACHE_ROOT. Two independent safeguards: (1) the
+# root must pass crf_safe_cache_root — a dedicated subdir under a pool/disk, never a
+# bare pool/disk/share root or system dir; and (2) even then we delete ONLY the
+# subdirectories this plugin creates, never a wholesale "$root"/* glob — so a
+# mis-pointed root can't take out unrelated data that shares the pool.
 cmd_prune_cache() {
   # Guard + canonicalize the root, then delete ONLY the subdirectories THIS plugin
   # creates under it — the warm package caches, each runner's DinD data root +
@@ -1575,9 +1636,12 @@ cmd_prune_cache() {
 # lock for the whole build, released only when that child exits — even on SIGKILL);
 # 1 = held; anything else (flock missing / unwritable flash) -> launch error.
 cmd_build_async() {
-  local log="$CFGDIR/build.log" lock="$CFGDIR/build.lock" inner
-  mkdir -p "$CFGDIR" 2>/dev/null
-  exec 9> "$lock" || { echo '{"ok":false,"error":"could not open the build lock (config dir not writable?)"}'; return 0; }
+  # Log + lock on tmpfs (RUNDIR), NOT flash: a docker build streams thousands of
+  # lines and appending each to /boot would hammer the USB stick. The log is only
+  # needed for the current session's build, so losing it on reboot is fine.
+  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner
+  mkdir -p "$RUNDIR" 2>/dev/null
+  exec 9> "$lock" || { echo '{"ok":false,"error":"could not open the build lock (runtime dir not writable?)"}'; return 0; }
   flock -n 9; local rc=$?
   if [ "$rc" -eq 0 ]; then
     : > "$log"
@@ -1595,7 +1659,7 @@ cmd_build_async() {
 # live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
 # from the __BUILD_RC__ sentinel only once the build is no longer running.
 cmd_build_status() {
-  local log="$CFGDIR/build.log" txt running rc n disp
+  local log="$RUNDIR/build.log" txt running rc n disp
   txt="$([ -f "$log" ] && tail -n 120 "$log")"
   if pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1; then running=true; else running=false; fi
   rc=null
@@ -1654,7 +1718,11 @@ cmd_boot_autostart() {
   docker info >/dev/null 2>&1 || { err "boot-autostart: dockerd not ready after wait — giving up"; return 1; }
   check_cache_root >/dev/null 2>&1 || { err "boot-autostart: cache pool not ready after wait — giving up"; return 1; }
   log "boot-autostart: docker + cache pool ready — bringing fleet up"
-  cmd_start
+  # Serialize the actual fleet bring-up behind the same lock every other mutation
+  # uses: on a Docker-service restart (no reboot) the autoscale/image daemons may
+  # still be alive and ticking, so an unlocked cmd_start here would race them into
+  # duplicate 'docker run's. The long readiness wait above stays OUTSIDE the lock.
+  with_fleet_lock wait cmd_start
 }
 
 case "${1:-status}" in

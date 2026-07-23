@@ -102,8 +102,12 @@ function crfPost(p){
    navigator.clipboard is undefined and .writeText would throw synchronously) and
    falling back to execCommand('copy'). Shared by every tab (one document). */
 function crfCopyText(t){
-  if(navigator.clipboard&&navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-  return new Promise((res,rej)=>{ try{ const ta=document.createElement('textarea'); ta.value=t; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); document.body.removeChild(ta); ok?res():rej(new Error('copy rejected')); }catch(e){ rej(e); } });
+  const legacy=()=>new Promise((res,rej)=>{ try{ const ta=document.createElement('textarea'); ta.value=t; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); document.body.removeChild(ta); ok?res():rej(new Error('copy rejected')); }catch(e){ rej(e); } });
+  // Some browsers EXPOSE navigator.clipboard on a plain-HTTP LAN page but then REJECT
+  // writeText (insecure/unfocused context) — so .catch the promise and fall through to
+  // the execCommand textarea, rather than surfacing the rejection as "Copy failed".
+  if(navigator.clipboard&&navigator.clipboard.writeText) return navigator.clipboard.writeText(t).catch(legacy);
+  return legacy();
 }
 /* Copy the text content of an element to the clipboard, with button feedback. */
 function crfCopyFrom(id, btn){
