@@ -15,11 +15,12 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
 }
 ?>
 <style>
-  :root{--crf-ok:#4caf50;--crf-busy:var(--brand-orange,#ff8c2f);--crf-err:var(--brand-red,#e22828)}
+  :root{--crf-ok:#4caf50;--crf-busy:var(--brand-orange,#ff8c2f);--crf-err:var(--brand-red,#e22828);--crf-info:var(--link-text-color,#29b6f6)}
   .crf-muted{color:var(--alt-text-color)}
   .crf-banner{margin:6px 0 8px;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.4}
   .crf-banner-sec{border:1px solid var(--crf-busy);background:color-mix(in srgb,var(--crf-busy) 12%,var(--background-color));color:var(--text-color);font-weight:bold}
   .crf-banner-warn{border:1px solid var(--crf-err);background:color-mix(in srgb,var(--crf-err) 12%,var(--background-color));color:var(--text-color)}
+  .crf-banner-info{border:1px solid var(--crf-info);background:color-mix(in srgb,var(--crf-info) 10%,var(--background-color));color:var(--text-color)}
   uui-button:not(:defined),uui-brand-button:not(:defined){cursor:pointer;border:1px solid var(--border-color);border-radius:6px;padding:5px 12px;font-size:13px;color:var(--text-color)}
   .crf-toast{position:fixed;right:18px;bottom:48px;z-index:9999;background:var(--inverse-background-color,#222);color:var(--inverse-text-color,#fff);border:1px solid var(--border-color);border-radius:6px;padding:9px 16px;font-size:13px;opacity:0;transform:translateY(6px);transition:opacity .2s,transform .2s;pointer-events:none}
   .crf-toast-show{opacity:1;transform:none}

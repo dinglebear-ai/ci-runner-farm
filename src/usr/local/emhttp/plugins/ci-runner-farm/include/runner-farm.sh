@@ -168,6 +168,36 @@ busy_count() {
   echo "$b"
 }
 
+# ── Config generation ────────────────────────────────────────────────────────
+# A short fingerprint of every config value that build_args BAKES INTO a runner
+# container at creation (image, resources, mounts, DinD/mirror, network, registration
+# identity) — i.e. the settings that only take effect on recreate, NOT the live keys the
+# daemons re-read each tick (autoscale thresholds, image-autoupdate cadence). Stamped as
+# a label on every runner so the reconciler can tell which runners predate a config
+# change and migrate them onto the new config as they go idle. IMPORTANT: whenever you
+# add a setting that build_args bakes into the container, add it here too.
+crf_confgen() {
+  printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$GH_REPOS" "$RUNNER_GROUP" "$RUNNER_LABELS" \
+    "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" \
+    "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" "$IMAGE_SOURCE" "$IMAGE" \
+    "$REGISTRY_SERVER" "$REGISTRY_USERNAME" "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" \
+    "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+    | sha256sum | cut -c1-12
+}
+# The config fingerprint a running runner was created with ('' for runners created before
+# this feature existed — they read as stale and migrate on the next reconcile).
+runner_confgen() { docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.confgen" }}' "$1" 2>/dev/null; }
+# How many RUNNING runners predate the current baked config (drives the drain loop and the
+# UI "migrating" indicator).
+count_stale_runners() {
+  local cur c n=0; cur="$(crf_confgen)"
+  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}'); do
+    [ -n "$c" ] || continue
+    [ "$(runner_confgen "$c")" = "$cur" ] || n=$((n+1))
+  done
+  echo "$n"
+}
+
 # Effective autoscale floor: AUTOSCALE_MIN, clamped to AUTOSCALE_MAX so a floor
 # misconfigured above the ceiling can never bypass the resource cap.
 autoscale_floor() { local f="$AUTOSCALE_MIN"; [ "$f" -gt "$AUTOSCALE_MAX" ] && f="$AUTOSCALE_MAX"; echo "$f"; }
@@ -260,6 +290,11 @@ autoscale_tick() {
   else
     echo 0 > "$statef"
   fi
+  # Continuous safety net behind the Apply-triggered drain: migrate one runner still on a
+  # previous baked config onto the current one (idle only). Also the path that eventually
+  # picks up a direct cfg edit, or a runner whose job outlasted the Apply drain timeout.
+  # Runs LAST so it never perturbs the scale math above; already under the fleet lock.
+  reconcile_stale_runners
 }
 
 # long-running loop; re-reads config each tick so UI changes apply live
@@ -834,6 +869,7 @@ build_args() {
     --pids-limit=4096
     --label "${MANAGED_LABEL%=*}=true"
     --label "net.unraid.ci-runner-farm.index=${idx}"
+    --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen)"
     -e RUNNER_NAME="$(host)-${name}"
     -e LABELS="$RUNNER_LABELS"
     -e DISABLE_AUTO_UPDATE="true"
@@ -1014,6 +1050,58 @@ cmd_mirror_up() {
   elif [ "$SHARED_IMAGE_CACHE" = "true" ] && [ "$DIND" = "true" ]; then
     err "shared image cache is not running — see the error above"
   fi
+}
+
+# ── Drain-aware config reconciliation ────────────────────────────────────────
+# Recycle AT MOST ONE running runner that predates the current baked config onto the new
+# one, and only while it is IDLE — a busy runner keeps its in-flight job and is caught on
+# a later pass once it finishes, so a settings change never kills a job. One-per-pass so
+# the fleet migrates gradually and never drops all its capacity at once. Lock-free: the
+# CALLER must hold the fleet lock (cmd_recycle, which this calls, assumes the dispatch or
+# caller already locked). Returns 0 always; callers poll count_stale_runners to know when
+# the fleet is fully migrated.
+reconcile_stale_runners() {
+  local cur c gen; cur="$(crf_confgen)"
+  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V); do
+    [ -n "$c" ] || continue
+    gen="$(runner_confgen "$c")"
+    [ "$gen" = "$cur" ] && continue                  # already on the current config
+    [ "$(runner_state "$c")" = idle ] || continue    # busy/starting — leave for a later pass
+    log "reconcile: $c predates a config change — recycling it (idle) onto the current config"
+    cmd_recycle "$c" >/dev/null 2>&1 || log "reconcile: recycle of $c failed — will retry next pass"
+    return 0                                          # one per pass; the drain/tick loop re-invokes
+  done
+  return 0
+}
+
+# Detached worker behind the Settings "Apply" button: migrate every stale runner onto the
+# new config as each goes idle, then exit. Re-reads the cfg each pass so an Apply made
+# mid-drain retargets the SAME drain (the flock in the dispatch keeps it to one). Gives up
+# after IMAGE_DRAIN_TIMEOUT on runners whose job outlasts it — they migrate on their next
+# idle via the autoscale tick, or on the next Apply/recycle. Progress is logged to
+# autoscale.log, which the farm-log panel tails.
+cmd_reconcile_drain() {
+  local deadline announced=0
+  deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  while :; do
+    load_cfg
+    [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+    [ "$(count_stale_runners)" -eq 0 ] && break
+    [ "$announced" = 0 ] && { log "reconcile: config changed — migrating runners onto it as they go idle"; announced=1; }
+    with_fleet_lock wait reconcile_stale_runners
+    [ "$(count_stale_runners)" -eq 0 ] && break
+    [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still busy after the drain timeout — they'll migrate on their next idle or recycle"; break; }
+    sleep 15
+  done
+  [ "$announced" = 1 ] && [ "$(count_stale_runners)" -eq 0 ] && log "reconcile: fleet is now on the current config"
+}
+
+# Kick off the drain detached so the Settings Apply returns immediately (recycling is
+# slow). Safe no-op when nothing is stale (the drain exits on the first count). Output
+# shows in the Apply progress frame — human text, not JSON.
+cmd_reconcile_config() {
+  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 &
+  echo "Configuration saved. Any runner on a previous config will migrate as it goes idle (busy jobs finish first)."
 }
 
 cmd_start() {
@@ -1523,17 +1611,21 @@ cmd_status_json() {
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
-  local inspraw=""
+  local inspraw="" cur_gen stalec=0
+  cur_gen="$(crf_confgen)"
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $names 2>/dev/null)"
+  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}' $names 2>/dev/null)"
   local out="["; local first=1
   for c in $names; do
     [ -z "$c" ] && continue
-    local irow st cpus mem
+    local irow st cpus mem cgen stale=false
     # {{.Name}} carries a leading '/', so field 1 is "/name"; split the pipe-delimited
     # inspect row with one read builtin instead of three cut subshells per runner.
     irow="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|")"
-    IFS='|' read -r _ st cpus mem <<< "$irow"
+    IFS='|' read -r _ st cpus mem cgen <<< "$irow"
+    # A RUNNING runner whose baked-config fingerprint differs from the current cfg predates
+    # a config change; the reconciler migrates it as it goes idle. Surface the count for the UI.
+    [ "$st" = running ] && [ "$cgen" != "$cur_gen" ] && { stale=true; stalec=$((stalec+1)); }
     # phase + cpu/mem usage + job context: all from the background cache line
     # "name cpu mem phase b64(job) jstarted b64(repo) pr b64(branch) run_id".
     local urow phase="starting" cpu_pct=-1 mem_used_mib=-1
@@ -1552,7 +1644,7 @@ cmd_status_json() {
     case "$jpr" in *[!0-9]*) jpr="" ;; esac
     case "$jrun" in *[!0-9]*) jrun="" ;; esac
     [ $first -eq 0 ] && out+=","
-    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0}}"
+    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"stale\":${stale}}"
     first=0
   done
   out+="]"
@@ -1563,7 +1655,7 @@ cmd_status_json() {
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"runners\":${out}}"
+  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
 }
 
 cmd_logs() { docker logs --tail "${2:-100}" -f "${NAME_PREFIX}-${1:-1}"; }
@@ -1744,6 +1836,8 @@ case "${1:-status}" in
   stats-json)   cmd_stats_json ;;
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
+  reconcile-config) cmd_reconcile_config ;;
+  reconcile-drain)  ( flock -n 7 || exit 0; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         cmd_validate ;;

@@ -12,6 +12,7 @@ Tag="server"
 <?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
 <div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
 <div id="crf-warn" class="crf-banner crf-banner-warn" style="display:none"></div>
+<div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
 
 <div class="crf-stats" id="crf-stats">
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
@@ -193,6 +194,10 @@ function crfRefresh(){
     if(warn){ if(d.warning){ warn.textContent='⚠ '+d.warning; warn.style.display='block'; } else { warn.textContent=''; warn.style.display='none'; } }
     const sec=document.getElementById('crf-sec');
     if(sec){ if(d.security){ sec.textContent='🔒 '+d.security; sec.style.display='block'; } else { sec.textContent=''; sec.style.display='none'; } }
+    // Runners still on a previous baked config after a settings change — the reconciler
+    // recycles them onto the new config as they go idle (busy jobs finish first).
+    const mig=document.getElementById('crf-migrate');
+    if(mig){ if(d.stale>0){ mig.textContent='⟳ '+d.stale+' runner'+(d.stale>1?'s':'')+' updating to the new configuration — recycling as they go idle, so running jobs finish first.'; mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
     const rs=d.runners||[];
     const up=rs.filter(r=>r.state==='running').length;
     const busy=rs.filter(r=>r.state==='running'&&r.phase==='busy').length;
