@@ -29,9 +29,11 @@ jobs:
       - name: Shell syntax (bash -n)
         run: |
           set -e
-          for f in $(git ls-files '*.sh'); do
-            echo "bash -n $f"
-            bash -n "$f"
+          # *.sh always; plus the extension-less shell scripts Unraid runs from nchan/
+          # and event/ (lint the ones with a shell shebang, skip any non-shell helper).
+          for f in $(git ls-files '*.sh'); do echo "bash -n $f"; bash -n "$f"; done
+          for f in $(git ls-files 'src/usr/local/emhttp/plugins/*/nchan/*' 'src/usr/local/emhttp/plugins/*/event/*'); do
+            case "$(head -1 "$f" 2>/dev/null)" in '#!'*sh*) echo "bash -n $f"; bash -n "$f" ;; esac
           done
 
       - name: PHP syntax (php -l)

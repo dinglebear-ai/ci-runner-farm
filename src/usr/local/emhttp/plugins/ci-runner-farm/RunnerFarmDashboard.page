@@ -12,8 +12,9 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
  * the full RunnerFarm tabs) — this renders on every dashboard view, so it stays
  * a few tiles + an EventSource. Live status is PUSHED over the nchan
  * "ci_runner_farm" channel (see nchan/ci_runner_farm); the Nchan= header keeps
- * that publisher alive while this tile is visible. The publisher computes the
- * same status-json the Fleet tab uses; here we just derive up/busy/idle. */
+ * that publisher alive while this tile is visible. The publisher pushes an
+ * AGGREGATE-ONLY payload ({count,up,busy,idle}) — the /sub channel is not behind
+ * the webGUI login, so no per-runner repo/branch/job detail is broadcast. */
 ?>
 <style>
   .crfw-wrap{display:flex;flex-direction:column;gap:8px;padding:2px}
@@ -49,22 +50,30 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
 <script>
 (function(){
   var set=function(id,v){var el=document.getElementById(id); if(el)el.textContent=v;};
-  var es;
+  // Show a non-live state WITHOUT pretending the counts are current: neutral dot + message.
+  var markDown=function(txt){ var dot=document.getElementById('crfw-dot'); if(dot) dot.className='crfw-dot'; set('crfw-state',txt); };
+  var last=Date.now(), es;
   function connect(){
     es=new EventSource('/sub/ci_runner_farm');
     es.onmessage=function(e){
       var d; try{ d=JSON.parse(e.data); }catch(_){ return; }
-      var rs=(d&&d.runners)||[];
-      var up=rs.filter(function(r){return r.state==='running';}).length;
-      var busy=rs.filter(function(r){return r.state==='running'&&r.phase==='busy';}).length;
-      var idle=rs.filter(function(r){return r.state==='running'&&r.phase==='idle';}).length;
-      set('crfw-up',up); set('crfw-busy',busy); set('crfw-idle',idle);
+      if(!d || d.ok===false){ markDown('Backend unavailable'); return; }   // sentinel pushed by the publisher on failure
+      last=Date.now();
+      var up=(typeof d.up==='number')?d.up:0;
+      set('crfw-up',up);
+      set('crfw-busy',(typeof d.busy==='number')?d.busy:0);
+      set('crfw-idle',(typeof d.idle==='number')?d.idle:0);
       var dot=document.getElementById('crfw-dot'); if(dot) dot.className='crfw-dot'+(up>0?' on':'');
       set('crfw-state', up>0 ? up+' runner'+(up===1?'':'s')+' up' : 'No runners up');
-      set('crfw-meta', typeof d.count==='number' ? d.count+' managed' : ' ');
+      set('crfw-meta', typeof d.count==='number' ? d.count+' managed' : ' ');
     };
-    es.onerror=function(){ /* EventSource auto-reconnects */ };
+    // Don't leave stale-but-confident tiles up on a dropped stream — the plugin's other
+    // panels surface "lost connection" rather than freezing; match that discipline here.
+    es.onerror=function(){ markDown('Disconnected — reconnecting…'); };
   }
+  // Staleness watchdog: even if the socket stays nominally open, flag it when no push has
+  // landed in ~3x the publisher interval (8s), so a wedged publisher can't show old data.
+  setInterval(function(){ if(Date.now()-last > 24000) markDown('No recent update — reconnecting…'); }, 6000);
   connect();
 })();
 </script>

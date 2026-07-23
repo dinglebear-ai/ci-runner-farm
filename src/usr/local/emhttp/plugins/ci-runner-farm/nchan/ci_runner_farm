@@ -14,10 +14,15 @@ chan="http://localhost/pub/ci_runner_farm?buffer_length=1"
 script="/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"
 interval=8
 
+# Publish the AGGREGATE-ONLY dashboard payload ({count,up,busy,idle}) — never the full
+# status-json. The nchan /sub channel is served by Unraid's nginx WITHOUT the webGUI
+# login, so anything pushed here is readable by any client on the network; the widget
+# only needs counts, so we don't broadcast private repo/branch/job metadata to the LAN.
 while :; do
-    json="$("$script" status-json 2>/dev/null)"
-    if [ -n "$json" ]; then
-        curl -s --max-time 3 --unix-socket "$socket" -d "$json" "$chan" >/dev/null 2>&1
-    fi
+    json="$("$script" dashboard-json 2>/dev/null)"
+    # On a backend failure push a sentinel instead of skipping the publish, so the widget
+    # flips to "disconnected" rather than freezing on the last-good counts as if live.
+    [ -n "$json" ] || json='{"ok":false,"error":"backend unavailable"}'
+    curl -s --max-time 3 --unix-socket "$socket" -d "$json" "$chan" >/dev/null 2>&1
     sleep "$interval"
 done

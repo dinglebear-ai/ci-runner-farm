@@ -28,6 +28,7 @@ $defaults = [
   'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
   'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
+  'DASHBOARD_WIDGET_ENABLE'=>'true',
   'AUTOSCALE'=>'false', 'AUTOSCALE_MIN'=>'2', 'AUTOSCALE_MAX'=>'16', 'AUTOSCALE_MIN_IDLE'=>'2',
   'AUTOSCALE_STEP'=>'2', 'AUTOSCALE_INTERVAL'=>'30', 'AUTOSCALE_IDLE_GRACE'=>'5',
 ];
@@ -355,6 +356,18 @@ _(Autoscale: scale-down grace)_:
 
 :crf_asgrace_plug:
 > How many consecutive over-idle checks before removing runners. Scale-up is immediate; scale-down waits this long to avoid flapping during brief lulls.
+:end
+
+### Dashboard
+
+_(Main Dashboard tile)_:
+: <select name="DASHBOARD_WIDGET_ENABLE">
+  <option value="true" <?=crf_sel($cfg,'DASHBOARD_WIDGET_ENABLE','true','true')?>>true (show the tile)</option>
+  <option value="false" <?=crf_sel($cfg,'DASHBOARD_WIDGET_ENABLE','false','true')?>>false</option>
+  </select>
+
+:crf_dashwidget_plug:
+> Show the CI Runner Farm status tile on the Unraid **Main → Dashboard** (up/busy/idle counts, pushed live). The tile broadcasts only aggregate counts — never repo/branch/job detail. Turn off to hide it.
 :end
 
 &nbsp;
