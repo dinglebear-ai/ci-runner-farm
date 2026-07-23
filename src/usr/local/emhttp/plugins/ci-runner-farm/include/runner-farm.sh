@@ -93,8 +93,8 @@ IMAGE_AUTOUPDATE="false"             # true => a daemon periodically pulls the r
                                      # when the digest moves, recreates runners on the new image.
 IMAGE_AUTOUPDATE_INTERVAL="1800"     # seconds between update checks (default 30 min)
 IMAGE_DRAIN_TIMEOUT="3600"           # max seconds to wait for a busy runner to finish its job
-DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (read only by RunnerFarmDashboard.page's Cond)
                                      # before leaving it on the old image this cycle (0 = wait forever)
+DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (read only by RunnerFarmDashboard.page's Cond)
 # ----------------------------------------------------------------------------
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
@@ -1056,8 +1056,8 @@ cmd_mirror_up() {
 
 # ── Drain-aware config reconciliation ────────────────────────────────────────
 # Recycle AT MOST ONE running runner that predates the current baked config onto the new
-# one, and only while it is IDLE — a busy runner keeps its in-flight job and is caught on
-# a later pass once it finishes, so a settings change never kills a job. One-per-pass so
+# one, while it is IDLE or in an ERROR state — a busy runner keeps its in-flight job and is
+# caught on a later pass once it finishes, so a settings change never kills a job. One-per-pass so
 # the fleet migrates gradually and never drops all its capacity at once. Lock-free: the
 # CALLER must hold the fleet lock (cmd_recycle, which this calls, assumes the dispatch or
 # caller already locked). Returns 0 always; callers poll count_stale_runners to know when
@@ -1112,7 +1112,11 @@ cmd_reconcile_drain() {
   lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
   if [ "$announced" = 1 ]; then
     if [ "${lost:-0}" -gt 0 ]; then
-      log "reconcile: migration finished but $lost runner(s) were removed without a replacement — Start/Restart the fleet to restore capacity"
+      if [ "$(count_stale_runners)" -eq 0 ]; then
+        log "reconcile: migration finished but $lost runner(s) were removed without a replacement — Start/Restart the fleet to restore capacity"
+      else
+        log "reconcile: migration incomplete, and $lost runner(s) were also removed without a replacement — Start/Restart the fleet to restore capacity"
+      fi
     elif [ "$(count_stale_runners)" -eq 0 ]; then
       log "reconcile: fleet is now on the current config"
     fi

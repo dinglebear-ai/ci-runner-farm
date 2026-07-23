@@ -51,14 +51,14 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
 (function(){
   var set=function(id,v){var el=document.getElementById(id); if(el)el.textContent=v;};
   // Show a non-live state WITHOUT pretending the counts are current: neutral dot + message.
-  var markDown=function(txt){ var dot=document.getElementById('crfw-dot'); if(dot) dot.className='crfw-dot'; set('crfw-state',txt); };
+  var markDown=function(txt){ var dot=document.getElementById('crfw-dot'); if(dot) dot.className='crfw-dot'; set('crfw-state',txt); set('crfw-up','–'); set('crfw-busy','–'); set('crfw-idle','–'); set('crfw-meta',' '); };
   var last=Date.now(), es;
   function connect(){
     es=new EventSource('/sub/ci_runner_farm');
     es.onmessage=function(e){
       var d; try{ d=JSON.parse(e.data); }catch(_){ return; }
+      last=Date.now();   // a frame arrived — the stream is live, even a failure sentinel; don't let the watchdog relabel it "stale"
       if(!d || d.ok===false){ markDown('Backend unavailable'); return; }   // sentinel pushed by the publisher on failure
-      last=Date.now();
       var up=(typeof d.up==='number')?d.up:0;
       set('crfw-up',up);
       set('crfw-busy',(typeof d.busy==='number')?d.busy:0);

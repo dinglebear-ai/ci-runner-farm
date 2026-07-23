@@ -19,10 +19,10 @@ interval=8
 # login, so anything pushed here is readable by any client on the network; the widget
 # only needs counts, so we don't broadcast private repo/branch/job metadata to the LAN.
 while :; do
-    json="$("$script" dashboard-json 2>/dev/null)"
+    json="$(timeout 5 "$script" dashboard-json 2>/dev/null)"
     # On a backend failure push a sentinel instead of skipping the publish, so the widget
     # flips to "disconnected" rather than freezing on the last-good counts as if live.
     [ -n "$json" ] || json='{"ok":false,"error":"backend unavailable"}'
-    curl -s --max-time 3 --unix-socket "$socket" -d "$json" "$chan" >/dev/null 2>&1
+    curl -s --max-time 3 --unix-socket "$socket" --data-raw "$json" "$chan" >/dev/null 2>&1
     sleep "$interval"
 done
