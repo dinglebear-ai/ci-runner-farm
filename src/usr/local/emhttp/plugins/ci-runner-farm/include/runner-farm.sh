@@ -1606,7 +1606,13 @@ cmd_status_json() {
   # Trigger the background refresh whenever the cache is stale — even with an EMPTY
   # fleet, so the cache-root (df) and public-repo security warnings stay fresh during
   # first-time setup (before any runner exists), which is exactly when they matter.
-  if [ "$uage" -gt 4 ]; then
+  # Decouple the refresh cadence from the 5s poll for LARGE fleets: cmd_usage_refresh
+  # runs one `docker exec` per runner (runner_state), so re-firing every poll would
+  # saturate the daemon at scale. Small fleets stay snappy (4s); fleets above the UI's
+  # 20-runner max throttle to ~9s, trading slightly staler cpu/mem bars for roughly
+  # half the background docker load.
+  local rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
+  if [ "$uage" -gt "$rthresh" ]; then
     ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
