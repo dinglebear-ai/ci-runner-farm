@@ -25,7 +25,7 @@ $defaults = [
   'RUNNER_CPUS'=>'', 'RUNNER_MEMORY'=>'16g', 'EPHEMERAL'=>'false', 'RUN_AS_ROOT'=>'false',
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
-  'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
+  'CACHE_MOUNTS'=>'cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
   'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
   'DASHBOARD_WIDGET_ENABLE'=>'true',
@@ -217,10 +217,10 @@ _(Workspace tmpfs size)_:
 :end
 
 _(Cache mounts)_:
-: <input type="text" name="CACHE_MOUNTS" value="<?=crf_g($cfg,'CACHE_MOUNTS','pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright')?>">
+: <input type="text" name="CACHE_MOUNTS" value="<?=crf_g($cfg,'CACHE_MOUNTS','cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright')?>">
 
 :crf_cache_mounts_plug:
-> Space-separated `host-subdir:container-path` warm caches mounted into every runner (created under the cache root). Defaults cover pnpm/npm/yarn/Playwright — edit for your stack.
+> Space-separated `host-subdir:container-path` warm caches mounted into every runner (created under the cache root). Defaults cover Cargo registry/git plus pnpm/npm/yarn/Playwright; edit for your stack. The Rust image preset keeps each runner’s local sccache inside its container until a shared backend or per-runner mount is configured.
 :end
 
 ### Docker

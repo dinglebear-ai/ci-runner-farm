@@ -17,8 +17,9 @@ dependency caches that stay hot between runs, at zero cost per minute.
 
 - **Cost.** Hosted CI bills by the minute. A server you already own runs builds
   for the price of the electricity.
-- **Speed.** Run many jobs in parallel and keep pnpm/npm/yarn/Playwright caches
-  warm on a local NVMe pool — no re-downloading the world on every run.
+- **Speed.** Run many jobs in parallel and keep Cargo registry/git plus
+  pnpm/npm/yarn/Playwright caches warm on a local NVMe pool, with no
+  re-downloading the world on every run.
 - **It's the Unraid thing to do.** Self-hosted runners are just Docker
   containers, and Docker is what your server is already great at. This is "do
   more with the hardware you have," turned up to a build farm.
@@ -33,7 +34,7 @@ dependency caches that stay hot between runs, at zero cost per minute.
 |---|---|
 | **N concurrent runners** | Each runner is its own container, optionally capped with `--cpus` / `--memory` so CI never starves the rest of the host. |
 | **Queue-aware autoscaling** | An optional daemon floats the fleet between a min and max based on how many jobs are waiting — capacity when you need it, idle when you don't. |
-| **Warm shared caches** | npm, yarn, pnpm, and Playwright caches by default (fully configurable — add cargo, sccache, and more) live on a fast pool and are reused across every run. This is the biggest hidden speed win over hosted CI. |
+| **Warm shared caches** | Cargo registry/git, npm, yarn, pnpm, and Playwright caches live on a fast pool and are reused across every run. Cache mounts are fully configurable for other toolchains and remote compiler-cache backends. |
 | **Docker-in-Docker per runner** | Jobs that use `services:` or `docker compose` just work, with an optional shared pull-through registry mirror so images are pulled once for the whole fleet. |
 | **Bring your own image** | Point at any image you publish to a registry, or build one in-plugin — toggle **Rust / Python / Node·TS / Android** toolchains into the Dockerfile with one click, then Build. |
 | **Live fleet dashboard** | Watch each runner's phase, the repo and **PR # it's building right now**, and live CPU/memory against its cap — plus queue depth, cache usage (one-click clear), recent-run pass rates, per-runner log drawers, and a colorized activity log. |
@@ -99,8 +100,8 @@ The Settings tab holds the whole configuration on one screen:
   (for a private image, set the registry server/username and save a registry
   token; for `ghcr.io`, a blank registry token reuses your GitHub token).
 - **Storage & caches** — the **warm caches** (host-subdir → container-path
-  mounts; defaults cover pnpm/npm/yarn/Playwright) and the **workspace tmpfs
-  size**.
+  mounts; defaults cover Cargo registry/git plus pnpm/npm/yarn/Playwright) and
+  the **workspace tmpfs size**.
 - **Docker** — **Docker-in-Docker** mode, host-socket sharing, and network
   isolation.
 - **Autoscaling** and **image auto-update** — optional; see steps below.
@@ -121,7 +122,9 @@ a syntax-highlighted, in-page Dockerfile editor over a generic
 (stock self-hosted runner base + a Docker-in-Docker readiness wrapper). Click the
 **toolchain** pills — **Rust**, **Python**, **Node / TS**, **Android** — to
 splice matching install blocks in or out, then **Save + Build** and watch the
-live build log. Restart the fleet to roll onto the new image. No registry needed.
+live build log. The Rust preset includes stable Rust, Clippy, rustfmt, native
+build tooling, and a verified prebuilt `sccache` configured as `RUSTC_WRAPPER`.
+Restart the fleet to roll onto the new image. No registry needed.
 
 ![The Runner image tab — a syntax-highlighted Dockerfile editor, one-click Rust / Python / Node·TS / Android toolchain blocks, and a live build log](docs/images/runner-image.png)
 
