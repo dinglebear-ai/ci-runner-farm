@@ -18,7 +18,7 @@ bad() { printf 'RUST PRESET FAIL: %s\n' "$*" >&2; fail=1; }
 rust_block="$(awk '/^# >>> ci-runner-farm toolchain: rust >>>/{f=1} f{print} /^# <<< ci-runner-farm toolchain: rust <<</{exit}' "$IMAGE")"
 [ -n "$rust_block" ] || bad "Rust toolchain block is missing"
 
-need() { grep -Fq "$1" <<<"$rust_block" || bad "Rust block lacks: $1"; }
+need() { grep -Fq -- "$1" <<<"$rust_block" || bad "Rust block lacks: $1"; }
 need 'ARG SCCACHE_VERSION=0.16.0'
 need 'CARGO_HOME=/home/runner/.cargo'
 need 'RUSTC_WRAPPER=/usr/local/bin/sccache'
@@ -36,6 +36,15 @@ need 'install -m 0755'
 if grep -Fq '.sha256' <<<"$rust_block"; then
   bad "sccache checksum is fetched beside the binary instead of pinned in source"
 fi
+
+# A `curl ... | sh` pipeline reports the exit status of `sh`, not `curl`, so a failed
+# download feeds empty stdin to a shell that exits 0 and the image builds without
+# rustup. Require the download-then-execute form so the failure actually propagates.
+if grep -Eq 'curl[^|]*\|[[:space:]]*sh' <<<"$rust_block"; then
+  bad "rustup is installed via a curl-to-sh pipeline; download to a file, then execute it"
+fi
+need '-o /tmp/rustup-init.sh'
+need 'sh /tmp/rustup-init.sh'
 
 for file in "$ENGINE" "$CFG" "$UI"; do
   grep -Fq 'cargo-registry:/home/runner/.cargo/registry' "$file" || bad "$file lacks the Cargo registry cache mount"

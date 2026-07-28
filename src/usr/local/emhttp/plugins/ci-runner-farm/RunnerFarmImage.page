@@ -35,8 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld cmake pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$SCCACHE_DIR" \
- && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal -c clippy,rustfmt \
+ && curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh https://sh.rustup.rs \
+ && sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain stable --profile minimal -c clippy,rustfmt \
+ && rm -f /tmp/rustup-init.sh \
  && arch="$(dpkg --print-architecture)" \
  && case "$arch" in \
       amd64) sccache_target="x86_64-unknown-linux-musl"; sccache_sha256="aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588" ;; \
