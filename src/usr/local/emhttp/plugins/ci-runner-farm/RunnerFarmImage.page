@@ -20,11 +20,39 @@ $crf_dockerfile = is_file($crf_df) ? file_get_contents($crf_df) : '';
 $crfi_tc = [];
 $crfi_tc['rust'] = <<<'DFBLOCK'
 # >>> ci-runner-farm toolchain: rust >>>
-# Rust stable installed system-wide (/opt/rust) so every job shares it.
-ENV RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust PATH=/opt/rust/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal -c clippy,rustfmt \
- && chmod -R a+w "$CARGO_HOME"
+# Rust stable, native build tools, and a verified prebuilt sccache binary.
+ARG SCCACHE_VERSION=0.16.0
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/home/runner/.cargo \
+    RUSTC_WRAPPER=/usr/local/bin/sccache \
+    CARGO_INCREMENTAL=0 \
+    SCCACHE_DIR=/home/runner/.cache/sccache \
+    SCCACHE_CACHE_SIZE=10G \
+    SCCACHE_IDLE_TIMEOUT=0 \
+    SCCACHE_BASEDIRS=/_work \
+    PATH=/home/runner/.cargo/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential clang lld cmake pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$SCCACHE_DIR" \
+ && curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh https://sh.rustup.rs \
+ && sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain stable --profile minimal -c clippy,rustfmt \
+ && rm -f /tmp/rustup-init.sh \
+ && arch="$(dpkg --print-architecture)" \
+ && case "$arch" in \
+      amd64) sccache_target="x86_64-unknown-linux-musl"; sccache_sha256="aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588" ;; \
+      arm64) sccache_target="aarch64-unknown-linux-musl"; sccache_sha256="f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784" ;; \
+      *) echo "Unsupported architecture for sccache: $arch" >&2; exit 1 ;; \
+    esac \
+ && sccache_archive="sccache-v$SCCACHE_VERSION-$sccache_target.tar.gz" \
+ && sccache_dir="sccache-v$SCCACHE_VERSION-$sccache_target" \
+ && sccache_base="https://github.com/mozilla/sccache/releases/download/v$SCCACHE_VERSION" \
+ && curl -fsSL -o "/tmp/$sccache_archive" "$sccache_base/$sccache_archive" \
+ && echo "$sccache_sha256  /tmp/$sccache_archive" | sha256sum -c - \
+ && tar -xzf "/tmp/$sccache_archive" -C /tmp \
+ && install -m 0755 "/tmp/$sccache_dir/sccache" /usr/local/bin/sccache \
+ && rm -rf "/tmp/$sccache_archive" "/tmp/$sccache_dir" \
+ && chown -R runner:runner "$RUSTUP_HOME" "$CARGO_HOME" "$SCCACHE_DIR"
 # <<< ci-runner-farm toolchain: rust <<<
 DFBLOCK;
 $crfi_tc['python'] = <<<'DFBLOCK'

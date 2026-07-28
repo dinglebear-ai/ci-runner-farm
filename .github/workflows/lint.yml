@@ -55,3 +55,6 @@ jobs:
 
       - name: Path guards
         run: bash tests/safe-paths.sh
+
+      - name: Rust preset invariants
+        run: bash tests/rust-preset.sh

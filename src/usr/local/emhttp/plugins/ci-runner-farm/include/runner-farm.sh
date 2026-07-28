@@ -79,7 +79,7 @@ REGISTRY_TOKEN=""                      # registry password/token (loaded from re
 # own the host cache dirs so the non-root runner can write (see ensure_dirs).
 RUNNER_UID="1001"                     # uid of the image's 'runner' user (myoung34/github-runner)
 RUNNER_GID="121"                      # gid of the 'runner' group
-CACHE_MOUNTS="pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright"
+CACHE_MOUNTS="cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright"
 # ---- autoscaling (queue-aware): fleet floats between MIN and MAX ------------
 AUTOSCALE="false"                     # true => a daemon grows/shrinks the fleet by demand
 AUTOSCALE_MIN="2"                     # never go below this many runners
