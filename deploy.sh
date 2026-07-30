@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 
 echo "[deploy] syncing $SRC -> $HOST:$DEST"
 ssh "$HOST" "mkdir -p '$DEST/include'"
-scp -q "$SRC/RunnerFarm.page" "$SRC/RunnerFarmDashboard.page" "$SRC/default.cfg" "$SRC/default.Dockerfile" "$SRC/README.md" "$HOST:$DEST/"
+scp -q "$SRC/RunnerFarm.page" "$SRC/RunnerFarmDashboard.page" "$SRC/RunnerFarmFleet.page" "$SRC/RunnerFarmSettings.page" "$SRC/RunnerFarmImage.page" "$SRC/default.cfg" "$SRC/default.Dockerfile" "$SRC/README.md" "$HOST:$DEST/"
 ssh "$HOST" "mkdir -p '$DEST/nchan'"
 scp -q "$SRC"/nchan/* "$HOST:$DEST/nchan/"
 scp -q "$SRC"/include/* "$HOST:$DEST/include/"

@@ -29,8 +29,8 @@ Tag="server"
   <uui-button variant="secondary" size="xs" onclick="crfAction('stop')">Stop</uui-button>
   <uui-button variant="secondary" size="xs" onclick="crfAction('restart')">Restart</uui-button>
   <uui-button variant="outline" size="xs" onclick="crfAction('validate')">Validate (no token)</uui-button>
-  <span class="crf-scale">Scale to <input type="number" id="crf-n" min="0" max="20" value="4">
-  <uui-button variant="secondary" size="xs" onclick="crfScale()">Scale</uui-button></span>
+  <span class="crf-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span> <input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled>
+  <uui-button id="crf-scale-button" size="xs" onclick="crfScale()" disabled>Scale</uui-button></span>
 </div>
 
 <div class="crf-bays">
@@ -204,6 +204,24 @@ function crfRefresh(){
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
+    // The manual scale target must start from the live fleet size, rather than a
+    // stale template default. Do not replace a value while the operator is typing.
+    const scale=document.getElementById('crf-n');
+    if(scale && document.activeElement!==scale) scale.value=d.count;
+    const scaleButton=document.getElementById('crf-scale-button');
+    const scaleWrap=document.getElementById('crf-scale-wrap');
+    const scaleLabel=document.getElementById('crf-scale-label');
+    if(scale){
+      scale.disabled=false;
+      scale.min=d.autoscale_enabled?Number(d.count)+1:0;
+      scale.max=d.autoscale_enabled?40:20;
+      if(d.autoscale_enabled) scale.max=d.autoscale_max;
+      scale.setAttribute('aria-label',d.autoscale_enabled?'Scale up the fleet within the autoscale maximum':'Scale fleet to this runner count');
+      scale.title=d.autoscale_enabled?'Immediately adds runners up to the Autoscale max. The autoscaler manages scale-down afterward.':'';
+    }
+    if(scaleButton){ scaleButton.disabled=!!d.autoscale_enabled&&Number(d.count)>=Number(d.autoscale_max); scaleButton.title=scale&&scale.title; }
+    if(scaleLabel) scaleLabel.textContent=d.autoscale_enabled?'Scale up to':'Scale to';
+    if(scaleWrap) scaleWrap.title=scale&&scale.title;
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the

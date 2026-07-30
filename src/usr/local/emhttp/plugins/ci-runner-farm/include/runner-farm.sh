@@ -276,14 +276,14 @@ autoscale_tick() {
   floor="$(autoscale_floor)"
   if [ "$cur" -lt "$floor" ]; then
     log "autoscale: count $cur < floor $floor -> grow to $floor"
-    cmd_scale "$floor" >/dev/null; echo 0 > "$statef"
+    cmd_scale_internal "$floor" >/dev/null; echo 0 > "$statef"
     return 0
   fi
 
   if [ "$idle" -lt "$AUTOSCALE_MIN_IDLE" ] && [ "$cur" -lt "$AUTOSCALE_MAX" ]; then
     target=$(( cur + AUTOSCALE_STEP )); [ "$target" -gt "$AUTOSCALE_MAX" ] && target=$AUTOSCALE_MAX
     log "autoscale: idle=$idle/$cur < buffer $AUTOSCALE_MIN_IDLE -> grow to $target"
-    cmd_scale "$target" >/dev/null; echo 0 > "$statef"
+    cmd_scale_internal "$target" >/dev/null; echo 0 > "$statef"
   elif [ "$idle" -gt $(( AUTOSCALE_MIN_IDLE + AUTOSCALE_STEP )) ] && [ "$cur" -gt "$floor" ]; then
     over=$(( over + 1 )); echo "$over" > "$statef"
     if [ "$over" -ge "$AUTOSCALE_IDLE_GRACE" ]; then
@@ -1226,7 +1226,7 @@ cmd_stop() {
   fi
 }
 
-cmd_scale() {
+cmd_scale_internal() {
   local target="$1"
   # Server-side validate + clamp. The form's max="20" is presentation-only, so a
   # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
@@ -1255,6 +1255,21 @@ cmd_scale() {
     done
   fi
   log "scaled to $(managed_names | wc -l) runner(s)"
+}
+
+cmd_scale() {
+  # The autoscaler uses cmd_scale_internal above. A manual scale-up is useful
+  # during a burst, but never bypass its configured ceiling or remove runners
+  # that the autoscaler is managing.
+  if [ "$AUTOSCALE" = "true" ]; then
+    local target="$1" current max="$AUTOSCALE_MAX"
+    case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
+    case "$max" in ''|*[!0-9]*) max=16 ;; esac
+    current="$(current_count)"
+    [ "$target" -gt "$current" ] || { err "manual scale with Autoscaling on can only add runners (currently $current)"; return 1; }
+    [ "$target" -le "$max" ] || { err "manual scale target ($target) exceeds autoscale max ($max); raise it in Settings first"; return 1; }
+  fi
+  cmd_scale_internal "$1"
 }
 
 cmd_status() {
@@ -1724,7 +1739,9 @@ cmd_status_json() {
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
+  local autoscale_max="$AUTOSCALE_MAX"
+  case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
+  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
