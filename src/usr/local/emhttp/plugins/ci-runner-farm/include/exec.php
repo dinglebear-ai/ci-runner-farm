@@ -34,6 +34,7 @@ if (!$csrf || !hash_equals($csrf, $given)) {
 
 $PLUGIN  = 'ci-runner-farm';
 $CFGDIR  = "/boot/config/plugins/$PLUGIN";
+$RUNDIR  = "/var/local/emhttp/$PLUGIN";
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action = post_scalar('action', 64, true, true);
 if ($action === false || !preg_match('/^[a-z][a-z0-9-]{0,63}$/', $action)) {
@@ -65,7 +66,8 @@ function bounded_request_string($value, $max, $trim = false) {
 }
 function config_keys() {
   return [
-    'GH_SCOPE','GH_OWNER','GH_REPOS','RUNNER_GROUP','RUNNER_COUNT','RUNNER_LABELS',
+    'GH_SCOPE','GH_OWNER','GH_REPOS','RUNNER_GROUP','AUTH_MODE','GITHUB_APP_ID',
+    'GITHUB_APP_INSTALLATION_ID','RUNNER_COUNT','RUNNER_LABELS',
     'RUNNER_MODE','RUNNER_POOLS','POOL_BACKEND','RUNNER_CPUS','RUNNER_MEMORY',
     'CACHE_ROOT','WORK_TMPFS_SIZE','IMAGE_SOURCE','IMAGE','EPHEMERAL',
     'RESOURCE_CPU_BUDGET','RESOURCE_MEMORY_BUDGET','RESOURCE_CPU_RESERVE',
@@ -82,6 +84,20 @@ function emit_error($status, $code, $message) {
   http_response_code($status);
   echo json_encode(['ok'=>false,'code'=>$code,'error'=>$message]);
 }
+function write_private_atomic($path, $content) {
+  $dir = dirname($path);
+  @mkdir($dir, 0755, true);
+  $tmp = tempnam($dir, '.secret.');
+  if ($tmp === false) return false;
+  $handle = @fopen($tmp, 'wb');
+  $ok = $handle !== false && chmod($tmp, 0600) &&
+    fwrite($handle, $content) === strlen($content) && fflush($handle);
+  if ($ok && function_exists('fsync')) $ok = fsync($handle);
+  if ($handle !== false) fclose($handle);
+  if (!$ok || !rename($tmp, $path)) { @unlink($tmp); return false; }
+  chmod($path, 0600);
+  return true;
+}
 
 switch ($action) {
   case 'status-json':
@@ -94,6 +110,12 @@ switch ($action) {
     if      ($out !== '') { echo $out; }
     elseif  ($rc === 0)   { echo json_encode(['count'=>0,'runners'=>[]]); }
     else                  { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'backend unavailable']); }
+    break;
+
+  case 'readiness-json':
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' readiness-json');
+    if ($rc === 0 && $out !== '') echo $out;
+    else emit_error(500, 'readiness_unavailable', 'scale-set readiness is unavailable');
     break;
 
   case 'start': case 'stop': case 'restart': case 'validate':
@@ -136,6 +158,22 @@ switch ($action) {
     $cmd .= escapeshellarg($raw);
     [$out, $rc] = run($cmd);
     echo json_encode(['ok' => $rc === 0, 'action' => $pool === '' ? "scale $raw" : "scale $pool $raw", 'log' => $out]);
+    break;
+
+  case 'prewarm':
+    $pool = post_scalar('pool', 24, true, true);
+    $raw = post_scalar('n', 2, true, true);
+    $revision = post_scalar('expected_config_revision', 64, true, true);
+    if (!is_string($pool) || !preg_match('/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/', $pool) ||
+        !is_string($raw) || !preg_match('/^(?:0|[1-9][0-9]?)$/', $raw) || (int)$raw > 64 ||
+        !is_string($revision) || !preg_match('/^[0-9a-f]{64}$/', $revision)) {
+      emit_error(400, 'invalid_prewarm', 'invalid prewarm pool, target, or revision');
+      break;
+    }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' prewarm ' . escapeshellarg($pool) . ' ' .
+      escapeshellarg($raw) . ' ' . escapeshellarg($revision));
+    if ($rc !== 0) http_response_code($rc === 3 ? 409 : 400);
+    echo json_encode(['ok'=>$rc === 0,'action'=>"prewarm $pool $raw",'log'=>$out]);
     break;
 
   case 'validate-pools':
@@ -249,12 +287,54 @@ switch ($action) {
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/token", $tok);
     chmod("$CFGDIR/token", 0600);
+    @unlink("$RUNDIR/scalesets/github-app-installation.token");
+    foreach (glob("$RUNDIR/scalesets/session.*") ?: [] as $stale) @unlink($stale);
     echo json_encode(['ok' => true, 'action' => 'set-token']);
     break;
 
   case 'clear-token':
     @unlink("$CFGDIR/token");
+    @unlink("$RUNDIR/scalesets/github-app-installation.token");
     echo json_encode(['ok' => true, 'action' => 'clear-token']);
+    break;
+
+  case 'set-app-private-key':
+    $key = bounded_request_string(post_scalar('private_key', 32768, true), 32768);
+    if ($key === false || !preg_match('/\A-----BEGIN (?:RSA )?PRIVATE KEY-----\r?\n[A-Za-z0-9+\/=\r\n]+\r?\n-----END (?:RSA )?PRIVATE KEY-----\r?\n?\z/', $key)) {
+      emit_error(400, 'invalid_private_key', 'expected one PEM private key up to 32 KiB');
+      break;
+    }
+    if (!write_private_atomic("$CFGDIR/github-app-private-key.pem", $key)) {
+      emit_error(500, 'secret_write_failed', 'could not atomically store the private key');
+      break;
+    }
+    @unlink("$RUNDIR/scalesets/github-app-installation.token");
+    foreach (glob("$RUNDIR/scalesets/session.*") ?: [] as $stale) @unlink($stale);
+    echo json_encode(['ok'=>true,'action'=>'set-app-private-key']);
+    break;
+
+  case 'clear-app-private-key':
+    @unlink("$CFGDIR/github-app-private-key.pem");
+    @unlink("$RUNDIR/scalesets/github-app-installation.token");
+    foreach (glob("$RUNDIR/scalesets/session.*") ?: [] as $stale) @unlink($stale);
+    echo json_encode(['ok'=>true,'action'=>'clear-app-private-key']);
+    break;
+
+  case 'compatibility-test':
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' compatibility-start');
+    if ($out !== '') echo $out;
+    else emit_error(500, 'operation_start_failed', 'could not launch compatibility test');
+    break;
+
+  case 'operation-status':
+    $id = post_scalar('operation_id', 36, true, true);
+    if (!is_string($id) || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $id)) {
+      emit_error(400, 'invalid_operation_id', 'invalid operation id');
+      break;
+    }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' operation-status ' . escapeshellarg($id));
+    if ($rc === 0 && $out !== '') echo $out;
+    else emit_error(404, 'operation_not_found', 'operation not found');
     break;
 
   case 'set-registry-token':

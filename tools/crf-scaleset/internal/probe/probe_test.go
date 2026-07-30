@@ -19,7 +19,8 @@ func completeRecord() Record {
 		ImageDigest: strings.Repeat("c", 64), DockerfileDigest: strings.Repeat("d", 64),
 		EntrypointDigest: strings.Repeat("e", 64), Owner: "acme", APIURL: "https://api.github.com",
 		InstallationID: "installation", HostID: "host", RunnerGroupID: 42,
-		Capabilities: caps, Cleanup: Cleanup{Complete: true}}
+		RunnerGroupPolicy: "selected_repositories",
+		Capabilities:      caps, Cleanup: Cleanup{Complete: true}}
 }
 
 func TestLoadFreshRevalidatesSealAgeAndPermissions(t *testing.T) {
@@ -76,5 +77,10 @@ func TestSealRequiresEveryGateAndCleanup(t *testing.T) {
 	r.Cleanup.IDs = []int64{7}
 	if err := r.Seal(time.Now()); err == nil {
 		t.Fatal("accepted incomplete cleanup")
+	}
+	r = completeRecord()
+	r.RunnerGroupPolicy = ""
+	if err := r.Seal(time.Now()); err == nil {
+		t.Fatal("accepted missing runner group policy")
 	}
 }

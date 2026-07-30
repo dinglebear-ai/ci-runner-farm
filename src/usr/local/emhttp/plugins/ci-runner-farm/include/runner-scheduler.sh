@@ -128,3 +128,16 @@ scheduler_wait_for_sequence() {
   done
   return 1
 }
+
+scheduler_prewarm_set() {
+  local pool="$1" target="$2" expected_revision="$3" max path tmp
+  pool_snapshot_load && pool_record "$pool" >/dev/null 2>&1 || return 1
+  scheduler_uint "$target" && [ "$target" -le "$POOL_HARD_MAX" ] || return 1
+  [ "$(pool_config_revision)" = "$expected_revision" ] || return 3
+  max="$(pool_max "$pool")"; [ "$max" = auto ] || [ "$target" -le "$max" ] || return 1
+  mkdir -p "$RUNDIR" || return 1
+  path="$RUNDIR/prewarm.$pool"; tmp="$path.tmp.$$"
+  ( umask 077; printf 'target=%s\nconfig_revision=%s\nexpires=%s\n' \
+    "$target" "$expected_revision" "$(( $(date +%s) + 3600 ))" >"$tmp" ) &&
+    chmod 0600 "$tmp" && mv "$tmp" "$path"
+}

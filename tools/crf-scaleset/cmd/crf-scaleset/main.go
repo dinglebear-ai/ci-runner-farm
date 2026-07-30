@@ -26,7 +26,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage", "expected version, validate-frame, probe, or supervise")
+		fail("usage", "expected version, validate-frame, probe, check-compatibility, or supervise")
 	}
 	switch os.Args[1] {
 	case "version":
@@ -41,6 +41,18 @@ func main() {
 		// Live compatibility requires disposable repo/group credentials and a
 		// remotely proven eligibility barrier. Never synthesize green evidence.
 		fail("live_probe_not_configured", "provide the tootie probe operation with restricted runner-group and disposable-repository inputs")
+	case "check-compatibility":
+		flags := flag.NewFlagSet("check-compatibility", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		path := flags.String("path", "", "sealed compatibility record")
+		if err := flags.Parse(os.Args[2:]); err != nil || *path == "" || flags.NArg() != 0 {
+			fail("invalid_arguments", "check-compatibility requires --path")
+		}
+		record, err := verifiedCompatibility(*path)
+		if err != nil {
+			fail("invalid_compatibility_record", err.Error())
+		}
+		write(map[string]any{"ok": true, "compatibility_record_id": record.CompatibilityRecordID})
 	case "supervise":
 		supervise(os.Args[2:])
 	default:
@@ -56,16 +68,9 @@ func supervise(args []string) {
 	if err := flags.Parse(args); err != nil || *socket == "" || *compatibility == "" || flags.NArg() != 0 {
 		fail("invalid_arguments", "supervise requires --socket and --compatibility")
 	}
-	record, err := probe.LoadFresh(*compatibility, time.Now().UTC(), 30*24*time.Hour)
+	record, err := verifiedCompatibility(*compatibility)
 	if err != nil {
 		fail("invalid_compatibility_record", err.Error())
-	}
-	if record.ModuleRevision != moduleRevision || record.GoVersion != runtime.Version() {
-		fail("helper_identity_mismatch", "module or Go runtime does not match compatibility evidence")
-	}
-	digest, err := executableDigest()
-	if err != nil || digest != record.HelperDigest {
-		fail("helper_digest_mismatch", "running helper does not match compatibility evidence")
 	}
 	controllerID := "crf-" + record.CompatibilityRecordID[:24]
 	handler := func(_ context.Context, request protocol.Request) protocol.Response {
@@ -97,6 +102,21 @@ func supervise(args []string) {
 	if err := (&ipc.Server{Path: *socket, Handler: handler}).Serve(ctx); err != nil {
 		fail("supervisor_failed", err.Error())
 	}
+}
+
+func verifiedCompatibility(path string) (probe.Record, error) {
+	record, err := probe.LoadFresh(path, time.Now().UTC(), 30*24*time.Hour)
+	if err != nil {
+		return probe.Record{}, err
+	}
+	if record.ModuleRevision != moduleRevision || record.GoVersion != runtime.Version() {
+		return probe.Record{}, fmt.Errorf("helper_identity_mismatch")
+	}
+	digest, err := executableDigest()
+	if err != nil || digest != record.HelperDigest {
+		return probe.Record{}, fmt.Errorf("helper_digest_mismatch")
+	}
+	return record, nil
 }
 
 func executableDigest() (string, error) {

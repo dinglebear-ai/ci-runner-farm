@@ -101,7 +101,7 @@ migration_revision_valid() { [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]; }
 
 migration_record_matches() {
   local expected="$1" id
-  scaleset_record_fresh || return 1
+  scaleset_record_valid || return 1
   id="$(php -r '$j=json_decode(file_get_contents($argv[1]),true);echo $j["compatibility_record_id"]??"";' \
     "$SCALESET_COMPAT" 2>/dev/null)"
   [ "$id" = "$expected" ]

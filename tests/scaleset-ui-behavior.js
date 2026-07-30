@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+'use strict';
+const fs=require('fs');
+const root=require('path').join(__dirname,'..','src','usr','local','emhttp','plugins','ci-runner-farm');
+const settings=fs.readFileSync(root+'/RunnerFarmSettings.page','utf8');
+const fleet=fs.readFileSync(root+'/RunnerFarmFleet.page','utf8');
+const endpoint=fs.readFileSync(root+'/include/exec.php','utf8');
+const status=fs.readFileSync(root+'/include/runner-status.sh','utf8');
+const engine=fs.readFileSync(root+'/include/runner-farm.sh','utf8');
+const must=(ok,msg)=>{if(!ok)throw new Error(msg);};
+
+must(settings.includes('Run compatibility test'),'compatibility action missing');
+must(settings.includes('CRF_COMPAT_OPERATION'),'compatibility operation is not single flight');
+must(settings.includes("action:'operation-status'"),'opaque operation polling missing');
+must(settings.includes('Requested runner backend'),'requested backend control missing');
+must(settings.includes("' · effective '"),'readiness does not show effective backend');
+must(settings.includes('module_revision')&&settings.includes('entrypoint_digest'),'packaged identity is not rendered');
+must(settings.includes('runner_group_policy'),'restricted runner group policy is not rendered');
+must(settings.includes("action:'readiness-json'"),'readiness uses the expensive full fleet snapshot');
+must(fleet.includes('Begin fleet migration')&&fleet.includes('Roll back to classic'),'migration controls missing');
+must(fleet.includes('CRF_BACKEND_PENDING'),'backend operation is not single flight');
+must(fleet.includes('Busy \'+busy')&&fleet.includes('assigned \'+assigned'),'confirmation omits impact counts');
+must(fleet.includes("scaleSet?'Prewarm to'"),'scale-set control is not labeled Prewarm');
+must(fleet.includes("action:'prewarm'"),'prewarm uses classic scale endpoint');
+must(fleet.includes("String(p.max)==='auto'?64:Number(p.max)"),'auto capacity emits an invalid HTML max');
+must(fleet.includes("backend.requested==='scaleset'||backend.effective==='scaleset'"),'classic mode shows an irrelevant compatibility failure');
+must(endpoint.includes("case 'begin-migration': case 'rollback-backend':"),'explicit migration endpoint missing');
+must(endpoint.includes("case 'prewarm':"),'prewarm endpoint missing');
+must(status.includes('STATUS_COMPATIBILITY_JSON')&&status.includes('transition_revision'),'typed readiness snapshot missing');
+must(status.includes('"runner_group_policy"'),'typed readiness omits runner group policy');
+must(engine.includes('compatibility-start')&&engine.includes('operation-status'),'operation commands missing');
+console.log('scaleset-ui-behavior: OK');

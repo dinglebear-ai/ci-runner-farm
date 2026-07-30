@@ -29,6 +29,7 @@ type Record struct {
 	InstallationID        string          `json:"installation_id"`
 	HostID                string          `json:"host_id"`
 	RunnerGroupID         int64           `json:"runner_group_id"`
+	RunnerGroupPolicy     string          `json:"runner_group_policy"`
 	Capabilities          map[string]bool `json:"capabilities"`
 	TestedAt              time.Time       `json:"tested_at"`
 	Cleanup               Cleanup         `json:"cleanup"`
@@ -50,6 +51,9 @@ var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 func (r *Record) Seal(now time.Time) error {
 	if !r.Cleanup.Complete || len(r.Cleanup.IDs) != 0 {
 		return errors.New("cleanup_incomplete")
+	}
+	if r.RunnerGroupID <= 0 || r.RunnerGroupPolicy == "" {
+		return errors.New("compatibility_record_identity")
 	}
 	for _, name := range required {
 		if !r.Capabilities[name] {
@@ -150,7 +154,7 @@ func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error)
 	}
 	if record.ModuleRevision == "" || record.GoVersion == "" || record.Owner == "" ||
 		record.APIURL == "" || record.InstallationID == "" || record.HostID == "" ||
-		record.RunnerGroupID <= 0 {
+		record.RunnerGroupID <= 0 || record.RunnerGroupPolicy == "" {
 		return Record{}, errors.New("compatibility_record_identity")
 	}
 	sealedID := record.CompatibilityRecordID

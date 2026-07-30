@@ -29,5 +29,17 @@ must(str_contains($engine, 'mv -f "$staged" "$old_cfg"'), 'commit is not an atom
 must(str_contains($engine, 'chmod 0600 "$backup_tmp"'), 'backup is not private');
 must(strpos($engine, 'mv -f "$staged" "$old_cfg"') < strpos($engine, 'reconcile_start', strpos($engine, 'cmd_apply_config')), 'reconcile starts before commit');
 must(!str_contains($page, '/update.php'), 'Settings still authorizes native update.php writes');
+must(str_contains($exec, "'AUTH_MODE','GITHUB_APP_ID'"), 'GitHub auth settings are not allowlisted');
+must(str_contains($exec, "case 'set-app-private-key':"), 'private-key endpoint is absent');
+must(str_contains($exec, "write_private_atomic"), 'private key is not written atomically');
+must(str_contains($exec, "chmod(\$path, 0600)"), 'private key is not forced to mode 0600');
+must(str_contains($exec, 'github-app-installation.token'), 'credential rotation does not invalidate tmpfs installation tokens');
+must(str_contains($engine, 'AUTH_MODE="pat"'), 'PAT auth default is absent');
+must(str_contains($engine, 'AUTH_MODE must be pat or github_app'), 'auth modes are not mutually validated');
+must(str_contains($engine, 'GitHub App and installation IDs must be positive integers'), 'GitHub App IDs are not numeric');
+must(str_contains($page, 'requested intent only'), 'Settings does not explain requested versus effective backend');
+must(str_contains($page, "action:'readiness-json'"), 'Settings readiness still depends on the full Docker fleet snapshot');
+must(str_contains($page, "patBand.style.display=app?'none':'flex'"), 'GitHub App mode leaves PAT controls visible');
+must(!str_contains(substr($page, strpos($page, "action:'apply-config'"), 500), 'begin-migration'), 'Apply advances backend migration');
 
 echo "settings-endpoint: OK\n";

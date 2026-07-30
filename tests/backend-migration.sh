@@ -48,6 +48,7 @@ bash -c '
   . "$SCRIPT_DIR/runner-scalesets.sh"
   . "$SCRIPT_DIR/runner-migration.sh"
   scaleset_supervisor_start(){ return 0; }
+  scaleset_record_valid(){ return 0; }
   jit_reconcile(){ return 0; }
   cat >"$SCALESET_COMPAT" <<EOF
 {"compatibility_record_id":"$compatibility","cleanup":{"complete":true},"capabilities":{"eligibility_barrier":true}}

@@ -13,6 +13,7 @@ $plugin   = 'ci-runner-farm';
    the flash cfg only ever holds what the user actually changed. */
 $cfg      = parse_plugin_cfg($plugin);
 $has_token= file_exists("/boot/config/plugins/$plugin/token");
+$has_app_key= file_exists("/boot/config/plugins/$plugin/github-app-private-key.pem");
 $has_regtok = file_exists("/boot/config/plugins/$plugin/registry-token");
 $host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec("grep MemTotal /proc/meminfo"))) / 1048576);
 $csrf     = $var['csrf_token'] ?? '';
@@ -21,6 +22,7 @@ $csrf     = $var['csrf_token'] ?? '';
    button (emitted as CRF_DEFAULTS), so the two can never drift apart. */
 $defaults = [
   'GH_SCOPE'=>'repo', 'GH_OWNER'=>'unraid', 'GH_REPOS'=>'unraid/repo-a unraid/repo-b',
+  'AUTH_MODE'=>'pat', 'GITHUB_APP_ID'=>'', 'GITHUB_APP_INSTALLATION_ID'=>'',
   'RUNNER_GROUP'=>'', 'RUNNER_COUNT'=>'4', 'RUNNER_LABELS'=>'self-hosted,unraid,build',
   'RUNNER_MODE'=>'single', 'RUNNER_POOLS'=>'rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1',
   'POOL_BACKEND'=>'classic',
@@ -83,6 +85,32 @@ if (!function_exists('crf_sel')) { function crf_sel($cfg,$k,$val,$d=''){ global 
 
 ### GitHub
 
+_(Authentication mode)_:
+: <select name="AUTH_MODE" id="crf-auth-mode" onchange="crfAuthMode(true)">
+  <option value="pat" <?=crf_sel($cfg,'AUTH_MODE','pat','pat')?>>Personal access token</option>
+  <option value="github_app" <?=crf_sel($cfg,'AUTH_MODE','github_app','pat')?>>GitHub App</option>
+  </select>
+
+:crf_auth_mode_plug:
+> PAT and GitHub App credentials are mutually exclusive at runtime. GitHub App installation tokens live only in tmpfs and are invalidated whenever credentials rotate.
+:end
+
+_(GitHub App ID)_:
+: <input type="text" inputmode="numeric" name="GITHUB_APP_ID" value="<?=crf_g($cfg,'GITHUB_APP_ID')?>">
+
+_(GitHub App installation ID)_:
+: <input type="text" inputmode="numeric" name="GITHUB_APP_INSTALLATION_ID" value="<?=crf_g($cfg,'GITHUB_APP_INSTALLATION_ID')?>">
+
+_(GitHub App private key)_:
+: <textarea id="crf-app-private-key" rows="4" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+  <uui-button size="xs" class="orange" onclick="crfSetAppKey();return false;">Save private key</uui-button>
+  <uui-button variant="outline" size="xs" onclick="crfClearAppKey();return false;">Clear private key</uui-button>
+  <span id="crf-app-key-state"><?= $has_app_key ? 'Private key configured (mode 0600)' : 'Private key not configured' ?></span>
+
+:crf_app_key_plug:
+> The key is stored atomically at mode 0600 outside `ci-runner-farm.cfg`. It is never returned to the browser.
+:end
+
 _(GitHub scope)_:
 : <select name="GH_SCOPE" aria-describedby="crf-pools-errors">
   <option value="repo" <?=crf_sel($cfg,'GH_SCOPE','repo','repo')?>>repo (per-repository)</option>
@@ -129,6 +157,19 @@ _(Runner layout)_:
 >
 > Pools are scheduling routes, not security boundaries. They still share this host, runner image, network policy, privileged Docker mode, and writable caches.
 :end
+
+_(Requested runner backend)_:
+: <select name="POOL_BACKEND" id="crf-pool-backend">
+  <option value="classic" <?=crf_sel($cfg,'POOL_BACKEND','classic','classic')?>>Classic persistent runners</option>
+  <option value="scaleset" <?=crf_sel($cfg,'POOL_BACKEND','scaleset','classic')?>>GitHub scale sets (gated)</option>
+  </select>
+
+:crf_backend_plug:
+> Apply saves requested intent only. It never changes the effective backend. Use the explicit migration controls on Fleet after the compatibility gate passes.
+:end
+
+<div class="crf-banner crf-banner-info" id="crf-scaleset-readiness">Scale-set readiness has not been checked.</div>
+<uui-button class="orange" size="xs" id="crf-compat-run" onclick="crfRunCompatibility();return false;">Run compatibility test</uui-button>
 
 _(Pool definitions)_:
 : <input type="hidden" name="RUNNER_POOLS" id="crf-pools-value" value="<?=htmlspecialchars(crf_g($cfg,'RUNNER_POOLS','rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1'),ENT_QUOTES)?>">
@@ -421,6 +462,7 @@ function crfResetDefaults(){
   crfBuildPoolEditor(CRF_DEFAULTS.RUNNER_POOLS||'');
   crfPoolMode();
   crfImgSrc();
+  crfAuthMode();
   // programmatic .value changes fire no input event, so nudge the advisory
   // listeners (Min>Max, memory envelope) to re-evaluate against the reset values.
   ['AUTOSCALE_MIN','AUTOSCALE_MAX','RUNNER_MEMORY','RUNNER_COUNT','AUTOSCALE'].forEach(n=>{ const el=document.getElementsByName(n)[0]; if(el) el.dispatchEvent(new Event('input')); });
@@ -552,6 +594,59 @@ function crfTokState(ok){
 function crfSetToken(){ const t=document.getElementById('crf-token').value; if(!t)return;
   crfPost({action:'set-token',token:t}).then(o=>{crfTokState(!!o.ok);document.getElementById('crf-token').value='';}).catch(e=>{ crfToast&&crfToast('Save failed'); console.error('ci-runner-farm set-token:',e); }); }
 function crfClearToken(){ crfPost({action:'clear-token'}).then(()=>crfTokState(false)).catch(e=>console.error('ci-runner-farm clear-token:',e)); }
+function crfAuthMode(userChanged=false){
+  const app=(document.getElementById('crf-auth-mode')||{}).value==='github_app';
+  const patBand=document.getElementById('crf-tokband');if(patBand)patBand.style.display=app?'none':'flex';
+  if(userChanged&&!app){['GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID'].forEach(n=>{const el=document.getElementsByName(n)[0];if(el)el.value='';});}
+  ['GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID'].forEach(n=>{
+    const el=document.getElementsByName(n)[0], dd=el&&el.closest('dd');
+    if(dd){dd.style.display=app?'':'none';if(dd.previousElementSibling)dd.previousElementSibling.style.display=app?'':'none';}
+  });
+  const key=document.getElementById('crf-app-private-key'), dd=key&&key.closest('dd');
+  if(dd){dd.style.display=app?'':'none';if(dd.previousElementSibling)dd.previousElementSibling.style.display=app?'':'none';}
+}
+function crfSetAppKey(){
+  const el=document.getElementById('crf-app-private-key'), key=el.value;
+  if(!key)return;
+  crfPost({action:'set-app-private-key',private_key:key}).then(o=>{
+    if(o.ok){el.value='';document.getElementById('crf-app-key-state').textContent='Private key configured (mode 0600)';crfToast('GitHub App key saved; sessions invalidated');}
+  }).catch(e=>{crfToast('Private key save failed');console.error(e);});
+}
+function crfClearAppKey(){
+  crfPost({action:'clear-app-private-key'}).then(()=>{
+    document.getElementById('crf-app-key-state').textContent='Private key not configured';
+    crfToast('GitHub App key cleared; sessions invalidated');
+  }).catch(e=>console.error(e));
+}
+let CRF_COMPAT_OPERATION='';
+function crfRenderReadiness(d){
+  const box=document.getElementById('crf-scaleset-readiness'), c=d.compatibility||{}, b=d.backend||{};
+  if(!box)return;
+  const identity=[c.module_revision&&('module '+c.module_revision),c.go_version,c.helper_digest&&('helper '+c.helper_digest.slice(0,12)),
+    c.plugin_digest&&('plugin '+c.plugin_digest.slice(0,12)),c.image_digest&&('image '+c.image_digest.slice(0,12)),
+    c.entrypoint_digest&&('entrypoint '+c.entrypoint_digest.slice(0,12)),c.runner_group_id!=null&&('runner group '+c.runner_group_id),
+    c.runner_group_policy&&('policy '+c.runner_group_policy)].filter(Boolean).join(' · ');
+  box.textContent='Requested '+(b.requested||'unknown')+' · effective '+(b.effective||'unknown')+' · '+(b.transition_phase||'unknown')+
+    ' · gate '+(c.valid?'valid':(c.reason||'not ready'))+(c.age_seconds!=null?' · age '+c.age_seconds+'s':'')+(identity?' · '+identity:'');
+}
+function crfRefreshReadiness(){crfPost({action:'readiness-json'}).then(crfRenderReadiness).catch(()=>{});}
+function crfPollCompatibility(){
+  if(!CRF_COMPAT_OPERATION)return;
+  crfPost({action:'operation-status',operation_id:CRF_COMPAT_OPERATION}).then(o=>{
+    const box=document.getElementById('crf-scaleset-readiness');
+    if(box)box.textContent='Compatibility test: '+o.state+(o.message?' · '+o.message:'');
+    if(o.state==='running')setTimeout(crfPollCompatibility,1000);
+    else{CRF_COMPAT_OPERATION='';document.getElementById('crf-compat-run').removeAttribute('aria-busy');crfRefreshReadiness();}
+  }).catch(()=>setTimeout(crfPollCompatibility,1500));
+}
+function crfRunCompatibility(){
+  if(CRF_COMPAT_OPERATION)return;
+  const button=document.getElementById('crf-compat-run');button.setAttribute('aria-busy','true');
+  crfPost({action:'compatibility-test'}).then(o=>{if(!o.operation_id)throw new Error('missing operation id');CRF_COMPAT_OPERATION=o.operation_id;crfPollCompatibility();})
+    .catch(e=>{button.removeAttribute('aria-busy');crfToast('Compatibility test could not start');console.error(e);});
+}
+crfAuthMode();
+crfRefreshReadiness();
 function crfRegState(ok){
   document.getElementById('crf-regtok').textContent = ok?'Registry token configured':'Registry token not set';
   document.getElementById('crf-regtok-ball').className='crf-ball '+(ok?'crf-ball-idle':'');
@@ -652,7 +747,7 @@ if(crfSettingsForm){
       if(epoch!==applyEpoch)return;
       if(!applied.ok)throw new Error(applied.error||'Apply failed');
       CRF_CONFIG_REVISION=applied.config_revision;
-      const box=document.getElementById('crf-pools-errors'); box.textContent='Settings saved. Existing runners will migrate as they become idle.'; box.classList.add('on'); box.classList.add('crfs-saved');
+      const box=document.getElementById('crf-pools-errors'); box.textContent='Settings saved. Backend choice is requested intent only; use Fleet migration controls to activate it.'; box.classList.add('on'); box.classList.add('crfs-saved');
       crfToast('Runner farm settings saved');
     }catch(err){
       if(epoch!==applyEpoch)return;
@@ -696,7 +791,8 @@ if(crfSettingsForm){
   .crfs-tok-input input[type=button]{margin:0}
   .crfs-tok-input uui-button:not(:defined){cursor:pointer;border:1px solid var(--border-color);border-radius:6px;padding:4px 12px;font-size:12px;color:var(--text-color)}
   .crfs-tok-input a{font-size:12px;white-space:nowrap}
-  .crfs-card .inline_help{font-size:12px;color:var(--alt-text-color);background:var(--shade-bg-color,transparent);border-left:2px solid var(--border-color);border-radius:0;margin:2px 0 6px;padding:6px 10px;line-height:1.45}
+  .crfs-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important;background:var(--shade-bg-color,transparent);border-left:2px solid var(--link-text-color,#29b6f6);border-radius:0;margin:2px 0 6px;padding:6px 10px;line-height:1.45}
+  .crfs-card .inline_help strong,.crfs-card .inline_help code{color:inherit!important}
   .crfs-card .inline_help p{margin:4px 0}
   .crfs-as-warn{display:none;font-size:12px;color:var(--brand-red,#e22828);padding:4px 0 2px;font-weight:bold}
   .crfs-as-warn.on{display:block}
@@ -705,7 +801,7 @@ if(crfSettingsForm){
   .crfs-pool-row legend{font-weight:700;padding:0 5px}
   .crfs-pool-row label{display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--alt-text-color)}
   .crfs-pool-row input{width:100%!important;box-sizing:border-box}
-  .crfs-pool-label{font-family:bitstream,monospace;font-size:11px;color:var(--link-text-color);align-self:center;overflow-wrap:anywhere;background:none;border:0;cursor:pointer;text-align:left;grid-column:1/-1}
+  button.crfs-pool-label{font-family:bitstream,monospace;font-size:11px;line-height:1.3;letter-spacing:0!important;text-transform:none!important;color:var(--link-text-color)!important;align-self:center;white-space:normal;overflow-wrap:anywhere;background:var(--shade-bg-color,transparent)!important;border:1px solid var(--border-color)!important;border-radius:4px;cursor:pointer;text-align:left;grid-column:1/-1;width:100%!important;min-width:0!important;max-width:100%;box-sizing:border-box;margin:0!important;padding:4px 7px!important}
   .crfs-pool-label:disabled{cursor:default;color:var(--alt-text-color)}
   .crfs-pool-label:focus-visible{outline:2px solid var(--link-text-color);outline-offset:2px}
   .crfs-pool-remove{width:auto!important;align-self:center}
@@ -715,7 +811,7 @@ if(crfSettingsForm){
   .crfs-pool-errors.crfs-saved{color:var(--crf-ok)}
   .crfs-invalid{border-color:var(--brand-red,#e22828)!important}
   .crfs-routing-warn{border:1px solid var(--brand-orange,#ff8c2f);background:color-mix(in srgb,var(--brand-orange,#ff8c2f) 9%,var(--background-color));border-radius:6px;padding:8px 10px;margin:4px 0 8px;font-size:12px}
-  @media(max-width:900px){.crfs-pool-row{grid-template-columns:repeat(2,minmax(90px,1fr))}.crfs-pool-label{grid-column:1/-1}}
+  @media(max-width:900px){.crfs-pool-row{grid-template-columns:repeat(2,minmax(90px,1fr))}button.crfs-pool-label{grid-column:1/-1}}
 </style>
 <script>
 /* Regroup the rendered markdown form (h3 + dl runs) into section cards laid out

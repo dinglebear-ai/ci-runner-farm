@@ -28,6 +28,7 @@ mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
 CFG="${CFGDIR}/${PLUGIN}.cfg"
 TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
+GITHUB_APP_KEY_FILE="${CFGDIR}/github-app-private-key.pem"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
 NAME_PREFIX="ci-runner"
 LABEL_NS="net.unraid.ci-runner-farm"
@@ -37,6 +38,9 @@ GH_SCOPE="repo"                       # repo | org
 GH_OWNER="unraid"
 GH_REPOS="unraid/repo-a unraid/repo-b"
 RUNNER_GROUP=""
+AUTH_MODE="pat"                       # pat | github_app
+GITHUB_APP_ID=""
+GITHUB_APP_INSTALLATION_ID=""
 RUNNER_COUNT=4
 RUNNER_LABELS="self-hosted,unraid,build"
 RUNNER_MODE="single"                  # single | pools
@@ -126,7 +130,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-status.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
-CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
+CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP AUTH_MODE GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
 RESOURCE_CPU_BUDGET RESOURCE_MEMORY_BUDGET RESOURCE_CPU_RESERVE RESOURCE_MEMORY_RESERVE \
 RESOURCE_CPU_OVERCOMMIT RESOURCE_MEMORY_SWAP RESOURCE_PIDS_LIMIT \
@@ -168,7 +172,11 @@ load_cfg() {
 }
 
 load_cfg
-[ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+if [ "$AUTH_MODE" = pat ]; then
+  [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+else
+  ACCESS_TOKEN=""
+fi
 [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
 # PID files live on tmpfs (RUNDIR), not flash: they're pure per-boot runtime state,
 # so this both spares the USB stick and means a stale PID can't survive a reboot to
@@ -214,6 +222,20 @@ validate_settings_config() {
   local key value
   validate_runtime_config || return 1
   case "$POOL_BACKEND" in classic|scaleset) ;; *) pool_error "POOL_BACKEND must be classic or scaleset" backend; return 1 ;; esac
+  case "$AUTH_MODE" in
+    pat)
+      [ -z "$GITHUB_APP_ID$GITHUB_APP_INSTALLATION_ID" ] ||
+        { pool_error "GitHub App IDs must be empty in PAT mode" auth; return 1; }
+      ;;
+    github_app)
+      [[ "$GITHUB_APP_ID" =~ ^[1-9][0-9]*$ ]] &&
+        [[ "$GITHUB_APP_INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] ||
+        { pool_error "GitHub App and installation IDs must be positive integers" auth; return 1; }
+      [ -f "$GITHUB_APP_KEY_FILE" ] && [ "$(stat -c %a "$GITHUB_APP_KEY_FILE" 2>/dev/null)" = 600 ] ||
+        { pool_error "A mode-0600 GitHub App private key is required" auth; return 1; }
+      ;;
+    *) pool_error "AUTH_MODE must be pat or github_app" auth; return 1 ;;
+  esac
   case "$IMAGE_SOURCE" in builtin|remote) ;; *) pool_error "IMAGE_SOURCE must be builtin or remote" image_source; return 1 ;; esac
   case "$NETWORK_ISOLATION" in off|isolate|strict) ;; *) pool_error "NETWORK_ISOLATION must be off, isolate, or strict" network; return 1 ;; esac
   for key in EPHEMERAL RUN_AS_ROOT SHARE_DOCKER_SOCK DIND SHARED_IMAGE_CACHE AUTOSCALE IMAGE_AUTOUPDATE DASHBOARD_WIDGET_ENABLE; do
@@ -2856,10 +2878,14 @@ cmd_usage_refresh() {
 
 cmd_status_json() {
   local names
+  migration_load || true
   if fleet_inventory_refresh; then names="$(inventory_names)"
   else
-    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"classic","transition":"classic_active"},"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
-      "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
+    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+      "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_EFFECTIVE_BACKEND" | json_escape)" "$(printf '%s' "$MIGRATION_PHASE" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_TRANSITION_ID" | json_escape)" "$(printf '%s' "$MIGRATION_REVISION" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_OWNERSHIP_REVISION" | json_escape)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
     return 1
   fi
   local config_error=""
@@ -2980,7 +3006,7 @@ cmd_status_json() {
         if [ -z "$blocked_reason" ] && ! resource_admit_one "$cpu_claim" "$memory_claim" >/dev/null 2>&1; then blocked_reason="$RESOURCE_REASON"; fi
       fi
       [ "$pfirst" -eq 0 ] && pools+=","
-      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle}}"
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle},\"assigned_jobs\":-1,\"demand_fresh\":false,\"desired\":${effective},\"admitted\":0,\"advertised_capacity\":0,\"lease_age_seconds\":null,\"session_healthy\":false,\"ownership_state\":\"$([ "$MIGRATION_EFFECTIVE_BACKEND" = scaleset ] && printf owned || printf classic)\",\"remote_scale_set_id\":null,\"tombstone\":false,\"orphan\":false}"
       pfirst=0; seen="${seen}${pool} "
     done < <(pool_records)
   fi
@@ -3013,7 +3039,14 @@ cmd_status_json() {
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
   status_model_refresh
-  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":{\"requested\":\"$(printf '%s' "$POOL_BACKEND"|json_escape)\",\"effective\":\"classic\",\"transition\":\"classic_active\"},\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":$STATUS_BACKEND_JSON,\"compatibility\":$STATUS_COMPATIBILITY_JSON,\"operation\":$STATUS_OPERATION_JSON,\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu"|json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+}
+
+cmd_readiness_json() {
+  migration_load >/dev/null 2>&1 || true
+  status_backend_refresh
+  printf '{"schema_version":2,"backend":%s,"compatibility":%s,"operation":%s}\n' \
+    "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -3229,6 +3262,7 @@ case "${1:-status}" in
   apply-config) with_fleet_lock wait cmd_apply_config "${2:-}" "${3:-}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
+  readiness-json) cmd_readiness_json ;;
   dashboard-json) cmd_dashboard_json ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
@@ -3254,6 +3288,7 @@ case "${1:-status}" in
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
+  prewarm)          backend_scaleset_admission_allowed && scheduler_prewarm_set "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
   jit-reconcile)    jit_reconcile ;;
   begin-migration)  migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
@@ -3265,6 +3300,9 @@ case "${1:-status}" in
     esac
   } ;;
   rollback-backend) migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  compatibility-start) scaleset_compatibility_start ;;
+  compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
+  operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
   autoscale-status) autoscale_status ;;

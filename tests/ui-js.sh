@@ -22,7 +22,7 @@ done
 
 grep -Fq "up '+crfEsc(p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq "min=\"'+(auto?Number(p.count)+1:1)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "min=\"'+(scaleSet?0:(auto?Number(p.count)+1:1))" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq "mode!=='pools'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "action:'apply-config'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq 'CRF_CONFIG_KEYS' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
@@ -35,6 +35,8 @@ grep -Fq "document.addEventListener('crf-pools-change',check)" src/usr/local/emh
 grep -Fq "input.setAttribute('aria-describedby','crf-pools-errors crf-pool-'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "input.setAttribute('aria-invalid','true')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "'Remove '+subject" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq '.crfs-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'button.crfs-pool-label{font-family:bitstream,monospace' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 
 # Execute the empty-state renderer from the page: invalid config must produce a
 # disabled mutation button, while a valid empty fleet remains startable.
