@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Security contracts for web action validation.
+# The quoted PHP/source fragments below are intentionally literal.
+# shellcheck disable=SC2016
 set -euo pipefail
 cd "$(dirname "$0")/.."
 EXEC="src/usr/local/emhttp/plugins/ci-runner-farm/include/exec.php"
@@ -29,6 +31,13 @@ need "function_exists('fsync')"
 need '$_POST[$key]'
 if grep -Fq '$_REQUEST' "$EXEC"; then fail 'exec.php still reads the mixed GET/POST request bag'; fi
 grep -Fq 'json_encode($crf_csrf' "$CORE" || fail 'CSRF token is interpolated into JavaScript without JSON encoding'
+
+# Unraid's global local_prepend.php validates csrf_token and then unsets it from
+# $_POST before the plugin endpoint begins. The endpoint must recognize that
+# completed gate and continue to its own action validation.
+reply="$(php -d auto_prepend_file=tests/fixtures/unraid-csrf-prepend.php "$EXEC")"
+[ "$reply" = '{"ok":false,"error":"unknown action"}' ] ||
+  fail "endpoint rejected Unraid's already-validated POST: $reply"
 
 # The old coercion turned arbitrary junk into destructive scale-to-zero.
 if grep -Fq '(int)($_REQUEST[' "$EXEC"; then fail 'raw request values are still coerced directly to integers'; fi

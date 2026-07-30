@@ -15,8 +15,6 @@ function must(bool $condition, string $message): void {
 
 must(str_contains($exec, "\$method !== 'POST'"), 'endpoint is not POST-only');
 must(!str_contains($exec, '$_REQUEST'), 'endpoint reads the mixed request bag');
-must(strpos($exec, "\$method !== 'POST'") < strpos($exec, 'hash_equals'), 'method is checked after CSRF');
-must(strpos($exec, "post_scalar('csrf_token'") < strpos($exec, 'hash_equals'), 'CSRF type is checked after hash_equals');
 must(str_contains($exec, "preg_match('/^[a-z][a-z0-9-]{0,63}$/"), 'action is not bounded and shape checked');
 must(str_contains($exec, "case 'apply-config':"), 'transactional endpoint is absent');
 must(str_contains($exec, 'array_diff_key($snapshot, $expectedKeys)'), 'settings allowlist is not exact');

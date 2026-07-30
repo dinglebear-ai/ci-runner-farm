@@ -18,17 +18,14 @@ function post_scalar($key, $max, $required = false, $trim = false) {
   return $trim ? trim($value) : $value;
 }
 
-$var = @parse_ini_file('/var/local/emhttp/var.ini');
-$csrf = $var['csrf_token'] ?? '';
-$given = post_scalar('csrf_token', 256, true);
-if ($given === false) {
-  http_response_code(400);
-  echo json_encode(['ok' => false, 'error' => 'invalid csrf token']);
-  exit;
-}
-if (!$csrf || !hash_equals($csrf, $given)) {
+// Unraid's global local_prepend.php validates csrf_token (POST field or
+// X-CSRF-Token) before this endpoint runs, then deliberately removes it from
+// $_POST. The validated value remains in prepend scope as $csrf_token. Requiring
+// that evidence preserves fail-closed CLI/non-Unraid behavior without trying to
+// re-read a field the platform has already consumed.
+if (!isset($csrf_token) || !is_string($csrf_token) || $csrf_token === '') {
   http_response_code(403);
-  echo json_encode(['ok' => false, 'error' => 'csrf']);
+  echo json_encode(['ok' => false, 'error' => 'csrf gate unavailable']);
   exit;
 }
 
