@@ -89,7 +89,7 @@ GH_RESPONSE=""
 gh_api_request() {
   inc "$runner_calls"
   GH_STATUS=200
-  GH_RESPONSE='{"total_count":2,"runners":[{"id":11,"name":"dookie-ci-runner-python-1","os":"linux"},{"id":12,"name":"dookie-ci-runner-rust-1","os":"linux"}]}'
+  GH_RESPONSE='{"total_count":2,"runners":[{"id":11,"name":"dookie-ci-runner-python-1","os":"linux","status":"online","busy":false},{"id":12,"name":"dookie-ci-runner-rust-1","os":"linux","status":"online","busy":true}]}'
   return 0
 }
 first="$(github_runner_inventory org:acme)"

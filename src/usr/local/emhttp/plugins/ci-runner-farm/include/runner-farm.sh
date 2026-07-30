@@ -114,6 +114,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-pools.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-resources.sh
 . "$SCRIPT_DIR/runner-resources.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
+. "$SCRIPT_DIR/runner-status.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
 CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
@@ -472,22 +474,17 @@ runner_identity_validate() {
   [ "$name" = "$expected" ]
 }
 
-# is a runner actively running a job? (last meaningful log line)
-# Single busy/idle/starting/error predicate shared by the autoscaler (scale-down
-# safety) and the UI status, so the two can never disagree. Deterministic: ask the
-# runner which agent process is live (Runner.Worker = running a job, Runner.Listener
-# = idle-waiting) in one docker exec, matching the image's own healthcheck, with a
-# log-tail fallback for non-standard images or the brief gap between agent processes.
+# Single busy/idle/starting predicate shared by autoscaling and status. The
+# runner-phase cache is refreshed in one GitHub inventory request per scope; this
+# function never performs a per-runner Docker exec/log/inspect. Missing or stale
+# truth is deliberately "starting", which blocks destructive scale-down.
 runner_state() {
-  local c="$1" p
-  p="$(docker exec "$c" sh -c 'pgrep -x Runner.Worker >/dev/null 2>&1 && echo busy || { pgrep -x Runner.Listener >/dev/null 2>&1 && echo idle; }' 2>/dev/null)"
-  case "$p" in busy) echo busy; return;; idle) echo idle; return;; esac
-  case "$(docker logs --tail 15 "$c" 2>&1 | grep -iE 'Running job|Listening for Jobs|Job .* completed|error' | tail -1)" in
-    *"Running job"*)                      echo busy ;;
-    *"Listening for Jobs"*|*"completed"*) echo idle ;;
-    *[Ee]rror*)                           echo error ;;
-    *)                                    echo starting ;;
-  esac
+  local c="$1" cache="$RUNDIR/runner-phases.tsv" age phase
+  [ -f "$cache" ] || { echo starting; return; }
+  age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+  [ "$age" -ge 0 ] && [ "$age" -le 15 ] || { echo starting; return; }
+  phase="$(awk -F'|' -v n="$c" '$1 == n { print $2; exit }' "$cache")"
+  case "$phase" in busy|idle|starting|error) echo "$phase" ;; *) echo starting ;; esac
 }
 runner_busy() { [ "$(runner_state "$1")" = busy ]; }
 runner_authoritatively_failed() {
@@ -681,6 +678,7 @@ autoscale_tick() {
   validate_runtime_config || { err "autoscale: $POOL_CONFIG_ERROR"; return 1; }
   cleanup_pool_runtime_state
   fleet_inventory_refresh || { err "autoscale: could not inventory managed runners"; return 1; }
+  github_phase_refresh >/dev/null 2>&1 || true
   reap_dead_runners        # drop dead containers first so idle accounting is real
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
   if pool_mode_enabled; then
@@ -1131,8 +1129,10 @@ github_runner_inventory() {
       if (!is_array($j) || !isset($j["runners"]) || !is_array($j["runners"])) exit(2);
       foreach ($j["runners"] as $r) {
         $id=$r["id"]??null; $name=$r["name"]??null;
-        if (is_int($id) && is_string($name) && !str_contains($name, "|") && !preg_match("/[\\x00-\\x1f]/", $name))
-          echo $id,"|",$name,"\n";
+        $status=$r["status"]??"unknown"; $busy=$r["busy"]??null;
+        if (is_int($id) && is_string($name) && is_string($status) && is_bool($busy) &&
+            !str_contains($name, "|") && !preg_match("/[\\x00-\\x1f]/", $name))
+          echo $id,"|",$name,"|",$status,"|",($busy ? "1" : "0"),"\n";
       }' > "$parsed"; then
       rm -f "$tmp" "$parsed"; return 1
     fi
@@ -1144,6 +1144,37 @@ github_runner_inventory() {
   chmod 600 "$tmp" 2>/dev/null || true
   mv "$tmp" "$cache" || { rm -f "$tmp"; return 1; }
   cat "$cache"
+}
+
+github_phase_refresh() {
+  local tmp="${RUNDIR}/runner-phases.tmp.$$" target id name status busy phase inventory
+  local targets=""
+  [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
+  targets="$(awk -F'|' '$8 != "" { print $8 }' "$INVENTORY_FILE" | sort -u)"
+  if [ -z "$targets" ]; then
+    if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then targets="org:$GH_OWNER"
+    else
+      local repo
+      for repo in $GH_REPOS; do targets="${targets}${targets:+$'\n'}repo:$repo"; done
+    fi
+  fi
+  : > "$tmp" || return 1
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    inventory="$(github_runner_inventory "$target")" || { rm -f "$tmp"; return 1; }
+    while IFS='|' read -r id name status busy; do
+      [ -n "$name" ] || continue
+      case "$status:$busy" in
+        online:1) phase=busy ;;
+        online:0) phase=idle ;;
+        offline:*) phase=starting ;;
+        *) phase=error ;;
+      esac
+      printf '%s|%s\n' "$name" "$phase" >> "$tmp"
+    done <<< "$inventory"
+  done <<< "$targets"
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$RUNDIR/runner-phases.tsv"
 }
 
 github_runner_inventory_invalidate() {
@@ -2320,7 +2351,8 @@ cmd_stop() {
   autoscale_stop
   imageupdate_stop
   reconcile_stop
-  local names; names="$(managed_names)"
+  fleet_inventory_refresh || { : > "$RUNDIR/usage.cache"; return 1; }
+  local names; names="$(inventory_names)"
   if [ -z "$names" ]; then
     log "no managed runners running"
   else
@@ -2734,7 +2766,7 @@ cmd_usage_refresh() {
   # Everything the 5s status poll would otherwise fork per runner, computed ONCE
   # out-of-band: batched docker stats (cpu/mem), the unified phase, and — for busy
   # runners — the job context. cmd_status_json then paints from this cache + a single
-  # batched inspect, so the hot path no longer runs docker logs/exec per runner.
+  # batched inspect, so the hot path no longer reads logs or enters each container.
   # Line: "name cpu_pct mem_mib phase b64(job) jstarted b64(repo) pr b64(branch) run_id"
   # Also refresh the status-envelope verdicts here, OFF the poll hot path: cache the
   # cache-root (df) warning and keep the public-repo security cache warm, so
@@ -2747,6 +2779,7 @@ cmd_usage_refresh() {
   public_repo_problem > "$RUNDIR/sec.cache" 2>/dev/null
   local names; names="$(managed_names)"
   [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
+  github_phase_refresh >/dev/null 2>&1 || true
   local statsraw
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   statsraw="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null)"
@@ -2759,21 +2792,9 @@ cmd_usage_refresh() {
     cpu="$(printf '%s' "$srow" | cut -d'|' -f2 | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
     mem_mib="$(to_mib "$(printf '%s' "$srow" | cut -d'|' -f3 | awk -F' / ' '{print $1}')")"
     local phase; phase="$(runner_state "$c")"
+    # Detailed job/log context is intentionally drawer-only. Recurring status and
+    # scheduler refreshes never exec into or read logs from each runner.
     local job="" jstarted="_" jrepo="" jpr="_" jbranch="" jrun="_"
-    if [ "$phase" = "busy" ]; then
-      local jline
-      jline="$(docker logs --timestamps --tail 60 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
-      job="${jline##*Running job: }"
-      jstarted="$(echo "$jline" | awk '{print $1}' | grep -oE '^[0-9T:.Z-]+' | head -1)"; jstarted="${jstarted:-_}"
-      local jenv jref
-      jenv="$(docker exec "$c" sh -c 'for p in /proc/[0-9]*/environ; do if tr "\0" "\n" < $p 2>/dev/null | grep -q "^GITHUB_REPOSITORY="; then tr "\0" "\n" < $p | grep -E "^GITHUB_(REPOSITORY|RUN_ID|REF_NAME)="; break; fi; done' 2>/dev/null)"
-      if [ -n "$jenv" ]; then
-        jrepo="$(echo "$jenv" | grep '^GITHUB_REPOSITORY=' | head -1 | cut -d= -f2)"
-        jrun="$(echo "$jenv" | grep '^GITHUB_RUN_ID=' | head -1 | cut -d= -f2 | grep -oE '^[0-9]+' | head -1)"; jrun="${jrun:-_}"
-        jref="$(echo "$jenv" | grep '^GITHUB_REF_NAME=' | head -1 | cut -d= -f2-)"
-        if echo "$jref" | grep -qE '^[0-9]+/merge$'; then jpr="${jref%%/merge*}"; else jbranch="$jref"; fi
-      fi
-    fi
     printf '%s %s %s %s %s %s %s %s %s %s\n' "$c" "${cpu:-0}" "${mem_mib:-0}" "$phase" \
       "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$RUNDIR/usage.cache.tmp"
   done
@@ -2784,8 +2805,8 @@ cmd_status_json() {
   local names
   if fleet_inventory_refresh; then names="$(inventory_names)"
   else
-    printf '{"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
-      "$(printf '%s' "$RUNNER_MODE" | json_escape)"
+    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"classic","transition":"classic_active"},"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+      "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
     return 1
   fi
   local config_error=""
@@ -2883,20 +2904,30 @@ cmd_status_json() {
     first=0
   done < "$INVENTORY_FILE"
   out+="]"
-  local pools="[" pfirst=1 rec pool min max idle configured effective label seen=" " pending=0
+  local pools="[" pfirst=1 rec pool min max idle configured effective label additional labels cpu_claim memory_claim seen=" " pending=0 blocked_reason="" resource_ok=0
+  resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1 && resource_ok=1
   if [ -z "$config_error" ]; then
     while IFS= read -r rec; do
       pool="${rec%%|*}"; min="$(pool_min "$pool")"
       max="$(pool_max "$pool")"; idle="$(pool_idle "$pool")"; configured="$(pool_configured_target "$pool")"
       if pool_mode_enabled; then effective="$(pool_effective_target "$pool")"; label="$(pool_label "$pool")"
       else effective="$configured"; label="$RUNNER_LABELS"; fi
+      additional="$(pool_additional_labels "$pool" 2>/dev/null || true)"
+      labels="$(pool_effective_labels "$pool" 2>/dev/null || printf '%s' "$label")"
+      cpu_claim="$(pool_cpu_milli "$pool" 2>/dev/null || echo 0)"
+      memory_claim="$(pool_memory_bytes "$pool" 2>/dev/null || echo 0)"
       pending=0
       if pool_mode_enabled && [ "$AUTOSCALE" != true ] && [ "${pc["$pool"]:-0}" -gt "$effective" ]; then
         pending=$(( ${pc["$pool"]:-0} - effective ))
         blockedc=$((blockedc + pending))
       fi
+      blocked_reason=""
+      if [ "$POOL_CONFIG_VERSION" = v2 ]; then
+        [ "$resource_ok" = 1 ] || blocked_reason="${RESOURCE_REASON:-resource_state_unavailable}"
+        if [ -z "$blocked_reason" ] && ! resource_admit_one "$cpu_claim" "$memory_claim" >/dev/null 2>&1; then blocked_reason="$RESOURCE_REASON"; fi
+      fi
       [ "$pfirst" -eq 0 ] && pools+=","
-      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle}}"
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle}}"
       pfirst=0; seen="${seen}${pool} "
     done < <(pool_records)
   fi
@@ -2928,7 +2959,8 @@ cmd_status_json() {
     done < <(pool_records)
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
-  echo "{\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+  status_model_refresh
+  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":{\"requested\":\"$(printf '%s' "$POOL_BACKEND"|json_escape)\",\"effective\":\"classic\",\"transition\":\"classic_active\"},\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.

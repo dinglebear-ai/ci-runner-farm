@@ -18,7 +18,7 @@ Tag="server"
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Queued workflow runs</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span></div></uui-card-wrapper>
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Tracked repository run queue</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span><span class="crf-stat-note">not pool demand</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Image update</span><span class="crf-stat-small" id="crf-s-iu">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Cache</span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></div></uui-card-wrapper>
@@ -30,7 +30,7 @@ Tag="server"
   <uui-button variant="secondary" size="xs" data-crf-mutation onclick="crfAction('restart')">Restart</uui-button>
   <uui-button variant="outline" size="xs" data-crf-mutation onclick="crfAction('validate')">Validate (no token)</uui-button>
   <span class="crf-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span> <input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled>
-  <uui-button id="crf-scale-button" size="xs" onclick="crfScale()" disabled>Scale</uui-button></span>
+  <uui-button id="crf-scale-button" class="orange" size="xs" onclick="crfScale()" disabled>Scale to</uui-button></span>
 </div>
 
 <div id="crf-pool-cards" class="crf-pool-cards" style="display:none"></div>
@@ -88,6 +88,8 @@ Tag="server"
   .crf-pool-title{font-weight:600;color:var(--text-color)}
   .crf-pool-label{font-family:bitstream,monospace;font-size:11px;color:var(--link-text-color);cursor:pointer;background:none;border:0}
   .crf-pool-counts{display:flex;gap:12px;font-size:12px;color:var(--alt-text-color);margin:6px 0}
+  .crf-pool-details{font-size:11px;color:var(--alt-text-color);margin:5px 0}
+  .crf-pool-details summary{cursor:pointer;color:var(--link-text-color)}
   .crf-pool-control{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--alt-text-color)}
   .crf-pool-control input{width:4em!important;height:26px;box-sizing:border-box;margin:0!important}
   .crf-pool-state{font-size:11px;color:var(--crf-busy)}
@@ -125,6 +127,7 @@ Tag="server"
   .crf-bay-drawer{border-top:1px solid var(--table-border-color,var(--border-color));background:var(--shade-bg-color,var(--background-color));padding:8px 12px 8px 44px;font-family:bitstream,monospace;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:190px;overflow:auto;cursor:default}
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
   .crf-empty strong{font-size:13px;color:var(--text-color)}
+  .crf-stat-note{font-size:10px;color:var(--alt-text-color)}
 </style>
 
 <script>
@@ -185,6 +188,7 @@ function crfRenderPools(d){
   const activePool=active&&active.classList&&active.classList.contains('crf-pool-scale')?active.dataset.pool:null;
   const activeScalePool=active&&active.closest&&active.closest('[data-scale-pool]')?active.closest('[data-scale-pool]').dataset.scalePool:null;
   const activeValue=activePool?active.value:null;
+  const openPools=new Set([...box.querySelectorAll('.crf-pool-card details[open]')].map(e=>e.closest('.crf-pool-card').dataset.pool));
   if(d.mode!=='pools'){box.style.display='none';box.textContent='';return;}
   box.style.display='grid';
   box.innerHTML=pools.map(p=>{
@@ -197,9 +201,11 @@ function crfRenderPools(d){
       '<div class="crf-pool-counts"><span>up '+crfEsc(p.up)+'</span><span>busy '+crfEsc(p.busy)+'</span><span>idle '+crfEsc(p.idle)+'</span>'+
       (p.starting?'<span>starting '+crfEsc(p.starting)+'</span>':'')+(p.error?'<span>error '+crfEsc(p.error)+'</span>':'')+
       '<span>'+(auto?'floor':'target')+' '+crfEsc(p.effective_target)+'</span></div>'+
+      '<details class="crf-pool-details"><summary>Labels and scheduling budget</summary><div>Labels: '+crfEsc(p.effective_labels||p.label||'')+'</div><div>CPU: '+crfEsc(p.cpu_milli||0)+'m · Memory: '+crfBytes(Number(p.memory_bytes||0))+'</div>'+(p.blocked_reason?'<div class="crf-pool-state">Blocked: '+crfEsc(p.blocked_reason)+'</div>':'')+'</details>'+
       '<div class="crf-pool-control"><span>'+(auto?'Scale up to':'Scale to')+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(auto?Number(p.count)+1:1)+'" max="'+crfEsc(auto?p.max:64)+'" value="'+crfEsc(p.count)+'" '+(retiring?'disabled ':'')+'aria-label="'+(auto?'Scale up ':'Scale ')+crfEsc(p.id)+' pool">'+
-      '<uui-button size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||retiring||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>Scale</uui-button>'+state+'</div></div>';
+      '<uui-button class="orange" size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||retiring||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>'+(auto?'Scale up to':'Scale to')+'</uui-button>'+state+'</div></div>';
   }).join('');
+  openPools.forEach(id=>{const card=box.querySelector('.crf-pool-card[data-pool="'+crfSelectorValue(id)+'"]');const details=card&&card.querySelector('details');if(details)details.open=true;});
   if(activePool){
     const restored=box.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(activePool)+'"]');
     if(restored&&!restored.disabled){restored.value=activeValue;restored.focus();}
@@ -255,6 +261,7 @@ function crfRefresh(){
   if(window.__crfBusyStatus){ window.__crfRefreshAgain=true; return; }
   window.__crfBusyStatus=true;
   crfPost({action:'status-json'}).then(d=>{
+    if(!d||d.schema_version!==2||!Array.isArray(d.runners)||!Array.isArray(d.pools)) throw new Error('unsupported or malformed Fleet snapshot');
     window.CRF_LAST=d;
     window.CRF_CONFIG_INVALID=!!d.config_error;
     const warn=document.getElementById('crf-warn');
@@ -291,6 +298,7 @@ function crfRefresh(){
       scale.title=d.autoscale_enabled?'Immediately adds runners up to the Autoscale max. The autoscaler manages scale-down afterward.':'';
     }
     if(scaleButton){ scaleButton.disabled=!!d.config_error||(!!d.autoscale_enabled&&Number(d.count)>=Number(d.autoscale_max)); scaleButton.title=scale&&scale.title; }
+    if(scaleButton) scaleButton.textContent=d.autoscale_enabled?'Scale up to':'Scale to';
     if(scaleLabel) scaleLabel.textContent=d.autoscale_enabled?'Scale up to':'Scale to';
     if(scaleWrap) scaleWrap.title=scale&&scale.title;
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
