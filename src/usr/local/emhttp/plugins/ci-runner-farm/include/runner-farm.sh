@@ -30,6 +30,7 @@ TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
 NAME_PREFIX="ci-runner"
+LABEL_NS="net.unraid.ci-runner-farm"
 
 # ---- defaults (overridden by ci-runner-farm.cfg) ---------------------------
 GH_SCOPE="repo"                       # repo | org
@@ -38,6 +39,8 @@ GH_REPOS="unraid/repo-a unraid/repo-b"
 RUNNER_GROUP=""
 RUNNER_COUNT=4
 RUNNER_LABELS="self-hosted,unraid,build"
+RUNNER_MODE="single"                  # single | pools
+RUNNER_POOLS="rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1"
 RUNNER_CPUS=""                        # per-runner CPU cap; empty = uncapped (CFS time-shares fairly)
 RUNNER_MEMORY="16g"                   # per-runner memory cap (kept: memory isn't time-shared like CPU)
 CACHE_ROOT="/mnt/cache/github-runner" # must be a dedicated SUBDIR under a pool/disk, never a bare mount root (see crf_safe_cache_root)
@@ -80,7 +83,7 @@ REGISTRY_TOKEN=""                      # registry password/token (loaded from re
 RUNNER_UID="1001"                     # uid of the image's 'runner' user (myoung34/github-runner)
 RUNNER_GID="121"                      # gid of the 'runner' group
 CACHE_MOUNTS="cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright"
-# ---- autoscaling (queue-aware): fleet floats between MIN and MAX ------------
+# ---- autoscaling (live utilization): fleet floats between MIN and MAX -------
 AUTOSCALE="false"                     # true => a daemon grows/shrinks the fleet by demand
 AUTOSCALE_MIN="2"                     # never go below this many runners
 AUTOSCALE_MAX="16"                    # never go above this many
@@ -98,8 +101,12 @@ IMAGE_DRAIN_TIMEOUT="3600"           # max seconds to wait for a busy runner to 
 DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (read only by RunnerFarmDashboard.page's Cond)
 # ----------------------------------------------------------------------------
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-pools.sh
+. "$SCRIPT_DIR/runner-pools.sh"
+
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
-CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS \
+CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
 SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
@@ -134,6 +141,7 @@ load_cfg
 # later match an unrelated reused PID that autoscale_stop would then kill.
 AUTOSCALE_PID="${RUNDIR}/autoscale.pid"
 IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
+RECONCILE_PID="${RUNDIR}/reconcile.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 
@@ -141,11 +149,189 @@ log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
 host() { hostname -s; }
 
-managed_names() {
-  docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V
+validate_runtime_config() {
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE"
 }
 
-current_count() { managed_names | grep -c . ; }
+# One authoritative Docker snapshot for pool-aware hot paths. The file is
+# process-local in intent but tmpfs-backed so subshells created by command
+# substitution can consume the same parsed records. Fields:
+# name|state|health|cpus|memory|confgen|pool|scope|index|routing-label|identity
+INVENTORY_FILE="$RUNDIR/fleet-inventory.tsv"
+INVENTORY_ACTIVE=0
+
+fleet_inventory_invalidate() {
+  INVENTORY_ACTIVE=0
+  rm -f "$INVENTORY_FILE" 2>/dev/null || true
+}
+
+fleet_inventory_refresh() {
+  local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing identity expected
+  names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V)"
+  tmp="${INVENTORY_FILE}.tmp.$$"
+  : > "$tmp" || return 1
+  if [ -n "$names" ]; then
+    # shellcheck disable=SC2086 # one Docker argument per newline-delimited managed name
+    if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}' $names 2>/dev/null)"; then
+      rm -f "$tmp"; return 1
+    fi
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      IFS='|' read -r name state health cpus mem gen pool scope pidx legacy_idx managed version routing _extra <<< "$row"
+      name="${name#/}"; identity=invalid-managed
+      [ "$gen" = "<no value>" ] && gen=""
+      [ "$pool" = "<no value>" ] && pool=""
+      [ "$scope" = "<no value>" ] && scope=""
+      [ "$pidx" = "<no value>" ] && pidx=""
+      [ "$legacy_idx" = "<no value>" ] && legacy_idx=""
+      [ "$managed" = "<no value>" ] && managed=""
+      [ "$version" = "<no value>" ] && version=""
+      [ "$routing" = "<no value>" ] && routing=""
+      # Reject delimiter/control injection in metadata before it reaches the
+      # inventory format or later JSON/selector consumers.
+      case "$name$scope$pool$pidx$legacy_idx$routing" in
+        *$'\n'*|*$'\r'*|*$'\t'*) name="" ;;
+      esac
+      [ -n "$name" ] || continue
+      if [ -z "$pool" ] && [[ "$name" =~ ^${NAME_PREFIX}-([0-9]+)$ ]]; then
+        pool=default
+        [ -n "$pidx" ] || pidx="${BASH_REMATCH[1]}"
+      fi
+      [ -n "$pidx" ] || pidx="$legacy_idx"
+      if [ "$managed" = true ]; then
+        case "$pidx" in ''|*[!0-9]*) ;;
+          *)
+            if [ "$pool" = default ]; then
+              expected="${NAME_PREFIX}-${pidx}"
+              if [ "$name" = "$expected" ] && { [ -z "$scope" ] || github_scope_validate "$scope"; }; then identity=valid; fi
+            elif pool_id_valid "$pool" && [ "$version" = 1 ]; then
+              expected="${NAME_PREFIX}-${pool}-${pidx}"
+              if [ "$name" = "$expected" ] && github_scope_validate "$scope" && [[ "$scope" == org:* ]]; then identity=valid; fi
+            fi
+            ;;
+        esac
+      fi
+      # Fields sourced from Docker labels must not be able to add columns.
+      case "$gen$pool$scope$routing" in *'|'*) identity=invalid-managed; pool=invalid; scope=""; routing="" ;; esac
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" >> "$tmp"
+    done <<< "$raw"
+  fi
+  mv "$tmp" "$INVENTORY_FILE" || { rm -f "$tmp"; return 1; }
+  INVENTORY_ACTIVE=1
+}
+
+inventory_names() {
+  local pool="${1:-}"
+  [ -f "$INVENTORY_FILE" ] || return 0
+  if [ -n "$pool" ]; then awk -F'|' -v p="$pool" '$7 == p && $11 == "valid" { print $1 }' "$INVENTORY_FILE"
+  else cut -d'|' -f1 "$INVENTORY_FILE"; fi
+}
+
+inventory_field() {
+  local name="$1" field="$2" col
+  case "$field" in
+    state) col=2 ;; health) col=3 ;; cpus) col=4 ;; memory) col=5 ;;
+    confgen) col=6 ;; pool) col=7 ;; scope) col=8 ;; index) col=9 ;;
+    routing_label) col=10 ;; identity) col=11 ;; *) return 1 ;;
+  esac
+  awk -F'|' -v n="$name" -v c="$col" '$1 == n { print $c; exit }' "$INVENTORY_FILE"
+}
+
+inventory_count() { inventory_names "${1:-}" | grep -c .; }
+
+inventory_state_counts() {
+  local pool="$1" c phase
+  POOL_BUSY=0; POOL_IDLE=0; POOL_STARTING=0; POOL_ERROR=0
+  for c in $(inventory_names "$pool"); do
+    phase="$(runner_state "$c")"
+    case "$phase" in
+      busy) POOL_BUSY=$((POOL_BUSY+1)) ;;
+      idle) POOL_IDLE=$((POOL_IDLE+1)) ;;
+      starting) POOL_STARTING=$((POOL_STARTING+1)) ;;
+      *) POOL_ERROR=$((POOL_ERROR+1)) ;;
+    esac
+  done
+}
+
+managed_names() {
+  local pool="${1:-}"
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    inventory_names "$pool"
+  elif [ -n "$pool" ]; then
+    fleet_inventory_refresh && inventory_names "$pool"
+  else
+    docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V
+  fi
+}
+
+current_count() {
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then inventory_count "${1:-}"
+  else managed_names "${1:-}" | grep -c .; fi
+}
+
+runner_pool() {
+  local p
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    p="$(inventory_field "$1" pool)"; [ -n "$p" ] && { printf '%s\n' "$p"; return; }
+  fi
+  p="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.pool\" }}" "$1" 2>/dev/null)"
+  [ "$p" = "<no value>" ] && p=""
+  printf '%s\n' "${p:-default}"
+}
+
+runner_index() {
+  local i
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    i="$(inventory_field "$1" index)"; [ -n "$i" ] && { printf '%s\n' "$i"; return; }
+  fi
+  i="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.pool-index\" }}" "$1" 2>/dev/null)"
+  [ "$i" = "<no value>" ] && i=""
+  [ -n "$i" ] || i="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.index\" }}" "$1" 2>/dev/null)"
+  [ "$i" = "<no value>" ] && i=""
+  [ -n "$i" ] || i="${1##*-}"
+  printf '%s\n' "$i"
+}
+
+runner_scope_target() {
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    inventory_field "$1" scope
+    return
+  fi
+  local target
+  target="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.scope-target\" }}" "$1" 2>/dev/null)"
+  [ "$target" = "<no value>" ] && target=""
+  printf '%s\n' "$target"
+}
+
+runner_name_for() {
+  local idx="$1" pool="${2:-default}"
+  if pool_mode_enabled; then printf '%s-%s-%s\n' "$NAME_PREFIX" "$pool" "$idx"
+  else printf '%s-%s\n' "$NAME_PREFIX" "$idx"; fi
+}
+
+runner_identity_validate() {
+  local name="$1" managed pool idx scope version expected
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    [ "$(inventory_field "$name" identity)" = valid ]
+    return
+  fi
+  managed="$(docker inspect -f "{{ index .Config.Labels \"${MANAGED_LABEL%=*}\" }}" "$name" 2>/dev/null)" || return 1
+  [ "$managed" = true ] || return 1
+  pool="$(runner_pool "$name")"; idx="$(runner_index "$name")"; scope="$(runner_scope_target "$name")"
+  version="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.identity-version\" }}" "$name" 2>/dev/null)"
+  case "$idx" in ''|*[!0-9]*) return 1 ;; esac
+  [ -z "$scope" ] || github_scope_validate "$scope" || return 1
+  if [ "$pool" = default ]; then
+    expected="${NAME_PREFIX}-${idx}"
+  else
+    pool_id_valid "$pool" || return 1
+    [ "$version" = 1 ] || return 1
+    case "$scope" in org:*) ;; *) return 1 ;; esac
+    expected="${NAME_PREFIX}-${pool}-${idx}"
+  fi
+  [ "$name" = "$expected" ]
+}
 
 # is a runner actively running a job? (last meaningful log line)
 # Single busy/idle/starting/error predicate shared by the autoscaler (scale-down
@@ -166,8 +352,8 @@ runner_state() {
 }
 runner_busy() { [ "$(runner_state "$1")" = busy ]; }
 busy_count() {
-  local b=0 c
-  for c in $(managed_names); do [ -n "$c" ] && runner_busy "$c" && b=$((b+1)); done
+  local pool="${1:-}" b=0 c
+  for c in $(managed_names "$pool"); do [ -n "$c" ] && runner_busy "$c" && b=$((b+1)); done
   echo "$b"
 }
 
@@ -180,6 +366,17 @@ busy_count() {
 # change and migrate them onto the new config as they go idle. IMPORTANT: whenever you
 # add a setting that build_args bakes into the container, add it here too.
 crf_confgen() {
+  local pool="${1:-default}" scope_target="${2:-}"
+  if pool_mode_enabled; then
+    [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+    printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$RUNNER_GROUP" "$(pool_label "$pool")" "$pool" \
+      "$scope_target" "identity-v1" "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" \
+      "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" \
+      "$IMAGE_SOURCE" "$IMAGE" "$REGISTRY_SERVER" "$REGISTRY_USERNAME" \
+      "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+      | sha256sum | cut -c1-12
+    return
+  fi
   printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$GH_REPOS" "$RUNNER_GROUP" "$RUNNER_LABELS" \
     "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" \
     "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" "$IMAGE_SOURCE" "$IMAGE" \
@@ -189,35 +386,94 @@ crf_confgen() {
 }
 # The config fingerprint a running runner was created with ('' for runners created before
 # this feature existed — they read as stale and migrate on the next reconcile).
-runner_confgen() { docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.confgen" }}' "$1" 2>/dev/null; }
+runner_confgen() {
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then inventory_field "$1" confgen
+  else docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.confgen" }}' "$1" 2>/dev/null; fi
+}
 # How many RUNNING runners predate the current baked config (drives the drain loop and the
 # UI "migrating" indicator).
 count_stale_runners() {
-  local cur c n=0; cur="$(crf_confgen)"
-  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}'); do
+  local cur c n=0 pool target
+  [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
+  for c in $(managed_names); do
     [ -n "$c" ] || continue
+    runner_identity_validate "$c" || continue
+    pool="$(runner_pool "$c")"
+    if pool_mode_enabled; then
+      pool_record "$pool" >/dev/null 2>&1 || { n=$((n+1)); continue; }
+      target="org:$GH_OWNER"
+      cur="$(crf_confgen "$pool" "$target")"
+    else
+      [ "$pool" = default ] || { n=$((n+1)); continue; }
+      cur="$(crf_confgen)"
+    fi
     [ "$(runner_confgen "$c")" = "$cur" ] || n=$((n+1))
   done
   echo "$n"
 }
 
+count_pool_desired_drift() {
+  pool_mode_enabled || { echo 0; return; }
+  [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || { echo 0; return 1; }
+  local rec pool current target drift=0 delta
+  while IFS= read -r rec; do
+    pool="${rec%%|*}"; current="$(current_count "$pool")"; target="$(pool_effective_target "$pool")"
+    delta=$((current-target)); [ "$delta" -lt 0 ] && delta=$((-delta))
+    drift=$((drift+delta))
+  done < <(pool_records)
+  echo "$drift"
+}
+
+count_reconcile_work() {
+  local stale drift
+  stale="$(count_stale_runners)" || stale=0
+  drift="$(count_pool_desired_drift)" || drift=0
+  echo $((stale+drift))
+}
+
 # Effective autoscale floor: AUTOSCALE_MIN, clamped to AUTOSCALE_MAX so a floor
 # misconfigured above the ceiling can never bypass the resource cap.
-autoscale_floor() { local f="$AUTOSCALE_MIN"; [ "$f" -gt "$AUTOSCALE_MAX" ] && f="$AUTOSCALE_MAX"; echo "$f"; }
+autoscale_floor() {
+  local pool="${1:-default}" f max
+  if pool_mode_enabled; then f="$(pool_min "$pool")"; max="$(pool_max "$pool")"
+  else f="$AUTOSCALE_MIN"; max="$AUTOSCALE_MAX"; fi
+  [ "$f" -gt "$max" ] && f="$max"
+  echo "$f"
+}
 
 # remove up to $1 IDLE runners (highest index first), never below the effective
 # floor (MIN clamped to MAX), never busy ones
 scale_down_idle() {
-  local want="$1" removed=0 c floor
-  floor="$(autoscale_floor)"
-  for c in $(managed_names | sort -rV); do
+  local want="$1" pool="${2:-default}" removed=0 c floor
+  SCALE_REMOVED=0
+  floor="$(autoscale_floor "$pool")"
+  for c in $(managed_names "$pool" | sort -rV); do
     [ "$removed" -ge "$want" ] && break
-    [ "$(current_count)" -le "$floor" ] && break
-    if ! runner_busy "$c"; then
-      log "autoscale: removing idle $c"
-      remove_runner "$c"
+    [ "$(current_count "$pool")" -le "$floor" ] && break
+    if [ "$(runner_state "$c")" = idle ]; then
+      log "autoscale[$pool]: removing idle $c"
+      remove_runner "$c" || continue
       removed=$((removed+1))
     fi
+  done
+  SCALE_REMOVED="$removed"
+}
+
+pool_phase_counts() {
+  local pool="$1" c phase
+  if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+    inventory_state_counts "$pool"
+    return
+  fi
+  POOL_BUSY=0; POOL_IDLE=0; POOL_STARTING=0; POOL_ERROR=0
+  for c in $(managed_names "$pool"); do
+    phase="$(runner_state "$c")"
+    case "$phase" in
+      busy) POOL_BUSY=$((POOL_BUSY+1)) ;;
+      idle) POOL_IDLE=$((POOL_IDLE+1)) ;;
+      starting) POOL_STARTING=$((POOL_STARTING+1)) ;;
+      *) POOL_ERROR=$((POOL_ERROR+1)) ;;
+    esac
   done
 }
 
@@ -243,8 +499,12 @@ reap_dead_runners() {
   local c st health
   for c in $(managed_names); do
     [ -n "$c" ] || continue
-    st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
-    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c" 2>/dev/null)"
+    if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
+      st="$(inventory_field "$c" state)"; health="$(inventory_field "$c" health)"
+    else
+      st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
+      health="$(docker inspect -f '{{with index .State "Health"}}{{.Status}}{{end}}' "$c" 2>/dev/null)"
+    fi
     case "$st" in
       exited|dead)
         log "autoscale: reaping dead runner $c (state=$st)" ;;
@@ -253,15 +513,36 @@ reap_dead_runners() {
         log "autoscale: reaping unhealthy runner $c (disconnected; health=$health)" ;;
       *) continue ;;
     esac
-    deregister_runner_api "$c"
-    docker rm -f "$c" >/dev/null 2>&1
+    remove_runner_force "$c"
   done
 }
 
 # one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
 autoscale_tick() {
   [ "$AUTOSCALE" = "true" ] || return 0
+  validate_runtime_config || { err "autoscale: $POOL_CONFIG_ERROR"; return 1; }
+  fleet_inventory_refresh || { err "autoscale: could not inventory managed runners"; return 1; }
   reap_dead_runners        # drop dead containers first so idle accounting is real
+  [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
+  if pool_mode_enabled; then
+    local rec pool cursor=0 offset idx count
+    local -a records=()
+    mapfile -t records < <(pool_records)
+    count="${#records[@]}"
+    [ -f "$RUNDIR/autoscale.cursor" ] && cursor="$(cat "$RUNDIR/autoscale.cursor" 2>/dev/null || echo 0)"
+    case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
+    [ "$count" -gt 0 ] && cursor=$((cursor%count))
+    AUTOSCALE_ADD_BUDGET=8
+    AUTOSCALE_REMOVE_BUDGET=2
+    for ((offset=0; offset<count; offset++)); do
+      idx=$(((cursor+offset)%count)); rec="${records[$idx]}"
+      pool="${rec%%|*}"
+      pool_autoscale_tick "$pool" || log "autoscale[$pool]: tick failed; continuing with other pools"
+    done
+    [ "$count" -gt 0 ] && printf '%s\n' "$(((cursor+1)%count))" > "$RUNDIR/autoscale.cursor"
+    reconcile_stale_runners
+    return 0
+  fi
   local cur busy idle statef over target
   cur=$(current_count); busy=$(busy_count); idle=$((cur - busy))
   statef="${RUNDIR}/autoscale.state"; over=0
@@ -298,6 +579,54 @@ autoscale_tick() {
   # picks up a direct cfg edit, or a runner whose job outlasted the Apply drain timeout.
   # Runs LAST so it never perturbs the scale math above; already under the fleet lock.
   reconcile_stale_runners
+}
+
+pool_autoscale_tick() {
+  local pool="$1" cur warm statef over=0 target floor max buffer before after delta remove_n
+  cur="$(current_count "$pool")"
+  pool_phase_counts "$pool"
+  warm=$((POOL_IDLE + POOL_STARTING))
+  floor="$(pool_min "$pool")"; max="$(pool_max "$pool")"; buffer="$(pool_idle "$pool")"
+  statef="${RUNDIR}/autoscale.${pool}.$(pool_state_generation "$pool").state"
+  [ -f "$statef" ] && over="$(cat "$statef" 2>/dev/null || echo 0)"
+  case "$over" in ''|*[!0-9]*) over=0 ;; esac
+
+  if [ "$cur" -lt "$floor" ]; then
+    [ "${AUTOSCALE_ADD_BUDGET:-8}" -gt 0 ] || return 0
+    target="$floor"
+    [ "$target" -gt $((cur + AUTOSCALE_ADD_BUDGET)) ] && target=$((cur + AUTOSCALE_ADD_BUDGET))
+    log "autoscale[$pool]: count $cur < floor $floor -> grow to $target this tick"
+    before="$cur"
+    cmd_scale_internal "$pool" "$target" >/dev/null || return 1
+    after="$(current_count "$pool")"; delta=$((after-before)); [ "$delta" -lt 0 ] && delta=0
+    AUTOSCALE_ADD_BUDGET=$((AUTOSCALE_ADD_BUDGET-delta))
+    printf '0\n' > "$statef"
+    return 0
+  fi
+  if [ "$warm" -lt "$buffer" ] && [ "$cur" -lt "$max" ]; then
+    [ "${AUTOSCALE_ADD_BUDGET:-8}" -gt 0 ] || return 0
+    target=$((cur + AUTOSCALE_STEP)); [ "$target" -gt "$max" ] && target="$max"
+    [ "$target" -gt $((cur + AUTOSCALE_ADD_BUDGET)) ] && target=$((cur + AUTOSCALE_ADD_BUDGET))
+    log "autoscale[$pool]: warm=$warm/$cur < buffer $buffer -> grow to $target"
+    before="$cur"
+    cmd_scale_internal "$pool" "$target" >/dev/null || return 1
+    after="$(current_count "$pool")"; delta=$((after-before)); [ "$delta" -lt 0 ] && delta=0
+    AUTOSCALE_ADD_BUDGET=$((AUTOSCALE_ADD_BUDGET-delta))
+    printf '0\n' > "$statef"
+  elif [ "$POOL_IDLE" -gt $((buffer + AUTOSCALE_STEP)) ] && [ "$cur" -gt "$floor" ]; then
+    over=$((over+1)); printf '%s\n' "$over" > "$statef"
+    if [ "$over" -ge "$AUTOSCALE_IDLE_GRACE" ]; then
+      [ "${AUTOSCALE_REMOVE_BUDGET:-2}" -gt 0 ] || return 0
+      remove_n="$AUTOSCALE_STEP"
+      [ "$remove_n" -gt "$AUTOSCALE_REMOVE_BUDGET" ] && remove_n="$AUTOSCALE_REMOVE_BUDGET"
+      log "autoscale[$pool]: idle=$POOL_IDLE/$cur high for $over checks -> shrink by $remove_n this tick"
+      scale_down_idle "$remove_n" "$pool"
+      AUTOSCALE_REMOVE_BUDGET=$((AUTOSCALE_REMOVE_BUDGET-${SCALE_REMOVED:-0}))
+      printf '0\n' > "$statef"
+    fi
+  else
+    printf '0\n' > "$statef"
+  fi
 }
 
 # long-running loop; re-reads config each tick so UI changes apply live
@@ -385,7 +714,7 @@ imageupdate_pull() {
 # freshly-pulled image. Never interrupts a running job. If it stays busy past
 # IMAGE_DRAIN_TIMEOUT, leave it on the old image — the next cycle retries.
 drain_and_recreate() {
-  local c="$1" waited=0 idx limit
+  local c="$1" waited=0 limit
   limit="${IMAGE_DRAIN_TIMEOUT:-3600}"
   # Wait for the runner to finish its job WITHOUT holding the fleet lock across the
   # (up to IMAGE_DRAIN_TIMEOUT — hours) idle-wait. fd 8 is the fleet mutex, held by our
@@ -405,11 +734,8 @@ drain_and_recreate() {
   # operator hit Stop/Recycle mid-drain), do NOT recreate it — never resurrect a
   # runner the operator just removed.
   docker ps -a --format '{{.Names}}' | grep -qx "$c" || { log "image-update: $c no longer present — skipping recreate"; return 0; }
-  idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$c" 2>/dev/null)"
-  [ -z "$idx" ] && idx="${c##*-}"
   log "image-update: $c idle -> recreating on new image"
-  remove_runner "$c"
-  start_one "$idx"
+  recreate_runner "$c" graceful >/dev/null
 }
 
 # Roll the whole fleet onto the new image, one runner at a time so capacity stays
@@ -425,6 +751,7 @@ imageupdate_rollover() {
 # one update evaluation: pull, and roll only if the runner image actually changed
 imageupdate_tick() {
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
+  validate_runtime_config || { err "image-update: $POOL_CONFIG_ERROR"; return 1; }
   imageupdate_pull || return 0   # nonzero = image unchanged this cycle
   log "image-update: new runner image detected -> draining + recreating fleet"
   imageupdate_rollover
@@ -531,22 +858,130 @@ gh_api() {
   printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
     | curl -fsSL -m 10 -X "$1" --config - \
       -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2026-03-10" \
       "https://api.github.com$2" 2>/dev/null
 }
 
-# Mint a runner registration token for a scope. $1 = "org:<name>" or
-# "repo:<owner/repo>". Echoes the token (empty on failure). GitHub's
-# registration-token endpoint returns {"token":"...","expires_at":"..."}.
-registration_token() {
-  local target="$1" path
-  case "$target" in
-    org:*)  path="/orgs/${target#org:}/actions/runners/registration-token" ;;
-    repo:*) path="/repos/${target#repo:}/actions/runners/registration-token" ;;
-    *) echo ""; return 1 ;;
+GH_RESPONSE=""
+GH_STATUS=""
+gh_api_request() {
+  local method="$1" path="$2" body
+  [ -n "$ACCESS_TOKEN" ] || { GH_RESPONSE=""; GH_STATUS="000"; return 1; }
+  body="$(mktemp 2>/dev/null)" || { GH_RESPONSE=""; GH_STATUS="000"; return 1; }
+  GH_STATUS="$(
+    printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+      | curl -sS -m 10 -X "$method" --config - -o "$body" -w '%{http_code}' \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2026-03-10" \
+        "https://api.github.com$path" 2>/dev/null
+  )"
+  GH_RESPONSE="$(cat "$body" 2>/dev/null)"
+  rm -f "$body"
+  case "$GH_STATUS" in 2??|404) return 0 ;; *) return 1 ;; esac
+}
+
+github_scope_validate() {
+  printf '%s' "$1" | grep -qE '^(org:[A-Za-z0-9_.-]+|repo:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$'
+}
+
+github_scope_base() {
+  github_scope_validate "$1" || return 1
+  case "$1" in
+    org:*) printf '/orgs/%s\n' "${1#org:}" ;;
+    repo:*) printf '/repos/%s\n' "${1#repo:}" ;;
   esac
-  gh_api POST "$path" \
-    | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
-    | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+legacy_runner_scope_target() {
+  local c="$1" env scope owner repo target
+  env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null)" || return 1
+  scope="$(printf '%s\n' "$env" | sed -n 's/^RUNNER_SCOPE=//p' | tail -1)"
+  case "$scope" in
+    org)
+      owner="$(printf '%s\n' "$env" | sed -n 's/^ORG_NAME=//p' | tail -1)"
+      target="org:$owner"
+      ;;
+    repo)
+      repo="$(printf '%s\n' "$env" | sed -n 's#^REPO_URL=https://github.com/##p' | tail -1)"
+      target="repo:$repo"
+      ;;
+    *) return 1 ;;
+  esac
+  github_scope_validate "$target" || return 1
+  printf '%s\n' "$target"
+}
+
+# Mint and cache one short-lived registration token per exact scope. GitHub
+# registration tokens are valid for one hour and may register multiple runners;
+# a 45-minute tmpfs cache turns a multi-runner Start into one token request per
+# scope instead of one request per container. The cache contains a short-lived,
+# registration-only credential (never the PAT) and is mode 0600.
+github_registration_token() {
+  local target="$1" base key cache age=999999 body token
+  github_scope_validate "$target" || return 1
+  key="$(printf '%s' "$target" | sha256sum | cut -c1-16)"
+  cache="$RUNDIR/registration-token.$key"
+  if [ -f "$cache" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    if [ "$age" -lt 2700 ]; then
+      token="$(cat "$cache" 2>/dev/null)"
+      case "$token" in ''|*[!A-Za-z0-9_-]*) ;; *) printf '%s\n' "$token"; return 0 ;; esac
+    fi
+  fi
+  base="$(github_scope_base "$target")" || return 1
+  body="$(gh_api POST "${base}/actions/runners/registration-token")" || return 1
+  token="$(printf '%s' "$body" | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  case "$token" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  ( umask 077; printf '%s\n' "$token" > "$cache.tmp" && mv "$cache.tmp" "$cache" ) || return 1
+  printf '%s\n' "$token"
+}
+
+# Compatibility name retained for the existing construction path.
+registration_token() { github_registration_token "$1"; }
+
+# Fetch and parse the GitHub runner list once per exact scope/mutation batch.
+# The result is a strict `id|name` inventory in tmpfs. Parsing through PHP's JSON
+# decoder avoids the line-format assumptions of grep/awk and rejects malformed
+# or truncated responses. Pagination continues until GitHub returns <100 rows.
+github_runner_inventory() {
+  local target="$1" base key cache age=999999 page=1 count tmp parsed
+  github_scope_validate "$target" || return 1
+  key="$(printf '%s' "$target" | sha256sum | cut -c1-16)"
+  cache="$RUNDIR/github-runners.$key"
+  if [ -f "$cache" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    [ "$age" -lt 5 ] && { cat "$cache"; return 0; }
+  fi
+  base="$(github_scope_base "$target")" || return 1
+  tmp="$(mktemp "$RUNDIR/github-runners.XXXXXX")" || return 1
+  : > "$tmp"
+  while [ "$page" -le 100 ]; do
+    gh_api_request GET "${base}/actions/runners?per_page=100&page=${page}" || { rm -f "$tmp"; return 1; }
+    parsed="${tmp}.page"
+    # shellcheck disable=SC2016 # the single-quoted program is PHP, not shell
+    if ! printf '%s' "$GH_RESPONSE" | php -r '
+      $j=json_decode(stream_get_contents(STDIN), true);
+      if (!is_array($j) || !isset($j["runners"]) || !is_array($j["runners"])) exit(2);
+      foreach ($j["runners"] as $r) {
+        $id=$r["id"]??null; $name=$r["name"]??null;
+        if (is_int($id) && is_string($name) && !str_contains($name, "|") && !preg_match("/[\\x00-\\x1f]/", $name))
+          echo $id,"|",$name,"\n";
+      }' > "$parsed"; then
+      rm -f "$tmp" "$parsed"; return 1
+    fi
+    count="$(wc -l < "$parsed" | tr -d ' ')"
+    cat "$parsed" >> "$tmp"; rm -f "$parsed"
+    [ "${count:-0}" -lt 100 ] && break
+    page=$((page+1))
+  done
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$cache" || { rm -f "$tmp"; return 1; }
+  cat "$cache"
+}
+
+github_runner_id() {
+  local target="$1" name="$2"
+  github_runner_inventory "$target" | awk -F'|' -v want="$name" '$2 == want { print $1; exit }'
 }
 
 # Deregister a runner from GitHub host-side, by name, using the PAT. This replaces
@@ -557,34 +992,34 @@ registration_token() {
 # Best-effort: a busy runner can't be deleted (GitHub 422) and a leftover offline
 # entry is harmless — the next Start re-registers the same name with --replace.
 deregister_runner_api() {
-  local c="$1" rname idx repo base id
-  [ -n "$ACCESS_TOKEN" ] && [ -n "$c" ] || return 0
+  local c="$1" rname base id target
+  [ -n "$ACCESS_TOKEN" ] && [ -n "$c" ] || return 1
   rname="$(host)-${c}"                          # matches RUNNER_NAME set in build_args
-  if [ "$GH_SCOPE" = "org" ]; then
-    base="/orgs/${GH_OWNER}"
-  else
-    idx="${c##*-}"; repo="$(repo_for_index "$idx")"
-    [ -n "$repo" ] || return 0
-    base="/repos/${repo}"
+  target="$(runner_scope_target "$c")"
+  if [ -z "$target" ]; then
+    # Compatibility fallback for old single-mode containers only: recover the
+    # ORIGINAL registration target from its baked environment. Never recompute
+    # it from today's owner/repository settings after those settings may change.
+    [ "$(runner_pool "$c")" = default ] || { err "runner $c lacks a valid stamped scope target"; return 1; }
+    target="$(legacy_runner_scope_target "$c")" || {
+      err "runner $c has no stamped scope and its original target is ambiguous; leaving it intact"
+      return 1
+    }
   fi
-  # Resolve name -> id from the (pretty-printed, multi-line) runners list. Track the
-  # last-seen id and name, and emit only at a runner-only key ("os") — label objects
-  # carry "id"+"name" too but never "os", and a runner's own id/name precede its
-  # labels, so at the "os" line cur/nm still hold the runner's values. Robust to the
-  # API's whitespace/line formatting (a single-line grep pair is not).
-  id="$(gh_api GET "${base}/actions/runners?per_page=100" | awk -v want="$rname" '
-      /"id"[[:space:]]*:/   { if (match($0, /[0-9]+/)) cur = substr($0, RSTART, RLENGTH) }
-      /"name"[[:space:]]*:/ { s=$0; sub(/^[^:]*:[[:space:]]*"/, "", s); sub(/".*/, "", s); nm=s }
-      /"os"[[:space:]]*:/   { if (nm == want) { print cur; exit } }
-    ')"
-  [ -n "$id" ] || return 0
-  # Best-effort (all callers force-remove the container regardless), but surface a
-  # DELETE failure in the fleet log so a lingering "offline" registration on GitHub
-  # isn't completely silent — recycle/scale-down otherwise report only success.
-  if gh_api DELETE "${base}/actions/runners/${id}" >/dev/null 2>&1; then
+  base="$(github_scope_base "$target")" || { err "runner $c carries an invalid scope target"; return 1; }
+  id="$(github_runner_id "$target" "$rname")" || {
+    log "warning: could not list GitHub runners for $target while retiring $c (HTTP ${GH_STATUS:-000})"
+    return 1
+  }
+  [ -n "$id" ] || { log "GitHub runner $rname is already absent from $target"; return 0; }
+  if gh_api_request DELETE "${base}/actions/runners/${id}" && {
+       [ "$GH_STATUS" = 204 ] || [ "$GH_STATUS" = 404 ];
+     }; then
     log "deregistered $rname from GitHub (id $id)"
+    return 0
   else
-    log "warning: could not deregister $rname (id $id) from GitHub — a stale offline runner may linger"
+    log "warning: GitHub did not accept retirement of $rname (HTTP ${GH_STATUS:-000}); leaving its container intact"
+    return 1
   fi
 }
 
@@ -865,9 +1300,22 @@ effective_image() {
   if [ "$IMAGE_SOURCE" = "remote" ] && [ -n "$IMAGE" ]; then echo "$IMAGE"; else echo "$BUILTIN_IMAGE"; fi
 }
 
-# build the docker run argv for one runner. $1=index, $2=name-override(optional)
+# build the docker run argv for one runner.
+# $1=index, $2=name-override(optional), $3=pool(optional), $4=scope-target(optional)
 build_args() {
-  local idx="$1"; local name="${2:-${NAME_PREFIX}-${idx}}"
+  local idx="$1" name_override="${2:-}" pool="${3:-default}" scope_target="${4:-}"
+  local name labels
+  [ -n "$name_override" ] && name="$name_override" || name="$(runner_name_for "$idx" "$pool")"
+  if pool_mode_enabled; then
+    labels="$(pool_label "$pool")"
+    [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+  else
+    labels="$RUNNER_LABELS"
+    if [ -z "$scope_target" ]; then
+      if [ "$GH_SCOPE" = "org" ]; then scope_target="org:$GH_OWNER"
+      else scope_target="repo:$(repo_for_index "$idx")"; fi
+    fi
+  fi
   ARGS=(
     # --restart=no (NOT unless-stopped): the registration token baked in below is
     # short-lived (~1h) and the runner re-runs config on start, so letting Docker
@@ -881,9 +1329,14 @@ build_args() {
     --pids-limit=4096
     --label "${MANAGED_LABEL%=*}=true"
     --label "net.unraid.ci-runner-farm.index=${idx}"
-    --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen)"
+    --label "${LABEL_NS}.pool=${pool}"
+    --label "${LABEL_NS}.pool-index=${idx}"
+    --label "${LABEL_NS}.routing-label=$(pool_mode_enabled && pool_label "$pool" || printf '%s' "$RUNNER_LABELS")"
+    --label "${LABEL_NS}.scope-target=${scope_target}"
+    --label "${LABEL_NS}.identity-version=1"
+    --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen "$pool" "$scope_target")"
     -e RUNNER_NAME="$(host)-${name}"
-    -e LABELS="$RUNNER_LABELS"
+    -e LABELS="$labels"
     -e DISABLE_AUTO_UPDATE="true"
     -e DISABLE_AUTOMATIC_DEREGISTRATION="true"   # we deregister host-side (deregister_runner_api)
     -e RUN_AS_ROOT="$RUN_AS_ROOT"
@@ -939,15 +1392,12 @@ build_args() {
     mkdir -p "$CACHE_ROOT/work/$name"
     ARGS+=( -v "$CACHE_ROOT/work/$name:/_work" )
   fi
-  local scope_target=""
-  if [ "$GH_SCOPE" = "org" ]; then
+  if [ "${scope_target%%:*}" = "org" ]; then
     ARGS+=( -e RUNNER_SCOPE="org" -e ORG_NAME="$GH_OWNER" )
     [ -n "$RUNNER_GROUP" ] && ARGS+=( -e RUNNER_GROUP="$RUNNER_GROUP" )
-    scope_target="org:$GH_OWNER"
   else
-    local repo; repo="$(repo_for_index "$idx")"
+    local repo="${scope_target#repo:}"
     ARGS+=( -e RUNNER_SCOPE="repo" -e REPO_URL="https://github.com/${repo}" )
-    scope_target="repo:$repo"
   fi
   # Hand the container a short-lived registration token, never the PAT (see the
   # host-side token helpers above). Skipped when no PAT is configured — e.g. the
@@ -961,13 +1411,21 @@ build_args() {
 }
 
 start_one() {
-  local idx="$1"; local name="${NAME_PREFIX}-${idx}"
+  local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
+  name="$(runner_name_for "$idx" "$pool")"
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
-    log "runner $name already exists; skipping"; return 0
+    if runner_identity_validate "$name"; then
+      log "runner $name already exists; skipping"; return 0
+    fi
+    err "runner name collision: $name exists but is not a valid managed runner; refusing to touch it"
+    return 1
   fi
-  build_args "$idx" || { err "runner $name not started (registration-token error)"; return 1; }
-  log "starting $name (cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=$GH_SCOPE)"
+  build_args "$idx" "$name" "$pool" "$scope_target" || { err "runner $name not started (registration-token error)"; return 1; }
+  log "starting $name (pool=$pool cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=${scope_target:-$GH_SCOPE})"
   docker run "${ARGS[@]}" >/dev/null
+  local rc=$?
+  fleet_inventory_invalidate
+  return "$rc"
 }
 
 # Recreate a stopped managed runner with a FRESH registration token. We cannot
@@ -979,12 +1437,21 @@ start_one() {
 # GitHub registration is dropped host-side first (the PAT never touches the
 # container) so the fresh runner re-registers cleanly.
 recreate_stopped_runner() {
-  local c="$1" idx
-  idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$c" 2>/dev/null)"
-  [ -z "$idx" ] && idx="${c##*-}"
+  local c="$1" idx pool scope
+  runner_identity_validate "$c" || { err "refusing to recreate invalid managed identity $c"; return 1; }
+  idx="$(runner_index "$c")"; pool="$(runner_pool "$c")"
+  if pool_mode_enabled; then
+    pool_record "$pool" >/dev/null 2>&1 || { log "stopped runner $c belongs to removed pool $pool — retiring instead of recreating"; remove_runner_force "$c"; return; }
+  elif [ "$pool" != default ]; then
+    log "stopped pool runner $c is obsolete in single mode — retiring instead of recreating"; remove_runner_force "$c"; return
+  fi
   deregister_runner_api "$c"
   docker rm -f "$c" >/dev/null 2>&1
-  start_one "$idx"
+  fleet_inventory_invalidate
+  if pool_mode_enabled; then scope="org:$GH_OWNER"
+  elif [ "$GH_SCOPE" = org ]; then scope="org:$GH_OWNER"
+  else scope="repo:$(repo_for_index "$idx")"; fi
+  start_one "$idx" "$pool" "$scope"
 }
 
 # Bring back managed runner containers that exist but are stopped — e.g. after
@@ -1047,7 +1514,11 @@ with_fleet_lock() {
     ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$RUNDIR/fleet.lock"
   fi
 }
-cmd_restart() { cmd_stop; cmd_start; }
+cmd_restart() {
+  validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
+  cmd_stop
+  cmd_start
+}
 
 # Operator convenience: (re)start the shared image cache + regenerate the runner DinD
 # config to match — WITHOUT a full fleet Start/Restart (useful after changing
@@ -1073,17 +1544,80 @@ cmd_mirror_up() {
 # caller already locked). Returns 0 always; callers poll count_stale_runners to know when
 # the fleet is fully migrated.
 reconcile_stale_runners() {
-  local cur c gen; cur="$(crf_confgen)"
-  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V); do
+  validate_runtime_config || { err "reconcile: $POOL_CONFIG_ERROR"; return 1; }
+  local cur c gen pool scope state docker_state desired rec target
+  fleet_inventory_refresh || { err "reconcile: could not inventory managed runners"; return 1; }
+  # Pass 1: retire identities whose pool/mode no longer exists. Invalid-managed
+  # rows remain visible but are never adopted or mutated.
+  for c in $(managed_names); do
     [ -n "$c" ] || continue
+    runner_identity_validate "$c" || { log "reconcile: $c has invalid managed metadata — leaving untouched"; continue; }
+    pool="$(runner_pool "$c")"
+    desired=true
+    if pool_mode_enabled; then
+      pool_record "$pool" >/dev/null 2>&1 || desired=false
+    else
+      [ "$pool" = default ] || desired=false
+    fi
+    docker_state="$(inventory_field "$c" state)"
+    state="$(runner_state "$c")"
+    if [ "$desired" = false ]; then
+      if [ "$docker_state" != running ]; then
+        log "reconcile: retiring stopped runner $c (pool identity no longer desired)"
+        remove_runner_force "$c" && start_one_missing_desired
+        return 0
+      fi
+      [ "$state" = idle ] || { log "reconcile: $c is retiring but $state — waiting"; continue; }
+      log "reconcile: retiring idle runner $c (pool identity no longer desired)"
+      if remove_runner "$c"; then start_one_missing_desired
+      else log "reconcile: GitHub did not accept retirement of $c — will retry"; fi
+      return 0
+    fi
+    if [ "$docker_state" != running ]; then
+      log "reconcile: recreating stopped desired runner $c"
+      recreate_stopped_runner "$c"
+      return 0
+    fi
+  done
+
+  # Pass 2: honor fixed-mode runtime targets persistently. Highest indexes drain
+  # first; a busy excess runner remains until a later worker pass sees it idle.
+  if pool_mode_enabled && [ "$AUTOSCALE" != true ]; then
+    while IFS= read -r rec; do
+      pool="${rec%%|*}"; target="$(pool_effective_target "$pool")"
+      [ "$(current_count "$pool")" -gt "$target" ] || continue
+      for c in $(managed_names "$pool" | sort -rV); do
+        [ "$(current_count "$pool")" -gt "$target" ] || break
+        state="$(runner_state "$c")"
+        [ "$state" = idle ] || { log "reconcile: $c exceeds fixed target but is $state — waiting"; continue; }
+        log "reconcile: draining idle excess runner $c to fixed target $target"
+        remove_runner "$c" && return 0
+      done
+    done < <(pool_records)
+  fi
+
+  # Pass 3: recycle one current-but-stale identity.
+  for c in $(managed_names); do
+    [ -n "$c" ] || continue
+    runner_identity_validate "$c" || continue
+    pool="$(runner_pool "$c")"
+    if pool_mode_enabled; then pool_record "$pool" >/dev/null 2>&1 || continue
+    else [ "$pool" = default ] || continue; fi
+    state="$(runner_state "$c")"
+    if pool_mode_enabled; then
+      scope="org:$GH_OWNER"
+      cur="$(crf_confgen "$pool" "$scope")"
+    else
+      cur="$(crf_confgen)"
+    fi
     gen="$(runner_confgen "$c")"
     [ "$gen" = "$cur" ] && continue                  # already on the current config
     # Migrate idle runners; also migrate error-state ones (a wedged runner will never
     # reach idle on its own, so leaving it would strand it on the old config forever).
     # Busy/starting runners are left for a later pass.
-    case "$(runner_state "$c")" in idle|error) ;; *) continue ;; esac
+    case "$state" in idle) ;; *) continue ;; esac
     log "reconcile: $c predates a config change — recycling it onto the current config"
-    if ! cmd_recycle "$c" >/dev/null 2>&1; then
+    if ! recreate_runner "$c" graceful >/dev/null 2>&1; then
       if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
         log "reconcile: recycle of $c failed but it is still present — will retry next pass"
       else
@@ -1096,6 +1630,7 @@ reconcile_stale_runners() {
     fi
     return 0                                          # one per pass; the drain/tick loop re-invokes
   done
+  start_one_missing_desired
   return 0
 }
 
@@ -1116,35 +1651,62 @@ cmd_reconcile_drain() {
   while :; do
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-    [ "$(count_stale_runners)" -eq 0 ] && break
+    [ "$(count_reconcile_work)" -eq 0 ] && break
     [ "$announced" = 0 ] && { log "reconcile: config changed — migrating runners onto it as they go idle"; announced=1; }
     with_fleet_lock wait reconcile_stale_runners
-    [ "$(count_stale_runners)" -eq 0 ] && break
+    [ "$(count_reconcile_work)" -eq 0 ] && break
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), so only enforce
     # the deadline when it's positive — matching drain_and_recreate's `limit -gt 0` guard.
-    [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout (finishing jobs or wedged in startup) — they'll migrate on their next idle, or Restart the fleet to force it now"; break; }
+    # Retiring identities (removed pools or mode transitions) must eventually
+    # disappear even when autoscale is off. Ordinary stale config migration may
+    # honor the drain timeout, but a retiring runner keeps this worker alive.
+    local retiring=0 c p durable
+    for c in $(managed_names); do
+      p="$(runner_pool "$c")"
+      if pool_mode_enabled; then pool_record "$p" >/dev/null 2>&1 || retiring=$((retiring+1))
+      else [ "$p" = default ] || retiring=$((retiring+1)); fi
+    done
+    durable=$((retiring + $(count_pool_desired_drift)))
+    [ "$durable" -eq 0 ] && [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout — they'll migrate on their next Apply/Start"; break; }
     sleep 15
   done
   lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
   if [ "$announced" = 1 ]; then
     if [ "${lost:-0}" -gt 0 ]; then
-      if [ "$(count_stale_runners)" -eq 0 ]; then
+      if [ "$(count_reconcile_work)" -eq 0 ]; then
         log "reconcile: migration finished but $lost runner(s) were removed without a replacement — Start/Restart the fleet to restore capacity"
       else
         log "reconcile: migration incomplete, and $lost runner(s) were also removed without a replacement — Start/Restart the fleet to restore capacity"
       fi
-    elif [ "$(count_stale_runners)" -eq 0 ]; then
+    elif [ "$(count_reconcile_work)" -eq 0 ]; then
       log "reconcile: fleet is now on the current config"
     fi
   fi
   rm -f "$RUNDIR/reconcile.shrink"
+  rm -f "$RECONCILE_PID"
+}
+
+reconcile_start() {
+  if [ -f "$RECONCILE_PID" ] && kill -0 "$(cat "$RECONCILE_PID" 2>/dev/null)" 2>/dev/null; then
+    return 0
+  fi
+  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 &
+  printf '%s\n' "$!" > "$RECONCILE_PID"
+}
+
+reconcile_stop() {
+  [ -f "$RECONCILE_PID" ] && kill "$(cat "$RECONCILE_PID" 2>/dev/null)" 2>/dev/null || true
+  rm -f "$RECONCILE_PID"
+  pkill -f '[r]unner-farm.sh reconcile-drain' 2>/dev/null || true
 }
 
 # Kick off the drain detached so the Settings Apply returns immediately (recycling is
 # slow). Safe no-op when nothing is stale (the drain exits on the first count). Output
 # shows in the Apply progress frame — human text, not JSON.
 cmd_reconcile_config() {
-  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 &
+  validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
+  rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
+  reconcile_start
   local msg="Configuration saved. Any runner on a previous config will migrate as it goes idle (busy jobs finish first)."
   # A NETWORK_ISOLATION change applies per-runner only as each recycles — so running
   # jobs keep their OLD network until they finish. Say so plainly: a gradual, background
@@ -1153,8 +1715,61 @@ cmd_reconcile_config() {
   echo "$msg"
 }
 
+pool_effective_target() {
+  local pool="$1" configured file value
+  configured="$(pool_configured_target "$pool")"
+  [ "$AUTOSCALE" = true ] && { printf '%s\n' "$configured"; return; }
+  file="$RUNDIR/scale-override.${pool}.$(pool_state_generation "$pool")"
+  if [ -f "$file" ]; then
+    value="$(cat "$file" 2>/dev/null)"
+    case "$value" in ''|*[!0-9]*) ;; *) printf '%s\n' "$value"; return ;; esac
+  fi
+  printf '%s\n' "$configured"
+}
+
+pool_configured_total() {
+  local rec pool total=0
+  if pool_mode_enabled; then
+    while IFS= read -r rec; do pool="${rec%%|*}"; total=$((total + $(pool_configured_target "$pool"))); done < <(pool_records)
+  else
+    total="$RUNNER_COUNT"; [ "$AUTOSCALE" = true ] && total="$AUTOSCALE_MIN"
+  fi
+  printf '%s\n' "$total"
+}
+
+start_one_missing_desired() {
+  local ceiling current rec pool target idx name
+  ceiling="$(pool_configured_total)"; current="$(current_count)"
+  [ "$current" -lt "$ceiling" ] || return 0
+  if ! pool_mode_enabled; then
+    target="$RUNNER_COUNT"; [ "$AUTOSCALE" = true ] && target="$AUTOSCALE_MIN"
+    [ "$(current_count default)" -lt "$target" ] || return 0
+    for idx in $(seq 1 "$target"); do
+      name="$(runner_name_for "$idx" default)"
+      if ! docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+        start_one "$idx" default
+        return $?
+      fi
+    done
+    return 0
+  fi
+  while IFS= read -r rec; do
+    pool="${rec%%|*}"; target="$(pool_effective_target "$pool")"
+    [ "$(current_count "$pool")" -lt "$target" ] || continue
+    for idx in $(seq 1 64); do
+      name="$(runner_name_for "$idx" "$pool")"
+      if ! docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+        start_one "$idx" "$pool"
+        return $?
+      fi
+    done
+  done < <(pool_records)
+}
+
 cmd_start() {
+  validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
   [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
+  rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp; secp="$(public_repo_problem)"
   [ -n "$secp" ] && err "SECURITY: $secp"       # warn, do not block (operator's call)
@@ -1172,30 +1787,81 @@ cmd_start() {
   for c in $(managed_names); do
     [ -n "$c" ] && ! on_expected_network "$c" && { need_migrate=1; break; }
   done
-  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 & }
+  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; reconcile_start; }
   # bring back any runners Unraid/Docker left exited (array stop, daemon restart)
   start_stopped_managed
-  # with autoscaling on, start the floor (MIN) and let the daemon grow to demand
-  local startn="$RUNNER_COUNT"
-  [ "$AUTOSCALE" = "true" ] && startn="$AUTOSCALE_MIN"
-  local i
-  for i in $(seq 1 "$startn"); do start_one "$i"; done
+  # With autoscaling on, start each floor and let the daemon grow independently.
+  local startn="$RUNNER_COUNT" i rec pool ceiling initial
+  if pool_mode_enabled; then
+    initial="$(current_count)"; ceiling="$(pool_configured_total)"
+    [ "$initial" -gt "$ceiling" ] && ceiling="$initial"
+    [ "$ceiling" -gt 64 ] && ceiling=64
+    while IFS= read -r rec; do
+      pool="${rec%%|*}"; startn="$(pool_configured_target "$pool")"
+      for i in $(seq 1 "$startn"); do
+        [ "$(current_count)" -lt "$ceiling" ] || break
+        start_one "$i" "$pool"
+      done
+    done < <(pool_records)
+    reconcile_start
+  else
+    [ "$AUTOSCALE" = "true" ] && startn="$AUTOSCALE_MIN"
+    initial="$(current_count)"; ceiling="$startn"
+    [ "$initial" -gt "$ceiling" ] && ceiling="$initial"
+    [ "$ceiling" -gt 64 ] && ceiling=64
+    for i in $(seq 1 "$startn"); do
+      [ "$(current_count)" -lt "$ceiling" ] || break
+      start_one "$i"
+    done
+    reconcile_start
+  fi
   log "fleet up: $(managed_names | wc -l) runner(s)"
   [ "$AUTOSCALE" = "true" ] && autoscale_start
   [ "$IMAGE_AUTOUPDATE" = "true" ] && imageupdate_start
 }
 
-# Tear down a runner: graceful stop, remove the container, and drop its DinD
-# data root (the per-runner /var/lib/docker bind dir created in build_args) so
-# the pool is reclaimed instead of leaking a tree per retired runner.
-remove_runner() {
-  local c="$1"
-  [ -n "$c" ] || return 0                      # never let an empty name make the rm below target docker/
-  deregister_runner_api "$c"                  # host-side (PAT stays off the container)
+safe_remove_runner_cache() {
+  local c="$1" root
+  runner_identity_validate "$c" || { log "warning: preserving cache for invalid runner identity $c"; return 1; }
+  root="$(crf_safe_cache_root)" || { log "warning: preserving cache for $c because CACHE_ROOT is unsafe"; return 1; }
+  case "$c" in "$NAME_PREFIX"-*) ;; *) return 1 ;; esac
+  rm -rf -- "${root:?}/docker/${c:?}" 2>/dev/null || true
+}
+
+remove_runner_container() {
+  local c="$1" root=""
+  if runner_identity_validate "$c"; then
+    root="$(crf_safe_cache_root 2>/dev/null || true)"
+  fi
   docker stop -t 30 "$c" >/dev/null 2>&1
   docker rm "$c" >/dev/null 2>&1
-  # $c is a managed container name (ci-runner-N) — no '/' or '..'; path stays under our docker/ subtree.
-  [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$c" 2>/dev/null || true
+  fleet_inventory_invalidate
+  if [ -n "$root" ]; then
+    rm -rf -- "${root:?}/docker/${c:?}" 2>/dev/null || true
+  else
+    log "warning: preserving cache for $c because its identity or CACHE_ROOT could not be proven safe"
+  fi
+}
+
+# Graceful controller removal: GitHub must first accept the deletion (or report
+# the runner absent). Ambiguous API failures leave the idle container intact so a
+# newly assigned job can never be interrupted by autoscale/reconciliation.
+remove_runner() {
+  local c="$1"
+  [ -n "$c" ] || return 0
+  runner_identity_validate "$c" || { err "refusing to remove invalid/unmanaged runner $c"; return 1; }
+  [ "$(runner_state "$c")" = idle ] || { log "runner $c is not explicitly idle; deferring removal"; return 1; }
+  deregister_runner_api "$c" || return 1
+  remove_runner_container "$c"
+}
+
+# Explicit teardown path for Stop, dead containers, and confirmed manual recycle.
+remove_runner_force() {
+  local c="$1"
+  [ -n "$c" ] || return 0
+  runner_identity_validate "$c" || { err "refusing to force-remove invalid/unmanaged runner $c"; return 1; }
+  deregister_runner_api "$c" || log "warning: forcing removal of $c after GitHub deregistration failed"
+  remove_runner_container "$c"
 }
 
 # Full teardown: daemons, runner containers, and the shared pull-through mirror.
@@ -1207,11 +1873,12 @@ remove_runner() {
 cmd_stop() {
   autoscale_stop
   imageupdate_stop
+  reconcile_stop
   local names; names="$(managed_names)"
   if [ -z "$names" ]; then
     log "no managed runners running"
   else
-    echo "$names" | while read -r c; do [ -n "$c" ] && { log "stopping $c (graceful deregister)"; remove_runner "$c"; }; done
+    echo "$names" | while read -r c; do [ -n "$c" ] && { log "stopping $c (forced operator teardown)"; remove_runner_force "$c"; }; done
   fi
   # drop the shared image-cache container so uninstall/Stop don't orphan it
   if docker ps -a --format '{{.Names}}' | grep -qx "$MIRROR_NAME"; then
@@ -1227,7 +1894,8 @@ cmd_stop() {
 }
 
 cmd_scale_internal() {
-  local target="$1"
+  local pool="default" target
+  if [ "$#" -ge 2 ]; then pool="$1"; target="$2"; else target="$1"; fi
   # Server-side validate + clamp. The form's max="20" is presentation-only, so a
   # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
   # a container + a minted GitHub registration token per iteration (host / API
@@ -1240,36 +1908,80 @@ cmd_scale_internal() {
   # scale path (down/same, not just up), so an unsafe CACHE_ROOT never gets provisioned.
   crf_safe_cache_root >/dev/null 2>&1 || { err "refusing to scale: CACHE_ROOT ($CACHE_ROOT) is unsafe — point it at a dedicated subdir under /mnt/<pool>, not a bare pool/disk/share root or system dir"; return 1; }
   ensure_dirs; registry_login
-  local current; current="$(managed_names | wc -l)"
+  if pool_mode_enabled; then
+    pool_record "$pool" >/dev/null 2>&1 || { err "unknown runner pool '$pool'"; return 1; }
+  else
+    pool="default"
+  fi
+  fleet_inventory_refresh || { err "scale: could not inventory managed runners"; return 1; }
+  local current; current="$(current_count "$pool")"
   if [ "$target" -gt "$current" ]; then
     [ -z "$ACCESS_TOKEN" ] && { err "no token configured"; return 1; }
     check_cache_root || return 1
-    local i
-    for i in $(seq 1 "$target"); do
-      docker ps -a --format '{{.Names}}' | grep -qx "${NAME_PREFIX}-${i}" || start_one "$i"
+    local i name total
+    for i in $(seq 1 "$HARD_MAX"); do
+      [ "$(current_count "$pool")" -ge "$target" ] && break
+      total="$(current_count)"
+      [ "$total" -lt "$HARD_MAX" ] || { log "scale: fleet hard cap reached with retiring/other pool runners still present"; break; }
+      name="$(runner_name_for "$i" "$pool")"
+      docker ps -a --format '{{.Names}}' | grep -qx "$name" || start_one "$i" "$pool"
     done
   elif [ "$target" -lt "$current" ]; then
-    local i
-    for i in $(seq "$current" -1 $((target+1)) ); do
-      remove_runner "${NAME_PREFIX}-${i}" && log "removed ${NAME_PREFIX}-${i}"
+    local c
+    for c in $(managed_names "$pool" | sort -rV); do
+      [ "$(current_count "$pool")" -le "$target" ] && break
+      if [ "$(runner_state "$c")" = idle ]; then
+        remove_runner "$c" && log "removed $c"
+      else
+        log "scale: $c is not idle; leaving it to finish before a later reconcile"
+      fi
     done
   fi
-  log "scaled to $(managed_names | wc -l) runner(s)"
+  log "scaled pool $pool to $(current_count "$pool") runner(s) (target $target)"
 }
 
 cmd_scale() {
   # The autoscaler uses cmd_scale_internal above. A manual scale-up is useful
   # during a burst, but never bypass its configured ceiling or remove runners
   # that the autoscaler is managing.
+  validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
+  local pool="default" target
+  if pool_mode_enabled; then
+    [ "$#" -eq 2 ] || { err "usage: scale <pool> <target>"; return 1; }
+    pool="$1"; target="$2"
+    pool_record "$pool" >/dev/null 2>&1 || { err "unknown runner pool '$pool'"; return 1; }
+  else
+    target="$1"
+  fi
+  case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
+  [ "$target" -le 64 ] || { err "manual scale target ($target) exceeds the fleet hard maximum (64)"; return 1; }
   if [ "$AUTOSCALE" = "true" ]; then
-    local target="$1" current max="$AUTOSCALE_MAX"
-    case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
+    local current max
+    if pool_mode_enabled; then max="$(pool_max "$pool")"; else max="$AUTOSCALE_MAX"; fi
     case "$max" in ''|*[!0-9]*) max=16 ;; esac
-    current="$(current_count)"
+    current="$(current_count "$pool")"
     [ "$target" -gt "$current" ] || { err "manual scale with Autoscaling on can only add runners (currently $current)"; return 1; }
     [ "$target" -le "$max" ] || { err "manual scale target ($target) exceeds autoscale max ($max); raise it in Settings first"; return 1; }
+    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
+  elif pool_mode_enabled; then
+    local rec other aggregate="$target" override tmp
+    while IFS= read -r rec; do
+      other="${rec%%|*}"; [ "$other" = "$pool" ] && continue
+      aggregate=$((aggregate + $(pool_effective_target "$other")))
+    done < <(pool_records)
+    [ "$aggregate" -le 64 ] || { err "manual pool targets would exceed the fleet hard maximum (64)"; return 1; }
+    override="$RUNDIR/scale-override.${pool}.$(pool_state_generation "$pool")"
+    tmp="${override}.tmp.$$"
+    printf '%s\n' "$target" > "$tmp" && mv "$tmp" "$override"
   fi
-  cmd_scale_internal "$1"
+  local rc=0
+  if pool_mode_enabled; then cmd_scale_internal "$pool" "$target" || rc=$?
+  else cmd_scale_internal "$target" || rc=$?; fi
+  if pool_mode_enabled && [ "$AUTOSCALE" != true ] && [ "$(current_count "$pool")" -ne "$target" ]; then
+    log "scale: pool $pool has pending capacity work; reconciliation will continue as runners become idle"
+    reconcile_start
+  fi
+  return "$rc"
 }
 
 cmd_status() {
@@ -1509,108 +2221,49 @@ cmd_queued_json() {
   echo "{\"queued\":${count:--1},\"age\":$age}"
 }
 
-cmd_recycle() {
-  # Deregister, remove, AND recreate one runner with a fresh registration token.
-  # Recreating (not just removing) keeps the fleet at its configured size even
-  # when autoscaling is off (the default) — otherwise a manual recycle would
-  # permanently shrink a fixed-size fleet by one. Mirrors recreate_stopped_runner:
-  # the warm caches and DinD data root are pool bind mounts keyed by the same
-  # name, so the replacement comes back warm.
-  local name="$1" idx
-  echo "$name" | grep -qE "^${NAME_PREFIX}-[0-9]+$" || { echo '{"ok":false,"error":"bad name"}'; return 1; }
-  idx="$(docker inspect -f '{{ index .Config.Labels "net.unraid.ci-runner-farm.index" }}' "$name" 2>/dev/null)"
-  [ -z "$idx" ] && idx="${name##*-}"
-  # Warn (don't block) if the rest of the fleet is on a different network than the
-  # current NETWORK_ISOLATION setting: build_args below uses the LIVE config, so a lone
-  # recycle after an isolation change silently places this one runner on the new
-  # network while its siblings stay on the old — a half-isolated fleet is a false sense
-  # of security. Tell the operator to restart the fleet to make it consistent.
-  local other
-  for other in $(managed_names); do
-    [ -n "$other" ] && [ "$other" != "$name" ] || continue
-    on_expected_network "$other" || { log "recycle: WARNING — $other is not on the network the current NETWORK_ISOLATION setting expects; recycling $name will place it on the new network, leaving the fleet split. Restart the fleet to reconcile."; break; }
-  done
-  # Provision what the replacement needs (cache-root guard, dirs, isolated network,
-  # mirror, registry login) BEFORE removing the old container, so a config change
-  # since the last Start can't leave the runner removed-but-not-replaced. NOT the
-  # firewall: strict-mode egress rules are subnet-keyed, so the replacement rejoins
-  # a subnet the fleet's existing rules already cover — a clear+reapply here would
-  # briefly drop egress protection for every strict runner (and the rules already
-  # protect the new one). Abort with the runner intact if the cache-root guard,
-  # registry login, or isolated network is unavailable.
-  provision_base || { echo '{"ok":false,"error":"provisioning preflight failed (see log)"}'; return 1; }
-  if [ "$NETWORK_ISOLATION" != "off" ] && ! docker network inspect "$RUNNER_NETWORK" >/dev/null 2>&1; then
-    log "recycle: $name left in place — runner network $RUNNER_NETWORK unavailable"
-    echo '{"ok":false,"error":"runner network unavailable"}'; return 1
+recreate_runner() {
+  local name="$1" mode="${2:-force}" idx pool scope image
+  runner_identity_validate "$name" || { echo '{"ok":false,"error":"runner is not a valid managed identity"}'; return 1; }
+  idx="$(runner_index "$name")"; pool="$(runner_pool "$name")"
+  if pool_mode_enabled; then
+    pool_record "$pool" >/dev/null 2>&1 || { echo '{"ok":false,"error":"runner pool is retiring"}'; return 1; }
+  elif [ "$pool" != default ]; then
+    echo '{"ok":false,"error":"pool runner is retiring in single mode"}'; return 1
   fi
-  # Recycle deliberately skips the full firewall_clear+reapply cmd_start runs — on a
-  # healthy strict fleet the replacement rejoins a subnet the existing rules already
-  # cover, and clear+reapply would briefly drop egress for EVERY strict runner. But
-  # re-assert when the firewall state is genuinely STALE: (a) strict was enabled since
-  # the last Start so no rules exist yet (the replacement would start unprotected), or
-  # (b) provision_base recreated the image mirror with a new IP so the strict mirror
-  # allow rule now dangles and DinD pull-through would break. Steady state (rules
-  # present + current mirror IP still allowed) skips, so there is no per-recycle
-  # blackout. firewall_apply reprograms from the live subnet + mirror IP.
-  if [ "$NETWORK_ISOLATION" = "strict" ] && command -v iptables >/dev/null 2>&1; then
-    local fwrules mip subnet
-    fwrules="$(iptables -w -L DOCKER-USER -n 2>/dev/null)"
-    mip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MIRROR_NAME" 2>/dev/null)"
-    # The current runner-network subnet: provision_base above may have RECREATED
-    # $RUNNER_NETWORK (e.g. after a docker network prune) with a fresh auto-allocated
-    # subnet. The existing rules are subnet-scoped (-s <cidr>), so if the live subnet
-    # no longer appears in them the fleet is sitting on a range the DROP rules were
-    # never written for — strict egress is silently unenforced until we reapply.
-    subnet="$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' "$RUNNER_NETWORK" 2>/dev/null)"
-    if ! printf '%s' "$fwrules" | grep -qF "$FW_TAG" \
-       || { [ -n "$mip" ] && ! printf '%s' "$fwrules" | grep -qF "$mip"; } \
-       || { [ -n "$subnet" ] && ! printf '%s' "$fwrules" | grep -qF "$subnet"; }; then
-      log "recycle: (re)applying strict egress rules — firewall state was stale"
-      firewall_apply
-    fi
-  fi
-  # Validate the REPLACEMENT can be fully provisioned BEFORE touching the old
-  # container. build_args assembles everything start_one needs — it mints a fresh
-  # GitHub registration token and resolves the image. A cleared token (no
-  # ACCESS_TOKEN, which build_args silently skips) or a PAT that can no longer mint
-  # one would otherwise let the replacement run unregistered, or fail, only after
-  # the old runner is already gone. Guard the empty-token case explicitly, then
-  # reuse the validated args so the runner we start is the one we vetted.
+  if pool_mode_enabled; then scope="org:$GH_OWNER"
+  elif [ "$GH_SCOPE" = org ]; then scope="org:$GH_OWNER"
+  else scope="repo:$(repo_for_index "$idx")"; fi
+  provision_base || { echo '{"ok":false,"error":"provisioning preflight failed"}'; return 1; }
   [ -n "$ACCESS_TOKEN" ] || { echo '{"ok":false,"error":"no GitHub token configured"}'; return 1; }
-  build_args "$idx" || { echo '{"ok":false,"error":"cannot provision replacement (check the GitHub token)"}'; return 1; }
-  # Verify the exact target image while the old runner is still intact. A valid
-  # registry login does not prove that a newly configured tag exists, and the
-  # built-in image may have been removed since this runner was started.
-  local image="${ARGS[${#ARGS[@]}-1]}"
-  if [ "$IMAGE_SOURCE" = "remote" ]; then
-    docker pull "$image" >/dev/null 2>&1 || {
-      log "recycle: $name left in place — could not pull replacement image $image"
-      echo '{"ok":false,"error":"cannot pull replacement image"}'; return 1
-    }
-  elif ! docker image inspect "$image" >/dev/null 2>&1; then
-    log "recycle: $name left in place — built-in replacement image $image is unavailable"
-    echo '{"ok":false,"error":"built-in replacement image is unavailable"}'; return 1
+  build_args "$idx" "$name" "$pool" "$scope" || { echo '{"ok":false,"error":"cannot provision replacement"}'; return 1; }
+  image="${ARGS[${#ARGS[@]}-1]}"
+  if [ "$IMAGE_SOURCE" = remote ]; then
+    docker pull "$image" >/dev/null 2>&1 || { echo '{"ok":false,"error":"cannot pull replacement image"}'; return 1; }
+  else
+    docker image inspect "$image" >/dev/null 2>&1 || { echo '{"ok":false,"error":"built-in replacement image is unavailable"}'; return 1; }
   fi
-  # Stop gracefully first so the runner's inner dockerd can flush its overlay2 /
-  # containerd metadata before removal. The DinD data root ($CACHE_ROOT/docker/$name)
-  # is preserved and reused WARM by the replacement, so a bare SIGKILL (docker rm -f
-  # with no stop) risks handing the new container an unclean data root that fails to
-  # mount. Then force-remove.
-  docker stop -t 30 "$name" >/dev/null 2>&1
-  if ! docker rm -f "$name" >/dev/null 2>&1; then
-    log "recycle: docker rm failed for $name"; echo '{"ok":false,"error":"remove failed"}'; return 1
+  if [ "$mode" = graceful ]; then
+    [ "$(runner_state "$name")" = idle ] || { echo '{"ok":false,"error":"runner is not idle"}'; return 1; }
+    deregister_runner_api "$name" || { echo '{"ok":false,"error":"GitHub did not accept runner retirement"}'; return 1; }
+    remove_runner_container "$name"
+  else
+    remove_runner_force "$name" || { echo '{"ok":false,"error":"remove failed"}'; return 1; }
   fi
-  deregister_runner_api "$name"
-  log "recycling $name (manual, from fleet page)"
+  log "recycling $name ($mode)"
   if ! docker run "${ARGS[@]}" >/dev/null 2>&1; then
-    log "recycle: $name removed but its replacement failed to start (idx=$idx)"
+    log "recycle: $name removed but its replacement failed to start"
     echo '{"ok":false,"error":"removed but not recreated"}'; return 1
   fi
   echo '{"ok":true}'
 }
 
+cmd_recycle() {
+  validate_runtime_config || { echo "{\"ok\":false,\"error\":\"$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)\"}"; return 1; }
+  recreate_runner "$1" force
+}
+
 cmd_logs_tail() {
-  echo "$1" | grep -qE "^${NAME_PREFIX}-[0-9]+$" || return 1
+  runner_identity_validate "$1" || return 1
   docker logs --tail "${2:-150}" "$1" 2>&1
 }
 
@@ -1670,7 +2323,15 @@ cmd_usage_refresh() {
 }
 
 cmd_status_json() {
-  local names; names="$(managed_names)"
+  local names
+  if fleet_inventory_refresh; then names="$(inventory_names)"
+  else
+    printf '{"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+      "$(printf '%s' "$RUNNER_MODE" | json_escape)"
+    return 1
+  fi
+  local config_error=""
+  validate_runtime_config || config_error="$POOL_CONFIG_ERROR"
   # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
   # cmd_usage_refresh) so this 5s-per-tab call makes just TWO docker calls total (the
   # `docker ps` in managed_names + one batched inspect for live state and resource
@@ -1695,21 +2356,33 @@ cmd_status_json() {
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
-  local inspraw="" cur_gen stalec=0
-  cur_gen="$(crf_confgen)"
-  # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}' $names 2>/dev/null)"
+  local cur_gen stalec=0 retiringc=0 blockedc=0
+  declare -A pc pup pbusy pidle pstarting perror pstale pretiring
   local out="["; local first=1
-  for c in $names; do
+  local c st _health cpus mem cgen pool scope pidx _routing identity
+  while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity; do
     [ -z "$c" ] && continue
-    local irow st cpus mem cgen stale=false
-    # {{.Name}} carries a leading '/', so field 1 is "/name"; split the pipe-delimited
-    # inspect row with one read builtin instead of three cut subshells per runner.
-    irow="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|")"
-    IFS='|' read -r _ st cpus mem cgen <<< "$irow"
+    local stale=false retiring=false
+    pool="${pool:-default}"; pidx="${pidx:-${c##*-}}"
+    pool_id_valid "$pool" || pool="invalid"
+    case "$pidx" in ''|*[!0-9]*) pidx=0 ;; esac
     # A RUNNING runner whose baked-config fingerprint differs from the current cfg predates
     # a config change; the reconciler migrates it as it goes idle. Surface the count for the UI.
-    [ "$st" = running ] && [ "$cgen" != "$cur_gen" ] && { stale=true; stalec=$((stalec+1)); }
+    if [ -z "$config_error" ]; then
+      if [ "$identity" != valid ]; then
+        retiring=true; retiringc=$((retiringc+1))
+      elif pool_mode_enabled; then
+        if pool_record "$pool" >/dev/null 2>&1; then
+          cur_gen="$(crf_confgen "$pool" "org:$GH_OWNER")"
+        else
+          retiring=true; retiringc=$((retiringc+1))
+        fi
+      else
+        if [ "$pool" = default ]; then cur_gen="$(crf_confgen)"
+        else retiring=true; retiringc=$((retiringc+1)); fi
+      fi
+      [ "$retiring" = false ] && [ "$st" = running ] && [ "$cgen" != "$cur_gen" ] && { stale=true; stalec=$((stalec+1)); }
+    fi
     # phase + cpu/mem usage + job context: all from the background cache line
     # "name cpu mem phase b64(job) jstarted b64(repo) pr b64(branch) run_id".
     local urow phase="starting" cpu_pct=-1 mem_used_mib=-1
@@ -1723,15 +2396,54 @@ cmd_status_json() {
       jrepo="$(_d64 "$7" | json_escape)"; jpr="$(_uu "$8")"
       jbranch="$(_d64 "$9" | json_escape)"; jrun="$(_uu "${10}")"
     fi
+    pc["$pool"]=$(( ${pc["$pool"]:-0} + 1 ))
+    if [ "$st" = running ]; then
+      pup["$pool"]=$(( ${pup["$pool"]:-0} + 1 ))
+      case "$phase" in
+        busy) pbusy["$pool"]=$(( ${pbusy["$pool"]:-0} + 1 )) ;;
+        idle) pidle["$pool"]=$(( ${pidle["$pool"]:-0} + 1 )) ;;
+        starting) pstarting["$pool"]=$(( ${pstarting["$pool"]:-0} + 1 )) ;;
+        *) perror["$pool"]=$(( ${perror["$pool"]:-0} + 1 )) ;;
+      esac
+    else
+      perror["$pool"]=$(( ${perror["$pool"]:-0} + 1 ))
+    fi
+    [ "$stale" = true ] && pstale["$pool"]=$(( ${pstale["$pool"]:-0} + 1 ))
+    if [ "$retiring" = true ]; then
+      pretiring["$pool"]=$(( ${pretiring["$pool"]:-0} + 1 ))
+      [ "$phase" = idle ] || blockedc=$((blockedc+1))
+    fi
     case "$cpu_pct" in ''|*[!0-9.-]*) cpu_pct=-1 ;; esac
     case "$mem_used_mib" in ''|*[!0-9-]*) mem_used_mib=-1 ;; esac
     case "$jpr" in *[!0-9]*) jpr="" ;; esac
     case "$jrun" in *[!0-9]*) jrun="" ;; esac
+    local routing_label
+    if pool_mode_enabled; then routing_label="$(pool_label "$pool" 2>/dev/null || true)"
+    else routing_label="$RUNNER_LABELS"; fi
     [ $first -eq 0 ] && out+=","
-    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"stale\":${stale}}"
+    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"pool\":\"$(printf '%s' "$pool"|json_escape)\",\"routing_label\":\"$(printf '%s' "$routing_label"|json_escape)\",\"scope_target\":\"$(printf '%s' "$scope"|json_escape)\",\"pool_index\":${pidx:-0},\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"stale\":${stale},\"retiring\":${retiring}}"
     first=0
-  done
+  done < "$INVENTORY_FILE"
   out+="]"
+  local pools="[" pfirst=1 rec pool min max idle configured effective label seen=" "
+  if [ -z "$config_error" ]; then
+    while IFS= read -r rec; do
+      pool="${rec%%|*}"; min="$(pool_min "$pool")"
+      max="$(pool_max "$pool")"; idle="$(pool_idle "$pool")"; configured="$(pool_configured_target "$pool")"
+      if pool_mode_enabled; then effective="$(pool_effective_target "$pool")"; label="$(pool_label "$pool")"
+      else effective="$configured"; label="$RUNNER_LABELS"; fi
+      [ "$pfirst" -eq 0 ] && pools+=","
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle}}"
+      pfirst=0; seen="${seen}${pool} "
+    done < <(pool_records)
+  fi
+  for pool in "${!pc[@]}"; do
+    case "$seen" in *" $pool "*) continue ;; esac
+    [ "$pfirst" -eq 0 ] && pools+=","
+    pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"\",\"configured\":0,\"effective_target\":0,\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"min\":0,\"max\":0,\"idle_buffer\":0}"
+    pfirst=0
+  done
+  pools+="]"
   local as="off"; [ "$AUTOSCALE" = "true" ] && as="$(autoscale_status)"
   local iu="off"; [ "$IMAGE_AUTOUPDATE" = "true" ] && iu="$(imageupdate_status) (every $((IMAGE_AUTOUPDATE_INTERVAL/60))m)"
   local warn; warn="$(cat "$RUNDIR/warn.cache" 2>/dev/null | json_escape)"
@@ -1739,9 +2451,17 @@ cmd_status_json() {
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
-  local autoscale_max="$AUTOSCALE_MAX"
+  local autoscale_max="$AUTOSCALE_MAX" configured_total="$RUNNER_COUNT"
+  if [ -z "$config_error" ] && pool_mode_enabled; then
+    autoscale_max=0; configured_total=0
+    while IFS= read -r rec; do
+      pool="${rec%%|*}"
+      autoscale_max=$((autoscale_max + $(pool_max "$pool")))
+      configured_total=$((configured_total + $(pool_configured_target "$pool")))
+    done < <(pool_records)
+  elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
+  echo "{\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -1753,18 +2473,17 @@ cmd_status_json() {
 # counts anyway. One batched inspect + the shared usage cache; triggers the same
 # background refresh as status-json so busy/idle stay fresh when only the tile is open.
 cmd_dashboard_json() {
-  local names up=0 busy=0 idle=0 c st ph usage uage nowu inspraw rthresh
-  names="$(managed_names)"
+  local names up=0 busy=0 idle=0 c st ph usage uage nowu rthresh
+  fleet_inventory_refresh || { printf '{"count":0,"up":0,"busy":0,"idle":0}\n'; return 1; }
+  names="$(inventory_names)"
   nowu=$(date +%s); uage=999
   [ -f "$RUNDIR/usage.cache" ] && uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
   rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
   [ "$uage" -gt "$rthresh" ] && ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
   usage="$([ -f "$RUNDIR/usage.cache" ] && cat "$RUNDIR/usage.cache" 2>/dev/null)"
-  # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}' $names 2>/dev/null)"
   for c in $names; do
     [ -n "$c" ] || continue
-    st="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|" | cut -d'|' -f2)"
+    st="$(inventory_field "$c" state)"
     [ "$st" = running ] || continue
     up=$((up+1))
     ph="$(printf '%s\n' "$usage" | grep -m1 -- "^${c} " | awk '{print $4}')"
@@ -1932,13 +2651,26 @@ cmd_boot_autostart() {
   with_fleet_lock wait cmd_start
 }
 
+cmd_validate_pools() {
+  local mode="${1:-$RUNNER_MODE}" pools="${2:-$RUNNER_POOLS}" scope="${3:-$GH_SCOPE}"
+  if pool_config_validate "$mode" "$pools" "$scope"; then
+    printf '{"ok":true}\n'
+  else
+    printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
+    return 1
+  fi
+}
+
 case "${1:-status}" in
   start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   cmd_boot_autostart ;;
   stop)         with_fleet_lock wait cmd_stop ;;
   restart)      with_fleet_lock wait cmd_restart ;;
   mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
-  scale)        with_fleet_lock wait cmd_scale "${2:?usage: scale <N>}" ;;
+  scale)
+    if [ -n "${3:-}" ]; then with_fleet_lock wait cmd_scale "${2}" "${3}"
+    else with_fleet_lock wait cmd_scale "${2:?usage: scale [pool] <N>}"; fi ;;
+  validate-pools) cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   dashboard-json) cmd_dashboard_json ;;

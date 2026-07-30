@@ -17,6 +17,15 @@ $PLUGIN  = 'ci-runner-farm';
 $CFGDIR  = "/boot/config/plugins/$PLUGIN";
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action  = $_REQUEST['action'] ?? 'status-json';
+$method  = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+
+$readOnlyActions = ['status-json','queued-json','stats-json','cache-usage','image-info',
+  'get-default-dockerfile','get-dockerfile','farm-log','build-log','runner-log','validate-pools'];
+if ($method !== 'POST' && !in_array($action, $readOnlyActions, true)) {
+  http_response_code(405);
+  echo json_encode(['ok'=>false,'error'=>'POST required']);
+  exit;
+}
 
 function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [implode("\n", $out), $rc]; }
 // For actions whose stdout is a JSON body the frontend parses: keep stderr OUT of
@@ -31,6 +40,9 @@ function last_json($out) {
   $lines = array_values(array_filter(explode("\n", $out), fn($l) => trim($l) !== ''));
   $last = $lines ? trim(end($lines)) : '';
   return (strlen($last) && $last[0] === '{') ? $last : '';
+}
+function runner_name_valid($name) {
+  return preg_match('/^ci-runner-(?:[0-9]+|[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?-[0-9]+)$/', $name) === 1;
 }
 
 switch ($action) {
@@ -52,11 +64,34 @@ switch ($action) {
     break;
 
   case 'scale':
-    // Clamp server-side too — the form max is presentation-only and the engine
-    // hard-caps; this is defense-in-depth against a crafted POST (n=99999).
-    $n = max(0, min(64, (int)($_REQUEST['n'] ?? 0)));
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' scale ' . escapeshellarg((string)$n));
-    echo json_encode(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
+    $raw = $_REQUEST['n'] ?? '';
+    if (!is_string($raw) || !preg_match('/^(?:0|[1-9][0-9]?)$/', $raw) || (int)$raw > 64) {
+      http_response_code(400); echo json_encode(['ok'=>false,'error'=>'scale target must be a canonical integer from 0 to 64']); break;
+    }
+    $pool = $_REQUEST['pool'] ?? '';
+    if ($pool !== '' && (!is_string($pool) || !preg_match('/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/', $pool))) {
+      http_response_code(400); echo json_encode(['ok'=>false,'error'=>'bad pool']); break;
+    }
+    $cmd = escapeshellarg($SCRIPT) . ' scale ';
+    if ($pool !== '') $cmd .= escapeshellarg($pool) . ' ';
+    $cmd .= escapeshellarg($raw);
+    [$out, $rc] = run($cmd);
+    echo json_encode(['ok' => $rc === 0, 'action' => $pool === '' ? "scale $raw" : "scale $pool $raw", 'log' => $out]);
+    break;
+
+  case 'validate-pools':
+    $mode = $_REQUEST['mode'] ?? 'single';
+    $pools = $_REQUEST['pools'] ?? '';
+    $scope = $_REQUEST['scope'] ?? 'repo';
+    if (!is_string($mode) || !in_array($mode, ['single','pools'], true) ||
+        !is_string($scope) || !in_array($scope, ['repo','org'], true) ||
+        !is_string($pools) || strlen($pools) > 4096) {
+      http_response_code(400); echo json_encode(['ok'=>false,'error'=>'invalid pool validation request']); break;
+    }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' validate-pools ' .
+      escapeshellarg($mode) . ' ' . escapeshellarg($pools) . ' ' . escapeshellarg($scope));
+    if ($out !== '') echo $out;
+    else { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'pool validation failed']); }
     break;
 
   case 'set-token':
@@ -83,6 +118,7 @@ switch ($action) {
   case 'set-registry-token':
     $tok = trim($_REQUEST['token'] ?? '');
     if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    if (strlen($tok) > 4096 || str_contains($tok, "\0")) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'registry token is too large']); break; }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/registry-token", $tok);
     chmod("$CFGDIR/registry-token", 0600);
@@ -103,6 +139,7 @@ switch ($action) {
   case 'save-dockerfile':
     $content = $_REQUEST['dockerfile'] ?? '';
     if (trim($content) === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    if (!is_string($content) || strlen($content) > 1048576) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'Dockerfile is too large']); break; }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/Dockerfile", $content);
     echo json_encode(['ok' => true, 'action' => 'save-dockerfile']);
@@ -140,7 +177,7 @@ switch ($action) {
 
   case 'recycle':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^ci-runner-[0-9]+$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    if (!is_string($n) || !runner_name_valid($n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' recycle ' . escapeshellarg($n));
     // cmd_recycle emits progress logs then its {ok,error?} verdict as the final
     // stdout line; pass it through so the specific reason (removed-not-recreated,
@@ -151,7 +188,7 @@ switch ($action) {
 
   case 'runner-log':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^ci-runner-[0-9]+$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    if (!is_string($n) || !runner_name_valid($n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
     [$out, $rc] = run(escapeshellarg($SCRIPT) . ' logs-tail ' . escapeshellarg($n) . ' 150');
     echo json_encode(['ok' => true, 'log' => $out]);
     break;

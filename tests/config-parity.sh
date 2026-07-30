@@ -80,12 +80,12 @@ done
 # 4. shared literals: the manual scale cap and runner-name prefix duplicated across
 #    the engine and exec.php must agree.
 eng_cap="$(grep -oE 'HARD_MAX=[0-9]+' "$ENGINE" | head -1 | grep -oE '[0-9]+')"
-php_cap="$(grep -oE 'min\([0-9]+' "$EXEC" | head -1 | grep -oE '[0-9]+')"
+php_cap="$(grep -oE '\$raw > [0-9]+' "$EXEC" | head -1 | grep -oE '[0-9]+' || true)"
 [ -n "$eng_cap" ] && [ "$eng_cap" = "$php_cap" ] || bad "scale hard-cap differs: engine HARD_MAX='$eng_cap' vs exec.php min='$php_cap'"
 
 prefix="$(grep -oE 'NAME_PREFIX="[^"]+"' "$ENGINE" | head -1 | sed -E 's/NAME_PREFIX="([^"]+)"/\1/')"
-if [ -n "$prefix" ] && ! grep -qF "^${prefix}-[0-9]" "$EXEC"; then
-  bad "exec.php runner-name regex does not match NAME_PREFIX='$prefix' (expected ^${prefix}-[0-9]+\$)"
+if [ -n "$prefix" ] && ! grep -qF "^${prefix}-" "$EXEC"; then
+  bad "exec.php runner-name regex does not match NAME_PREFIX='$prefix'"
 fi
 
 if [ "$fail" -ne 0 ]; then

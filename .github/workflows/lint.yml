@@ -50,11 +50,10 @@ jobs:
             php -l "$f"
           done
 
-      - name: Config parity
-        run: bash tests/config-parity.sh
-
-      - name: Path guards
-        run: bash tests/safe-paths.sh
-
-      - name: Rust preset invariants
-        run: bash tests/rust-preset.sh
+      - name: Behavioral regression suite
+        run: |
+          set -e
+          for test in tests/*.sh; do
+            echo "bash $test"
+            bash "$test"
+          done

@@ -2,7 +2,7 @@
 
 Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners** —
 multiple concurrent, resource-capped runners running as Docker containers, with
-warm shared caches, queue-aware autoscaling, and Docker-in-Docker. No VM
+warm shared caches, utilization-aware autoscaling, routed capacity pools, and Docker-in-Docker. No VM
 required.
 
 Hosted CI minutes are slow and metered. Meanwhile, the Unraid server in your
@@ -33,7 +33,8 @@ dependency caches that stay hot between runs, at zero cost per minute.
 | Capability | What it means |
 |---|---|
 | **N concurrent runners** | Each runner is its own container, optionally capped with `--cpus` / `--memory` so CI never starves the rest of the host. |
-| **Queue-aware autoscaling** | An optional daemon floats the fleet between a min and max based on how many jobs are waiting — capacity when you need it, idle when you don't. |
+| **Runner pools** | Reserve independently scaled Rust, Python, TypeScript, or other capacity behind derived `ci-pool-*` labels so quick jobs do not wait behind long builds. |
+| **Utilization-aware autoscaling** | An optional daemon maintains a warm idle buffer between a min and max, independently for every configured pool. |
 | **Warm shared caches** | Cargo registry/git, npm, yarn, pnpm, and Playwright caches live on a fast pool and are reused across every run. Cache mounts are fully configurable for other toolchains and remote compiler-cache backends. |
 | **Docker-in-Docker per runner** | Jobs that use `services:` or `docker compose` just work, with an optional shared pull-through registry mirror so images are pulled once for the whole fleet. |
 | **Bring your own image** | Point at any image you publish to a registry, or build one in-plugin — toggle **Rust / Python / Node·TS / Android** toolchains into the Dockerfile with one click, then Build. |
@@ -52,9 +53,10 @@ gives you one shared pool that any of your private repos can pull from).
 Persistent package caches and the build workspace are bind-mounted from a fast
 pool so they survive across jobs. An optional companion container runs a
 **pull-through registry mirror**, so Docker-in-Docker jobs across the whole fleet
-pull each image only once. And an optional autoscaler watches the GitHub job
-queue, scaling the fleet up toward your max when work is waiting and back down to
-your min when things go quiet.
+pull each image only once. An optional autoscaler observes live busy, idle, and
+starting runners, scaling each pool toward its configured warm-idle buffer and
+back down after a grace period. The queued tile is a separate count of queued
+workflow runs across configured repositories; it is not the autoscaling signal.
 
 ---
 
@@ -92,9 +94,9 @@ The Settings tab holds the whole configuration on one screen:
 
 - **GitHub** — pick your **scope** (`repo` or `org`), the **owner** and **target
   repos**, and an optional **runner group**.
-- **Runners** — how many **concurrent runners**, their **labels** (so workflows
-  target this fleet with `runs-on:`), and optional **CPU / memory caps per
-  runner** so CI can't starve the rest of the box.
+- **Runners** — choose the legacy single fleet or define routed **runner pools**
+  with their own fixed/min/max/idle capacity. Pools receive derived labels such
+  as `ci-pool-python`. CPU/memory caps remain global per runner.
 - **Runner image** — the **Image source**: **Built-in** (build locally, below),
   or **Remote** to pull a named image, e.g. `ghcr.io/org/ci-runner-image:latest`
   (for a private image, set the registry server/username and save a registry
@@ -137,7 +139,7 @@ now** (linked to the GitHub run), and live **CPU / memory** against each runner'
 cap. Click the ↻ on a runner to **recycle** it — deregister, remove, and bring
 back a fresh replacement in place, so the fleet keeps its size.
 
-The stat tiles track runners up / busy / idle, GitHub **queue** depth, autoscaler
+The stat tiles track runners up / busy / idle, queued GitHub **workflow runs**, autoscaler
 state, image-update state, and total **cache** usage — with a one-click **Clear
 caches**. A **Recent runs** strip summarizes pass/fail/cancel rates across your
 repos, and the colorized **Fleet log** streams autoscaler and action output.
@@ -149,17 +151,66 @@ job output inline:
 
 ![A runner's log drawer expanded below its row, streaming the live job log](docs/images/fleet-log-drawer.png)
 
-### 4. (Optional) Queue-aware autoscaling
+### 4. (Optional) Routed runner pools
+
+Runner pools solve head-of-line blocking by reserving eligible capacity. In
+**Settings → Runners**, select **Runner pools** (organization scope is required)
+and define records such as Rust 3, Python 1, and TypeScript 1. Each pool shows a
+copyable workflow selector:
+
+```yaml
+# Rust
+runs-on: [self-hosted, ci-pool-rust]
+
+# Python
+runs-on: [self-hosted, ci-pool-python]
+
+# TypeScript / Node
+runs-on: [self-hosted, ci-pool-typescript]
+```
+
+GitHub matches every requested label. A job that asks only for `self-hosted`
+can still use any self-hosted runner, and a specialized runner carrying a broad
+legacy label such as `unraid` would still accept generic jobs. Pool-mode runners
+therefore receive only their derived custom routing label. Migrate every
+self-hosted workflow job to an explicit `ci-pool-*` selector before removing the
+legacy/general capacity.
+
+Pools are scheduling routes, not trust boundaries. They share the host kernel,
+runner image, network policy, privileged DinD setting, and writable caches.
+Runner groups remain the organization-level repository access boundary.
+
+Safe activation order:
+
+1. Deploy the plugin while **Single fleet** remains selected.
+2. Restart the single fleet once after upgrading so existing containers receive
+   immutable GitHub scope metadata before any mode change.
+3. Add a general compatibility pool if legacy selectors still exist.
+4. Prepare Rust/Python/TypeScript pool definitions.
+5. Update workflow jobs to their unique selectors.
+6. Enable pool mode and verify each GitHub registration and smoke job.
+7. Remove general capacity only after the workflow inventory is complete.
+
+The plugin never edits workflow files in sibling repositories. Routing changes
+are an explicit, repository-by-repository migration owned by those workflows.
+
+Rollback in the opposite order: restore legacy workflow selectors first, wait
+for those workflow changes to land, then switch back to Single fleet. Switching
+the controller first leaves jobs targeting `ci-pool-*` queued.
+
+### 5. (Optional) Utilization-aware autoscaling
 
 On the Settings tab, set a **min** and **max** runner count, a **warm idle
 buffer**, an **autoscale step**, a **demand check interval**, and a **scale-down
-grace** period. The daemon adds runners when jobs are queued and removes idle
-ones once the grace window passes — so you keep capacity ready without leaving
-the whole fleet running around the clock. Its decisions stream into the Fleet
-log.
+grace** period. In pool mode, every pool has its own min/max/buffer while the
+step, interval, and grace are global. The daemon grows a pool when running jobs
+consume its warm idle capacity and removes only explicitly idle runners after
+the grace window. Every autoscaled pool requires a minimum of at least one:
+this release intentionally does not enumerate queued jobs by label or scale
+from zero. Its decisions stream into the Fleet log.
 
 Once started, the runners also show up as ordinary Docker containers
-(`ci-runner-1…N`), plus the optional `ci-runner-mirror` registry mirror — each
+(`ci-runner-1…N` in single mode or `ci-runner-<pool>-N` in pool mode), plus the optional `ci-runner-mirror` registry mirror — each
 with the warm-cache bind mounts you configured — register with GitHub, and start
 picking up jobs.
 
@@ -194,6 +245,8 @@ before exposing the fleet:
 - For stronger isolation, set `EPHEMERAL=true` so each job gets a clean runner.
 - At org scope, create a **runner group restricted to your private repos** so a
   public repo can never schedule onto these runners.
+- Runner pool labels route jobs but do not authorize repositories. V1 uses the
+  same global runner group for every pool.
 
 See GitHub's [self-hosted runner security guidance](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners#self-hosted-runner-security)
 for the full picture.
@@ -205,7 +258,7 @@ for the full picture.
 Everything in the UI maps to the control script:
 
 ```
-include/runner-farm.sh {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-*}
+include/runner-farm.sh {start|boot-autostart|stop|restart|scale [pool] N|status|status-json|logs i|validate|validate-pools|build-image|prune-cache|autoscale-*}
 ```
 
 ---

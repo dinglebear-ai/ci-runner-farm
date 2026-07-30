@@ -22,6 +22,7 @@ $csrf     = $var['csrf_token'] ?? '';
 $defaults = [
   'GH_SCOPE'=>'repo', 'GH_OWNER'=>'unraid', 'GH_REPOS'=>'unraid/repo-a unraid/repo-b',
   'RUNNER_GROUP'=>'', 'RUNNER_COUNT'=>'4', 'RUNNER_LABELS'=>'self-hosted,unraid,build',
+  'RUNNER_MODE'=>'single', 'RUNNER_POOLS'=>'rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1',
   'RUNNER_CPUS'=>'', 'RUNNER_MEMORY'=>'16g', 'EPHEMERAL'=>'false', 'RUN_AS_ROOT'=>'false',
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
@@ -114,6 +115,34 @@ _(Runner group)_:
 :end
 
 ### Runners
+
+_(Runner layout)_:
+: <select name="RUNNER_MODE" id="crf-runner-mode" onchange="crfPoolMode()">
+  <option value="single" <?=crf_sel($cfg,'RUNNER_MODE','single','single')?>>Single fleet (legacy)</option>
+  <option value="pools" <?=crf_sel($cfg,'RUNNER_MODE','pools','single')?>>Runner pools</option>
+  </select>
+
+:crf_mode_plug:
+> **Single fleet** preserves the existing count and labels. **Runner pools** reserves independently scaled capacity behind derived labels such as `ci-pool-python`.
+>
+> Pools are scheduling routes, not security boundaries. They still share this host, runner image, network policy, privileged Docker mode, and writable caches.
+:end
+
+_(Pool definitions)_:
+: <input type="hidden" name="RUNNER_POOLS" id="crf-pools-value" value="<?=htmlspecialchars(crf_g($cfg,'RUNNER_POOLS','rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1'),ENT_QUOTES)?>">
+  <div id="crf-pools-editor"></div>
+  <div id="crf-pools-errors" class="crfs-pool-errors" aria-live="polite"></div>
+  <uui-button id="crf-add-pool" size="xs" onclick="crfAddPool();return false;">Add pool</uui-button>
+
+:crf_pools_plug:
+> Each row is **pool / fixed / min / max / idle buffer**. Workflows must request the generated label, for example `runs-on: [self-hosted, ci-pool-python]`.
+>
+> Runner pools require Organization scope. Removing or renaming a pool drains its runners as jobs finish; workflows still using the old label will queue.
+>
+> Do not add broad legacy labels to specialized pools. Jobs that ask only for `self-hosted` can still use any self-hosted runner.
+:end
+
+<div class="crfs-routing-warn">Runner pools reserve routed capacity; they are not security isolation. With privileged DinD or the host Docker socket, workflow code still shares this host kernel. At organization scope, use a runner group restricted to trusted repositories.</div>
 
 _(Concurrent runners)_:
 : <input type="number" name="RUNNER_COUNT" min="1" max="20" value="<?=crf_g($cfg,'RUNNER_COUNT','4')?>">
@@ -385,11 +414,78 @@ const CRF_DEFAULTS = <?=json_encode($defaults)?>;
 // nothing is written to flash until the user clicks Apply.
 function crfResetDefaults(){
   for (const k in CRF_DEFAULTS){ const el=document.getElementsByName(k)[0]; if(el) el.value=CRF_DEFAULTS[k]; }
+  crfBuildPoolEditor(CRF_DEFAULTS.RUNNER_POOLS||'');
+  crfPoolMode();
   crfImgSrc();
   // programmatic .value changes fire no input event, so nudge the advisory
   // listeners (Min>Max, memory envelope) to re-evaluate against the reset values.
   ['AUTOSCALE_MIN','AUTOSCALE_MAX','RUNNER_MEMORY','RUNNER_COUNT','AUTOSCALE'].forEach(n=>{ const el=document.getElementsByName(n)[0]; if(el) el.dispatchEvent(new Event('input')); });
 }
+const CRF_POOL_ID=/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/;
+function crfPoolRows(){ return [...document.querySelectorAll('#crf-pools-editor .crfs-pool-row')]; }
+function crfSerializePools(){
+  const v=crfPoolRows().map(row=>[...row.querySelectorAll('input')].map(i=>i.value.trim()).join('|')).join(';');
+  document.getElementById('crf-pools-value').value=v; return v;
+}
+function crfPoolPreview(row){
+  const id=row.querySelector('input').value.trim(), label=row.querySelector('.crfs-pool-label');
+  label.textContent=CRF_POOL_ID.test(id)?'runs-on: [self-hosted, ci-pool-'+id+']':'Enter a valid pool id';
+}
+function crfAddPool(rec='pool|1|1|2|1'){
+  const parts=String(rec).split('|'); while(parts.length<5) parts.push('1');
+  const row=document.createElement('div'); row.className='crfs-pool-row';
+  const names=['Pool','Fixed','Min','Max','Idle'];
+  parts.slice(0,5).forEach((v,i)=>{
+    const wrap=document.createElement('label'); wrap.textContent=names[i];
+    const input=document.createElement('input'); input.type=i?'number':'text'; input.value=v;
+    input.setAttribute('aria-label',names[i]+' for runner pool');
+    if(i){ input.min='1'; input.max='64'; }
+    input.addEventListener('input',()=>{crfPoolPreview(row);crfValidatePools(false);});
+    wrap.appendChild(input); row.appendChild(wrap);
+  });
+  const meta=document.createElement('div'); meta.className='crfs-pool-label'; row.appendChild(meta);
+  const remove=document.createElement('button'); remove.type='button'; remove.className='crfs-pool-remove';
+  remove.textContent='Remove'; remove.setAttribute('aria-label','Remove runner pool');
+  remove.addEventListener('click',()=>{row.remove();crfSerializePools();crfValidatePools(false);});
+  row.appendChild(remove); document.getElementById('crf-pools-editor').appendChild(row); crfPoolPreview(row);
+}
+function crfBuildPoolEditor(raw){
+  const editor=document.getElementById('crf-pools-editor'); if(!editor)return;
+  editor.textContent=''; String(raw||'').split(';').filter(Boolean).forEach(crfAddPool);
+}
+function crfValidatePools(focus=true){
+  const mode=(document.getElementById('crf-runner-mode')||{}).value;
+  const box=document.getElementById('crf-pools-errors'); const rows=crfPoolRows(), errors=[], seen=new Set();
+  if(mode==='pools'&&!rows.length) errors.push('Add at least one pool.');
+  if(rows.length>8) errors.push('At most eight pools are supported.');
+  let fixedTotal=0,maxTotal=0,firstBad=null;
+  rows.forEach((row,n)=>{
+    const ins=[...row.querySelectorAll('input')], id=ins[0].value.trim();
+    ins.forEach(i=>i.classList.remove('crfs-invalid'));
+    if(!CRF_POOL_ID.test(id)){ errors.push('Pool '+(n+1)+' has an invalid id.'); firstBad=firstBad||ins[0]; ins[0].classList.add('crfs-invalid'); }
+    if(seen.has(id)){ errors.push('Pool id '+id+' is duplicated.'); firstBad=firstBad||ins[0]; ins[0].classList.add('crfs-invalid'); } seen.add(id);
+    const nums=ins.slice(1).map(i=>i.value);
+    nums.forEach((v,i)=>{ if(!/^[1-9][0-9]?$/.test(v)||+v>64){ errors.push(['Fixed','Min','Max','Idle'][i]+' for '+(id||'pool '+(n+1))+' must be 1-64.'); firstBad=firstBad||ins[i+1]; ins[i+1].classList.add('crfs-invalid'); } });
+    if((+nums[1]||0)>(+nums[2]||0)){errors.push('Min exceeds Max for '+id+'.');firstBad=firstBad||ins[2];}
+    if((+nums[3]||0)>(+nums[2]||0)){errors.push('Idle exceeds Max for '+id+'.');firstBad=firstBad||ins[4];}
+    fixedTotal+=(+nums[0]||0); maxTotal+=(+nums[2]||0);
+  });
+  if(fixedTotal>64) errors.push('Fixed pool capacity exceeds 64.');
+  if(maxTotal>64) errors.push('Maximum pool capacity exceeds 64.');
+  if(mode==='pools'&&(document.getElementsByName('GH_SCOPE')[0]||{}).value!=='org') errors.push('Runner pools require Organization scope.');
+  crfSerializePools(); box.textContent=errors.join(' '); box.classList.toggle('on',!!errors.length);
+  if(errors.length&&focus&&firstBad) firstBad.focus();
+  return errors.length===0;
+}
+function crfPoolMode(){
+  const pools=(document.getElementById('crf-runner-mode')||{}).value==='pools';
+  const editor=document.getElementById('crf-pools-editor'), add=document.getElementById('crf-add-pool');
+  if(editor) editor.style.display=pools?'grid':'none'; if(add) add.style.display=pools?'':'none';
+  ['RUNNER_COUNT','RUNNER_LABELS','AUTOSCALE_MIN','AUTOSCALE_MAX','AUTOSCALE_MIN_IDLE'].forEach(n=>{const el=document.getElementsByName(n)[0],dd=el&&el.closest('dd');if(dd){dd.style.display=pools?'none':'';if(dd.previousElementSibling)dd.previousElementSibling.style.display=pools?'none':'';}});
+  crfValidatePools(false);
+}
+crfBuildPoolEditor((document.getElementById('crf-pools-value')||{}).value||'');
+crfPoolMode();
 function crfTokState(ok){
   const band=document.getElementById('crf-tokband'), ball=document.getElementById('crf-tok-ball');
   document.getElementById('crf-tok').textContent = ok?'GitHub token configured':'GitHub token not set';
@@ -456,7 +552,10 @@ crfImgSrc();
   const fmt=(x)=>x.toFixed(1).replace(/\.0$/,'');
   const check=()=>{
     const g=parseMemGb(mem.value);
-    const n=(as&&as.value==='true')?(+((asmax||{}).value)||0):(+cnt.value||0);
+    const poolMode=(document.getElementsByName('RUNNER_MODE')[0]||{}).value==='pools';
+    const records=String((document.getElementById('crf-pools-value')||{}).value||'').split(';').filter(Boolean).map(r=>r.split('|'));
+    const n=poolMode?records.reduce((sum,r)=>sum+(+(as&&as.value==='true'?r[3]:r[1])||0),0):
+      ((as&&as.value==='true')?(+((asmax||{}).value)||0):(+cnt.value||0));
     const worst=g*n;
     const on=worst>HOST_GB*0.8;
     w.textContent='Worst case '+n+' \u00d7 '+fmt(g)+'g = '+fmt(worst)+'g of the host\u2019s '+HOST_GB+'g \u2014 leaves '+fmt(HOST_GB-worst)+'g for everything else on this box.';
@@ -467,6 +566,25 @@ crfImgSrc();
 })();
 // Native Unraid folder picker on the Cache root path field
 if (window.jQuery) jQuery(function($){ if ($.fn.fileTreeAttach) $("#CACHE_ROOT").fileTreeAttach(); });
+const crfSettingsForm=document.forms['ci_runner_farm'];
+if(crfSettingsForm){
+  const scope=document.getElementsByName('GH_SCOPE')[0]; if(scope) scope.addEventListener('change',()=>crfValidatePools(false));
+  crfSettingsForm.addEventListener('submit',async e=>{
+    if(crfSettingsForm.dataset.validated==='1'){ delete crfSettingsForm.dataset.validated; return; }
+    e.preventDefault();
+    if(!crfValidatePools(true)) return;
+    const mode=document.getElementsByName('RUNNER_MODE')[0].value, pools=crfSerializePools(),
+          scopeValue=document.getElementsByName('GH_SCOPE')[0].value;
+    try{
+      const result=await crfPost({action:'validate-pools',mode,pools,scope:scopeValue});
+      if(!result.ok){ const box=document.getElementById('crf-pools-errors'); box.textContent=result.error||'Pool validation failed.'; box.classList.add('on'); return; }
+      crfSettingsForm.dataset.validated='1';
+      crfSettingsForm.submit();
+    }catch(err){
+      const box=document.getElementById('crf-pools-errors'); box.textContent='Could not validate runner pools: '+err.message; box.classList.add('on');
+    }
+  });
+}
 </script>
 
 <style>
@@ -502,6 +620,17 @@ if (window.jQuery) jQuery(function($){ if ($.fn.fileTreeAttach) $("#CACHE_ROOT")
   .crfs-card .inline_help p{margin:4px 0}
   .crfs-as-warn{display:none;font-size:12px;color:var(--brand-red,#e22828);padding:4px 0 2px;font-weight:bold}
   .crfs-as-warn.on{display:block}
+  #crf-pools-editor{display:grid;gap:6px}
+  .crfs-pool-row{display:grid;grid-template-columns:minmax(110px,1.4fr) repeat(4,minmax(54px,.55fr)) minmax(210px,2fr) auto;gap:6px;align-items:end;border:1px solid var(--border-color);border-radius:6px;padding:7px}
+  .crfs-pool-row label{display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--alt-text-color)}
+  .crfs-pool-row input{width:100%!important;box-sizing:border-box}
+  .crfs-pool-label{font-family:bitstream,monospace;font-size:11px;color:var(--link-text-color);align-self:center;overflow-wrap:anywhere}
+  .crfs-pool-remove{width:auto!important;align-self:center}
+  .crfs-pool-errors{display:none;color:var(--brand-red,#e22828);font-size:12px;font-weight:bold;padding:5px 0}
+  .crfs-pool-errors.on{display:block}
+  .crfs-invalid{border-color:var(--brand-red,#e22828)!important}
+  .crfs-routing-warn{border:1px solid var(--brand-orange,#ff8c2f);background:color-mix(in srgb,var(--brand-orange,#ff8c2f) 9%,var(--background-color));border-radius:6px;padding:8px 10px;margin:4px 0 8px;font-size:12px}
+  @media(max-width:900px){.crfs-pool-row{grid-template-columns:repeat(2,minmax(90px,1fr))}.crfs-pool-label{grid-column:1/-1}}
 </style>
 <script>
 /* Regroup the rendered markdown form (h3 + dl runs) into section cards laid out

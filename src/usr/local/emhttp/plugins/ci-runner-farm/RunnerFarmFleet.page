@@ -18,20 +18,22 @@ Tag="server"
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Queued</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span></div></uui-card-wrapper>
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Queued workflow runs</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Image update</span><span class="crf-stat-small" id="crf-s-iu">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Cache</span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></div></uui-card-wrapper>
 </div>
 
 <div class="crf-toolbar">
-  <uui-button size="xs" onclick="crfAction('start')">Start</uui-button>
+  <uui-button size="xs" data-crf-mutation onclick="crfAction('start')">Start</uui-button>
   <uui-button variant="secondary" size="xs" onclick="crfAction('stop')">Stop</uui-button>
-  <uui-button variant="secondary" size="xs" onclick="crfAction('restart')">Restart</uui-button>
-  <uui-button variant="outline" size="xs" onclick="crfAction('validate')">Validate (no token)</uui-button>
+  <uui-button variant="secondary" size="xs" data-crf-mutation onclick="crfAction('restart')">Restart</uui-button>
+  <uui-button variant="outline" size="xs" data-crf-mutation onclick="crfAction('validate')">Validate (no token)</uui-button>
   <span class="crf-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span> <input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled>
   <uui-button id="crf-scale-button" size="xs" onclick="crfScale()" disabled>Scale</uui-button></span>
 </div>
+
+<div id="crf-pool-cards" class="crf-pool-cards" style="display:none"></div>
 
 <div class="crf-bays">
   <div class="crf-bay crf-bay-head">
@@ -80,6 +82,16 @@ Tag="server"
   .crf-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px}
   .crf-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--alt-text-color);font-size:13px}
   .crf-scale input[type=number]{width:4em;height:26px;box-sizing:border-box;border-radius:6px;padding:0 8px;font-size:12px;margin:0}
+  .crf-pool-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin:0 0 8px}
+  .crf-pool-card{border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:9px 11px}
+  .crf-pool-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .crf-pool-title{font-weight:600;color:var(--text-color)}
+  .crf-pool-label{font-family:bitstream,monospace;font-size:11px;color:var(--link-text-color);cursor:pointer;background:none;border:0}
+  .crf-pool-counts{display:flex;gap:12px;font-size:12px;color:var(--alt-text-color);margin:6px 0}
+  .crf-pool-control{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--alt-text-color)}
+  .crf-pool-control input{width:4em!important;height:26px;box-sizing:border-box;margin:0!important}
+  .crf-pool-state{font-size:11px;color:var(--crf-busy)}
+  .crf-pool-badge{display:inline-block;margin-left:6px;border:1px solid var(--border-color);border-radius:8px;padding:0 5px;color:var(--link-text-color);font:10px bitstream,monospace}
   .crf-bays{border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:0 0 8px}
   .crf-bay{display:grid;grid-template-columns:22px minmax(110px,1fr) 88px minmax(120px,1.6fr) 120px 160px 26px;gap:8px;align-items:center;padding:4px 10px;border-top:1px solid var(--table-border-color,var(--border-color))}
   .crf-bay:first-child{border-top:none}
@@ -136,7 +148,7 @@ function crfFarmLog(){
 crfFarmLog(); setInterval(crfFarmLog,10000);
 /* Lightweight theme-following toast for action feedback. */
 const CRF_TOAST_MSG={start:'Fleet started',stop:'Fleet stopped',restart:'Fleet restarted',validate:'Validation finished'};
-function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
+function crfDoAction(a){ if(window.CRF_CONFIG_INVALID&&a!=='stop')return; crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
 function crfAction(a){
   /* Stop/Restart kill whatever the runners are building — confirm with the
      live impact when any runner is mid-job (sweetalert ships with the webgui). */
@@ -153,7 +165,43 @@ function crfAction(a){
   }
   crfDoAction(a);
 }
-function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
+function crfScale(){ if(window.CRF_CONFIG_INVALID)return; const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
+const CRF_POOL_PENDING=new Set();
+function crfSelectorValue(value){ return window.CSS&&CSS.escape?CSS.escape(value):String(value).replace(/["\\]/g,'\\$&'); }
+function crfScalePool(pool){
+  if(window.CRF_CONFIG_INVALID)return;
+  const input=document.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(pool)+'"]'); if(!input)return;
+  const n=input.value; CRF_POOL_PENDING.add(pool); crfRenderPools(window.CRF_LAST||{});
+  crfPost({action:'scale',pool,n}).then(o=>{
+    crfLog(o);
+    if(o.ok===false) crfToast('Scale failed'+(o.error?': '+o.error:''));
+    else crfToast('Scaled '+pool+' to '+n);
+  }).catch(e=>{crfToast('Scale failed');console.error('ci-runner-farm pool scale:',e);})
+    .finally(()=>{CRF_POOL_PENDING.delete(pool);crfRefresh();});
+}
+function crfRenderPools(d){
+  const box=document.getElementById('crf-pool-cards'); if(!box)return;
+  const pools=d.pools||[], active=document.activeElement;
+  if(d.mode!=='pools'){box.style.display='none';box.textContent='';return;}
+  box.style.display='grid';
+  if(active&&box.contains(active))return;
+  box.innerHTML=pools.map(p=>{
+    const auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), atMax=auto&&Number(p.count)>=Number(p.max);
+    const state=(p.retiring?'<span class="crf-pool-state">retiring '+crfEsc(p.retiring)+'</span>':'')+
+      (p.stale?'<span class="crf-pool-state"> updating '+crfEsc(p.stale)+'</span>':'');
+    return '<div class="crf-pool-card" data-pool="'+crfEsc(p.id)+'">'+
+      '<div class="crf-pool-head"><span class="crf-pool-title">'+crfEsc(p.id)+'</span><button type="button" class="crf-pool-label" data-copy="'+crfEsc(p.label)+'" title="Copy runs-on selector">'+crfEsc(p.label||'retiring')+'</button></div>'+
+      '<div class="crf-pool-counts"><span>up '+crfEsc(p.count)+'</span><span>busy '+crfEsc(p.busy)+'</span><span>idle '+crfEsc(p.idle)+'</span><span>target '+crfEsc(p.effective_target)+'</span></div>'+
+      '<div class="crf-pool-control"><span>'+(auto?'Scale up to':'Scale to')+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(auto?Number(p.count)+1:0)+'" max="'+crfEsc(auto?p.max:64)+'" value="'+crfEsc(p.count)+'" aria-label="'+(auto?'Scale up ':'Scale ')+crfEsc(p.id)+' pool">'+
+      '<uui-button size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>Scale</uui-button>'+state+'</div></div>';
+  }).join('');
+}
+document.getElementById('crf-pool-cards').addEventListener('click',e=>{
+  const scale=e.target.closest('[data-scale-pool]'); if(scale){crfScalePool(scale.dataset.scalePool);return;}
+  const copy=e.target.closest('[data-copy]'); if(copy&&copy.dataset.copy){
+    crfCopyText('runs-on: [self-hosted, '+copy.dataset.copy+']').then(()=>crfToast('Selector copied'));
+  }
+});
 
 function crfElapsed(iso){
   const t=Date.parse(iso); if(isNaN(t)) return null;
@@ -186,19 +234,24 @@ function crfVolatile(r){
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
   // outstanding, so a slow backend can't spiral into overlapping polls.
-  if(!crfFleetActive() || window.__crfBusyStatus) return;
+  if(!crfFleetActive()) return;
+  if(window.__crfBusyStatus){ window.__crfRefreshAgain=true; return; }
   window.__crfBusyStatus=true;
   crfPost({action:'status-json'}).then(d=>{
     window.CRF_LAST=d;
+    window.CRF_CONFIG_INVALID=!!d.config_error;
     const warn=document.getElementById('crf-warn');
-    if(warn){ if(d.warning){ warn.textContent='⚠ '+d.warning; warn.style.display='block'; } else { warn.textContent=''; warn.style.display='none'; } }
+    const warnText=d.config_error?('Configuration error: '+d.config_error):d.warning;
+    if(warn){ if(warnText){ warn.textContent='⚠ '+warnText; warn.style.display='block'; } else { warn.textContent=''; warn.style.display='none'; } }
+    document.querySelectorAll('[data-crf-mutation]').forEach(b=>b.disabled=!!d.config_error);
     const sec=document.getElementById('crf-sec');
     if(sec){ if(d.security){ sec.textContent='🔒 '+d.security; sec.style.display='block'; } else { sec.textContent=''; sec.style.display='none'; } }
     // Runners still on a previous baked config after a settings change — the reconciler
     // recycles them onto the new config as they go idle (busy jobs finish first).
     const mig=document.getElementById('crf-migrate');
-    if(mig){ if(d.stale>0){ mig.textContent='⟳ '+d.stale+' runner'+(d.stale>1?'s':'')+' updating to the new configuration — recycling as they go idle, so running jobs finish first.'; mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
+    if(mig){ if(d.stale>0){ mig.textContent='⟳ '+d.stale+' runner'+(d.stale>1?'s':'')+' updating or retiring — recycling as they go idle, so running jobs finish first.'+(d.blocked_capacity>0?' '+d.blocked_capacity+' currently blocked by active or starting work.':''); mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
     const rs=d.runners||[];
+    crfRenderPools(d);
     const up=rs.filter(r=>r.state==='running').length;
     const busy=rs.filter(r=>r.state==='running'&&r.phase==='busy').length;
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
@@ -211,15 +264,16 @@ function crfRefresh(){
     const scaleButton=document.getElementById('crf-scale-button');
     const scaleWrap=document.getElementById('crf-scale-wrap');
     const scaleLabel=document.getElementById('crf-scale-label');
-    if(scale){
-      scale.disabled=false;
+    if(scaleWrap) scaleWrap.style.display=d.mode==='pools'?'none':'flex';
+    if(scale && d.mode!=='pools'){
+      scale.disabled=!!d.config_error;
       scale.min=d.autoscale_enabled?Number(d.count)+1:0;
       scale.max=d.autoscale_enabled?40:20;
       if(d.autoscale_enabled) scale.max=d.autoscale_max;
       scale.setAttribute('aria-label',d.autoscale_enabled?'Scale up the fleet within the autoscale maximum':'Scale fleet to this runner count');
       scale.title=d.autoscale_enabled?'Immediately adds runners up to the Autoscale max. The autoscaler manages scale-down afterward.':'';
     }
-    if(scaleButton){ scaleButton.disabled=!!d.autoscale_enabled&&Number(d.count)>=Number(d.autoscale_max); scaleButton.title=scale&&scale.title; }
+    if(scaleButton){ scaleButton.disabled=!!d.config_error||(!!d.autoscale_enabled&&Number(d.count)>=Number(d.autoscale_max)); scaleButton.title=scale&&scale.title; }
     if(scaleLabel) scaleLabel.textContent=d.autoscale_enabled?'Scale up to':'Scale to';
     if(scaleWrap) scaleWrap.title=scale&&scale.title;
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
@@ -244,7 +298,7 @@ function crfRefresh(){
     // and falls through to the full rebuild below. busy-with-job_started is in the
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
-    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
+    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
     if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
@@ -281,12 +335,12 @@ function crfRefresh(){
       const jobCls=running&&r.phase==='busy'&&r.job?'crf-job':'crf-job crf-muted';
       return '<div class="crf-bay" data-name="'+crfEsc(r.name)+'" tabindex="0" role="button" aria-expanded="'+(window.CRF_DRAWER===r.name?'true':'false')+'" aria-label="Runner '+crfEsc(r.name)+', toggle log">'+
         '<span class="crf-ball '+ball+'"></span>'+
-        '<span class="crf-name">'+crfEsc(r.name)+'</span>'+
+        '<span class="crf-name">'+crfEsc(r.name)+(r.pool?'<span class="crf-pool-badge">'+crfEsc(r.pool)+'</span>':'')+'</span>'+
         '<span class="crf-phase"><uui-badge variant="'+bvar+'" size="xs"'+dark+'>'+crfEsc(ph)+'</uui-badge></span>'+
         '<span class="'+jobCls+'" title="'+crfEsc(r.job||'')+'">'+jobHtml+'</span>'+
         '<span class="crf-usage">'+crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span></span>'+
         '<span class="crf-usage">'+crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span></span>'+
-        '<span class="crf-recycle" tabindex="0" role="button" aria-label="Recycle '+crfEsc(r.name)+'" title="Recycle this runner">&#10227;</span>'+
+        '<span class="crf-recycle" tabindex="'+(d.config_error?'-1':'0')+'" role="button" aria-disabled="'+(d.config_error?'true':'false')+'" aria-label="Recycle '+crfEsc(r.name)+'" title="'+(d.config_error?'Fix the configuration before recycling':'Recycle this runner')+'">&#10227;</span>'+
       '</div>';
     }).join('');
     crfDrawerMount();
@@ -298,7 +352,7 @@ function crfRefresh(){
     const warn=document.getElementById('crf-warn');
     if(warn){ warn.textContent='⚠ '+(String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…'); warn.style.display='block'; }
     console.error('ci-runner-farm status:',e);
-  }).finally(()=>{ window.__crfBusyStatus=false; });
+  }).finally(()=>{ window.__crfBusyStatus=false; if(window.__crfRefreshAgain){window.__crfRefreshAgain=false;setTimeout(crfRefresh,0);} });
 }
 crfRefresh(); setInterval(crfRefresh,5000);
 function crfQueued(){
@@ -347,6 +401,7 @@ function crfCacheClear(){
   else if(confirm('Clear package caches? '+msg)) doIt();
 }
 function crfRecycle(name){
+  if(window.CRF_CONFIG_INVALID)return;
   const r=((window.CRF_LAST||{}).runners||[]).find(x=>x.name===name)||{};
   const go=()=>crfPost({action:'recycle',name})
     .then(o=>{ crfToast(o.ok?('Recycled '+name):('Recycle failed'+(o.error?': '+o.error:''))); crfRefresh(); })

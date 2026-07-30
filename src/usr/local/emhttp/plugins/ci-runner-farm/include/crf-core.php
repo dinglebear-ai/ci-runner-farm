@@ -22,6 +22,7 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   .crf-banner-warn{border:1px solid var(--crf-err);background:color-mix(in srgb,var(--crf-err) 12%,var(--background-color));color:var(--text-color)}
   .crf-banner-info{border:1px solid var(--crf-info);background:color-mix(in srgb,var(--crf-info) 10%,var(--background-color));color:var(--text-color)}
   uui-button:not(:defined),uui-brand-button:not(:defined){cursor:pointer;border:1px solid var(--border-color);border-radius:6px;padding:5px 12px;font-size:13px;color:var(--text-color)}
+  uui-button:not([variant]):not(:defined){background:var(--crf-busy);border-color:var(--crf-busy);color:#fff;font-weight:600}
   .crf-toast{position:fixed;right:18px;bottom:48px;z-index:9999;background:var(--inverse-background-color,#222);color:var(--inverse-text-color,#fff);border:1px solid var(--border-color);border-radius:6px;padding:9px 16px;font-size:13px;opacity:0;transform:translateY(6px);transition:opacity .2s,transform .2s;pointer-events:none}
   .crf-toast-show{opacity:1;transform:none}
   .crf-ball{width:12px;height:12px;border-radius:50%;background:var(--disabled-text-color,#888);display:inline-block}
@@ -42,7 +43,7 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   @media (prefers-reduced-motion:reduce){.crf-ball-busy,.crf-ball-starting{animation:none}}
 </style>
 <script>
-const CRF_CSRF = "<?=$crf_csrf?>";
+const CRF_CSRF = <?=json_encode($crf_csrf, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT)?>;
 const CRF_URL  = "/plugins/ci-runner-farm/include/exec.php";
 const CRF_UUI_BASE = "<?=$crf_uui_base?>";
 const CRF_UTIL_CSS = "<?=$crf_util_css?>";
