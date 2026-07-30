@@ -44,6 +44,10 @@ if grep -Fq '/update.php' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarm
   echo 'Settings still delegates writes to /update.php' >&2; exit 1
 fi
 grep -Fq '.crfs-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq '#crf-pools-editor{display:grid;gap:8px}' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq '.crfs-pool-row{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:8px;align-items:end;border:1px solid var(--border-color);border-radius:6px;padding:10px;min-width:0}' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'button.crfs-pool-label{font-family:bitstream,monospace;font-size:11px;line-height:1.3;letter-spacing:0!important;text-transform:none!important;color:var(--link-text-color)!important;align-self:center;white-space:normal;overflow-wrap:anywhere;background:var(--shade-bg-color,transparent)!important;border:1px solid var(--border-color)!important;border-radius:4px;cursor:pointer;text-align:left;grid-column:1/-1;width:100%!important;min-width:0!important;max-width:100%' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq '.crfs-pool-row input{width:100%!important;box-sizing:border-box}' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 
 pools=src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmPools.page
 grep -Fq 'Menu="RunnerFarm:2"' "$pools"
