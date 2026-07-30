@@ -24,9 +24,15 @@ grep -Fq "up '+crfEsc(p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerF
 grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq "min=\"'+(auto?Number(p.count)+1:1)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq "mode!=='pools'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq "currentSnapshot!==formSnapshot" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "action:'apply-config'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'CRF_CONFIG_KEYS' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'data-pool-field' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "crfSettingsForm.dataset.applying==='1'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+if grep -Fq '/update.php' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page; then
+  echo 'Settings still delegates writes to /update.php' >&2; exit 1
+fi
 grep -Fq "document.addEventListener('crf-pools-change',check)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq "input.setAttribute('aria-describedby','crf-pools-errors')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "input.setAttribute('aria-describedby','crf-pools-errors crf-pool-'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "input.setAttribute('aria-invalid','true')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "'Remove '+subject" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 

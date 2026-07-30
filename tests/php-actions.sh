@@ -12,7 +12,7 @@ need "'POST required'"
 need "preg_match('/^(?:0|[1-9][0-9]?)$/'"
 need '(int)$raw > 64'
 need "case 'validate-pools':"
-need 'strlen($pools) > 4096'
+need 'post_scalar('\''pools'\'', 16384)'
 need 'runner_name_valid($n)'
 need "http_response_code(405)"
 need "http_response_code(400)"
@@ -20,7 +20,14 @@ need "escapeshellarg(\$pool)"
 need "escapeshellarg(\$raw)"
 need "'runner pools cannot scale to zero'"
 need "escapeshellarg(\$owner)"
-need 'bounded_request_string($_REQUEST['
+need 'bounded_request_string(post_scalar('
+need "case 'apply-config':"
+need "expected_config_revision"
+need "settings snapshot does not match the server allowlist"
+need "tempnam(\$CFGDIR, '.apply.')"
+need "function_exists('fsync')"
+need '$_POST[$key]'
+if grep -Fq '$_REQUEST' "$EXEC"; then fail 'exec.php still reads the mixed GET/POST request bag'; fi
 grep -Fq 'json_encode($crf_csrf' "$CORE" || fail 'CSRF token is interpolated into JavaScript without JSON encoding'
 
 # The old coercion turned arbitrary junk into destructive scale-to-zero.

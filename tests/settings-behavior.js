@@ -1,0 +1,23 @@
+'use strict';
+const fs = require('fs');
+const page = fs.readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page', 'utf8');
+
+function must(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+must(page.includes("Object.freeze(['id','routing_label','additional_labels','fixed','min','max','idle','cpus','memory'])"),
+  'pool serializer has no fixed field allowlist');
+must(page.includes("row.dataset.active!=='0'"), 'inactive draft rows enter runtime serialization');
+must(page.includes("input.dataset.poolField=field"), 'pool inputs are positional');
+must(page.includes("if(field==='id'&&saved) input.readOnly=true"), 'saved IDs remain editable');
+must(page.includes('Duplicate as new pool'), 'immutable-ID duplicate workflow is absent');
+must(page.includes('Copy selector'), 'selector action is not visibly named');
+must(page.includes("crfSettingsForm.dataset.applying==='1'"), 'Apply is not single-flight');
+must(page.includes("setAttribute('aria-busy','true')"), 'Apply does not expose busy state');
+must(page.includes('const epoch=++applyEpoch'), 'Apply has no response epoch');
+must(page.includes('expected_config_revision:CRF_CONFIG_REVISION'), 'Apply has no optimistic concurrency');
+must(!page.includes('crfSettingsForm.submit()'), 'native form submission bypass remains');
+must(!page.includes('/update.php'), 'native update endpoint remains');
+
+console.log('settings-behavior: OK');

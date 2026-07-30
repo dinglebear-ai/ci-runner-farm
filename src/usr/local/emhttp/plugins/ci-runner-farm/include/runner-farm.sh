@@ -181,6 +181,102 @@ validate_runtime_config() {
   }
 }
 
+config_revision() {
+  local key
+  for key in $CFG_KEYS; do
+    printf '%s=%s\0' "$key" "${!key-}"
+  done | sha256sum | cut -d' ' -f1
+}
+
+config_json() {
+  local key first=1
+  printf '{'
+  for key in $CFG_KEYS; do
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '"%s":"%s"' "$key" "$(printf '%s' "${!key-}" | json_escape)"
+  done
+  printf '}'
+}
+
+validate_settings_config() {
+  local key value
+  validate_runtime_config || return 1
+  case "$POOL_BACKEND" in classic|scaleset) ;; *) pool_error "POOL_BACKEND must be classic or scaleset" backend; return 1 ;; esac
+  case "$IMAGE_SOURCE" in builtin|remote) ;; *) pool_error "IMAGE_SOURCE must be builtin or remote" image_source; return 1 ;; esac
+  case "$NETWORK_ISOLATION" in off|isolate|strict) ;; *) pool_error "NETWORK_ISOLATION must be off, isolate, or strict" network; return 1 ;; esac
+  for key in EPHEMERAL RUN_AS_ROOT SHARE_DOCKER_SOCK DIND SHARED_IMAGE_CACHE AUTOSCALE IMAGE_AUTOUPDATE DASHBOARD_WIDGET_ENABLE; do
+    value="${!key-}"
+    case "$value" in true|false) ;; *) pool_error "$key must be true or false" settings; return 1 ;; esac
+  done
+  for key in RUNNER_COUNT AUTOSCALE_MIN AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT RESOURCE_PIDS_LIMIT; do
+    value="${!key-}"
+    case "$value" in ''|*[!0-9]*) pool_error "$key must be a canonical non-negative integer" settings; return 1 ;; esac
+  done
+  [ "$RUNNER_COUNT" -le 64 ] && [ "$AUTOSCALE_MIN" -le 64 ] &&
+    [ "$AUTOSCALE_MAX" -le 64 ] && [ "$AUTOSCALE_MIN_IDLE" -le 64 ] &&
+    [ "$AUTOSCALE_STEP" -ge 1 ] && [ "$AUTOSCALE_STEP" -le 64 ] || {
+      pool_error "runner counts and autoscale bounds must be within 0-64" settings
+      return 1
+    }
+  if [ "$IMAGE_SOURCE" = remote ] && [ -z "$IMAGE" ]; then
+    pool_error "IMAGE is required for a remote image source" image
+    return 1
+  fi
+  return 0
+}
+
+cmd_apply_config() {
+  local expected="${1:-}" staged="${2:-}" current old_cfg backup_tmp backup new_revision
+  case "$expected" in *[!0-9a-f]*|'') printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2 ;; esac
+  [ "${#expected}" -eq 64 ] || { printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2; }
+  case "$staged" in "$CFGDIR"/.apply.*) ;; *) printf '{"ok":false,"code":"invalid_staging_path","error":"invalid staging path"}\n'; return 2 ;; esac
+  [ -f "$staged" ] && [ ! -L "$staged" ] || { printf '{"ok":false,"code":"invalid_staging_file","error":"staged config is unavailable"}\n'; return 2; }
+
+  current="$(config_revision)"
+  if [ "$current" != "$expected" ]; then
+    printf '{"ok":false,"code":"stale_config","error":"settings changed in another session","config_revision":"%s"}\n' "$current"
+    return 3
+  fi
+
+  old_cfg="$CFG"
+  CFG="$staged"
+  load_cfg
+  if ! validate_settings_config; then
+    printf '{"ok":false,"code":"invalid_config","error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
+    CFG="$old_cfg"
+    load_cfg
+    return 4
+  fi
+  new_revision="$(config_revision)"
+
+  backup="${old_cfg}.bak"
+  backup_tmp="${backup}.tmp.$$"
+  if [ -f "$old_cfg" ]; then
+    cp "$old_cfg" "$backup_tmp" || {
+      CFG="$old_cfg"; load_cfg
+      printf '{"ok":false,"code":"backup_failed","error":"could not preserve the previous configuration"}\n'
+      return 5
+    }
+    chmod 0600 "$backup_tmp" || { rm -f "$backup_tmp"; CFG="$old_cfg"; load_cfg; return 5; }
+    mv -f "$backup_tmp" "$backup" || { rm -f "$backup_tmp"; CFG="$old_cfg"; load_cfg; return 5; }
+  fi
+  chmod 0600 "$staged" || { CFG="$old_cfg"; load_cfg; return 5; }
+  if ! mv -f "$staged" "$old_cfg"; then
+    CFG="$old_cfg"; load_cfg
+    printf '{"ok":false,"code":"commit_failed","error":"could not atomically commit configuration"}\n'
+    return 5
+  fi
+  chmod 0600 "$old_cfg" || true
+  CFG="$old_cfg"
+  load_cfg
+  rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
+  reconcile_start
+  printf '{"ok":true,"config_revision":"%s","settings":' "$new_revision"
+  config_json
+  printf '}\n'
+}
+
 cleanup_pool_runtime_state() {
   local keep=" " rec pool gen f
   if pool_mode_enabled; then
@@ -3044,6 +3140,8 @@ case "${1:-status}" in
   validate-pools)
     if [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
     else cmd_validate_pools "${2:-}" "${3:-}" "${4:-}"; fi ;;
+  config-revision) config_revision ;;
+  apply-config) with_fleet_lock wait cmd_apply_config "${2:-}" "${3:-}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   dashboard-json) cmd_dashboard_json ;;
