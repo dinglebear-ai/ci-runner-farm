@@ -13,20 +13,29 @@ mkfifo -m 0600 "$secret_dir/secret.in"
 : > "$secret_dir/ready"
 chmod 0600 "$secret_dir/ready"
 
-IFS= read -r runner_token < "$secret_dir/secret.in"
+IFS= read -r runner_credential < "$secret_dir/secret.in"
 rm -f "$secret_dir/secret.in"
-[ -n "$runner_token" ] || {
+[ -n "$runner_credential" ] || {
   echo "ci-runner-farm: empty runner credential" >&2
   exit 1
 }
 
-# The base image consumes RUNNER_TOKEN while configuring, unexports it before
-# subprocesses, and UNSET_CONFIG_VARS removes it before the long-lived listener.
-export RUNNER_TOKEN="$runner_token"
-export UNSET_CONFIG_VARS=true
-runner_token=""
-unset runner_token
 : > "$secret_dir/consumed"
 chmod 0600 "$secret_dir/consumed"
 
-exec "$base_entrypoint" "$@"
+if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
+  jit_runner="${CRF_JIT_RUNNER:-./run.sh}"
+  jit_config="$runner_credential"
+  runner_credential=""
+  unset runner_credential
+  export RUNNER_ALLOW_RUNASROOT=1
+  exec "$jit_runner" --jitconfig "$jit_config"
+else
+  # The base image consumes RUNNER_TOKEN while configuring, unexports it before
+  # subprocesses, and UNSET_CONFIG_VARS removes it before the long-lived listener.
+  export RUNNER_TOKEN="$runner_credential"
+  export UNSET_CONFIG_VARS=true
+  runner_credential=""
+  unset runner_credential
+  exec "$base_entrypoint" "$@"
+fi

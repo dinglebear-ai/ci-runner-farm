@@ -116,6 +116,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-resources.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scheduler.sh
 . "$SCRIPT_DIR/runner-scheduler.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
+. "$SCRIPT_DIR/runner-jit.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 
@@ -1726,7 +1728,7 @@ runner_secret_inject() {
     # A freshly created container may not yet be in the shared inventory. Its
     # exact deterministic name is still bounded before this function is called.
     case "$name" in
-      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*) ;;
+      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*) ;;
       *) return 1 ;;
     esac
   }
@@ -3232,6 +3234,8 @@ case "${1:-status}" in
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
+  jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
+  jit-reconcile)    jit_reconcile ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
   autoscale-status) autoscale_status ;;

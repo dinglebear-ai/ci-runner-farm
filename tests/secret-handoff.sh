@@ -58,4 +58,26 @@ grep -Fq -- 'cat > /run/crf/secret.in' "$engine" ||
 grep -Fq -- '-e UNSET_CONFIG_VARS="true"' "$engine" ||
   crf_fail "base image is not told to clear configuration variables"
 
+# JIT mode consumes the same FIFO but invokes the listener's one-job path
+# without exporting the descriptor into Docker metadata.
+cat > "$task_tmp/jit-runner" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = --jitconfig ]
+[ "$2" = "$CRF_EXPECTED_SECRET" ]
+printf 'jit\n' > "$CRF_TEST_RESULT"
+SCRIPT
+chmod 0755 "$task_tmp/jit-runner"
+rm -rf "$CRF_SECRET_DIR"; : >"$CRF_TEST_RESULT"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
+  "$entrypoint" >"$task_tmp/jit-stdout" 2>"$task_tmp/jit-stderr" &
+entry_pid=$!
+for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+printf '%s\n' "$sentinel" >"$CRF_SECRET_DIR/secret.in"
+wait "$entry_pid"
+crf_assert_eq jit "$(cat "$CRF_TEST_RESULT")" "JIT entrypoint lifecycle"
+if grep -Fq "$sentinel" "$task_tmp/jit-stdout" "$task_tmp/jit-stderr"; then
+  crf_fail "JIT descriptor leaked to output"
+fi
+
 echo "secret-handoff: OK"
