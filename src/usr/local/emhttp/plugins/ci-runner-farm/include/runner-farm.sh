@@ -1149,7 +1149,7 @@ github_runner_inventory() {
 }
 
 github_phase_refresh() {
-  local tmp="${RUNDIR}/runner-phases.tmp.$$" target id name status busy phase inventory
+  local tmp="${RUNDIR}/runner-phases.tmp.$$" target id name local_name status busy phase inventory host_prefix
   local targets=""
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
   targets="$(awk -F'|' '$8 != "" { print $8 }' "$INVENTORY_FILE" | sort -u)"
@@ -1161,6 +1161,7 @@ github_phase_refresh() {
     fi
   fi
   : > "$tmp" || return 1
+  host_prefix="$(host)-"
   while IFS= read -r target; do
     [ -n "$target" ] || continue
     inventory="$(github_runner_inventory "$target")" || { rm -f "$tmp"; return 1; }
@@ -1172,7 +1173,11 @@ github_phase_refresh() {
         offline:*) phase=starting ;;
         *) phase=error ;;
       esac
-      printf '%s|%s\n' "$name" "$phase" >> "$tmp"
+      local_name="${name#"$host_prefix"}"
+      if ! awk -F'|' -v n="$local_name" '$1 == n { found=1 } END { exit !found }' "$INVENTORY_FILE"; then
+        local_name="$name"
+      fi
+      printf '%s|%s\n' "$local_name" "$phase" >> "$tmp"
     done <<< "$inventory"
   done <<< "$targets"
   chmod 0600 "$tmp" 2>/dev/null || true
@@ -2176,7 +2181,7 @@ cmd_maintenance() {
       ;;
     resume)
       rm -f "$MAINTENANCE_FILE"
-      [ "$AUTOSCALE" = true ] && autoscale_start
+      [ "$AUTOSCALE" = true ] && autoscale_start >/dev/null
       reconcile_start
       printf '{"ok":true,"maintenance":false,"message":"Admissions resumed."}\n'
       ;;

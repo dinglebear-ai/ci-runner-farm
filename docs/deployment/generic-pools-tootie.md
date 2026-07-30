@@ -53,3 +53,20 @@ endpoint. Wait for busy runners to drain before retiring temporary identities.
 5. Resume admissions.
 6. Confirm pre-existing busy runners were uninterrupted and remove only the
    uniquely named stage and test fixtures.
+
+## 2026-07-30 code-only proof
+
+Commit `b1834cb` was staged on tootie under a unique plugin directory. The host
+reported Linux 6.18.38-Unraid, Docker 29.5.3, cgroup v2, 24 online CPUs,
+131517828 KiB RAM, no swap, and ZFS at `/mnt/cache`. The active configuration
+was mode 0600 with SHA-256
+`6341005956d70b78af1fcca34d9b028f49ea0265be3c86366993b7ff4532fe77`.
+
+All five existing runners were busy before the switch. The deployment paused
+autoscaling, entered maintenance, atomically switched the code directory, and
+left the configuration byte-identical. Schema-v2 status then reported the same
+five runners as busy, classic effective backend, no stale runners, zero pending
+reservations, and maintenance state correctly. Resume restarted autoscaling.
+Container start ages were unchanged, demonstrating that no busy runner was
+recreated or interrupted. The recoverable code and configuration backups remain
+uniquely named with the stage ID until final acceptance.
