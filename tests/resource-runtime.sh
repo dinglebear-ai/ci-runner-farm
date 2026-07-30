@@ -28,6 +28,7 @@ export WORK_TMPFS_SIZE=2g SHARED_IMAGE_CACHE=false IMAGE_SOURCE=builtin IMAGE=''
 export BUILTIN_IMAGE=test-image LABEL_NS=net.unraid.ci-runner-farm
 export MANAGED_LABEL="$LABEL_NS.managed=true"
 export CACHE_ROOT="$task_tmp/cache"
+export SCRIPT_DIR="$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include"
 mkdir -p "$CACHE_ROOT"
 
 runner_name_for() { printf 'ci-runner-%s-%s\n' "$2" "$1"; }
@@ -45,6 +46,10 @@ crf_assert_contains "$joined" '--cpus=2.5' "V2 CPU limit"
 crf_assert_contains "$joined" '--memory=4294967296' "V2 memory limit"
 crf_assert_contains "$joined" '--memory-swap=4294967296' "no-swap policy"
 crf_assert_contains "$joined" '--pids-limit=2048' "PIDs limit"
+crf_assert_contains "$joined" '--entrypoint' "protected entrypoint option"
+crf_assert_contains "$joined" '/usr/local/bin/crf-runner-entrypoint' "protected entrypoint path"
+crf_assert_contains "$joined" 'effective-labels=ci-rust,rust,build' "effective label metadata"
+crf_assert_contains "$joined" 'backend=classic' "backend metadata"
 case "$joined" in *'/var/run/docker.sock'*) crf_fail "host Docker socket was mounted" ;; esac
 
 echo "resource-runtime: OK"

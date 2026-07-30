@@ -246,7 +246,7 @@ fleet_inventory_refresh() {
             if [ "$pool" = default ]; then
               expected="${NAME_PREFIX}-${pidx}"
               if [ "$name" = "$expected" ] && { [ -z "$scope" ] || github_scope_validate "$scope"; }; then identity=valid; fi
-            elif pool_id_valid "$pool" && [ "$version" = 1 ]; then
+            elif pool_id_valid "$pool" && { [ "$version" = 1 ] || [ "$version" = 2 ]; }; then
               expected="${NAME_PREFIX}-${pool}-${pidx}"
               if [ "$name" = "$expected" ] && github_scope_validate "$scope" && [[ "$scope" == org:* ]]; then identity=valid; fi
             fi
@@ -369,7 +369,7 @@ runner_identity_validate() {
     expected="${NAME_PREFIX}-${idx}"
   else
     pool_id_valid "$pool" || return 1
-    [ "$version" = 1 ] || return 1
+    { [ "$version" = 1 ] || [ "$version" = 2 ]; } || return 1
     case "$scope" in org:*) ;; *) return 1 ;; esac
     expected="${NAME_PREFIX}-${pool}-${idx}"
   fi
@@ -427,7 +427,8 @@ crf_confgen() {
   if pool_mode_enabled; then
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
     if [ "$POOL_CONFIG_VERSION" = v2 ] || { pool_snapshot_load >/dev/null 2>&1 && [ "$POOL_CONFIG_VERSION" = v2 ]; }; then
-      pool_runner_spec_hash "$pool" | cut -c1-12
+      printf '%s\0%s' "$(pool_runner_spec_hash "$pool")" "$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)" |
+        sha256sum | cut -c1-12
       return
     fi
     printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$RUNNER_GROUP" "$(pool_label "$pool")" "$pool" \
@@ -1448,7 +1449,8 @@ effective_image() {
 # $1=index, $2=name-override(optional), $3=pool(optional), $4=scope-target(optional)
 build_args() {
   local idx="$1" name_override="${2:-}" pool="${3:-default}" scope_target="${4:-}"
-  local name labels effective_cpu="" effective_memory="" memory_swap
+  local name labels effective_cpu="" effective_memory="" memory_swap identity_version=1
+  CRF_REGISTRATION_SECRET=""
   [ -n "$name_override" ] && name="$name_override" || name="$(runner_name_for "$idx" "$pool")"
   if pool_mode_enabled; then
     labels="$(pool_effective_labels "$pool")"
@@ -1456,6 +1458,7 @@ build_args() {
     if pool_snapshot_load && [ "$POOL_CONFIG_VERSION" = v2 ]; then
       effective_cpu="$(pool_cpu_milli "$pool")" || return 1
       effective_memory="$(pool_memory_bytes "$pool")" || return 1
+      identity_version=2
     fi
   else
     labels="$RUNNER_LABELS"
@@ -1475,14 +1478,23 @@ build_args() {
     -d --restart=no
     --name "$name" --hostname "$name"
     --pids-limit="${RESOURCE_PIDS_LIMIT:-4096}"
+    --tmpfs "/run/crf:rw,noexec,nosuid,nodev,size=1m"
+    --mount "type=bind,src=$SCRIPT_DIR/runner-entrypoint.sh,dst=/usr/local/bin/crf-runner-entrypoint,readonly"
+    --entrypoint /usr/local/bin/crf-runner-entrypoint
     --label "${MANAGED_LABEL%=*}=true"
     --label "net.unraid.ci-runner-farm.index=${idx}"
     --label "${LABEL_NS}.pool=${pool}"
     --label "${LABEL_NS}.pool-index=${idx}"
     --label "${LABEL_NS}.routing-label=$(pool_mode_enabled && pool_label "$pool" || printf '%s' "$RUNNER_LABELS")"
     --label "${LABEL_NS}.scope-target=${scope_target}"
-    --label "${LABEL_NS}.identity-version=1"
+    --label "${LABEL_NS}.identity-version=${identity_version}"
     --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen "$pool" "$scope_target")"
+    --label "${LABEL_NS}.runner-spec-hash=$(pool_runner_spec_hash "$pool")"
+    --label "${LABEL_NS}.config-revision=$(pool_config_revision)"
+    --label "${LABEL_NS}.effective-labels=${labels}"
+    --label "${LABEL_NS}.backend=classic"
+    --label "${LABEL_NS}.cpu-milli=${effective_cpu:-0}"
+    --label "${LABEL_NS}.memory-bytes=${effective_memory:-0}"
     -e RUNNER_NAME="$(host)-${name}"
     -e LABELS="$labels"
     -e DISABLE_AUTO_UPDATE="true"
@@ -1490,6 +1502,7 @@ build_args() {
     -e RUN_AS_ROOT="$RUN_AS_ROOT"
     -e RUNNER_ALLOW_RUNASROOT="1"
     -e RUNNER_WORKDIR="/_work"
+    -e UNSET_CONFIG_VARS="true"
     -e npm_config_cache="/home/runner/.npm"
   )
   # myoung34 entrypoints enable ephemeral mode when the EPHEMERAL env var is
@@ -1565,9 +1578,27 @@ build_args() {
   if [ -n "$ACCESS_TOKEN" ] && [ "${NO_REGISTER:-0}" != "1" ]; then
     local reg; reg="$(registration_token "$scope_target")"
     [ -z "$reg" ] && { err "could not mint a runner registration token for ${scope_target#*:} (check the PAT's scope/permissions)"; return 1; }
-    ARGS+=( -e RUNNER_TOKEN="$reg" )
+    CRF_REGISTRATION_SECRET="$reg"
   fi
   ARGS+=( "$(effective_image)" )
+}
+
+runner_secret_inject() {
+  local name="$1" secret="$2"
+  [ -n "$secret" ] || return 0
+  runner_identity_validate "$name" || {
+    # A freshly created container may not yet be in the shared inventory. Its
+    # exact deterministic name is still bounded before this function is called.
+    case "$name" in
+      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*) ;;
+      *) return 1 ;;
+    esac
+  }
+  docker exec "$name" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 ||
+    return 1
+  ( set +x; printf '%s\n' "$secret" ) |
+    docker exec -i "$name" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || return 1
+  docker exec "$name" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
 }
 
 fleet_lock_suspend() {
@@ -1637,6 +1668,15 @@ start_one() {
   fleet_lock_suspend || { [ -z "$reservation_id" ] || reservation_release "$reservation_id"; return 1; }
   docker run "${ARGS[@]}" >/dev/null
   rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "${CRF_REGISTRATION_SECRET:-}" ]; then
+    if ! runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"; then
+      err "runner $name did not consume its protected registration credential"
+      docker rm -f "$name" >/dev/null 2>&1 || true
+      rc=1
+    fi
+  fi
+  CRF_REGISTRATION_SECRET=""
+  unset CRF_REGISTRATION_SECRET
   if fleet_inventory_refresh; then
     awk -F'|' -v n="$name" '$1 == n { found=1 } END { exit !found }' "$INVENTORY_FILE" && observed=1
   fi
