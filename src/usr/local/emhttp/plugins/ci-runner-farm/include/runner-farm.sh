@@ -44,6 +44,13 @@ RUNNER_POOLS="rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1"
 POOL_BACKEND="classic"                # requested only; effective backend is durable runtime state
 RUNNER_CPUS=""                        # per-runner CPU cap; empty = uncapped (CFS time-shares fairly)
 RUNNER_MEMORY="16g"                   # per-runner memory cap (kept: memory isn't time-shared like CPU)
+RESOURCE_CPU_BUDGET="auto"
+RESOURCE_MEMORY_BUDGET="auto"
+RESOURCE_CPU_RESERVE="2"
+RESOURCE_MEMORY_RESERVE="8g"
+RESOURCE_CPU_OVERCOMMIT="1.0"
+RESOURCE_MEMORY_SWAP="none"
+RESOURCE_PIDS_LIMIT="4096"
 CACHE_ROOT="/mnt/cache/github-runner" # must be a dedicated SUBDIR under a pool/disk, never a bare mount root (see crf_safe_cache_root)
 WORK_TMPFS_SIZE="8g"                  # empty => bind workdir to pool instead of RAM
 IMAGE_SOURCE="builtin"                # builtin = run the locally-built image; remote = pull IMAGE from a registry
@@ -105,10 +112,14 @@ DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (rea
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-pools.sh
 . "$SCRIPT_DIR/runner-pools.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-resources.sh
+. "$SCRIPT_DIR/runner-resources.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
 CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
+RESOURCE_CPU_BUDGET RESOURCE_MEMORY_BUDGET RESOURCE_CPU_RESERVE RESOURCE_MEMORY_RESERVE \
+RESOURCE_CPU_OVERCOMMIT RESOURCE_MEMORY_SWAP RESOURCE_PIDS_LIMIT \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
 SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
@@ -163,7 +174,11 @@ err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
 host() { hostname -s; }
 
 validate_runtime_config() {
-  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$GH_OWNER"
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$GH_OWNER" || return 1
+  resource_v2_preflight || {
+    pool_error "$(resource_reason_text "$RESOURCE_REASON")" resources
+    return 1
+  }
 }
 
 cleanup_pool_runtime_state() {
@@ -246,6 +261,7 @@ fleet_inventory_refresh() {
   fi
   mv "$tmp" "$INVENTORY_FILE" || { rm -f "$tmp"; return 1; }
   INVENTORY_ACTIVE=1
+  reservation_reconcile "$INVENTORY_FILE" >/dev/null 2>&1 || true
 }
 
 inventory_names() {
@@ -410,6 +426,10 @@ crf_confgen() {
   local pool="${1:-default}" scope_target="${2:-}"
   if pool_mode_enabled; then
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+    if [ "$POOL_CONFIG_VERSION" = v2 ] || { pool_snapshot_load >/dev/null 2>&1 && [ "$POOL_CONFIG_VERSION" = v2 ]; }; then
+      pool_runner_spec_hash "$pool" | cut -c1-12
+      return
+    fi
     printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$RUNNER_GROUP" "$(pool_label "$pool")" "$pool" \
       "$scope_target" "identity-v1" "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" \
       "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" \
@@ -1428,11 +1448,15 @@ effective_image() {
 # $1=index, $2=name-override(optional), $3=pool(optional), $4=scope-target(optional)
 build_args() {
   local idx="$1" name_override="${2:-}" pool="${3:-default}" scope_target="${4:-}"
-  local name labels
+  local name labels effective_cpu="" effective_memory="" memory_swap
   [ -n "$name_override" ] && name="$name_override" || name="$(runner_name_for "$idx" "$pool")"
   if pool_mode_enabled; then
-    labels="$(pool_label "$pool")"
+    labels="$(pool_effective_labels "$pool")"
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+    if pool_snapshot_load && [ "$POOL_CONFIG_VERSION" = v2 ]; then
+      effective_cpu="$(pool_cpu_milli "$pool")" || return 1
+      effective_memory="$(pool_memory_bytes "$pool")" || return 1
+    fi
   else
     labels="$RUNNER_LABELS"
     if [ -z "$scope_target" ]; then
@@ -1450,7 +1474,7 @@ build_args() {
     # token instead of resurrecting it with the stale one.
     -d --restart=no
     --name "$name" --hostname "$name"
-    --pids-limit=4096
+    --pids-limit="${RESOURCE_PIDS_LIMIT:-4096}"
     --label "${MANAGED_LABEL%=*}=true"
     --label "net.unraid.ci-runner-farm.index=${idx}"
     --label "${LABEL_NS}.pool=${pool}"
@@ -1479,8 +1503,20 @@ build_args() {
     local hostdir; hostdir="$(crf_safe_mount_subdir "${m%%:*}")" || { err "skipping unsafe cache mount '${m%%:*}'"; continue; }
     ARGS+=( -v "$hostdir:${m#*:}" )
   done
-  [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
-  [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
+  if [ -n "$effective_cpu" ]; then
+    if [ $((effective_cpu % 1000)) -eq 0 ]; then effective_cpu="$((effective_cpu / 1000))"
+    else effective_cpu="$(printf '%s.%03d' "$((effective_cpu / 1000))" "$((effective_cpu % 1000))" | sed 's/0*$//')"; fi
+    ARGS+=( --cpus="$effective_cpu" --memory="$effective_memory" )
+    case "${RESOURCE_MEMORY_SWAP:-none}" in
+      none) memory_swap="$effective_memory" ;;
+      double) memory_swap="$((effective_memory * 2))" ;;
+      *) err "invalid RESOURCE_MEMORY_SWAP policy"; return 1 ;;
+    esac
+    ARGS+=( --memory-swap="$memory_swap" )
+  else
+    [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
+    [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
+  fi
   # network isolation: put the runner on the dedicated bridge (off = default bridge)
   [ "$NETWORK_ISOLATION" != "off" ] && ARGS+=( --network "$RUNNER_NETWORK" )
   if [ "$DIND" = "true" ]; then
@@ -1534,26 +1570,86 @@ build_args() {
   ARGS+=( "$(effective_image)" )
 }
 
+fleet_lock_suspend() {
+  CRF_FLEET_LOCK_WAS_HELD=0
+  if [ -e "/proc/${BASHPID}/fd/8" ] &&
+     [ "$(readlink "/proc/${BASHPID}/fd/8" 2>/dev/null)" = "$RUNDIR/fleet.lock" ]; then
+    flock -u 8 || return 1
+    CRF_FLEET_LOCK_WAS_HELD=1
+  fi
+}
+
+fleet_lock_resume() {
+  [ "${CRF_FLEET_LOCK_WAS_HELD:-0}" = 1 ] || return 0
+  flock -w 20 8 || { err "fleet busy while finalizing a reserved start"; return 1; }
+  CRF_FLEET_LOCK_WAS_HELD=0
+}
+
 start_one() {
   local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
+  local expected_revision cpu_milli memory_bytes spec_hash reservation_id="" rc observed=0
   name="$(runner_name_for "$idx" "$pool")"
   if [ -z "$scope_target" ]; then
     if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then scope_target="org:$GH_OWNER"
     else scope_target="repo:$(repo_for_index "$idx")"; fi
   fi
+  expected_revision="$(pool_config_revision)" || return 1
+  cpu_milli=0; memory_bytes=0
+  if pool_mode_enabled && [ "$POOL_CONFIG_VERSION" = v2 ]; then
+    cpu_milli="$(pool_cpu_milli "$pool")" || return 1
+    memory_bytes="$(pool_memory_bytes "$pool")" || return 1
+    spec_hash="$(pool_runner_spec_hash "$pool")" || return 1
+  else
+    spec_hash="$(crf_confgen "$pool" "$scope_target")"
+  fi
+
+  # Docker/GitHub/token work is deliberately outside the fleet flock.
+  fleet_lock_suspend || return 1
+  fleet_inventory_refresh || { fleet_lock_resume; err "could not inventory before start"; return 1; }
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+    fleet_lock_resume || return 1
     if runner_identity_validate "$name"; then
       log "runner $name already exists; skipping"; return 0
     fi
     err "runner name collision: $name exists but is not a valid managed runner; refusing to touch it"
     return 1
   fi
-  build_args "$idx" "$name" "$pool" "$scope_target" || { err "runner $name not started (registration-token error)"; return 1; }
-  log "starting $name (pool=$pool cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=${scope_target:-$GH_SCOPE})"
+  build_args "$idx" "$name" "$pool" "$scope_target" || {
+    fleet_lock_resume || true
+    err "runner $name not started (registration-token error)"
+    return 1
+  }
+  fleet_lock_resume || return 1
+
+  [ "$(pool_config_revision)" = "$expected_revision" ] ||
+    { err "runner config changed while preparing $name; retrying is required"; return 1; }
+  if [ "$cpu_milli" -gt 0 ]; then
+    reservation_runner_exists "$name" && { err "runner $name already has a pending start"; return 1; }
+    resource_snapshot_refresh "$INVENTORY_FILE" || { err "resource snapshot failed: $RESOURCE_REASON"; return 1; }
+    resource_admit_one "$cpu_milli" "$memory_bytes" ||
+      { err "runner $name blocked: $(resource_reason_text "$RESOURCE_REASON")"; return 1; }
+    reservation_create "$pool" "$name" "$cpu_milli" "$memory_bytes" "$spec_hash" "$expected_revision" ||
+      { err "could not persist admission reservation for $name"; return 1; }
+    reservation_id="$CRF_RESERVATION_ID"
+  fi
+
+  log "starting $name (pool=$pool cpu_milli=$cpu_milli memory_bytes=$memory_bytes scope=${scope_target:-$GH_SCOPE})"
+  fleet_lock_suspend || { [ -z "$reservation_id" ] || reservation_release "$reservation_id"; return 1; }
   docker run "${ARGS[@]}" >/dev/null
-  local rc=$?
+  rc=$?
+  if fleet_inventory_refresh; then
+    awk -F'|' -v n="$name" '$1 == n { found=1 } END { exit !found }' "$INVENTORY_FILE" && observed=1
+  fi
+  fleet_lock_resume || return 1
+  if [ -n "$reservation_id" ] && { [ "$rc" -ne 0 ] || [ "$observed" -eq 1 ]; }; then
+    reservation_release "$reservation_id"
+  fi
+  [ "$rc" -eq 0 ] && [ "$observed" -eq 1 ] || {
+    [ "$observed" -eq 1 ] && rc=0
+    [ "$observed" -eq 0 ] && err "runner $name start outcome was not observed; reservation retained for recovery"
+  }
   [ "$rc" -eq 0 ] && github_runner_inventory_invalidate "$scope_target" 2>/dev/null || true
-  fleet_inventory_invalidate
+  [ "$observed" -eq 1 ] || fleet_inventory_invalidate
   return "$rc"
 }
 

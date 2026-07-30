@@ -48,3 +48,25 @@ done
 }
 
 echo 'reconcile-locks: OK'
+
+# The resource-aware start path must release fd 8 around slow Docker/GitHub
+# work, then reacquire it before finalizing the reservation.
+sed -n '/^fleet_lock_suspend()/,/^}/p' "$ENGINE" > "$tmpdir/lock-suspend.sh"
+sed -n '/^fleet_lock_resume()/,/^}/p' "$ENGINE" >> "$tmpdir/lock-suspend.sh"
+# shellcheck disable=SC1090
+. "$tmpdir/lock-suspend.sh"
+RUNDIR="$tmpdir"
+err() { printf '%s\n' "$*" >&2; }
+(
+  exec 8>"$tmpdir/fleet.lock"
+  flock 8
+  fleet_lock_suspend
+  ( flock -w 1 9 ) 9>"$tmpdir/fleet.lock" || exit 8
+  fleet_lock_resume
+  if ( flock -n 9 ) 9>"$tmpdir/fleet.lock"; then exit 9; fi
+) || {
+  echo "FAIL: fleet lock was not suspended/resumed around slow work" >&2
+  exit 1
+}
+
+echo 'resource-locks: OK'

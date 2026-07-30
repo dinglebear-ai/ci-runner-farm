@@ -378,7 +378,7 @@ pool_cpu_milli() {
   if pool_is_v2; then
     local value
     value="$(pool_field "$1" 8)"
-    [ "$value" != "inherit" ] || value="$(parse_cpu_milli "${RUNNER_CPUS:-1}")"
+    [ "$value" != "inherit" ] || value="$(parse_cpu_milli "${RUNNER_CPUS:-}")" || return 1
     printf '%s\n' "$value"
   else
     parse_cpu_milli "${RUNNER_CPUS:-1}"
