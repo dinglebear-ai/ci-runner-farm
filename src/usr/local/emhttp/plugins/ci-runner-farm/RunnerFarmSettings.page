@@ -23,6 +23,7 @@ $defaults = [
   'GH_SCOPE'=>'repo', 'GH_OWNER'=>'unraid', 'GH_REPOS'=>'unraid/repo-a unraid/repo-b',
   'RUNNER_GROUP'=>'', 'RUNNER_COUNT'=>'4', 'RUNNER_LABELS'=>'self-hosted,unraid,build',
   'RUNNER_MODE'=>'single', 'RUNNER_POOLS'=>'rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1',
+  'POOL_BACKEND'=>'classic',
   'RUNNER_CPUS'=>'', 'RUNNER_MEMORY'=>'16g', 'EPHEMERAL'=>'false', 'RUN_AS_ROOT'=>'false',
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',

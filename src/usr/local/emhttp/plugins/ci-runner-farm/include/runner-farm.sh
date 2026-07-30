@@ -41,6 +41,7 @@ RUNNER_COUNT=4
 RUNNER_LABELS="self-hosted,unraid,build"
 RUNNER_MODE="single"                  # single | pools
 RUNNER_POOLS="rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1"
+POOL_BACKEND="classic"                # requested only; effective backend is durable runtime state
 RUNNER_CPUS=""                        # per-runner CPU cap; empty = uncapped (CFS time-shares fairly)
 RUNNER_MEMORY="16g"                   # per-runner memory cap (kept: memory isn't time-shared like CPU)
 CACHE_ROOT="/mnt/cache/github-runner" # must be a dedicated SUBDIR under a pool/disk, never a bare mount root (see crf_safe_cache_root)
@@ -106,7 +107,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-pools.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
-CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS \
+CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
 SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
