@@ -1,0 +1,5 @@
+# case|cursor|cpu|memory|fresh|expected_cursor|expected_starts
+all-languages|0|8000|17179869184|1|2|2
+rotate|2|8000|17179869184|1|4|2
+fragmented|0|1500|3221225472|1|0|2
+stale|0|8000|17179869184|0|0|0

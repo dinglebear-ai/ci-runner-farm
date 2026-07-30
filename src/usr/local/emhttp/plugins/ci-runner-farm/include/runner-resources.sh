@@ -123,11 +123,33 @@ reservation_field() {
 reservation_set_phase() {
   local id="$1" phase="$2" path tmp
   reservation_dir_ensure || return 1
-  case "$phase" in reserved|acting|observed|failed) ;; *) return 1 ;; esac
+  case "$phase" in reserved|offered|assigned|acting|observed|failed|expired) ;; *) return 1 ;; esac
   path="$RESERVATION_DIR/$id.state"; [ -f "$path" ] || return 1
   tmp="$path.tmp.$$"
   sed "s/^phase=.*/phase=$phase/" "$path" > "$tmp" &&
     chmod 0600 "$tmp" && mv "$tmp" "$path"
+}
+
+offer_lease_create() {
+  local pool="$1" poll_id="$2" epoch="$3" cpu="$4" memory="$5" spec_hash="$6" config_revision="$7"
+  local deadline="${8:-$(( $(date +%s) + 30 ))}" runner="offer-${pool}-${poll_id}-${epoch}"
+  case "$poll_id$epoch" in *[!A-Za-z0-9._:-]*|'') return 1 ;; esac
+  reservation_create "$pool" "$runner" "$cpu" "$memory" "$spec_hash" "$config_revision" \
+    "lease-${pool}-${poll_id}-${epoch}" "$deadline" || return 1
+  {
+    printf 'poll_id=%s\nlease_epoch=%s\n' "$poll_id" "$epoch"
+  } >> "$RESERVATION_DIR/$CRF_RESERVATION_ID.state" || return 1
+  reservation_set_phase "$CRF_RESERVATION_ID" offered
+}
+
+offer_lease_assign() {
+  local id="$1" runner="$2" path tmp
+  reservation_dir_ensure || return 1
+  path="$RESERVATION_DIR/$id.state"; [ -f "$path" ] || return 1
+  case "$runner" in *[!A-Za-z0-9._:-]*|'') return 1 ;; esac
+  tmp="$path.tmp.$$"
+  sed -e "s/^runner_name=.*/runner_name=$runner/" -e 's/^phase=.*/phase=assigned/' \
+    "$path" >"$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$path"
 }
 
 reservation_release() {

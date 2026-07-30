@@ -114,6 +114,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-pools.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-resources.sh
 . "$SCRIPT_DIR/runner-resources.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scheduler.sh
+. "$SCRIPT_DIR/runner-scheduler.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 
@@ -3229,6 +3231,7 @@ case "${1:-status}" in
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
+  scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
   autoscale-status) autoscale_status ;;
