@@ -39,12 +39,29 @@ REPO="${REPO:-unraid/ci-runner-farm}"
 # (never /usr or a root '.' entry that could clobber system-dir perms on extract;
 # the install step extracts --no-same-owner and chowns root:root regardless).
 make_tgz() {
-  local opts=()
+  local opts=() package_root helper go_bin
+  package_root="$(mktemp -d)"
+  trap 'rm -rf "$package_root"' RETURN
+  cp -a "$SRCDIR/." "$package_root/"
+  if [ -d tools/crf-scaleset ]; then
+    go_bin="${CRF_GO:-go}"
+    [ "$("$go_bin" version | awk '{print $3}')" = go1.25.3 ] ||
+      { echo "crf-scaleset requires Go 1.25.3 (set CRF_GO to that binary)" >&2; return 1; }
+    mkdir -p "$package_root/bin"
+    helper="$package_root/bin/crf-scaleset"
+    (
+      cd tools/crf-scaleset
+      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 "$go_bin" \
+        build -mod=vendor -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+        -o "$helper" ./cmd/crf-scaleset
+    )
+    chmod 0755 "$helper"
+  fi
   if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
     opts=(--sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner)
   fi
   # ${opts[@]+...} keeps this safe under `set -u` when opts is empty (bash 3.2).
-  tar ${opts[@]+"${opts[@]}"} -cf - -C "$SRCDIR" . | gzip -9n > "$TGZ"
+  tar ${opts[@]+"${opts[@]}"} -cf - -C "$package_root" . | gzip -9n > "$TGZ"
 }
 
 # `build-plg.sh --tgz-only` just (re)builds the package — used by the release
@@ -141,6 +158,7 @@ find "\$PLGDIR" -type d -exec chmod 0755 {} +
 find "\$PLGDIR" -type f -exec chmod 0644 {} +
 chmod 0755 "\$PLGDIR/include/runner-farm.sh"
 chmod 0755 "\$PLGDIR/include/runner-entrypoint.sh"
+[ ! -f "\$PLGDIR/bin/crf-scaleset" ] || chmod 0755 "\$PLGDIR/bin/crf-scaleset"
 [ -d "\$PLGDIR/nchan" ] && find "\$PLGDIR/nchan" -type f -exec chmod 0755 {} +
 # Unraid's emhttp_event executes these on Docker service start/stop — must be +x
 [ -d "\$PLGDIR/event" ] && find "\$PLGDIR/event" -type f -exec chmod 0755 {} +
