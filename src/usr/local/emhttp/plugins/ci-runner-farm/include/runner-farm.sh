@@ -114,13 +114,25 @@ AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
 AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT \
 DASHBOARD_WIDGET_ENABLE"
 
+# Long-running daemons reload this file in place. Snapshot every configurable
+# default once so a key omitted by an older config resets instead of retaining
+# the value from the previous reload (notably RUNNER_MODE/RUNNER_POOLS).
+declare -A CFG_DEFAULTS=()
+for cfg_key in $CFG_KEYS; do
+  CFG_DEFAULTS["$cfg_key"]="${!cfg_key-}"
+done
+
 # Read ci-runner-farm.cfg WITHOUT sourcing it (the file is written by the web form, so
 # sourcing would execute anything a crafted value smuggled in). Parse KEY="value"
 # lines ourselves and assign via printf -v — a literal string set, never eval'd —
 # and only for keys on the allowlist above.
 load_cfg() {
+  local key
+  for key in $CFG_KEYS; do
+    printf -v "$key" '%s' "${CFG_DEFAULTS[$key]}"
+  done
   [ -f "$CFG" ] || return 0
-  local line key val
+  local line val
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
     [ "${line#*=}" = "$line" ] && continue           # no '=' on the line
@@ -615,7 +627,7 @@ autoscale_tick() {
 }
 
 pool_autoscale_tick() {
-  local pool="$1" cur warm statef over=0 target floor max buffer before after delta remove_n
+  local pool="$1" cur warm statef over=0 target floor max buffer before after delta remove_n removable_idle removable_floor
   cur="$(current_count "$pool")"
   pool_phase_counts "$pool"
   warm=$((POOL_IDLE + POOL_STARTING))
@@ -646,12 +658,16 @@ pool_autoscale_tick() {
     after="$(current_count "$pool")"; delta=$((after-before)); [ "$delta" -lt 0 ] && delta=0
     AUTOSCALE_ADD_BUDGET=$((AUTOSCALE_ADD_BUDGET-delta))
     printf '0\n' > "$statef"
-  elif [ "$POOL_IDLE" -gt $((buffer + AUTOSCALE_STEP)) ] && [ "$cur" -gt "$floor" ]; then
+  elif [ "$POOL_IDLE" -gt "$buffer" ] && [ "$cur" -gt "$floor" ]; then
     over=$((over+1)); printf '%s\n' "$over" > "$statef"
     if [ "$over" -ge "$AUTOSCALE_IDLE_GRACE" ]; then
       [ "${AUTOSCALE_REMOVE_BUDGET:-2}" -gt 0 ] || return 0
       remove_n="$AUTOSCALE_STEP"
       [ "$remove_n" -gt "$AUTOSCALE_REMOVE_BUDGET" ] && remove_n="$AUTOSCALE_REMOVE_BUDGET"
+      removable_idle=$((POOL_IDLE-buffer))
+      removable_floor=$((cur-floor))
+      [ "$remove_n" -gt "$removable_idle" ] && remove_n="$removable_idle"
+      [ "$remove_n" -gt "$removable_floor" ] && remove_n="$removable_floor"
       log "autoscale[$pool]: idle=$POOL_IDLE/$cur high for $over checks -> shrink by $remove_n this tick"
       scale_down_idle "$remove_n" "$pool"
       AUTOSCALE_REMOVE_BUDGET=$((AUTOSCALE_REMOVE_BUDGET-${SCALE_REMOVED:-0}))
@@ -1857,7 +1873,7 @@ reconcile_start() {
   if [ -f "$RECONCILE_PID" ] && kill -0 "$(cat "$RECONCILE_PID" 2>/dev/null)" 2>/dev/null; then
     return 0
   fi
-  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 &
+  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
   printf '%s\n' "$!" > "$RECONCILE_PID"
 }
 

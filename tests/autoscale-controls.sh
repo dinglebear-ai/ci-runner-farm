@@ -104,4 +104,56 @@ if autoscale_tick; then fail 'legacy autoscale masked a scale-up failure'; fi
 [ "$(cat "$RUNDIR/autoscale.state")" = 7 ] || fail 'failed autoscale growth reset grace state'
 rm -f "$tick_tmp"
 
+# A manually added runner must age back out when removing it preserves both the
+# pool floor and its configured idle buffer. The smallest useful pool
+# (min=1, max=2, idle_buffer=1) previously got stuck at two forever because the
+# shrink condition required idle > buffer + step instead of merely having
+# removable idle capacity.
+pool_tick_tmp="$(mktemp)"
+sed -n '/^pool_autoscale_tick()/,/^}/p' "$ENGINE" > "$pool_tick_tmp"
+# shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
+. "$pool_tick_tmp"
+current_count() { echo 2; }
+pool_phase_counts() {
+  POOL_IDLE=2
+  POOL_STARTING=0
+}
+pool_min() { echo 1; }
+pool_max() { echo 2; }
+pool_idle() { echo 1; }
+pool_state_generation() { echo test; }
+scale_down_called=''
+scale_down_idle() {
+  scale_down_called="$1:$2"
+  SCALE_REMOVED="$1"
+}
+AUTOSCALE_STEP=1
+AUTOSCALE_IDLE_GRACE=1
+AUTOSCALE_ADD_BUDGET=8
+AUTOSCALE_REMOVE_BUDGET=2
+pool_autoscale_tick python
+[ "$scale_down_called" = 1:python ] || fail 'idle manual pool burst did not return toward its floor'
+[ "$(cat "$RUNDIR/autoscale.python.test.state")" = 0 ] || fail 'successful pool shrink did not reset grace state'
+rm -f "$pool_tick_tmp"
+
+# Long-running daemons call load_cfg repeatedly. Reloading a legacy config that
+# predates runner pools must reset omitted keys to their defaults; otherwise a
+# daemon that previously saw pools mode keeps scheduling those stale pools.
+reload_tmp="$(mktemp)"
+sed -n '/^CFG_KEYS=/,/^}/p' "$ENGINE" > "$reload_tmp"
+RUNNER_MODE=single
+RUNNER_POOLS='default-pool-records'
+# shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
+. "$reload_tmp"
+reload_cfg="$RUNDIR/reload.cfg"
+CFG="$reload_cfg"
+printf 'RUNNER_MODE="pools"\nRUNNER_POOLS="python|1|1|2|1"\n' > "$CFG"
+load_cfg
+[ "$RUNNER_MODE" = pools ] || fail 'pool config did not load for hot-reload regression'
+printf 'RUNNER_COUNT="2"\n' > "$CFG"
+load_cfg
+[ "$RUNNER_MODE" = single ] || fail 'legacy config reload retained stale pool mode'
+[ "$RUNNER_POOLS" = default-pool-records ] || fail 'legacy config reload retained stale pool records'
+rm -f "$reload_tmp"
+
 echo 'autoscale-controls: OK'
