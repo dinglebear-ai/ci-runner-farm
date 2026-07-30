@@ -69,6 +69,8 @@ jit_execute() {
   local pool="$1" reservation="$2" handle="$3" spec_hash="$4"
   local config_revision="$5" runner_id container idx rc image_index jit_image descriptor=""
   IFS= read -r descriptor || [ -n "$descriptor" ] || true
+  backend_scaleset_admission_allowed ||
+    { err "JIT admission is blocked by backend transition state"; return 1; }
   pool_id_valid "$pool" && jit_id_valid "$reservation" && jit_id_valid "$handle" ||
     { err "invalid JIT operation identity"; return 1; }
   [ -n "$descriptor" ] && [ "${#descriptor}" -le 65536 ] &&

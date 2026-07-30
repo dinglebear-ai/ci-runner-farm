@@ -101,6 +101,24 @@ switch ($action) {
     echo json_encode(['ok' => $rc === 0, 'action' => $action, 'log' => $out]);
     break;
 
+  case 'begin-migration': case 'rollback-backend':
+    $config = post_scalar('expected_config_revision', 64, true, true);
+    $ownership = post_scalar('expected_ownership_revision', 64, true, true);
+    $compatibility = post_scalar('expected_compatibility_record_id', 64, true, true);
+    $transition = post_scalar('expected_transition_revision', 64, true, true);
+    foreach ([$config,$ownership,$compatibility,$transition] as $revision) {
+      if (!is_string($revision) || !preg_match('/^[0-9a-f]{64}$/', $revision)) {
+        emit_error(400, 'invalid_revision', 'migration requires four exact revisions');
+        break 2;
+      }
+    }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action) . ' ' .
+      escapeshellarg($config) . ' ' . escapeshellarg($ownership) . ' ' .
+      escapeshellarg($compatibility) . ' ' . escapeshellarg($transition));
+    if ($rc !== 0) http_response_code($rc === 3 ? 409 : 400);
+    echo json_encode(['ok'=>$rc === 0,'action'=>$action,'log'=>$out]);
+    break;
+
   case 'scale':
     $raw = post_scalar('n', 2, true);
     if (!is_string($raw) || !preg_match('/^(?:0|[1-9][0-9]?)$/', $raw) || (int)$raw > 64) {

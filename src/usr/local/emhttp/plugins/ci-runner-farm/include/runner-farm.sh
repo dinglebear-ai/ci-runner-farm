@@ -114,6 +114,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-pools.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-resources.sh
 . "$SCRIPT_DIR/runner-resources.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh
+. "$SCRIPT_DIR/runner-scalesets.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-migration.sh
+. "$SCRIPT_DIR/runner-migration.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scheduler.sh
 . "$SCRIPT_DIR/runner-scheduler.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
@@ -921,6 +925,10 @@ imageupdate_rollover() {
 
 # one update evaluation: pull, and roll only if the runner image actually changed
 imageupdate_tick() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    log "image update paused by backend transition state"; return 0
+  fi
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
   validate_runtime_config || { err "image-update: $POOL_CONFIG_ERROR"; return 1; }
   imageupdate_pull || return 0   # nonzero = image unchanged this cycle
@@ -1758,6 +1766,10 @@ start_one() {
   local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
   local expected_revision cpu_milli memory_bytes spec_hash reservation_id="" rc observed=0
   [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { err "maintenance mode blocks new runner admissions"; return 1; }
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    err "classic runner admissions are blocked by backend transition state"; return 1
+  fi
   name="$(runner_name_for "$idx" "$pool")"
   if [ -z "$scope_target" ]; then
     if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then scope_target="org:$GH_OWNER"
@@ -2085,6 +2097,10 @@ reconcile_stale_runners() {
 # migrate on their next idle via the autoscale tick, or on the next Apply/recycle. Progress
 # is logged to autoscale.log, which the farm-log panel tails.
 cmd_reconcile_drain() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    log "classic reconcile paused by backend transition state"; return 0
+  fi
   # Disown an inherited fleet-lock fd (this can be nohup'd from cmd_start, which holds
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
@@ -2458,6 +2474,10 @@ cmd_scale_internal() {
 }
 
 cmd_scale() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    err "manual classic scaling is blocked by backend transition state"; return 1
+  fi
   # The autoscaler uses cmd_scale_internal above. A manual scale-up is useful
   # during a burst, but never bypass its configured ceiling or remove runners
   # that the autoscaler is managing.
@@ -3236,6 +3256,15 @@ case "${1:-status}" in
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
   jit-reconcile)    jit_reconcile ;;
+  begin-migration)  migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  continue-migration) migration_load && {
+    case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE" in
+      classic:*) migration_advance_forward ;;
+      scaleset:scaleset_active) : ;;
+      scaleset:*) migration_advance_reverse ;;
+    esac
+  } ;;
+  rollback-backend) migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
   autoscale-status) autoscale_status ;;

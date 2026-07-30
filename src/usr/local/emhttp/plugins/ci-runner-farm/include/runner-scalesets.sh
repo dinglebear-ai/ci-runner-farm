@@ -37,3 +37,28 @@ scaleset_supervisor_status() {
     printf 'running\n'
   else printf 'stopped\n'; fi
 }
+
+scaleset_prepare_ineligible() {
+  [ "${CRF_MIGRATION_TEST_GATES:-0}" = 1 ] || {
+    err "scale-set remote ineligibility operation is not yet compatibility-proven"
+    return 1
+  }
+}
+scaleset_activate_eligible() {
+  [ "${CRF_MIGRATION_TEST_GATES:-0}" = 1 ] || {
+    err "scale-set eligibility operation is not yet compatibility-proven"
+    return 1
+  }
+}
+scaleset_make_ineligible() {
+  [ "${CRF_MIGRATION_TEST_GATES:-0}" = 1 ] || {
+    err "scale-set remote ineligibility operation is unavailable"
+    return 1
+  }
+}
+scaleset_delete_owned() {
+  [ "${CRF_MIGRATION_TEST_GATES:-0}" = 1 ] || {
+    err "exact-ID scale-set deletion is unavailable"
+    return 1
+  }
+}
