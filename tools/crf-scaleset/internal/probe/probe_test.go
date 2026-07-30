@@ -1,6 +1,9 @@
 package probe
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,44 @@ func completeRecord() Record {
 		EntrypointDigest: strings.Repeat("e", 64), Owner: "acme", APIURL: "https://api.github.com",
 		InstallationID: "installation", HostID: "host", RunnerGroupID: 42,
 		Capabilities: caps, Cleanup: Cleanup{Complete: true}}
+}
+
+func TestLoadFreshRevalidatesSealAgeAndPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compatibility.json")
+	record := completeRecord()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := record.Seal(now); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFresh(path, now.Add(time.Hour), 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFresh(path, now.Add(time.Hour), 30*24*time.Hour); err == nil {
+		t.Fatal("accepted broad permissions")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFresh(path, now.Add(31*24*time.Hour), 30*24*time.Hour); err == nil {
+		t.Fatal("accepted stale record")
+	}
+	data[len(data)/2] ^= 1
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFresh(path, now, 30*24*time.Hour); err == nil {
+		t.Fatal("accepted tampered record")
+	}
 }
 func TestSealRequiresEveryGateAndCleanup(t *testing.T) {
 	r := completeRecord()

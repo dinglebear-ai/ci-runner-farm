@@ -1,12 +1,16 @@
 package probe
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -40,6 +44,8 @@ var required = []string{
 	"cancel_reassign", "ack_replay", "dynamic_capacity",
 	"eligibility_barrier", "nested_cgroup_charging", "exact_cleanup",
 }
+
+var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (r *Record) Seal(now time.Time) error {
 	if !r.Cleanup.Complete || len(r.Cleanup.IDs) != 0 {
@@ -97,4 +103,66 @@ func WriteAtomic(path string, record Record) error {
 		return err
 	}
 	return os.Rename(name, path)
+}
+
+func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return Record{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() > 64<<10 {
+		return Record{}, errors.New("compatibility_record_permissions_or_size")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return Record{}, err
+	}
+	defer file.Close()
+	dec := json.NewDecoder(io.LimitReader(file, 64<<10))
+	dec.DisallowUnknownFields()
+	var record Record
+	if err := dec.Decode(&record); err != nil {
+		return Record{}, fmt.Errorf("decode compatibility record: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return Record{}, errors.New("compatibility_record_trailing_data")
+	}
+	if record.SchemaVersion != 1 || !record.Cleanup.Complete || len(record.Cleanup.IDs) != 0 {
+		return Record{}, errors.New("compatibility_record_incomplete")
+	}
+	for _, name := range required {
+		if !record.Capabilities[name] {
+			return Record{}, errors.New("capability_missing:" + name)
+		}
+	}
+	if maxAge <= 0 || record.TestedAt.After(now.Add(5*time.Minute)) ||
+		now.Sub(record.TestedAt) > maxAge {
+		return Record{}, errors.New("compatibility_record_stale")
+	}
+	for name, value := range map[string]string{
+		"plugin": record.PluginDigest, "helper": record.HelperDigest, "image": record.ImageDigest,
+		"dockerfile": record.DockerfileDigest, "entrypoint": record.EntrypointDigest,
+	} {
+		if !digest.MatchString(value) {
+			return Record{}, errors.New("invalid_" + name + "_digest")
+		}
+	}
+	if record.ModuleRevision == "" || record.GoVersion == "" || record.Owner == "" ||
+		record.APIURL == "" || record.InstallationID == "" || record.HostID == "" ||
+		record.RunnerGroupID <= 0 {
+		return Record{}, errors.New("compatibility_record_identity")
+	}
+	sealedID := record.CompatibilityRecordID
+	record.CompatibilityRecordID = ""
+	data, err := json.Marshal(record)
+	if err != nil {
+		return Record{}, err
+	}
+	sum := sha256.Sum256(data)
+	if !bytes.Equal([]byte(sealedID), []byte(hex.EncodeToString(sum[:]))) {
+		return Record{}, errors.New("compatibility_record_seal")
+	}
+	record.CompatibilityRecordID = sealedID
+	return record, nil
 }
