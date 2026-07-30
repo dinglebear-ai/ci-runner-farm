@@ -170,6 +170,7 @@ IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
 RECONCILE_PID="${RUNDIR}/reconcile.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
+MAINTENANCE_FILE="${RUNDIR}/maintenance.state"
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
@@ -675,6 +676,7 @@ reap_dead_runners() {
 # one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
 autoscale_tick() {
   [ "$AUTOSCALE" = "true" ] || return 0
+  [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { log "autoscale: maintenance mode blocks new admissions"; return 0; }
   validate_runtime_config || { err "autoscale: $POOL_CONFIG_ERROR"; return 1; }
   cleanup_pool_runtime_state
   fleet_inventory_refresh || { err "autoscale: could not inventory managed runners"; return 1; }
@@ -1746,6 +1748,7 @@ fleet_lock_resume() {
 start_one() {
   local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
   local expected_revision cpu_milli memory_bytes spec_hash reservation_id="" rc observed=0
+  [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { err "maintenance mode blocks new runner admissions"; return 1; }
   name="$(runner_name_for "$idx" "$pool")"
   if [ -z "$scope_target" ]; then
     if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then scope_target="org:$GH_OWNER"
@@ -2161,6 +2164,27 @@ cmd_reconcile_config() {
   # migration of a security-isolation setting can otherwise read as immediate enforcement.
   [ "$NETWORK_ISOLATION" != off ] && msg="$msg  NOTE: network isolation ($NETWORK_ISOLATION) takes effect on each runner only as it recycles — running jobs keep their current network until they finish. Restart the fleet to enforce it on every runner immediately."
   echo "$msg"
+}
+
+cmd_maintenance() {
+  case "${1:-status}" in
+    begin|quiesce)
+      ( umask 077; printf 'entered_at=%s\nreason=operator\n' "$(date +%s)" > "${MAINTENANCE_FILE}.tmp" &&
+        mv "${MAINTENANCE_FILE}.tmp" "$MAINTENANCE_FILE" ) || return 1
+      autoscale_stop
+      printf '{"ok":true,"maintenance":true,"message":"New admissions are paused; busy runners continue."}\n'
+      ;;
+    resume)
+      rm -f "$MAINTENANCE_FILE"
+      [ "$AUTOSCALE" = true ] && autoscale_start
+      reconcile_start
+      printf '{"ok":true,"maintenance":false,"message":"Admissions resumed."}\n'
+      ;;
+    status)
+      printf '{"ok":true,"maintenance":%s}\n' "$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false)"
+      ;;
+    *) printf '{"ok":false,"error":"maintenance action must be begin, resume, or status"}\n'; return 2 ;;
+  esac
 }
 
 pool_effective_target() {
@@ -2960,7 +2984,7 @@ cmd_status_json() {
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
   status_model_refresh
-  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":{\"requested\":\"$(printf '%s' "$POOL_BACKEND"|json_escape)\",\"effective\":\"classic\",\"transition\":\"classic_active\"},\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":{\"requested\":\"$(printf '%s' "$POOL_BACKEND"|json_escape)\",\"effective\":\"classic\",\"transition\":\"classic_active\"},\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -3187,6 +3211,7 @@ case "${1:-status}" in
   stats-json)   cmd_stats_json ;;
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
+  maintenance)  with_fleet_lock wait cmd_maintenance "${2:-status}" ;;
   reconcile-config) cmd_reconcile_config ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
