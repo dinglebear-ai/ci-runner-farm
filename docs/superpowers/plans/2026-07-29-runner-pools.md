@@ -159,13 +159,18 @@ Migration capacity is bounded:
 
 Graceful paths are autoscale shrink, fixed scale-down, deleted-pool retirement, and config/image reconciliation:
 
-1. Observe the runner as explicitly `idle`; `starting`, `busy`, `error`, and `unknown` are not removable.
+1. Observe the runner as explicitly `idle`; `starting`, `busy`, log-derived `error`, and `unknown` are not removable.
 2. Resolve the runner ID from one cached GitHub inventory for its stamped scope.
 3. Request GitHub deletion.
 4. Stop/remove the container only when deletion succeeds or GitHub returns not found.
 5. Treat 403, 422, timeout, rate-limit, and unknown responses as retryable; leave the container intact and surface the reason.
 
 This closes the race where GitHub assigns a job after a local idle check.
+
+One narrow recovery exception is authoritative failure: a container proven
+`exited`/`dead`, or `running` with Docker health `unhealthy`, may be force-retired
+or replaced. A generic error inferred only from logs never authorizes forced
+removal because custom images may not expose the standard runner processes.
 
 Forced paths remain separate:
 
@@ -1039,13 +1044,17 @@ Replace claims that queued jobs drive scaling. State that the global queued tile
 **Step 3: Document safe activation**
 
 1. Deploy code with `RUNNER_MODE=single`.
-2. Add a general compatibility pool if legacy selectors still exist.
-3. Prepare specialized pool definitions.
-4. Change workflow jobs to unique `ci-pool-*` selectors.
-5. Enable pool mode.
-6. Verify registered labels and one smoke job per pool.
-7. Saturate Rust and prove Python/TypeScript stay available.
-8. Remove the legacy/general pool only after workflow inventory is complete.
+2. Prepare specialized pool definitions.
+3. Change workflow jobs to unique `ci-pool-*` selectors.
+4. Enable pool mode.
+5. Verify registered labels and one smoke job per pool.
+6. Saturate Rust and prove Python/TypeScript stay available.
+
+Pool runners carry only derived `ci-pool-*` custom labels, so a pool cannot
+provide compatibility for jobs that still request legacy custom labels. Keep
+external legacy-compatible capacity online during the handoff for a zero-queue
+migration; otherwise expect a short queued interval between the workflow update
+and enabling pool mode.
 
 Rollback is symmetric:
 
@@ -1199,7 +1208,7 @@ Keep the work on the local `codex/runner-pools` branch. Do not push to the offic
 | Fixed scale | Reconciler restores config immediately | Respect generation-keyed runtime override |
 | Autoscale | Slow start appears as no warm capacity | Count `starting` as pending; bound additions |
 | Autoscale | One pool API timeout blocks later pools | Failure isolation and round-robin bounded work |
-| Scale-down | `error` or `starting` treated as idle | Remove only explicit `idle` |
+| Scale-down | Log-derived `error` or `starting` treated as idle | Remove only explicit `idle`; force only Docker-proven exited/dead/unhealthy runners |
 | Cache cleanup | `CACHE_ROOT` changed to unsafe path | Revalidate at deletion; preserve data on ambiguity |
 | Status | Pool loops multiply Docker calls | One ps + one batched inspect, group in memory |
 | Fleet | Old poll overwrites action result | In-flight guard plus one queued refresh |

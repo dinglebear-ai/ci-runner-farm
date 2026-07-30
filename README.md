@@ -48,7 +48,8 @@ dependency caches that stay hot between runs, at zero cost per minute.
 The plugin provisions a set of Docker containers from a runner image — built
 in-plugin or pulled from a registry. Each container registers itself with GitHub
 as a self-hosted runner, either at **repo** scope or **org** scope (org scope
-gives you one shared pool that any of your private repos can pull from).
+registers organization-wide capacity that can be one shared fleet or multiple
+routed pools available to permitted repositories).
 
 Persistent package caches and the build workspace are bind-mounted from a fast
 pool so they survive across jobs. An optional companion container runs a
@@ -185,11 +186,16 @@ Safe activation order:
 1. Deploy the plugin while **Single fleet** remains selected.
 2. Restart the single fleet once after upgrading so existing containers receive
    immutable GitHub scope metadata before any mode change.
-3. Add a general compatibility pool if legacy selectors still exist.
-4. Prepare Rust/Python/TypeScript pool definitions.
-5. Update workflow jobs to their unique selectors.
-6. Enable pool mode and verify each GitHub registration and smoke job.
-7. Remove general capacity only after the workflow inventory is complete.
+3. Prepare Rust/Python/TypeScript pool definitions.
+4. Update workflow jobs to their unique selectors.
+5. Enable pool mode and verify each GitHub registration and smoke job.
+
+Pool runners carry only their derived `ci-pool-*` custom label, so they cannot
+stand in for jobs that still request legacy custom labels such as `unraid` or
+`build`. Keep external legacy-compatible capacity online during the handoff if
+you need a zero-queue migration; otherwise expect a short queued interval between
+the workflow-label update and enabling pool mode. Jobs requesting only
+`self-hosted` remain eligible for any online self-hosted runner.
 
 The plugin never edits workflow files in sibling repositories. Routing changes
 are an explicit, repository-by-repository migration owned by those workflows.

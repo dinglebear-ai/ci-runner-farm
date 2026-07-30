@@ -44,6 +44,10 @@ function last_json($out) {
 function runner_name_valid($name) {
   return preg_match('/^ci-runner-(?:[0-9]+|[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?-[0-9]+)$/', $name) === 1;
 }
+function bounded_request_string($value, $max, $trim = false) {
+  if (!is_string($value) || strlen($value) > $max || str_contains($value, "\0")) return false;
+  return $trim ? trim($value) : $value;
+}
 
 switch ($action) {
   case 'status-json':
@@ -72,6 +76,9 @@ switch ($action) {
     if ($pool !== '' && (!is_string($pool) || !preg_match('/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/', $pool))) {
       http_response_code(400); echo json_encode(['ok'=>false,'error'=>'bad pool']); break;
     }
+    if ($pool !== '' && $raw === '0') {
+      http_response_code(400); echo json_encode(['ok'=>false,'error'=>'runner pools cannot scale to zero']); break;
+    }
     $cmd = escapeshellarg($SCRIPT) . ' scale ';
     if ($pool !== '') $cmd .= escapeshellarg($pool) . ' ';
     $cmd .= escapeshellarg($raw);
@@ -83,19 +90,23 @@ switch ($action) {
     $mode = $_REQUEST['mode'] ?? 'single';
     $pools = $_REQUEST['pools'] ?? '';
     $scope = $_REQUEST['scope'] ?? 'repo';
+    $owner = $_REQUEST['owner'] ?? '';
     if (!is_string($mode) || !in_array($mode, ['single','pools'], true) ||
         !is_string($scope) || !in_array($scope, ['repo','org'], true) ||
-        !is_string($pools) || strlen($pools) > 4096) {
+        !is_string($pools) || strlen($pools) > 4096 ||
+        !is_string($owner) || strlen($owner) > 255) {
       http_response_code(400); echo json_encode(['ok'=>false,'error'=>'invalid pool validation request']); break;
     }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' validate-pools ' .
-      escapeshellarg($mode) . ' ' . escapeshellarg($pools) . ' ' . escapeshellarg($scope));
+      escapeshellarg($mode) . ' ' . escapeshellarg($pools) . ' ' . escapeshellarg($scope) . ' ' .
+      escapeshellarg($owner));
     if ($out !== '') echo $out;
     else { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'pool validation failed']); }
     break;
 
   case 'set-token':
-    $tok = trim($_REQUEST['token'] ?? '');
+    $tok = bounded_request_string($_REQUEST['token'] ?? '', 255, true);
+    if ($tok === false) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'invalid GitHub token value']); break; }
     if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
     // Shape-check the PAT: every GitHub token form (ghp_/gho_/ghs_/ghr_/github_pat_
     // + classic 40-char hex) is [A-Za-z0-9_] only. Rejecting anything else keeps a
@@ -116,9 +127,9 @@ switch ($action) {
     break;
 
   case 'set-registry-token':
-    $tok = trim($_REQUEST['token'] ?? '');
+    $tok = bounded_request_string($_REQUEST['token'] ?? '', 4096, true);
+    if ($tok === false) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'registry token is too large or invalid']); break; }
     if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
-    if (strlen($tok) > 4096 || str_contains($tok, "\0")) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'registry token is too large']); break; }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/registry-token", $tok);
     chmod("$CFGDIR/registry-token", 0600);
@@ -137,9 +148,9 @@ switch ($action) {
     break;
 
   case 'save-dockerfile':
-    $content = $_REQUEST['dockerfile'] ?? '';
+    $content = bounded_request_string($_REQUEST['dockerfile'] ?? '', 1048576);
+    if ($content === false) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'Dockerfile is too large or invalid']); break; }
     if (trim($content) === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
-    if (!is_string($content) || strlen($content) > 1048576) { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'Dockerfile is too large']); break; }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/Dockerfile", $content);
     echo json_encode(['ok' => true, 'action' => 'save-dockerfile']);

@@ -29,9 +29,9 @@ pool_uint_valid() {
 }
 
 # Validate one complete immutable snapshot.
-# Usage: pool_config_validate <single|pools> <serialized records> <repo|org>
+# Usage: pool_config_validate <single|pools> <serialized records> <repo|org> [owner]
 pool_config_validate() {
-  local mode="${1:-}" raw="${2:-}" scope="${3:-}" rec id fixed min max idle
+  local mode="${1:-}" raw="${2:-}" scope="${3:-}" owner="${4-${GH_OWNER:-}}" rec id fixed min max idle
   local count=0 sum_fixed=0 sum_max=0 seen=" "
   # shellcheck disable=SC2034 # public validation result consumed by callers
   POOL_CONFIG_ERROR=""
@@ -43,6 +43,8 @@ pool_config_validate() {
     *) pool_error "Runner mode must be single or pools."; return 1 ;;
   esac
   [ "$scope" = "org" ] || { pool_error "Runner pools require Organization scope."; return 1; }
+  printf '%s' "$owner" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$' ||
+    { pool_error "Organization owner must be 1-39 letters, digits, or internal hyphens."; return 1; }
   [ -n "$raw" ] || { pool_error "Runner pools mode requires at least one pool."; return 1; }
   [ "${#raw}" -le "$POOL_CONFIG_MAX_BYTES" ] || { pool_error "Runner pool configuration is too large."; return 1; }
   case "$raw" in
@@ -61,6 +63,9 @@ pool_config_validate() {
 
   for rec in "${records[@]}"; do
     [ -n "$rec" ] || { pool_error "Runner pool entries cannot be empty."; return 1; }
+    [ "${rec//[^|]/}" = "||||" ] || {
+      pool_error "Pool '$rec' must have exactly id|fixed|min|max|idle."; return 1;
+    }
     oldifs="$IFS"; IFS='|' read -r id fixed min max idle extra <<EOF
 $rec
 EOF
@@ -71,6 +76,9 @@ EOF
     pool_id_valid "$id" || {
       pool_error "Pool id '$id' must be lowercase, 1-24 characters, and may contain only letters, digits, and internal hyphens."; return 1;
     }
+    case "$id" in
+      default|invalid) pool_error "Pool id '$id' is reserved."; return 1 ;;
+    esac
     case "$seen" in
       *" $id "*) pool_error "Pool id '$id' is duplicated."; return 1 ;;
     esac
@@ -103,7 +111,7 @@ pool_mode_enabled() {
 }
 
 pool_records() {
-  pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" || return 1
+  pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" "${GH_OWNER:-}" || return 1
   if pool_mode_enabled; then
     printf '%s\n' "$POOL_RECORDS" | tr ';' '\n'
   else

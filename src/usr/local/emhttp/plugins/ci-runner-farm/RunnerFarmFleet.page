@@ -169,37 +169,49 @@ function crfScale(){ if(window.CRF_CONFIG_INVALID)return; const n=document.getEl
 const CRF_POOL_PENDING=new Set();
 function crfSelectorValue(value){ return window.CSS&&CSS.escape?CSS.escape(value):String(value).replace(/["\\]/g,'\\$&'); }
 function crfScalePool(pool){
-  if(window.CRF_CONFIG_INVALID)return;
+  if(window.CRF_CONFIG_INVALID||CRF_POOL_PENDING.has(pool))return;
   const input=document.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(pool)+'"]'); if(!input)return;
   const n=input.value; CRF_POOL_PENDING.add(pool); crfRenderPools(window.CRF_LAST||{});
   crfPost({action:'scale',pool,n}).then(o=>{
     crfLog(o);
     if(o.ok===false) crfToast('Scale failed'+(o.error?': '+o.error:''));
-    else crfToast('Scaled '+pool+' to '+n);
+    else crfToast('Scale target set for '+pool+' at '+n);
   }).catch(e=>{crfToast('Scale failed');console.error('ci-runner-farm pool scale:',e);})
     .finally(()=>{CRF_POOL_PENDING.delete(pool);crfRefresh();});
 }
 function crfRenderPools(d){
   const box=document.getElementById('crf-pool-cards'); if(!box)return;
   const pools=d.pools||[], active=document.activeElement;
+  const activePool=active&&active.classList&&active.classList.contains('crf-pool-scale')?active.dataset.pool:null;
+  const activeScalePool=active&&active.closest&&active.closest('[data-scale-pool]')?active.closest('[data-scale-pool]').dataset.scalePool:null;
+  const activeValue=activePool?active.value:null;
   if(d.mode!=='pools'){box.style.display='none';box.textContent='';return;}
   box.style.display='grid';
-  if(active&&box.contains(active))return;
   box.innerHTML=pools.map(p=>{
-    const auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), atMax=auto&&Number(p.count)>=Number(p.max);
+    const auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), retiring=!p.label||Number(p.configured)===0, atMax=auto&&Number(p.count)>=Number(p.max);
     const state=(p.retiring?'<span class="crf-pool-state">retiring '+crfEsc(p.retiring)+'</span>':'')+
-      (p.stale?'<span class="crf-pool-state"> updating '+crfEsc(p.stale)+'</span>':'');
+      (p.stale?'<span class="crf-pool-state"> updating '+crfEsc(p.stale)+'</span>':'')+
+      (p.pending?'<span class="crf-pool-state"> draining '+crfEsc(p.pending)+'</span>':'');
     return '<div class="crf-pool-card" data-pool="'+crfEsc(p.id)+'">'+
       '<div class="crf-pool-head"><span class="crf-pool-title">'+crfEsc(p.id)+'</span><button type="button" class="crf-pool-label" data-copy="'+crfEsc(p.label)+'" title="Copy runs-on selector">'+crfEsc(p.label||'retiring')+'</button></div>'+
-      '<div class="crf-pool-counts"><span>up '+crfEsc(p.count)+'</span><span>busy '+crfEsc(p.busy)+'</span><span>idle '+crfEsc(p.idle)+'</span><span>target '+crfEsc(p.effective_target)+'</span></div>'+
-      '<div class="crf-pool-control"><span>'+(auto?'Scale up to':'Scale to')+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(auto?Number(p.count)+1:0)+'" max="'+crfEsc(auto?p.max:64)+'" value="'+crfEsc(p.count)+'" aria-label="'+(auto?'Scale up ':'Scale ')+crfEsc(p.id)+' pool">'+
-      '<uui-button size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>Scale</uui-button>'+state+'</div></div>';
+      '<div class="crf-pool-counts"><span>up '+crfEsc(p.up)+'</span><span>busy '+crfEsc(p.busy)+'</span><span>idle '+crfEsc(p.idle)+'</span>'+
+      (p.starting?'<span>starting '+crfEsc(p.starting)+'</span>':'')+(p.error?'<span>error '+crfEsc(p.error)+'</span>':'')+
+      '<span>'+(auto?'floor':'target')+' '+crfEsc(p.effective_target)+'</span></div>'+
+      '<div class="crf-pool-control"><span>'+(auto?'Scale up to':'Scale to')+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(auto?Number(p.count)+1:1)+'" max="'+crfEsc(auto?p.max:64)+'" value="'+crfEsc(p.count)+'" '+(retiring?'disabled ':'')+'aria-label="'+(auto?'Scale up ':'Scale ')+crfEsc(p.id)+' pool">'+
+      '<uui-button size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||retiring||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>Scale</uui-button>'+state+'</div></div>';
   }).join('');
+  if(activePool){
+    const restored=box.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(activePool)+'"]');
+    if(restored&&!restored.disabled){restored.value=activeValue;restored.focus();}
+  }else if(activeScalePool){
+    const restored=box.querySelector('[data-scale-pool="'+crfSelectorValue(activeScalePool)+'"]');
+    if(restored)restored.focus();
+  }
 }
 document.getElementById('crf-pool-cards').addEventListener('click',e=>{
   const scale=e.target.closest('[data-scale-pool]'); if(scale){crfScalePool(scale.dataset.scalePool);return;}
   const copy=e.target.closest('[data-copy]'); if(copy&&copy.dataset.copy){
-    crfCopyText('runs-on: [self-hosted, '+copy.dataset.copy+']').then(()=>crfToast('Selector copied'));
+    crfCopyText('runs-on: [self-hosted, '+copy.dataset.copy+']').then(()=>crfToast('Selector copied')).catch(()=>crfToast('Copy failed'));
   }
 });
 
@@ -230,6 +242,11 @@ function crfVolatile(r){
   const cpuTxt=cpuKnown?Math.round(r.cpu_pct)+'%':(running?'…':'&ndash;');
   const memTxt=memKnown?((r.mem_used_mib>=1024?( (r.mem_used_mib/1024).toFixed(1)+'g'):(r.mem_used_mib+'m'))+'/'+r.mem_gb+'g'):(running?'…':'&ndash;');
   return {elapsedHtml,cpuPct,cpuTxt,memPct,memTxt};
+}
+function crfEmptyFleetHtml(d){
+  return '<div class="crf-empty"><span class="crf-ball"></span>'+
+    '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
+    '<uui-button size="sm" data-crf-mutation'+(crfDark()?' class="dark"':'')+(d.config_error?' disabled':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
 }
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
@@ -283,9 +300,7 @@ function crfRefresh(){
     const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]');
     if(odr){ window.CRF_DRAWER_PINNED=crfDrawerPinned(odr); window.CRF_DRAWER_SCROLL=odr.scrollTop; }
     if(!rs.length){
-      tb.innerHTML='<div class="crf-empty"><span class="crf-ball"></span>'+
-        '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
-        '<uui-button size="sm"'+(crfDark()?' class="dark"':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
+      tb.innerHTML=crfEmptyFleetHtml(d);
       return;
     }
     const dark=crfDark()?' class="dark"':'';

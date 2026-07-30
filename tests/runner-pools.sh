@@ -11,6 +11,7 @@ EXEC="src/usr/local/emhttp/plugins/ci-runner-farm/include/exec.php"
 
 # shellcheck disable=SC1090
 . "$HELPER"
+GH_OWNER=acme
 
 pass=0
 fail=0
@@ -43,6 +44,8 @@ reject broken "$valid" org
 reject pools '' org
 reject pools "$valid" repo
 reject pools 'Rust|1|1|1|1' org
+reject pools 'default|1|1|1|1' org
+reject pools 'invalid|1|1|1|1' org
 reject pools 'rust-|1|1|1|1' org
 reject pools '-rust|1|1|1|1' org
 reject pools 'r/ust|1|1|1|1' org
@@ -50,6 +53,8 @@ reject pools 'rust dev|1|1|1|1' org
 reject pools $'rust|1|1|1|1\npython|1|1|1|1' org
 reject pools 'rust|1|1|1' org
 reject pools 'rust|1|1|1|1|extra' org
+reject pools 'rust|1|1|1|1|' org
+reject pools 'rust|1|1|1|1||' org
 reject pools 'rust||1|1|1' org
 reject pools 'rust|01|1|1|1' org
 reject pools 'rust|-1|1|1|1' org
@@ -64,6 +69,11 @@ reject pools 'rust|1|1|1|1;;python|1|1|1|1' org
 reject pools 'a|1|1|1|1;b|1|1|1|1;c|1|1|1|1;d|1|1|1|1;e|1|1|1|1;f|1|1|1|1;g|1|1|1|1;h|1|1|1|1;i|1|1|1|1' org
 reject pools 'a|64|1|64|1;b|1|1|1|1' org
 reject pools 'a|1|1|64|1;b|1|1|1|1' org
+if pool_config_validate pools "$valid" org ''; then bad 'empty organization owner was accepted'; else ok; fi
+if pool_config_validate pools "$valid" org 'bad/owner'; then bad 'unsafe organization owner was accepted'; else ok; fi
+for owner in . .. bad_owner -leading trailing- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+  if pool_config_validate pools "$valid" org "$owner"; then bad "unsafe organization owner was accepted: $owner"; else ok; fi
+done
 
 # Source-level contracts filled in by later implementation tasks. Keeping them in
 # this suite makes `tests/*.sh` one executable acceptance surface.

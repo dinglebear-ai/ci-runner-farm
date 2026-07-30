@@ -20,4 +20,29 @@ for page in \
   node --check "$out"
 done
 
+grep -Fq "up '+crfEsc(p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "min=\"'+(auto?Number(p.count)+1:1)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "mode!=='pools'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "currentSnapshot!==formSnapshot" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "document.addEventListener('crf-pools-change',check)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "input.setAttribute('aria-describedby','crf-pools-errors')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "input.setAttribute('aria-invalid','true')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq "'Remove '+subject" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+
+# Execute the empty-state renderer from the page: invalid config must produce a
+# disabled mutation button, while a valid empty fleet remains startable.
+node - src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page <<'NODE'
+const fs=require('fs'), vm=require('vm');
+const src=fs.readFileSync(process.argv[2],'utf8');
+const match=src.match(/function crfEmptyFleetHtml\(d\)\{[\s\S]*?\n\}/);
+if(!match) throw new Error('empty-fleet renderer not found');
+const ctx={crfEsc:s=>String(s),crfDark:()=>false};
+vm.createContext(ctx); vm.runInContext(match[0],ctx);
+const invalid=ctx.crfEmptyFleetHtml({configured:3,config_error:'bad pools'});
+if(!invalid.includes('data-crf-mutation')||!invalid.includes(' disabled')) throw new Error('invalid empty fleet has active Start');
+const valid=ctx.crfEmptyFleetHtml({configured:3,config_error:''});
+if(!valid.includes('data-crf-mutation')||valid.includes(' disabled')) throw new Error('valid empty fleet Start is disabled');
+NODE
+
 echo 'ui-js: OK'

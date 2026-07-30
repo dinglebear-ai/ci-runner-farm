@@ -78,4 +78,30 @@ grep -q 'AUTOSCALE_ADD_BUDGET=8' "$ENGINE" || fail 'pool autoscale additions are
 grep -q 'AUTOSCALE_REMOVE_BUDGET=2' "$ENGINE" || fail 'pool autoscale removals are not bounded per tick'
 grep -q 'autoscale.cursor' "$ENGINE" || fail 'pool autoscale evaluation does not rotate'
 
+# A failed legacy autoscale growth must remain a failed tick and must not reset
+# the grace-state file as though capacity had been created.
+tick_tmp="$(mktemp)"
+sed -n '/^autoscale_tick()/,/^}/p' "$ENGINE" > "$tick_tmp"
+# shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
+. "$tick_tmp"
+validate_runtime_config() { return 0; }
+cleanup_pool_runtime_state() { :; }
+fleet_inventory_refresh() { INVENTORY_ACTIVE=1; }
+reap_dead_runners() { :; }
+pool_mode_enabled() { return 1; }
+current_count() { echo 0; }
+busy_count() { echo 0; }
+autoscale_floor() { echo 2; }
+cmd_scale_internal() { return 1; }
+reconcile_stale_runners() { :; }
+INVENTORY_ACTIVE=1
+AUTOSCALE=true
+AUTOSCALE_MIN_IDLE=1
+AUTOSCALE_MAX=4
+AUTOSCALE_STEP=1
+printf '7\n' > "$RUNDIR/autoscale.state"
+if autoscale_tick; then fail 'legacy autoscale masked a scale-up failure'; fi
+[ "$(cat "$RUNDIR/autoscale.state")" = 7 ] || fail 'failed autoscale growth reset grace state'
+rm -f "$tick_tmp"
+
 echo 'autoscale-controls: OK'
