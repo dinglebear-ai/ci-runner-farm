@@ -68,6 +68,10 @@ grep -Fq 'record.State = "create_ambiguous"' tools/crf-scaleset/internal/ownersh
   crf_fail "ambiguous response-loss ownership tombstone is missing"
 grep -Fq 'never adopt by name' tools/crf-scaleset/internal/ownership/ownership.go ||
   crf_fail "foreign name/spec adoption guard is missing"
+grep -Fq 'scaleSetLabelContract = "canonical-name-label-v1"'   tools/crf-scaleset/internal/ownership/ownership.go ||
+  crf_fail "canonical scale-set name-label migration contract is missing"
+grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/internal/github/api.go ||
+  crf_fail "scale-set canonical name label is missing"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 

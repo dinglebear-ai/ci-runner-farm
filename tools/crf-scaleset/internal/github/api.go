@@ -82,22 +82,32 @@ func NewAdapter(client *scaleset.Client, owner string) *Adapter {
 	return &Adapter{client: client, owner: owner, sessions: make(map[int64]*scaleset.MessageSessionClient)}
 }
 
-func labels(in []string) []scaleset.Label {
-	out := make([]scaleset.Label, 0, len(in))
+func labels(name string, in []string) []scaleset.Label {
+	out := make([]scaleset.Label, 0, len(in)+1)
+	out = append(out, scaleset.Label{Type: "System", Name: name})
+	seen := map[string]bool{strings.ToLower(name): true}
 	for _, label := range in {
+		key := strings.ToLower(label)
+		if seen[key] {
+			continue
+		}
 		out = append(out, scaleset.Label{Type: "System", Name: label})
+		seen[key] = true
 	}
 	return out
 }
 func fromScaleSet(in *scaleset.RunnerScaleSet) ScaleSet {
 	out := ScaleSet{ID: int64(in.ID), Name: in.Name, RunnerGroupID: int64(in.RunnerGroupID)}
 	for _, label := range in.Labels {
+		if strings.EqualFold(label.Name, in.Name) {
+			continue
+		}
 		out.Labels = append(out.Labels, label.Name)
 	}
 	return out
 }
 func (a *Adapter) CreateRunnerScaleSet(ctx context.Context, spec CreateSpec) (ScaleSet, error) {
-	v, err := a.client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID), Labels: labels(spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
+	v, err := a.client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID), Labels: labels(spec.Name, spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
 	if err != nil {
 		return ScaleSet{}, err
 	}
@@ -123,7 +133,7 @@ func (a *Adapter) GetRunnerScaleSetByName(ctx context.Context, groupID int64, na
 func (a *Adapter) UpdateRunnerScaleSet(ctx context.Context, id int64, spec UpdateSpec) (ScaleSet, error) {
 	v, err := a.client.UpdateRunnerScaleSet(ctx, int(id), &scaleset.RunnerScaleSet{
 		ID: int(id), Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID),
-		Labels: labels(spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Labels: labels(spec.Name, spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
 	})
 	if err != nil {
 		return ScaleSet{}, err

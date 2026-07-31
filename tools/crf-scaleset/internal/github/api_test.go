@@ -1,10 +1,40 @@
 package github
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/actions/scaleset"
 )
+
+func TestLabelsIncludeCanonicalScaleSetName(t *testing.T) {
+	got := labels("crf-install-ops-revision", []string{"ci-pool-ops", "tailscale", "CRF-INSTALL-OPS-REVISION"})
+	if len(got) != 3 {
+		t.Fatalf("unexpected labels: %#v", got)
+	}
+	want := []scaleset.Label{
+		{Type: "System", Name: "crf-install-ops-revision"},
+		{Type: "System", Name: "ci-pool-ops"},
+		{Type: "System", Name: "tailscale"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("canonical scale-set label missing or reordered: got=%#v want=%#v", got, want)
+	}
+}
+
+func TestFromScaleSetHidesCanonicalNameLabel(t *testing.T) {
+	got := fromScaleSet(&scaleset.RunnerScaleSet{
+		ID: 62, Name: "crf-install-ops-revision", RunnerGroupID: 4,
+		Labels: []scaleset.Label{
+			{Type: "System", Name: "crf-install-ops-revision"},
+			{Type: "System", Name: "ci-pool-ops"},
+			{Type: "System", Name: "tailscale"},
+		},
+	})
+	if !slices.Equal(got.Labels, []string{"ci-pool-ops", "tailscale"}) {
+		t.Fatalf("adapter leaked canonical name into configured labels: %#v", got.Labels)
+	}
+}
 
 func TestAssignedJobHandleUsesStableJobIdentityWhenRunnerRequestIDIsZero(t *testing.T) {
 	job := &scaleset.JobAssigned{JobMessageBase: scaleset.JobMessageBase{

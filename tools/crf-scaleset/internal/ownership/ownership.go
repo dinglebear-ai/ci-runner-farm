@@ -102,10 +102,12 @@ func remoteName(installationID, poolID, specRevision string) string {
 	return fmt.Sprintf("crf-%s-%s-%s", install, poolID, specRevision[:12])
 }
 
+const scaleSetLabelContract = "canonical-name-label-v1"
+
 func specRevision(pool Pool, productionGroupID, quarantineGroupID int64) string {
 	labels := slices.Clone(pool.Labels)
 	sort.Strings(labels)
-	data, _ := json.Marshal([]any{pool.ID, pool.RoutingLabel, labels, productionGroupID, quarantineGroupID})
+	data, _ := json.Marshal([]any{scaleSetLabelContract, pool.ID, pool.RoutingLabel, labels, productionGroupID, quarantineGroupID})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
