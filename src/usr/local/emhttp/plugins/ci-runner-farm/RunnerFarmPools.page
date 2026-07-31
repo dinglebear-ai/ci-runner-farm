@@ -78,7 +78,7 @@ _(Pool definitions)_:
 >
 > Set **Max** to `auto` to admit runners from the available CPU and memory budget instead of a fixed runner count. The host resource budget remains the hard admission boundary.
 >
-> Removing or renaming a pool drains its runners as jobs finish; workflows using the old label will queue.
+> Saved pool IDs are immutable. To rename one, duplicate it with the new ID and routing label, save, move workflows to the new selector, then remove the old pool; removing it drains its runners as jobs finish.
 :end
 
 <div class="crfp-routing-warn" id="crf-routing-warn">Runner pools reserve routed capacity; they are not security isolation. Restrict the GitHub runner group to trusted repositories.</div>
@@ -317,7 +317,26 @@ function crfResetPoolDefaults(){
 }
 crfBuildPoolEditor(document.getElementById('crf-pools-value').value);crfPoolMode();
 
-let CRF_COMPAT_OPERATION='';
+let CRF_COMPAT_OPERATION='',CRF_COMPAT_FAILURES=0,CRF_COMPAT_TIMER=null;
+function crfPoolsActive(){
+  const box=document.getElementById('crf-scaleset-readiness');
+  return !document.hidden&&!!box&&box.offsetParent!==null;
+}
+function crfScheduleCompatibility(delay){
+  if(CRF_COMPAT_TIMER)clearTimeout(CRF_COMPAT_TIMER);
+  CRF_COMPAT_TIMER=setTimeout(()=>{
+    CRF_COMPAT_TIMER=null;
+    if(!CRF_COMPAT_OPERATION)return;
+    if(!crfPoolsActive()){crfScheduleCompatibility(Math.min(12000,Math.max(1500,delay*2)));return;}
+    crfPollCompatibility();
+  },delay);
+}
+function crfFinishCompatibility(message){
+  if(CRF_COMPAT_TIMER)clearTimeout(CRF_COMPAT_TIMER);
+  CRF_COMPAT_TIMER=null;CRF_COMPAT_OPERATION='';CRF_COMPAT_FAILURES=0;
+  document.getElementById('crf-compat-run').removeAttribute('aria-busy');
+  if(message)document.getElementById('crf-scaleset-readiness').textContent=message;
+}
 function crfRenderReadiness(d){
   const box=document.getElementById('crf-scaleset-readiness'),c=d.compatibility||{},b=d.backend||{};
   const identity=[c.helper_digest&&('helper '+c.helper_digest.slice(0,12)),c.plugin_digest&&('plugin '+c.plugin_digest.slice(0,12)),
@@ -329,22 +348,37 @@ function crfRenderReadiness(d){
 function crfRefreshReadiness(){crfPost({action:'readiness-json'}).then(crfRenderReadiness).catch(()=>{});}
 function crfPollCompatibility(){
   if(!CRF_COMPAT_OPERATION)return;
+  if(!crfPoolsActive()){crfScheduleCompatibility(1500);return;}
   crfPost({action:'operation-status',operation_id:CRF_COMPAT_OPERATION}).then(status=>{
+    CRF_COMPAT_FAILURES=0;
     const box=document.getElementById('crf-scaleset-readiness');
     box.textContent='Compatibility test: '+status.state+(status.message?' · '+status.message:'');
-    if(status.state==='running')setTimeout(crfPollCompatibility,1000);
-    else{CRF_COMPAT_OPERATION='';document.getElementById('crf-compat-run').removeAttribute('aria-busy');crfRefreshReadiness();}
-  }).catch(()=>setTimeout(crfPollCompatibility,1500));
+    if(status.state==='running')crfScheduleCompatibility(1000);
+    else{crfFinishCompatibility();crfRefreshReadiness();}
+  }).catch(error=>{
+    CRF_COMPAT_FAILURES++;
+    if(CRF_COMPAT_FAILURES>=8){
+      crfFinishCompatibility('Compatibility status could not be read after 8 attempts. Retry the test when the connection is stable.');
+      console.error(error);return;
+    }
+    crfScheduleCompatibility(Math.min(12000,1500*(2**(CRF_COMPAT_FAILURES-1))));
+  });
 }
 function crfRunCompatibility(){
   if(CRF_COMPAT_OPERATION)return;
   const button=document.getElementById('crf-compat-run');button.setAttribute('aria-busy','true');
   crfPost({action:'compatibility-test'}).then(result=>{
     if(!result.operation_id)throw new Error('missing operation ID');
-    CRF_COMPAT_OPERATION=result.operation_id;crfPollCompatibility();
+    CRF_COMPAT_OPERATION=result.operation_id;CRF_COMPAT_FAILURES=0;crfPollCompatibility();
   }).catch(error=>{button.removeAttribute('aria-busy');crfToast('Compatibility test could not start');console.error(error);});
 }
 crfRefreshReadiness();
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&CRF_COMPAT_OPERATION)crfScheduleCompatibility(0);
+});
+document.getElementById('tab2')&&document.getElementById('tab2').addEventListener('click',()=>{
+  if(CRF_COMPAT_OPERATION)crfScheduleCompatibility(60);
+});
 
 (function(){
   const min=document.getElementsByName('AUTOSCALE_MIN')[0],max=document.getElementsByName('AUTOSCALE_MAX')[0];
@@ -384,7 +418,11 @@ crfPoolsForm.addEventListener('submit',async event=>{
     if(!validated.ok)throw new Error(validated.error||'Pool validation failed');
     const applied=await crfPost({action:'apply-config',expected_config_revision:CRF_POOL_CONFIG_REVISION,settings:JSON.stringify(settings)});
     if(!applied.ok)throw new Error(applied.error||'Apply failed');
-    CRF_POOL_CONFIG_REVISION=applied.config_revision;result.textContent='Pool settings saved. Use Fleet migration controls to activate a requested backend change.';
+    CRF_POOL_CONFIG_REVISION=applied.config_revision;
+    // REVIEW(crf-v3q.13.15): IDs become immutable in the same transaction that
+    // saves them, not only after a later page reload.
+    crfBuildPoolEditor(settings.RUNNER_POOLS);
+    result.textContent='Pool settings saved. Use Fleet migration controls to activate a requested backend change.';
     result.className='crfp-result on saved';crfToast('Pool settings saved');
   }catch(error){result.textContent='Could not save pool settings: '+error.message;result.className='crfp-result on';}
   finally{delete crfPoolsForm.dataset.applying;submit.disabled=false;}

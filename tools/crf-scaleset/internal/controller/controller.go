@@ -104,7 +104,7 @@ func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	dec := json.NewDecoder(file)
 	dec.DisallowUnknownFields()
 	var cfg RuntimeConfig
@@ -129,6 +129,7 @@ type Control struct {
 	poller    *session.Poller
 	super     *supervisor.Supervisor
 	cancel    context.CancelFunc
+	superDone chan error
 	issued    map[string]string
 	lastSeq   uint64
 }
@@ -155,15 +156,9 @@ func New(cfg RuntimeConfig, api crfgithub.ScaleSetAPI) (*Control, error) {
 func (c *Control) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-		c.cancel = nil
-	}
-	if c.poller != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_ = c.poller.Close(ctx)
-		cancel()
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_ = c.stopSessions(ctx)
+	cancel()
 }
 
 func (c *Control) poolRecords() []ownership.Pool {
@@ -176,17 +171,10 @@ func (c *Control) poolRecords() []ownership.Pool {
 }
 
 func (c *Control) startSessions(records []ownership.Record) error {
-	if c.cancel != nil {
-		c.cancel()
-		c.cancel = nil
-	}
-	if c.poller != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err := c.poller.Close(ctx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("close_previous_sessions: %w", err)
-		}
+	ctx, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelStop()
+	if err := c.stopSessions(ctx); err != nil {
+		return err
 	}
 	consumed := make(map[string]bool, len(c.issued))
 	for key, state := range c.issued {
@@ -222,8 +210,37 @@ func (c *Control) startSessions(records []ownership.Record) error {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c.poller, c.super, c.cancel = poller, runner, cancel
-	go func() { _ = runner.Run(ctx) }()
+	done := make(chan error, 1)
+	c.poller, c.super, c.cancel, c.superDone = poller, runner, cancel, done
+	go func() { done <- runner.Run(ctx) }()
+	return nil
+}
+
+func (c *Control) stopSessions(ctx context.Context) error {
+	// REVIEW(crf-v3q.13.12): Canceling a supervisor is not completion. Join it
+	// before closing its sessions or installing a successor so long polls from
+	// two generations can never overlap.
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	if c.superDone != nil {
+		select {
+		case err := <-c.superDone:
+			c.superDone = nil
+			if err != nil {
+				return fmt.Errorf("join_previous_supervisor: %w", err)
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("join_previous_supervisor: %w", ctx.Err())
+		}
+	}
+	if c.poller != nil {
+		if err := c.poller.Close(ctx); err != nil {
+			return fmt.Errorf("close_previous_sessions: %w", err)
+		}
+	}
+	c.poller, c.super = nil, nil
 	return nil
 }
 
@@ -256,13 +273,32 @@ func failure(req protocol.Request, code string, err error) protocol.Response {
 		Code: code, Error: message}
 }
 
+func (c *Control) lock(ctx context.Context) bool {
+	for {
+		if c.mu.TryLock() {
+			return true
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Response {
 	if req.ConfigRevision != c.cfg.ConfigRevision ||
 		req.OwnershipRevision != c.cfg.OwnershipRevision ||
 		req.ControllerInstanceID != c.cfg.ControllerInstanceID {
 		return failure(req, "identity_mismatch", nil)
 	}
-	c.mu.Lock()
+	if !c.lock(ctx) {
+		return failure(req, "request_timeout", ctx.Err())
+	}
 	defer c.mu.Unlock()
 	if req.Sequence <= c.lastSeq {
 		return failure(req, "sequence_regression", nil)
@@ -374,19 +410,52 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			return failure(req, "jit_state_failed", err)
 		}
 		return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
-	case "delete_owned":
-		if c.cancel != nil {
-			c.cancel()
-			c.cancel = nil
+	case "retire_jit":
+		var payload struct {
+			PoolID     string `json:"pool_id"`
+			WorkHandle int64  `json:"work_handle"`
 		}
-		if c.poller != nil {
-			closeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			if err := c.poller.Close(closeCtx); err != nil {
-				cancel()
-				return failure(req, "session_cleanup_failed", err)
+		if err := decodePayload(req.Payload, &payload); err != nil ||
+			!identifier.MatchString(payload.PoolID) || payload.WorkHandle <= 0 {
+			return failure(req, "invalid_jit_retirement", err)
+		}
+		if c.poller == nil {
+			return failure(req, "sessions_not_applied", nil)
+		}
+		state, err := c.ownership.Load()
+		if err != nil {
+			return failure(req, "ownership_load_failed", err)
+		}
+		scaleSetID := int64(0)
+		for _, record := range state.Records {
+			if record.PoolID == payload.PoolID {
+				scaleSetID = record.ScaleSetID
+				break
 			}
-			cancel()
 		}
+		key := fmt.Sprintf("%d:%d", scaleSetID, payload.WorkHandle)
+		if scaleSetID <= 0 || c.issued[key] != "issued" {
+			return failure(req, "work_handle_not_issued", nil)
+		}
+		// REVIEW(crf-v3q.13.10): Compact the durable replay proof before
+		// removing the issued-handle tombstone. A crash at either boundary
+		// leaves a conservative, replay-safe record instead of a reusable JIT.
+		if err := c.poller.RetireHandle(scaleSetID, payload.WorkHandle); err != nil {
+			return failure(req, "jit_retirement_failed", err)
+		}
+		delete(c.issued, key)
+		if err := c.writeIssued(); err != nil {
+			c.issued[key] = "issued"
+			return failure(req, "jit_state_failed", err)
+		}
+		return response(req, map[string]bool{"retired": true})
+	case "delete_owned":
+		closeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if err := c.stopSessions(closeCtx); err != nil {
+			cancel()
+			return failure(req, "session_cleanup_failed", err)
+		}
+		cancel()
 		if err := c.ownership.DeleteOwned(ctx); err != nil {
 			return failure(req, "delete_owned_failed", err)
 		}
@@ -397,7 +466,6 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err := os.RemoveAll(filepath.Join(c.cfg.StateDir, "replay")); err != nil {
 			return failure(req, "journal_cleanup_failed", err)
 		}
-		c.poller, c.super = nil, nil
 		return response(req, map[string]bool{"deleted": true})
 	default:
 		return failure(req, "unsupported_operation", nil)
@@ -423,7 +491,7 @@ func (c *Control) loadIssued() error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	dec := json.NewDecoder(file)
 	var issued map[string]string
 	if err := dec.Decode(&issued); err != nil {
@@ -461,17 +529,17 @@ func (c *Control) writeIssued() error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

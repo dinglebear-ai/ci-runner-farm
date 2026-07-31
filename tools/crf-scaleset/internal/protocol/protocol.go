@@ -22,6 +22,7 @@ var (
 		"apply_sessions":          true,
 		"publish_capacity_leases": true,
 		"issue_jit":               true,
+		"retire_jit":              true,
 		"read_snapshot":           true,
 		"reconcile_owned":         true,
 		"delete_owned":            true,
@@ -88,13 +89,15 @@ func Decode(rd io.Reader) (Request, error) {
 }
 
 type PoolSnapshot struct {
-	PoolID             string  `json:"pool_id"`
-	ScaleSetID         int64   `json:"scale_set_id"`
-	AssignedJobs       int     `json:"assigned_jobs"`
-	AdvertisedCapacity int     `json:"advertised_capacity"`
-	LastMessageID      int64   `json:"last_message_id"`
-	SessionHealthy     bool    `json:"session_healthy"`
-	AcquiredHandles    []int64 `json:"acquired_handles"`
+	PoolID             string    `json:"pool_id"`
+	ScaleSetID         int64     `json:"scale_set_id"`
+	AssignedJobs       int       `json:"assigned_jobs"`
+	AdvertisedCapacity int       `json:"advertised_capacity"`
+	LastMessageID      int64     `json:"last_message_id"`
+	SessionHealthy     bool      `json:"session_healthy"`
+	AcquiredHandles    []int64   `json:"acquired_handles"`
+	ObservedAt         time.Time `json:"observed_at"`
+	ValidUntil         time.Time `json:"valid_until"`
 }
 
 type Snapshot struct {
@@ -129,6 +132,12 @@ func (s Snapshot) Validate(now time.Time) error {
 			pool.AdvertisedCapacity < 0 || pool.LastMessageID < 0 ||
 			len(pool.AcquiredHandles) > 64 {
 			return errors.New("invalid_pool_snapshot")
+		}
+		if !pool.ObservedAt.IsZero() &&
+			(pool.ObservedAt.After(now.Add(5*time.Second)) ||
+				!pool.ValidUntil.After(pool.ObservedAt) ||
+				pool.ValidUntil.Sub(pool.ObservedAt) > 30*time.Second) {
+			return errors.New("invalid_pool_freshness")
 		}
 		seenPools[pool.PoolID] = true
 		seenHandles := make(map[int64]bool, len(pool.AcquiredHandles))

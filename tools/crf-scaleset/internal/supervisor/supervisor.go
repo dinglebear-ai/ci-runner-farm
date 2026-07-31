@@ -37,7 +37,6 @@ type Supervisor struct {
 	poller   Poller
 	leaseMu  sync.Mutex
 	leases   map[string]int
-	changed  chan struct{}
 	snapshot atomic.Pointer[protocol.Snapshot]
 	sequence atomic.Uint64
 }
@@ -46,7 +45,7 @@ func New(cfg Config, poller Poller) (*Supervisor, error) {
 	if len(cfg.Pools) == 0 || len(cfg.Pools) > 8 || cfg.Heartbeat <= 0 || cfg.Heartbeat > 10*time.Second {
 		return nil, errors.New("invalid_supervisor_config")
 	}
-	s := &Supervisor{cfg: cfg, poller: poller, leases: map[string]int{}, changed: make(chan struct{})}
+	s := &Supervisor{cfg: cfg, poller: poller, leases: map[string]int{}}
 	return s, nil
 }
 
@@ -64,14 +63,12 @@ func (s *Supervisor) SetLeases(leases map[string]int) {
 		return
 	}
 	s.leases = copy
-	close(s.changed)
-	s.changed = make(chan struct{})
 }
 
-func (s *Supervisor) leaseForPool(pool string) (int, <-chan struct{}) {
+func (s *Supervisor) leaseForPool(pool string) int {
 	s.leaseMu.Lock()
 	defer s.leaseMu.Unlock()
-	return s.leases[pool], s.changed
+	return s.leases[pool]
 }
 
 func (s *Supervisor) Snapshot() protocol.Snapshot {
@@ -92,36 +89,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			ticker := time.NewTicker(s.cfg.Heartbeat)
 			defer ticker.Stop()
 			for {
-				capacity, changed := s.leaseForPool(pool.ID)
-				pollCtx, cancelPoll := context.WithCancel(ctx)
-				pollDone := make(chan struct{})
-				go func() {
-					select {
-					case <-changed:
-						cancelPoll()
-					case <-ctx.Done():
-						cancelPoll()
-					case <-pollDone:
-					}
-				}()
-				poll, err := s.poller.Poll(pollCtx, pool, capacity)
-				close(pollDone)
-				cancelPoll()
-				leaseUpdated := false
-				select {
-				case <-changed:
-					leaseUpdated = true
-				default:
-				}
+				capacity := s.leaseForPool(pool.ID)
+				poll, err := s.poller.Poll(ctx, pool, capacity)
 				if ctx.Err() != nil {
 					return
-				}
-				// The lease generation changed while this request was in
-				// flight. Discard its result regardless of how the HTTP stack
-				// wrapped cancellation; publishing it would transiently mark
-				// every untouched pool unhealthy and block fair admission.
-				if leaseUpdated {
-					continue
 				}
 				if err != nil && !errors.Is(err, context.Canceled) {
 					// The supervisor log lives in the root-only state tree.
@@ -129,13 +100,26 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					// the public status snapshot exposes only healthy/unhealthy.
 					log.Printf("pool %s message poll failed: %v", pool.ID, err)
 				}
+				now := time.Now().UTC()
 				result := protocol.PoolSnapshot{PoolID: pool.ID, ScaleSetID: pool.ScaleSetID,
 					AssignedJobs: poll.AssignedJobs, AdvertisedCapacity: capacity, LastMessageID: poll.MessageID,
 					SessionHealthy: err == nil, AcquiredHandles: poll.AcquiredHandles}
+				if err == nil {
+					result.ObservedAt = now
+					result.ValidUntil = now.Add(2 * s.cfg.Heartbeat)
+				}
 				select {
 				case results <- result:
 				case <-ctx.Done():
 					return
+				}
+				// A capacity change cannot cancel an in-flight long poll: the
+				// remote may already have accepted its old max-capacity header.
+				// Publish/reconcile that definitive result while the old lease
+				// remains charged, then immediately issue the successor poll
+				// with the newest capacity instead of waiting a heartbeat.
+				if s.leaseForPool(pool.ID) != capacity {
+					continue
 				}
 				select {
 				case <-ticker.C:
@@ -167,7 +151,16 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for {
 		select {
 		case result := <-results:
-			current[result.PoolID] = result
+			if result.SessionHealthy {
+				current[result.PoolID] = result
+			} else {
+				// REVIEW(crf-v3q.13.6, MUST-CHECK): A failed or wedged poll
+				// must not turn old demand into fresh zero. Preserve the last
+				// authoritative counts/timestamps and only downgrade health.
+				previous := current[result.PoolID]
+				previous.SessionHealthy = false
+				current[result.PoolID] = previous
+			}
 			publish()
 		case <-heartbeat.C:
 			// GitHub's message API is a long poll. Keep publishing the last

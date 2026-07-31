@@ -62,9 +62,11 @@ grep -Fq 'scaleset_request delete_owned' "$scalesets" ||
   crf_fail "production exact-owned deletion is missing"
 grep -Fq 'probe.RunLive' tools/crf-scaleset/cmd/crf-scaleset/main.go ||
   crf_fail "live compatibility probe is not wired"
-grep -Fq 'GetRunnerScaleSetByName' tools/crf-scaleset/internal/ownership/ownership.go ||
-  crf_fail "response-loss ownership reconciliation is missing"
-! rg -q 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
+grep -Fq 'record.State = "create_ambiguous"' tools/crf-scaleset/internal/ownership/ownership.go ||
+  crf_fail "ambiguous response-loss ownership tombstone is missing"
+grep -Fq 'never adopt by name' tools/crf-scaleset/internal/ownership/ownership.go ||
+  crf_fail "foreign name/spec adoption guard is missing"
+! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
 # The complete typed snapshot remains comfortably beneath the expected 256 KiB
@@ -75,7 +77,7 @@ bash tests/package-reproducible.sh >/dev/null
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp -a build-plg.sh src tools VERSION CHANGELOG.md "$tmp/"
-go125="$(mise where go@1.25.3)/bin/go"
+go125="$(crf_go125)"
 (
   cd "$tmp"
   CRF_GO="$go125" ./build-plg.sh --tgz-only >/dev/null

@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,34 @@ func TestClientRoundTripUsesBoundedUnixFrame(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("client never completed a round trip")
+}
+
+func TestClientContextBoundsConnectedRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stalled.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			close(accepted)
+			defer func() { _ = conn.Close() }()
+			time.Sleep(time.Second)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	_, err = (Client{Path: path}).Call(ctx, protocol.Request{
+		SchemaVersion: 1, RequestID: "request-stall", Operation: "read_snapshot",
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64),
+		ControllerInstanceID: "controller", Sequence: 1})
+	if err == nil {
+		t.Fatal("connected read ignored context timeout")
+	}
+	<-accepted
 }
 
 func TestClientRejectsOversizedResponse(t *testing.T) {

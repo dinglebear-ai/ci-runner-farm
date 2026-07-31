@@ -200,11 +200,8 @@ function crfScalePool(pool){
 }
 function crfRenderPools(d){
   const section=document.getElementById('crf-pools-section'); if(!section)return;
-  const pools=(d.pools||[]).slice(), active=document.activeElement;
-  const activePool=active&&active.classList&&active.classList.contains('crf-pool-scale')?active.dataset.pool:null;
-  const activeScalePool=active&&active.closest&&active.closest('[data-scale-pool]')?active.closest('[data-scale-pool]').dataset.scalePool:null;
-  const activeValue=activePool?active.value:null;
-  if(d.mode!=='pools'){section.style.display='none';section.textContent='';return;}
+  const pools=(d.pools||[]).slice();
+  if(d.mode!=='pools'){section.style.display='none';return;}
   const configured=new Set(pools.map(p=>String(p.id)));
   const legacy=(d.runners||[]).filter(r=>!r.pool||!configured.has(String(r.pool)));
   if(legacy.length) pools.push({id:'default',label:'',up:legacy.filter(r=>r.state==='running').length,
@@ -214,7 +211,9 @@ function crfRenderPools(d){
   const poolTitle=id=>({rust:'Rust',python:'Python',typescript:'TypeScript',go:'Go',ops:'Ops',
     system:'System','residential-egress':'Residential egress',default:'Retiring'}[id]||
     String(id).split(/[-_]/).map(s=>s?s.charAt(0).toUpperCase()+s.slice(1):s).join(' '));
-  section.innerHTML=pools.map(p=>{
+  const wanted=new Set();
+  pools.forEach((p,poolIndex)=>{
+    const id=String(p.id);wanted.add(id);
     const scaleSet=d.backend&&d.backend.effective==='scaleset', auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), retiring=!p.label||Number(p.configured)===0;
     const numericMax=String(p.max)==='auto'?64:Number(p.max), atMax=!scaleSet&&auto&&Number(p.count)>=numericMax;
     const controlLabel=scaleSet?'Prewarm to':(auto?'Scale up to':'Scale to');
@@ -223,25 +222,52 @@ function crfRenderPools(d){
       (p.pending?'<span class="crf-pool-state"> draining '+crfEsc(p.pending)+'</span>':'')+
       (p.blocked_reason?'<span class="crf-pool-state"> blocked: '+crfEsc(p.blocked_reason)+'</span>':'');
     const selector=p.label||'retiring', title=poolTitle(String(p.id));
-    const controls=retiring?'':('<span class="crf-pool-control"><span>'+controlLabel+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(scaleSet?0:(auto?Number(p.count)+1:1))+'" max="'+crfEsc(auto?numericMax:64)+'" value="'+crfEsc(p.count)+'" aria-label="'+controlLabel+' '+crfEsc(p.id)+' pool">'+
-      '<uui-button class="orange" size="xs" data-scale-pool="'+crfEsc(p.id)+'" title="'+controlLabel+' '+crfEsc(p.id)+'" '+((pending||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>'+(scaleSet?'Set':'Scale')+'</uui-button></span>');
-    return '<section class="crf-pool-fleet" data-pool="'+crfEsc(p.id)+'">'+
-      '<div class="crf-pool-fleet-meta">'+
-      (p.label?'<button type="button" class="crf-pool-selector" data-copy="'+crfEsc(p.label)+'" title="Copy runs-on: '+crfEsc(p.label)+'">'+crfEsc(selector)+'</button>':'<span class="crf-pool-state">classic runners draining</span>')+
-      '<span class="crf-pool-metrics"><strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
-        (p.starting?' · starting '+crfEsc(p.starting):'')+(p.error?' · error '+crfEsc(p.error):'')+'</span>'+
-      state+controls+'</div>'+
-      '<div class="crf-bays"><div class="crf-bay crf-bay-head">'+
-      '<span></span><span>'+crfEsc(title)+'</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>'+
-      '</div><div class="crf-pool-bays-body" data-pool-body="'+crfEsc(p.id)+'"></div></div></section>';
-  }).join('');
-  if(activePool){
-    const restored=section.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(activePool)+'"]');
-    if(restored&&!restored.disabled){restored.value=activeValue;restored.focus();}
-  }else if(activeScalePool){
-    const restored=section.querySelector('[data-scale-pool="'+crfSelectorValue(activeScalePool)+'"]');
-    if(restored)restored.focus();
-  }
+    let fleet=section.querySelector('.crf-pool-fleet[data-pool="'+crfSelectorValue(id)+'"]');
+    if(!fleet){
+      fleet=document.createElement('section');fleet.className='crf-pool-fleet';fleet.dataset.pool=id;
+      fleet.innerHTML='<div class="crf-pool-fleet-meta"><span class="crf-pool-route"></span><span class="crf-pool-metrics"></span><span class="crf-pool-state-wrap"></span><span class="crf-pool-control" style="display:none"><span class="crf-pool-control-label"></span><input class="crf-pool-scale" type="number"><uui-button class="orange" size="xs"></uui-button></span></div>'+
+        '<div class="crf-bays"><div class="crf-bay crf-bay-head"><span></span><span class="crf-pool-title"></span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span></div><div class="crf-pool-bays-body"></div></div>';
+    }
+    // REVIEW(crf-v3q.13.9): Reconcile stable pool sections and controls instead
+    // of replacing their subtree every poll. Focus, caret, runner rows, open
+    // drawers, and drawer scroll therefore survive ordinary metric updates.
+    const route=fleet.querySelector('.crf-pool-route');
+    if(p.label){
+      let copy=route.querySelector('.crf-pool-selector');
+      if(!copy){route.textContent='';copy=document.createElement('button');copy.type='button';copy.className='crf-pool-selector';route.appendChild(copy);}
+      copy.dataset.copy=p.label;copy.title='Copy runs-on: '+p.label;copy.textContent=selector;
+    }else if(route.textContent!=='classic runners draining'){
+      route.innerHTML='<span class="crf-pool-state">classic runners draining</span>';
+    }
+    fleet.querySelector('.crf-pool-metrics').innerHTML='<strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
+      (p.starting?' · starting '+crfEsc(p.starting):'')+(p.error?' · error '+crfEsc(p.error):'');
+    fleet.querySelector('.crf-pool-state-wrap').innerHTML=state;
+    fleet.querySelector('.crf-pool-title').textContent=title;
+    const body=fleet.querySelector('.crf-pool-bays-body');body.dataset.poolBody=id;
+    const control=fleet.querySelector('.crf-pool-control');
+    control.style.display=retiring?'none':'flex';
+    if(!retiring){
+      const input=control.querySelector('input'),button=control.querySelector('uui-button');
+      control.querySelector('.crf-pool-control-label').textContent=controlLabel;
+      input.dataset.pool=id;input.min=String(scaleSet?0:(auto?Number(p.count)+1:1));input.max=String(auto?numericMax:64);
+      input.setAttribute('aria-label',controlLabel+' '+id+' pool');
+      if(document.activeElement!==input)input.value=String(p.count);
+      button.dataset.scalePool=id;button.title=controlLabel+' '+id;button.textContent=scaleSet?'Set':'Scale';
+      button.disabled=!!(pending||atMax||d.config_error);
+      if(pending)button.setAttribute('aria-busy','true');else button.removeAttribute('aria-busy');
+    }
+    if(section.children[poolIndex]!==fleet)
+      section.insertBefore(fleet,section.children[poolIndex]||null);
+  });
+  section.querySelectorAll('.crf-pool-fleet').forEach(fleet=>{
+    if(!wanted.has(String(fleet.dataset.pool)))fleet.remove();
+  });
+}
+function crfCollectPoolRows(tb){
+  document.querySelectorAll('#crf-pools-section .crf-pool-bays-body').forEach(body=>{
+    body.querySelectorAll('.crf-bay[data-name],.crf-bay-drawer').forEach(node=>tb.appendChild(node));
+    body.querySelectorAll('.crf-bay:not([data-name])').forEach(node=>node.remove());
+  });
 }
 function crfPlacePoolRows(d,tb){
   const single=document.getElementById('crf-single-fleet'), section=document.getElementById('crf-pools-section');
@@ -253,7 +279,11 @@ function crfPlacePoolRows(d,tb){
     const runner=(d.runners||[]).find(r=>String(r.name)===String(row.dataset.name));
     const pool=runner&&runner.pool&&configured.has(String(runner.pool))?String(runner.pool):'default';
     const body=section.querySelector('[data-pool-body="'+crfSelectorValue(pool)+'"]');
-    if(body)body.appendChild(row);
+    if(body){
+      body.appendChild(row);
+      const drawer=tb.querySelector('.crf-bay-drawer[data-for="'+crfSelectorValue(row.dataset.name)+'"]');
+      if(drawer)body.appendChild(drawer);
+    }
   });
   section.querySelectorAll('.crf-pool-bays-body').forEach(body=>{
     if(!body.querySelector('.crf-bay[data-name]')) body.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">No runners up</span><span></span><span></span><span></span><span></span><span></span></div>';
@@ -380,6 +410,7 @@ function crfRefresh(){
     if(scaleWrap) scaleWrap.title=scale&&scale.title;
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
+    if(d.mode==='pools')crfCollectPoolRows(tb);
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the
     // node, so crfDrawerMount can restore the user's position (not snap to tail).
     const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]');
@@ -400,7 +431,7 @@ function crfRefresh(){
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
     const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
-    if(d.mode!=='pools'&&tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
+    if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
         const v=crfVolatile(r);
@@ -410,6 +441,7 @@ function crfRefresh(){
         const el=row.querySelector('.crf-elapsed');
         if(el&&r.job_started){ const e=crfElapsed(r.job_started); if(e){ el.textContent=e.txt; el.title='running for '+e.txt; el.className='crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':''); } }
       });
+      crfPlacePoolRows(d,tb);
       crfDrawerMount();
       return;
     }

@@ -70,6 +70,7 @@ func (f *liveFake) CloseMessageSession(context.Context, crfgithub.Session) error
 
 func liveConfig() LiveConfig {
 	return LiveConfig{Owner: "dinglebear-ai", RunnerGroupName: "CI Runner Farm Trusted",
+		RunnerGroupID:             7,
 		QuarantineRunnerGroupName: "CRF Quarantine",
 		RunnerGroupPolicy:         "selected_repositories", InstallationID: "installation", HostID: "host",
 		PluginDigest: strings.Repeat("a", 64), HelperDigest: strings.Repeat("b", 64),
@@ -78,6 +79,17 @@ func liveConfig() LiveConfig {
 		EntrypointDigest: strings.Repeat("e", 64),
 		Workload: WorkloadEvidence{TotalAssignedJobs: true, ZeroToOne: true, CancelReassign: true,
 			AckReplay: true, NestedCgroupCharging: true, ClassicQuarantineBarrier: true}}
+}
+
+func TestRunLiveRejectsRunnerGroupThatDiffersFromRESTPolicyProof(t *testing.T) {
+	api := &liveFake{group: crfgithub.RunnerGroup{ID: 9, Name: "CI Runner Farm Trusted"},
+		quarantine: crfgithub.RunnerGroup{ID: 8, Name: "CRF Quarantine"}}
+	if _, err := RunLive(context.Background(), liveConfig(), api); err == nil {
+		t.Fatal("Actions service runner group did not match the REST policy-bound group ID")
+	}
+	if api.set.ID != 0 {
+		t.Fatal("probe mutated remote state before binding runner-group identity")
+	}
 }
 
 func TestRunLiveProvesRemoteLifecycleAndSealsOnlyAfterCleanup(t *testing.T) {

@@ -12,6 +12,9 @@ grep -Fq 'backend_classic_admission_allowed' "$engine"
 grep -Fq 'backend_scaleset_admission_allowed' src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 grep -Fq 'classic-quarantine.json' "$migration"
 grep -Fq 'migration_quarantine_move_all' "$migration"
+grep -Fq 'MIGRATION_CLASSIC_ACTIVATION=1 cmd_start' "$migration"
+grep -Fq 'scaleset_activation_prove_effective' "$migration"
+grep -Fq 'scaleset_publish_zero_capacity' "$migration"
 grep -Fq -- '--data-binary "$request_body"' "$engine"
 grep -Fq "case 'begin-migration': case 'rollback-backend':" "$endpoint"
 ! grep -A100 "case 'apply-config':" "$endpoint" | grep -q 'begin-migration'
@@ -136,6 +139,61 @@ bash -c '
   ! migration_classic_prove_ineligible
 '
 
+# Rollback drain proof fails closed on every remaining authority: nonterminal
+# JIT state, resource reservations, assigned/leased GitHub work, stale session
+# evidence, and managed JIT containers.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; JIT_STATE_DIR=$root/jit
+  RESERVATION_DIR=$root/reservations; SCALESET_STATE_DIR=$root/scaleset
+  SCALESET_SNAPSHOT=$SCALESET_STATE_DIR/snapshot.json
+  INVENTORY_FILE=$RUNDIR/inventory
+  mkdir -p "$RUNDIR" "$CFGDIR" "$JIT_STATE_DIR" "$RESERVATION_DIR" "$SCALESET_STATE_DIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  err(){ :; }
+  jit_state_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
+  reservation_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
+  reservation_release(){ rm -f "$RESERVATION_DIR/$1.state"; }
+  snapshot_mode=good; inventory_mode=empty
+  scaleset_snapshot_refresh(){
+    local now until assigned=0 handles="" healthy=true
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    until=$(date -u -d "+20 seconds" +%Y-%m-%dT%H:%M:%SZ)
+    case "$snapshot_mode" in
+      assigned) assigned=1 ;;
+      handles) handles=501 ;;
+      stale) now=$(date -u -d "-2 minutes" +%Y-%m-%dT%H:%M:%SZ) ;;
+      unhealthy) healthy=false ;;
+    esac
+    printf "{\"pools\":[{\"pool_id\":\"python\",\"session_healthy\":%s,\"assigned_jobs\":%s,\"acquired_handles\":[%s],\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
+      "$healthy" "$assigned" "$handles" "$now" "$until" >"$SCALESET_SNAPSHOT"
+  }
+  fleet_inventory_refresh(){
+    : >"$INVENTORY_FILE"
+    [ "$inventory_mode" = jit ] &&
+      printf "runner|running|x|x|x|x|python|x|x|x|valid|scaleset\n" >"$INVENTORY_FILE"
+    return 0
+  }
+  . "$SCRIPT_DIR/runner-migration.sh"
+  migration_jit_drained
+  printf "phase=running\n" >"$JIT_STATE_DIR/runner.state"
+  ! migration_jit_drained
+  printf "phase=deleted\n" >"$JIT_STATE_DIR/runner.state"
+  printf "phase=assigned\n" >"$RESERVATION_DIR/work.state"
+  ! migration_jit_drained
+  rm -f "$RESERVATION_DIR/work.state"
+  snapshot_mode=assigned; ! migration_jit_drained
+  snapshot_mode=handles; ! migration_jit_drained
+  snapshot_mode=stale; ! migration_jit_drained
+  snapshot_mode=unhealthy; ! migration_jit_drained
+  snapshot_mode=good; inventory_mode=jit; ! migration_jit_drained
+  inventory_mode=empty
+  printf "phase=offered\n" >"$RESERVATION_DIR/offer.state"
+  migration_jit_drained
+  [ ! -e "$RESERVATION_DIR/offer.state" ]
+'
+
 # Exercise every persisted phase with exact revisions. Test gates stand in for
 # the remote eligibility operations; production defaults above remain closed.
 bash -c '
@@ -159,9 +217,13 @@ bash -c '
   migration_quarantine_move_all(){ return 0; }
   migration_quarantine_delete(){ return 0; }
   scaleset_supervisor_start(){ return 0; }
+  scaleset_autoscale_tick(){ return 0; }
+  scaleset_activation_prove_effective(){ return 0; }
+  scaleset_publish_zero_capacity(){ return 0; }
   scaleset_record_valid(){ return 0; }
   scaleset_request(){ return 0; }
   jit_reconcile(){ return 0; }
+  migration_jit_drained(){ return 0; }
   runners=""
   fleet_inventory_refresh(){ : >"$RUNDIR/inventory"; }
   github_phase_refresh(){ return 0; }

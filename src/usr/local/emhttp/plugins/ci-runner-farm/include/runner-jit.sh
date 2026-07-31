@@ -2,7 +2,10 @@
 # Execute one already-admitted scale-set work item. Demand, session ownership,
 # and backend transitions are deliberately outside this file.
 
-JIT_STATE_DIR="${JIT_STATE_DIR:-$RUNDIR/jit}"
+# REVIEW(crf-v3q.13.16, MUST-CHECK): ACK/acquire/JIT recovery must survive a
+# host reboot. Keep PIDs, sockets, snapshots, and short leases in RUNDIR tmpfs,
+# but persist bounded operation state on the configured cache dataset.
+JIT_STATE_DIR="${JIT_STATE_DIR:-$CACHE_ROOT/state/jit}"
 JIT_LOG_ROOT="${JIT_LOG_ROOT:-$CACHE_ROOT/logs/runners}"
 JIT_LOG_MAX_BYTES="${JIT_LOG_MAX_BYTES:-268435456}"
 JIT_LOG_MAX_DAYS="${JIT_LOG_MAX_DAYS:-7}"
@@ -57,6 +60,19 @@ jit_capture_diagnostics() {
   [ -z "$total" ] || while IFS= read -r file; do rm -f -- "$file"; done <<<"$total"
 }
 
+jit_retire_handle() {
+  local reservation="$1" handle="$2" pool payload response
+  pool="$(reservation_field "$RESERVATION_DIR/$reservation.state" pool_id)"
+  pool_id_valid "$pool" && jit_id_valid "$handle" || return 1
+  payload="$(php -r 'echo json_encode(["pool_id"=>$argv[1],"work_handle"=>(int)$argv[2]],
+    JSON_UNESCAPED_SLASHES);' "$pool" "$handle")" || return 1
+  response="$(scaleset_request retire_jit "$payload")" || return 1
+  printf '%s' "$response" | php -r '
+    $j=json_decode(stream_get_contents(STDIN),true);
+    if(($j["ok"]??false)!==true||($j["result"]["retired"]??false)!==true)exit(2);
+  '
+}
+
 jit_cleanup_observed() {
   local runner_id="$1" reservation="$2" handle="$3" container="$4"
   jit_state_write "$runner_id" deleting "$reservation" "$handle" "$container" || return 1
@@ -65,6 +81,10 @@ jit_cleanup_observed() {
   if jit_container_exists "$container"; then
     return 1
   fi
+  # REVIEW(crf-v3q.13.10): The helper first compacts replay proof, then the
+  # shell releases its resource reservation. Failure leaves deleting state for
+  # a conservative retry and never permits an old work handle to be reissued.
+  jit_retire_handle "$reservation" "$handle" || return 1
   reservation_release "$reservation" || return 1
   jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container"
 }
@@ -75,8 +95,12 @@ jit_execute() {
   IFS= read -r descriptor || [ -n "$descriptor" ] || true
   backend_scaleset_admission_allowed ||
     { err "JIT admission is blocked by backend transition state"; return 1; }
-  pool_id_valid "$pool" && jit_id_valid "$reservation" && jit_id_valid "$handle" ||
-    { err "invalid JIT operation identity"; return 1; }
+  if ! pool_id_valid "$pool" ||
+     ! jit_id_valid "$reservation" ||
+     ! jit_id_valid "$handle"; then
+    err "invalid JIT operation identity"
+    return 1
+  fi
   [ -n "$descriptor" ] && [ "${#descriptor}" -le 65536 ] &&
     [[ "$descriptor" =~ ^[A-Za-z0-9._+/=-]+$ ]] ||
     { err "invalid JIT descriptor"; return 1; }
@@ -97,6 +121,8 @@ jit_execute() {
     return 1
   chmod 0700 "$CACHE_ROOT/work/$runner_id" "$CACHE_ROOT/docker/$runner_id" "$JIT_LOG_ROOT/$runner_id" 2>/dev/null || true
 
+  # Dynamically scoped input consumed by build_args.
+  # shellcheck disable=SC2034
   local NO_REGISTER=1
   build_args "$idx" "$container" "$pool" "org:$GH_OWNER" || return 1
   [[ "${CRF_IMAGE_ARG_INDEX:-}" =~ ^[0-9]+$ ]] ||
@@ -160,8 +186,9 @@ jit_reconcile() {
         # Ambiguous creation is never retried blindly. Only release after exact
         # absence is observed; an existing container remains charged/preserved.
         if ! jit_container_exists "$container"; then
-          reservation_release "$reservation" || true
-          jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" || true
+          jit_retire_handle "$reservation" "$handle" &&
+            reservation_release "$reservation" &&
+            jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" || true
         fi
         ;;
     esac

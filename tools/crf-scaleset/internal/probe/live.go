@@ -23,6 +23,7 @@ type WorkloadEvidence struct {
 type LiveConfig struct {
 	Owner                     string           `json:"owner"`
 	RunnerGroupName           string           `json:"runner_group_name"`
+	RunnerGroupID             int64            `json:"runner_group_id"`
 	QuarantineRunnerGroupName string           `json:"quarantine_runner_group_name"`
 	RunnerGroupPolicy         string           `json:"runner_group_policy"`
 	InstallationID            string           `json:"installation_id"`
@@ -53,6 +54,7 @@ func exactScaleSet(actual crfgithub.ScaleSet, id int64, name string, groupID int
 
 func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Record, error) {
 	if api == nil || cfg.Owner == "" || cfg.RunnerGroupName == "" ||
+		cfg.RunnerGroupID <= 0 ||
 		cfg.QuarantineRunnerGroupName == "" ||
 		cfg.RunnerGroupPolicy != "selected_repositories" {
 		return Record{}, errors.New("invalid_live_probe_config")
@@ -61,7 +63,11 @@ func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Re
 	if err != nil {
 		return Record{}, err
 	}
-	if group.ID <= 0 || group.IsDefault || group.Name != cfg.RunnerGroupName {
+	// REVIEW(crf-v3q.13.2, MUST-CHECK): RunnerGroupID is resolved from the
+	// GitHub REST runner-groups endpoint only after it proves selected
+	// visibility and public-repository denial. Bind the Actions-service group
+	// to that exact REST-observed identity before making any remote mutation.
+	if group.ID != cfg.RunnerGroupID || group.IsDefault || group.Name != cfg.RunnerGroupName {
 		return Record{}, errors.New("restricted_runner_group_required")
 	}
 	quarantineGroup, err := api.GetRunnerGroupByName(ctx, cfg.QuarantineRunnerGroupName)

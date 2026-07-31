@@ -14,7 +14,7 @@ import (
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/supervisor"
 )
 
-var ErrAmbiguousAcquire = errors.New("ambiguous_acquisition_requires_replay")
+var ErrAmbiguousAcquire = errors.New("ambiguous_acquisition_session_reset")
 
 const maxJSONSafeInteger int64 = 1<<53 - 1
 
@@ -29,6 +29,7 @@ type Config struct {
 type Poller struct {
 	cfg        Config
 	mu         sync.Mutex
+	journalMu  sync.Mutex
 	sessions   map[int64]crfgithub.Session
 	assigned   map[int64]int
 	advertised map[int64]int
@@ -227,15 +228,61 @@ func (p *Poller) session(ctx context.Context, scaleSetID int64) (crfgithub.Sessi
 	return created, nil
 }
 
-func (p *Poller) append(entry journal.Entry) error {
+func (p *Poller) resetAmbiguousAcquire(ctx context.Context, scaleSetID int64,
+	key journal.Key) error {
+	closer, ok := p.cfg.API.(sessionCloser)
+	if !ok {
+		return errors.New("ambiguous_acquisition_session_reset_unsupported")
+	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	active, exists := p.sessions[scaleSetID]
+	p.mu.Unlock()
+	if !exists {
+		return errors.New("ambiguous_acquisition_session_missing")
+	}
+	// GitHub redelivers an unacknowledged message unchanged. Therefore an
+	// Available entry cannot prove that the prior AcquireJobs request failed.
+	// Delete the entire message session as the bounded requeue boundary before
+	// removing the ambiguous local replay intent.
+	if err := closer.CloseMessageSession(ctx, active); err != nil {
+		return fmt.Errorf("close_ambiguous_acquisition_session: %w", err)
+	}
+	p.journalMu.Lock()
+	defer p.journalMu.Unlock()
+	p.mu.Lock()
+	delete(p.sessions, scaleSetID)
+	keep := make(map[journal.Key]journal.Entry, len(p.replay))
+	for replayKey, entry := range p.replay {
+		if replayKey != key {
+			keep[replayKey] = entry
+		}
+	}
+	entries := make([]journal.Entry, 0, len(keep))
+	for _, entry := range keep {
+		entries = append(entries, entry)
+	}
+	p.mu.Unlock()
+	if err := p.cfg.Store.Rewrite(entries); err != nil {
+		return fmt.Errorf("compact_ambiguous_acquisition_session: %w", err)
+	}
+	p.mu.Lock()
+	p.replay = keep
+	p.mu.Unlock()
+	return ErrAmbiguousAcquire
+}
+
+func (p *Poller) append(entry journal.Entry) error {
+	// REVIEW(crf-v3q.13.13): Preserve journal ordering with a dedicated writer
+	// lock, but never hold the shared poller-state lock across filesystem I/O
+	// or fsync. Independent pool polls can continue updating in-memory state.
+	p.journalMu.Lock()
+	defer p.journalMu.Unlock()
 	size, err := p.cfg.Store.Size()
 	if err != nil {
 		return err
 	}
 	if size > journal.MaxJournalBytes-journal.MaxEntryBytes {
-		if err := p.compactLocked(); err != nil {
+		if err := p.compactJournalLocked(); err != nil {
 			return err
 		}
 		size, err = p.cfg.Store.Size()
@@ -249,30 +296,40 @@ func (p *Poller) append(entry journal.Entry) error {
 	if err := p.cfg.Store.Append(entry); err != nil {
 		return err
 	}
+	p.mu.Lock()
 	p.replay[entry.Key()] = entry
+	p.mu.Unlock()
 	size, err = p.cfg.Store.Size()
 	if err != nil {
 		return err
 	}
 	if size > journal.MaxJournalBytes {
-		return p.compactLocked()
+		return p.compactJournalLocked()
 	}
 	return nil
 }
 
-func (p *Poller) compactLocked() error {
+// compactJournalLocked requires journalMu and performs no filesystem I/O while
+// holding mu. Consumed handles are removed from retained ACK records so their
+// external tombstones can be safely retired after this rewrite succeeds.
+func (p *Poller) compactJournalLocked() error {
 	highestAcked := map[int64]journal.Key{}
 	keep := map[journal.Key]journal.Entry{}
+	p.mu.Lock()
 	for key, entry := range p.replay {
 		if entry.Phase != "acked" {
 			keep[key] = entry
 			continue
 		}
+		filtered := make([]int64, 0, len(entry.AcquiredHandles))
 		for _, handle := range entry.AcquiredHandles {
 			if !p.consumed[handleKey(entry.ScaleSetID, handle)] {
-				keep[key] = entry
-				break
+				filtered = append(filtered, handle)
 			}
+		}
+		if len(filtered) > 0 {
+			entry.AcquiredHandles = filtered
+			keep[key] = entry
 		}
 		highest, ok := highestAcked[entry.ScaleSetID]
 		if !ok || key.MessageID > highest.MessageID {
@@ -280,8 +337,13 @@ func (p *Poller) compactLocked() error {
 		}
 	}
 	for _, key := range highestAcked {
-		keep[key] = p.replay[key]
+		entry := p.replay[key]
+		entry.AcquiredHandles = slices.DeleteFunc(slices.Clone(entry.AcquiredHandles), func(handle int64) bool {
+			return p.consumed[handleKey(entry.ScaleSetID, handle)]
+		})
+		keep[key] = entry
 	}
+	p.mu.Unlock()
 	entries := make([]journal.Entry, 0, len(keep))
 	for _, entry := range keep {
 		entries = append(entries, entry)
@@ -289,7 +351,9 @@ func (p *Poller) compactLocked() error {
 	if err := p.cfg.Store.Rewrite(entries); err != nil {
 		return err
 	}
+	p.mu.Lock()
 	p.replay = keep
+	p.mu.Unlock()
 	return nil
 }
 
@@ -319,9 +383,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if batch.MessageID == 0 {
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
-	if batch.Statistics != nil {
-		p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
+	if batch.Statistics == nil {
+		return supervisor.PollResult{}, errors.New("message_statistics_required")
 	}
+	p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)
 	if p.assignedCount(pool.ScaleSetID) == 0 {
 		p.clearPending(pool.ScaleSetID)
@@ -336,6 +401,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if ok {
 		if len(previous.AcquiredHandles) > 0 {
 			base.AcquiredHandles = slices.Clone(previous.AcquiredHandles)
+		}
+		if previous.Phase == "acquire_started" && len(batch.AssignedHandles) == 0 {
+			return supervisor.PollResult{}, p.resetAmbiguousAcquire(
+				ctx, pool.ScaleSetID, previous.Key())
 		}
 		switch previous.Phase {
 		case "received":
@@ -366,13 +435,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			p.appendPending(pool.ScaleSetID, base.AcquiredHandles...)
 			fallthrough
 		case "acquire_started":
-			// Older builds incorrectly put direct JobAssigned notifications
-			// into acquire_started. Once the adapter distinguishes message
-			// kinds, an empty Available set proves no acquisition needs to be
-			// repeated, so the durable assignment handles can be committed.
 			if previous.Phase == "acquire_started" {
-				if len(batch.Available) > 0 {
-					return supervisor.PollResult{}, ErrAmbiguousAcquire
+				base.Phase = "acquire_observed"
+				if err := p.append(base); err != nil {
+					return supervisor.PollResult{}, err
 				}
 				base.Phase = "committed"
 				if err := p.append(base); err != nil {
@@ -391,10 +457,6 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			}
 			fallthrough
 		case "committed", "ack_pending":
-			base.Phase = "ack_pending"
-			if err := p.append(base); err != nil {
-				return supervisor.PollResult{}, err
-			}
 			if err := p.cfg.API.AcknowledgeMessage(ctx, session, batch.MessageID); err != nil {
 				return supervisor.PollResult{}, err
 			}
@@ -408,10 +470,6 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		}
 		p.appendPending(pool.ScaleSetID, base.AcquiredHandles...)
 		return p.result(pool.ScaleSetID, session.ID, capacity, batch.MessageID)
-	}
-	base.Phase = "received"
-	if err := p.append(base); err != nil {
-		return supervisor.PollResult{}, err
 	}
 	base.Phase = "validated"
 	if err := p.append(base); err != nil {
@@ -436,10 +494,6 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		return supervisor.PollResult{}, err
 	}
 	p.appendPending(pool.ScaleSetID, base.AcquiredHandles...)
-	base.Phase = "ack_pending"
-	if err := p.append(base); err != nil {
-		return supervisor.PollResult{}, err
-	}
 	if err := p.cfg.API.AcknowledgeMessage(ctx, session, batch.MessageID); err != nil {
 		return supervisor.PollResult{}, err
 	}
@@ -467,6 +521,33 @@ func (p *Poller) ConsumeHandle(scaleSetID, handle int64) bool {
 	p.pending[scaleSetID] = slices.Delete(handles, idx, idx+1)
 	p.consumed[handleKey(scaleSetID, handle)] = true
 	return true
+}
+
+// RetireHandle durably removes a terminal JIT handle from replay state before
+// callers discard their issued-handle tombstone.
+func (p *Poller) RetireHandle(scaleSetID, handle int64) error {
+	lock := p.poolLock(scaleSetID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	key := handleKey(scaleSetID, handle)
+	p.mu.Lock()
+	p.consumed[key] = true
+	if idx := slices.Index(p.pending[scaleSetID], handle); idx >= 0 {
+		p.pending[scaleSetID] = slices.Delete(p.pending[scaleSetID], idx, idx+1)
+	}
+	p.mu.Unlock()
+
+	p.journalMu.Lock()
+	if err := p.compactJournalLocked(); err != nil {
+		p.journalMu.Unlock()
+		return err
+	}
+	p.journalMu.Unlock()
+	p.mu.Lock()
+	delete(p.consumed, key)
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *Poller) Close(ctx context.Context) error {

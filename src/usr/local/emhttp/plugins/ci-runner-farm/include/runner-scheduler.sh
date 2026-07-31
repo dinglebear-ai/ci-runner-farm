@@ -2,7 +2,7 @@
 # Pure, deterministic, resource-aware scale-set scheduler.
 #
 # Input rows:
-# pool|assigned|warm|service|charged|pending|leases|max|cpu_milli|memory_bytes|healthy
+# pool|assigned|warm|service|charged|pending|leases|max|cpu_milli|memory_bytes|healthy|fresh
 # `max` is a positive integer or auto. The caller supplies the currently
 # admissible CPU/memory budget; charged runners, pending starts, and leases must
 # already be reflected in that budget. Output rows:
@@ -15,9 +15,9 @@ SCHEDULER_ERROR=""
 scheduler_uint() { [[ "${1:-}" =~ ^(0|[1-9][0-9]*)$ ]]; }
 
 scheduler_plan() {
-  local input="$1" available_cpu="$2" available_memory="$3" cursor="${4:-0}" fresh="${5:-1}"
+  local input="$1" available_cpu="$2" available_memory="$3" cursor="${4:-0}" snapshot_fresh="${5:-1}"
   local soft_limit="${SCHEDULER_START_LIMIT:-2}" hard_limit=4
-  local line pool assigned warm service charged pending leases max cpu memory healthy extra
+  local line pool assigned warm service charged pending leases max cpu memory healthy pool_fresh extra
   local i n round progress order=0 last_cursor
   local -a ids=() desired=() admitted=() blocked=() removals=() advertised=() start_order=()
   local -a new_leases=() cpus=() memories=() needs=() health=()
@@ -28,20 +28,22 @@ scheduler_plan() {
     { SCHEDULER_ERROR=invalid_scheduler_argument; return 1; }
   [ "$soft_limit" -ge 1 ] || soft_limit=1
   [ "$soft_limit" -le "$hard_limit" ] || soft_limit="$hard_limit"
-  case "$fresh" in 0|1) ;; *) SCHEDULER_ERROR=invalid_freshness; return 1 ;; esac
+  case "$snapshot_fresh" in 0|1) ;; *) SCHEDULER_ERROR=invalid_freshness; return 1 ;; esac
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    [ "${line//[^|]/}" = "||||||||||" ] ||
+    [ "${line//[^|]/}" = "|||||||||||" ] ||
       { SCHEDULER_ERROR=invalid_scheduler_row; return 1; }
-    IFS='|' read -r pool assigned warm service charged pending leases max cpu memory healthy extra <<<"$line"
+    IFS='|' read -r pool assigned warm service charged pending leases max cpu memory healthy pool_fresh extra <<<"$line"
     pool_id_valid "$pool" || { SCHEDULER_ERROR=invalid_pool_id; return 1; }
     for i in "$assigned" "$warm" "$service" "$charged" "$pending" "$leases" "$cpu" "$memory"; do
       scheduler_uint "$i" || { SCHEDULER_ERROR=invalid_scheduler_count; return 1; }
     done
     [ "$cpu" -gt 0 ] && [ "$memory" -gt 0 ] ||
       { SCHEDULER_ERROR=invalid_resource_claim; return 1; }
-    case "$healthy" in 0|1) ;; *) SCHEDULER_ERROR=invalid_health; return 1 ;; esac
+    case "$healthy:$pool_fresh" in 0:0|0:1|1:0|1:1) ;;
+      *) SCHEDULER_ERROR=invalid_health_or_freshness; return 1 ;;
+    esac
     if [ "$max" = auto ]; then
       max="$POOL_HARD_MAX"
     else
@@ -59,8 +61,13 @@ scheduler_plan() {
     [ "${needs[i]}" -ge 0 ] || needs[i]=0
     removals[i]=$((service - desired[i]))
     [ "${removals[i]}" -ge 0 ] || removals[i]=0
-    admitted[i]=0; advertised[i]="$leases"; new_leases[i]="$leases"; blocked[i]=""; start_order[i]=""
-    if [ "$fresh" != 1 ]; then
+    # REVIEW(crf-v3q.13.5, MUST-CHECK): The max-capacity header is total
+    # assigned work plus free resource-backed offers, never a per-pool
+    # standalone host estimate. Service, pending, and offered slots are each
+    # resource-backed; assigned demand is not additional capacity until one of
+    # those slots exists to serve it.
+    admitted[i]=0; advertised[i]=$((service + pending + leases)); new_leases[i]="$leases"; blocked[i]=""; start_order[i]=""
+    if [ "$snapshot_fresh" != 1 ] || [ "$pool_fresh" != 1 ]; then
       blocked[i]=stale_demand; needs[i]=0; removals[i]=0
     elif [ "$healthy" != 1 ]; then
       blocked[i]=session_unhealthy; needs[i]=0; removals[i]=0

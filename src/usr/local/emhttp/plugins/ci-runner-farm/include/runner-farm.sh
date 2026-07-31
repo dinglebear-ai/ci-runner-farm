@@ -2387,8 +2387,17 @@ cmd_start() {
   [ -n "$secp" ] && err "SECURITY: $secp"       # warn, do not block (operator's call)
   [ -n "$orgp" ] && err "SECURITY: $orgp"
   provision_preflight || return 1               # cache-root guard + dirs/network/mirror/firewall/registry
+  local classic_rollback_activation=0
+  if [ "${MIGRATION_CLASSIC_ACTIVATION:-0}" = 1 ] &&
+     migration_load &&
+     [ "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" = \
+       "scaleset:activating_classic:jit_drained" ] &&
+     backend_classic_admission_allowed; then
+    classic_rollback_activation=1
+  fi
   if declare -F backend_effective >/dev/null &&
-     [ "$(backend_effective 2>/dev/null)" = scaleset ]; then
+     [ "$(backend_effective 2>/dev/null)" = scaleset ] &&
+     [ "$classic_rollback_activation" -ne 1 ]; then
     migration_load && [ "$MIGRATION_PHASE" = scaleset_active ] ||
       { err "scale-set Start requires an active, completed backend migration"; return 1; }
     scaleset_supervisor_start ||

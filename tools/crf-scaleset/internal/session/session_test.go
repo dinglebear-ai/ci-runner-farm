@@ -25,6 +25,7 @@ type fakeAPI struct {
 	acquireIDs   []int64
 	ackCalls     int
 	ackSawCommit bool
+	closeCalls   int
 	lastMessage  int64
 	store        journal.Store
 	started      chan int64
@@ -79,7 +80,7 @@ func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id 
 	f.ackCalls++
 	replayed, _ := f.store.Replay()
 	for key, entry := range replayed {
-		if key.MessageID == id && entry.Phase == "ack_pending" {
+		if key.MessageID == id && (entry.Phase == "committed" || entry.Phase == "ack_pending") {
 			f.ackSawCommit = true
 		}
 	}
@@ -87,6 +88,12 @@ func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id 
 }
 func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
 	return nil, nil
+}
+func (f *fakeAPI) CloseMessageSession(_ context.Context, _ crfgithub.Session) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCalls++
+	return nil
 }
 
 func TestPollAcquiresOnlyAvailableJobsAndOffersAssignedJobs(t *testing.T) {
@@ -215,7 +222,7 @@ func TestLegacyAcquireStartedAssignmentRecoversWithoutAcquire(t *testing.T) {
 	}
 }
 
-func TestAcquireStartedAvailableJobRemainsFailClosed(t *testing.T) {
+func TestAcquireStartedClosesSessionWithoutRetryingAvailableJobs(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	entry := journal.Entry{ScaleSetID: 7, SessionID: "old-session", MessageID: 33,
 		Phase: "acquire_started", AssignedCount: 0, ConfigRevision: strings.Repeat("a", 64),
@@ -224,7 +231,8 @@ func TestAcquireStartedAvailableJobRemainsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{MessageID: 33,
-		Statistics: &crfgithub.Statistics{}, Available: []int64{801}}}
+		Statistics: &crfgithub.Statistics{}, Available: []int64{801}},
+		acquire: crfgithub.AcquireResult{AcquiredIDs: []int64{801}}}
 	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64)})
 	if err != nil {
@@ -232,10 +240,34 @@ func TestAcquireStartedAvailableJobRemainsFailClosed(t *testing.T) {
 	}
 	if _, err := poller.Poll(context.Background(),
 		supervisor.Pool{ID: "python", ScaleSetID: 7}, 1); !errors.Is(err, ErrAmbiguousAcquire) {
-		t.Fatalf("ambiguous available-job acquisition was not rejected: %v", err)
+		t.Fatalf("ambiguous acquisition did not reset its session: %v", err)
 	}
-	if api.acquireCalls != 0 || api.ackCalls != 0 {
-		t.Fatalf("ambiguous acquisition caused a side effect: %#v", api)
+	if api.acquireCalls != 0 || api.ackCalls != 0 || api.closeCalls != 1 {
+		t.Fatalf("ambiguous redelivery made unsafe progress: %#v", api)
+	}
+	replayed, err := store.Replay()
+	if err != nil || len(replayed) != 0 {
+		t.Fatalf("reset session retained ambiguous replay: replay=%#v err=%v", replayed, err)
+	}
+}
+
+func TestNonzeroMessageWithoutStatisticsMakesNoProgress(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 44, Available: []int64{901}}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(),
+		supervisor.Pool{ID: "python", ScaleSetID: 7}, 1); err == nil {
+		t.Fatal("message without authoritative statistics was accepted")
+	}
+	replayed, replayErr := store.Replay()
+	if replayErr != nil || len(replayed) != 0 || api.acquireCalls != 0 || api.ackCalls != 0 {
+		t.Fatalf("malformed message changed state: replay=%#v api=%#v err=%v",
+			replayed, api, replayErr)
 	}
 }
 
@@ -387,6 +419,36 @@ func TestCompletionRemovesItsPendingHandle(t *testing.T) {
 	}
 	if !slices.Equal(result.AcquiredHandles, []int64{302}) {
 		t.Fatalf("completed handle was retained or replacement lost: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestRetireHandleCompactsDurableReplayState(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	entry := journal.Entry{ScaleSetID: 12, SessionID: "old-session", MessageID: 22, Phase: "acked",
+		AssignedCount: 1, AcquiredHandles: []int64{301, 302}, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)}
+	if err := store.Append(entry); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.RetireHandle(12, 301); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := store.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := replayed[entry.Key()]
+	if !slices.Equal(got.AcquiredHandles, []int64{302}) || poller.HasHandle(12, 301) {
+		t.Fatalf("retired handle survived compaction: %#v", got)
+	}
+	if poller.consumed[handleKey(12, 301)] {
+		t.Fatal("retired handle leaked in the in-memory consumed set")
 	}
 }
 

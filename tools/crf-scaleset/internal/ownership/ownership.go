@@ -26,8 +26,10 @@ var (
 
 var recordStates = []string{
 	"creating",
+	"create_ambiguous",
 	"ineligible",
 	"eligible",
+	"update_pending",
 	"orphan_create_ambiguous",
 	"orphan_ineligible",
 	"delete_pending",
@@ -50,15 +52,18 @@ type Pool struct {
 }
 
 type Record struct {
-	PoolID             string   `json:"pool_id"`
-	RemoteName         string   `json:"remote_name"`
-	ScaleSetID         int64    `json:"scale_set_id"`
-	RunnerGroupID      int64    `json:"runner_group_id"`
-	ConfiguredLabels   []string `json:"configured_labels"`
-	AppliedLabels      []string `json:"applied_labels"`
-	RemoteSpecRevision string   `json:"remote_spec_revision"`
-	State              string   `json:"state"`
-	UpdatedAt          string   `json:"updated_at"`
+	PoolID               string   `json:"pool_id"`
+	RemoteName           string   `json:"remote_name"`
+	ScaleSetID           int64    `json:"scale_set_id"`
+	RunnerGroupID        int64    `json:"runner_group_id"`
+	ConfiguredLabels     []string `json:"configured_labels"`
+	AppliedLabels        []string `json:"applied_labels"`
+	RemoteSpecRevision   string   `json:"remote_spec_revision"`
+	State                string   `json:"state"`
+	PendingRunnerGroupID int64    `json:"pending_runner_group_id,omitempty"`
+	PendingAppliedLabels []string `json:"pending_applied_labels,omitempty"`
+	PendingState         string   `json:"pending_state,omitempty"`
+	UpdatedAt            string   `json:"updated_at"`
 }
 
 type State struct {
@@ -142,7 +147,7 @@ func (m *Manager) Load() (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	dec := json.NewDecoder(file)
 	dec.DisallowUnknownFields()
 	var state State
@@ -174,15 +179,35 @@ func (m *Manager) Load() (State, error) {
 			return State{}, errors.New("invalid_ownership_record")
 		}
 		if record.ScaleSetID == 0 && record.State != "creating" &&
+			record.State != "create_ambiguous" &&
 			record.State != "orphan_create_ambiguous" && record.State != "delete_pending" {
 			return State{}, errors.New("invalid_ownership_record")
 		}
 		if _, err := time.Parse(time.RFC3339, record.UpdatedAt); err != nil {
 			return State{}, errors.New("invalid_ownership_record")
 		}
+		pending := record.State == "update_pending"
+		if pending {
+			if (record.PendingRunnerGroupID != m.cfg.ProductionRunnerGroupID &&
+				record.PendingRunnerGroupID != m.cfg.QuarantineRunnerGroupID) ||
+				len(record.PendingAppliedLabels) == 0 ||
+				len(record.PendingAppliedLabels) > 32 ||
+				!slices.Contains([]string{"eligible", "ineligible", "orphan_ineligible",
+					"delete_pending"}, record.PendingState) {
+				return State{}, errors.New("invalid_ownership_update_intent")
+			}
+		} else if record.PendingRunnerGroupID != 0 ||
+			len(record.PendingAppliedLabels) != 0 || record.PendingState != "" {
+			return State{}, errors.New("invalid_ownership_update_intent")
+		}
 		for _, label := range append(slices.Clone(record.ConfiguredLabels), record.AppliedLabels...) {
 			if !identity.MatchString(label) {
 				return State{}, errors.New("invalid_ownership_record")
+			}
+		}
+		for _, label := range record.PendingAppliedLabels {
+			if !identity.MatchString(label) {
+				return State{}, errors.New("invalid_ownership_update_intent")
 			}
 		}
 		seen[record.PoolID] = true
@@ -211,17 +236,17 @@ func (m *Manager) write(state State) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -257,45 +282,110 @@ func specMismatch(remote crfgithub.ScaleSet, name string, groupID int64, labels 
 	)
 }
 
+func (m *Manager) finishPendingUpdate(ctx context.Context, state *State,
+	record *Record) error {
+	if record.State != "update_pending" {
+		return nil
+	}
+	remote, err := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
+	if err != nil {
+		return fmt.Errorf("get_pending_owned_update: %w", err)
+	}
+	oldMatches := equalSpec(remote, record.RemoteName, record.RunnerGroupID, record.AppliedLabels)
+	targetMatches := equalSpec(remote, record.RemoteName, record.PendingRunnerGroupID,
+		record.PendingAppliedLabels)
+	if !oldMatches && !targetMatches {
+		return fmt.Errorf("owned_remote_drift_during_update: %w",
+			specMismatch(remote, record.RemoteName, record.PendingRunnerGroupID,
+				record.PendingAppliedLabels))
+	}
+	if oldMatches {
+		if _, err := m.api.UpdateRunnerScaleSet(ctx, record.ScaleSetID, crfgithub.UpdateSpec{
+			Name: record.RemoteName, RunnerGroupID: record.PendingRunnerGroupID,
+			Labels: slices.Clone(record.PendingAppliedLabels),
+		}); err != nil {
+			return fmt.Errorf("update_owned_scale_set: %w", err)
+		}
+		remote, err = m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
+		if err != nil {
+			return fmt.Errorf("verify_updated_scale_set: %w", err)
+		}
+		if !equalSpec(remote, record.RemoteName, record.PendingRunnerGroupID,
+			record.PendingAppliedLabels) {
+			return specMismatch(remote, record.RemoteName, record.PendingRunnerGroupID,
+				record.PendingAppliedLabels)
+		}
+	}
+	record.RunnerGroupID = record.PendingRunnerGroupID
+	record.AppliedLabels = slices.Clone(record.PendingAppliedLabels)
+	record.State = record.PendingState
+	record.PendingRunnerGroupID = 0
+	record.PendingAppliedLabels = nil
+	record.PendingState = ""
+	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return m.write(*state)
+}
+
+func (m *Manager) updateOwnedSpec(ctx context.Context, state *State, record *Record,
+	targetGroupID int64, labels []string, targetState string) error {
+	if record.State == "update_pending" {
+		if err := m.finishPendingUpdate(ctx, state, record); err != nil {
+			return err
+		}
+	}
+	remote, err := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
+	if err != nil {
+		return fmt.Errorf("get_owned_before_update: %w", err)
+	}
+	if !equalSpec(remote, record.RemoteName, record.RunnerGroupID, record.AppliedLabels) {
+		return fmt.Errorf("owned_remote_identity_mismatch: %w",
+			specMismatch(remote, record.RemoteName, record.RunnerGroupID, record.AppliedLabels))
+	}
+	if equalSpec(remote, record.RemoteName, targetGroupID, labels) {
+		record.RunnerGroupID = targetGroupID
+		record.AppliedLabels = slices.Clone(labels)
+		record.State = targetState
+		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return m.write(*state)
+	}
+	record.PendingRunnerGroupID = targetGroupID
+	record.PendingAppliedLabels = slices.Clone(labels)
+	record.PendingState = targetState
+	record.State = "update_pending"
+	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := m.write(*state); err != nil {
+		return err
+	}
+	return m.finishPendingUpdate(ctx, state, record)
+}
+
 func (m *Manager) replaceOwnedSpec(ctx context.Context, state *State, record *Record,
 	pool Pool, name, specRev string) error {
 	oldName := record.RemoteName
 	oldLabels := slices.Clone(record.AppliedLabels)
+	if record.State == "update_pending" {
+		if err := m.finishPendingUpdate(ctx, state, record); err != nil {
+			return err
+		}
+	}
 
 	// GitHub's scale-set update endpoint can add labels but does not reliably
 	// remove them. Replacement is therefore the only way to narrow routing.
-	// First force the exact owned ID back behind quarantine using its persisted
-	// old spec. Also recognize and repair a narrowly bounded partial update from
-	// an interrupted older build: same ID, old labels, and either the old or the
-	// deterministic new name in one of our two bound runner groups.
+	// First force the exact owned ID back behind quarantine using an intent-first
+	// update. Remote state may be only the exact persisted old identity or the
+	// exact intended identity after a crash.
 	if record.State != "delete_pending" {
 		remote, err := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
 		if err != nil {
 			return fmt.Errorf("get_owned_before_spec_replacement: %w", err)
 		}
-		nameKnown := remote.Name == oldName || remote.Name == name
-		groupKnown := remote.RunnerGroupID == m.cfg.ProductionRunnerGroupID ||
-			remote.RunnerGroupID == m.cfg.QuarantineRunnerGroupID
-		if remote.ID != record.ScaleSetID || !nameKnown || !groupKnown ||
-			!equalSpec(remote, remote.Name, remote.RunnerGroupID, oldLabels) {
+		if remote.ID != record.ScaleSetID ||
+			!equalSpec(remote, oldName, record.RunnerGroupID, oldLabels) {
 			return fmt.Errorf("owned_remote_drift_before_spec_migration: %w",
 				specMismatch(remote, oldName, record.RunnerGroupID, oldLabels))
 		}
-		if !equalSpec(remote, oldName, m.cfg.QuarantineRunnerGroupID, oldLabels) {
-			if _, err := m.api.UpdateRunnerScaleSet(ctx, record.ScaleSetID, crfgithub.UpdateSpec{
-				Name: oldName, RunnerGroupID: m.cfg.QuarantineRunnerGroupID, Labels: oldLabels,
-			}); err != nil {
-				return fmt.Errorf("quarantine_owned_before_spec_replacement: %w", err)
-			}
-			remote, err = m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
-			if err != nil || !equalSpec(remote, oldName, m.cfg.QuarantineRunnerGroupID, oldLabels) {
-				return fmt.Errorf("verify_quarantined_before_spec_replacement: %w", err)
-			}
-		}
-		record.RunnerGroupID = m.cfg.QuarantineRunnerGroupID
-		record.State = "delete_pending"
-		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := m.write(*state); err != nil {
+		if err := m.updateOwnedSpec(ctx, state, record, m.cfg.QuarantineRunnerGroupID,
+			oldLabels, "delete_pending"); err != nil {
 			return err
 		}
 	}
@@ -340,6 +430,7 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 		return nil, err
 	}
 	byPool := make(map[string]int, len(state.Records))
+	newIntent := make(map[string]bool, len(pools))
 	for i, record := range state.Records {
 		byPool[record.PoolID] = i
 	}
@@ -364,6 +455,7 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 			if err := m.write(state); err != nil {
 				return nil, err
 			}
+			newIntent[pool.ID] = true
 		}
 		record := &state.Records[idx]
 		if record.RemoteName != name || record.RemoteSpecRevision != specRev {
@@ -373,65 +465,43 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 			if err := m.replaceOwnedSpec(ctx, &state, record, pool, name, specRev); err != nil {
 				return nil, err
 			}
+			newIntent[pool.ID] = true
 		}
 		if record.ScaleSetID == 0 {
-			created := crfgithub.ScaleSet{}
-			if exists {
-				reconciled, getErr := m.api.GetRunnerScaleSetByName(ctx, record.RunnerGroupID, name)
-				if getErr == nil && reconciled.ID > 0 {
-					if !equalSpec(reconciled, name, record.RunnerGroupID, applied) {
-						return nil, errors.New("foreign_collision_during_intent_recovery")
-					}
-					created = reconciled
-				} else if getErr != nil && !errors.Is(getErr, crfgithub.ErrNotFound) {
-					return nil, fmt.Errorf("recover_create_intent: %w", getErr)
+			// REVIEW(crf-v3q.13.3, MUST-CHECK): A persisted ID-less intent
+			// proves only that a create may have been attempted. Predictable
+			// name/spec equality cannot prove ownership after response loss, so
+			// never adopt by name. Only an intent created in this in-memory
+			// reconciliation pass may issue the remote create.
+			if !newIntent[pool.ID] {
+				record.State = "create_ambiguous"
+				record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				if err := m.write(state); err != nil {
+					return nil, err
 				}
+				return nil, errors.New("ambiguous_create_intent")
 			}
-			if created.ID == 0 {
-				var createErr error
-				created, createErr = m.api.CreateRunnerScaleSet(ctx, crfgithub.CreateSpec{
-					Name: name, RunnerGroupID: record.RunnerGroupID, Labels: applied,
-				})
-				if createErr != nil {
-					reconciled, getErr := m.api.GetRunnerScaleSetByName(ctx, record.RunnerGroupID, name)
-					if getErr != nil || !equalSpec(reconciled, name, record.RunnerGroupID, applied) {
-						return nil, fmt.Errorf("foreign_collision_or_ambiguous_create: %w", createErr)
-					}
-					created = reconciled
+			created, createErr := m.api.CreateRunnerScaleSet(ctx, crfgithub.CreateSpec{
+				Name: name, RunnerGroupID: record.RunnerGroupID, Labels: applied,
+			})
+			if createErr != nil {
+				record.State = "create_ambiguous"
+				record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				if err := m.write(state); err != nil {
+					return nil, err
 				}
+				return nil, fmt.Errorf("ambiguous_create_intent: %w", createErr)
 			}
 			record.ScaleSetID = created.ID
 			if err := m.write(state); err != nil {
 				return nil, err
 			}
 		}
-		remote, err := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
-		if err != nil {
-			return nil, fmt.Errorf("get_owned_scale_set: %w", err)
+		if err := m.updateOwnedSpec(ctx, &state, record, targetGroupID, applied,
+			targetState); err != nil {
+			return nil, err
 		}
-		if remote.ID != record.ScaleSetID || remote.Name != record.RemoteName ||
-			remote.RunnerGroupID != record.RunnerGroupID {
-			return nil, errors.New("owned_remote_identity_mismatch")
-		}
-		if !equalSpec(remote, name, targetGroupID, applied) {
-			_, err = m.api.UpdateRunnerScaleSet(ctx, record.ScaleSetID, crfgithub.UpdateSpec{
-				Name: name, RunnerGroupID: targetGroupID, Labels: applied,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("update_owned_scale_set: %w", err)
-			}
-			remote, err = m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
-			if err != nil {
-				return nil, fmt.Errorf("verify_updated_scale_set: %w", err)
-			}
-			if !equalSpec(remote, name, targetGroupID, applied) {
-				return nil, specMismatch(remote, name, targetGroupID, applied)
-			}
-		}
-		record.RunnerGroupID = targetGroupID
 		record.ConfiguredLabels = slices.Clone(pool.Labels)
-		record.AppliedLabels = slices.Clone(applied)
-		record.State = targetState
 		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		if err := m.write(state); err != nil {
 			return nil, err
@@ -450,27 +520,11 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 			}
 			continue
 		}
-		remote, err := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
-		if err != nil || remote.ID != record.ScaleSetID || remote.Name != record.RemoteName ||
-			remote.RunnerGroupID != record.RunnerGroupID {
-			return nil, fmt.Errorf("orphan_owned_remote_identity_mismatch: %w", err)
-		}
 		applied := slices.Clone(record.ConfiguredLabels)
-		if !equalSpec(remote, record.RemoteName, m.cfg.QuarantineRunnerGroupID, applied) {
-			_, err = m.api.UpdateRunnerScaleSet(ctx, record.ScaleSetID, crfgithub.UpdateSpec{
-				Name: record.RemoteName, RunnerGroupID: m.cfg.QuarantineRunnerGroupID, Labels: applied,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("make_orphan_ineligible: %w", err)
-			}
-			remote, err = m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
-			if err != nil || !equalSpec(remote, record.RemoteName, m.cfg.QuarantineRunnerGroupID, applied) {
-				return nil, fmt.Errorf("verify_orphan_ineligible: %w", err)
-			}
+		if err := m.updateOwnedSpec(ctx, &state, record, m.cfg.QuarantineRunnerGroupID,
+			applied, "orphan_ineligible"); err != nil {
+			return nil, fmt.Errorf("make_orphan_ineligible: %w", err)
 		}
-		record.RunnerGroupID = m.cfg.QuarantineRunnerGroupID
-		record.AppliedLabels = applied
-		record.State = "orphan_ineligible"
 		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		if err := m.write(state); err != nil {
 			return nil, err
@@ -501,8 +555,30 @@ func (m *Manager) DeleteOwned(ctx context.Context) error {
 			kept = append(kept, record)
 			continue
 		}
+		// REVIEW(crf-v3q.13.4, MUST-CHECK): An owned numeric ID is necessary
+		// but not sufficient after operator/API drift. Re-read and verify the
+		// complete persisted identity before deletion; only the typed not-found
+		// sentinel is idempotent success.
+		remote, getErr := m.api.GetRunnerScaleSet(ctx, record.ScaleSetID)
+		if errors.Is(getErr, crfgithub.ErrNotFound) {
+			continue
+		}
+		if getErr != nil || !equalSpec(remote, record.RemoteName, record.RunnerGroupID,
+			record.AppliedLabels) {
+			if first == nil {
+				if getErr != nil {
+					first = fmt.Errorf("delete_owned_identity_check: %w", getErr)
+				} else {
+					first = fmt.Errorf("delete_owned_remote_identity_mismatch: %w",
+						specMismatch(remote, record.RemoteName, record.RunnerGroupID,
+							record.AppliedLabels))
+				}
+			}
+			kept = append(kept, record)
+			continue
+		}
 		if err := m.api.DeleteRunnerScaleSet(ctx, record.ScaleSetID); err != nil &&
-			!strings.Contains(err.Error(), "404") && !errors.Is(err, crfgithub.ErrNotFound) {
+			!errors.Is(err, crfgithub.ErrNotFound) {
 			if first == nil {
 				first = err
 			}

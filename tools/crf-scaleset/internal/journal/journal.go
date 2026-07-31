@@ -88,7 +88,7 @@ func (s Store) Append(e Entry) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := f.Chmod(0o600); err != nil {
 		return err
 	}
@@ -96,7 +96,10 @@ func (s Store) Append(e Entry) error {
 	if err := json.NewEncoder(f).Encode(e); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func (s Store) Replay() (map[Key]Entry, error) {
@@ -115,7 +118,7 @@ func (s Store) Replay() (map[Key]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	scan := bufio.NewScanner(f)
 	scan.Buffer(make([]byte, 4096), 1<<20)
 	for scan.Scan() {
@@ -149,25 +152,25 @@ func (s Store) Rewrite(entries []Entry) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	encoder := json.NewEncoder(tmp)
 	for _, entry := range ordered {
 		if err := entry.Validate(); err != nil {
-			tmp.Close()
+			_ = tmp.Close()
 			return err
 		}
 		entry.UpdatedAt = time.Now().UTC()
 		if err := encoder.Encode(entry); err != nil {
-			tmp.Close()
+			_ = tmp.Close()
 			return err
 		}
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

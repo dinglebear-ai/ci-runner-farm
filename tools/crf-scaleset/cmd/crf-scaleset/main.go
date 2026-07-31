@@ -80,7 +80,7 @@ func loadProbeConfig(path string) (probeConfig, error) {
 	if err != nil {
 		return probeConfig{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	dec := json.NewDecoder(file)
 	dec.DisallowUnknownFields()
 	var cfg probeConfig
@@ -286,7 +286,7 @@ func executableDigest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, file); err != nil {
 		return "", err

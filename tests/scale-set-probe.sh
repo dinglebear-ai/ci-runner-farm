@@ -5,7 +5,7 @@ mod=tools/crf-scaleset
 grep -Fq 'go 1.25.3' "$mod/go.mod"
 grep -Fq 'github.com/actions/scaleset v0.4.0' "$mod/go.mod"
 grep -Fq '6ce025902cd964747a078c2aabe7340ebc667eca' "$mod/cmd/crf-scaleset/main.go"
-! rg -q 'listener\\.New|listener\\.Run' "$mod"
+! grep -R -Eq 'listener\.New|listener\.Run' "$mod"
 go test -C "$mod" ./...
 go vet -C "$mod" ./...
 
@@ -47,8 +47,13 @@ SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
         POST:*/actions/runner-groups) created=1; GH_STATUS=201; GH_RESPONSE='\''{"id":8}'\'' ;;
         GET:*/actions/runner-groups/*/repositories*) GH_RESPONSE='\''{"total_count":0,"repositories":[]}'\'' ;;
         GET:*/actions/runner-groups*) if [ "$created" = 1 ]; then
-          GH_RESPONSE='\''{"runner_groups":[{"id":8,"name":"crf-scaleset-quarantine-490447eedbf12df1","visibility":"selected","allows_public_repositories":false}]}'\''
-        else GH_RESPONSE='\''{"runner_groups":[]}'\''; fi ;;
+          GH_RESPONSE='\''{"runner_groups":[
+            {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":false},
+            {"id":8,"name":"crf-scaleset-quarantine-490447eedbf12df1","visibility":"selected","allows_public_repositories":false}
+          ]}'\''
+        else GH_RESPONSE='\''{"runner_groups":[
+          {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":false}
+        ]}'\''; fi ;;
         *) return 1 ;;
       esac
     }
@@ -58,6 +63,7 @@ SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
       $j=json_decode(file_get_contents($argv[1]),true);
       exit(($j["runtime"]["owner"]??"") === "dinglebear-ai" &&
         ($j["runtime"]["auth"]["token_file"]??"") === $argv[2] &&
+        ($j["live"]["runner_group_id"]??0) === 7 &&
         ($j["live"]["runner_group_policy"]??"") === "selected_repositories" &&
         ($j["live"]["quarantine_runner_group_name"]??"") !== "" &&
         ($j["live"]["workload"]["zero_to_one"]??false) === true ? 0 : 1);

@@ -108,8 +108,13 @@ backend_classic_admission_allowed() {
 }
 
 backend_scaleset_admission_allowed() {
-  migration_load && [ "$MIGRATION_EFFECTIVE_BACKEND" = scaleset ] &&
-    [ "$MIGRATION_PHASE" = scaleset_active ]
+  migration_load || return 1
+  case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" in
+    scaleset:scaleset_active:scaleset_eligible|classic:activating_scaleset:classic_ineligible)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 migration_revision_valid() { [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]; }
@@ -163,6 +168,8 @@ migration_advance_forward() {
       ;;
     activating_scaleset)
       scaleset_activate_eligible "$MIGRATION_OWNERSHIP_REVISION" &&
+        scaleset_autoscale_tick &&
+        scaleset_activation_prove_effective &&
         migration_write scaleset_active scaleset scaleset_eligible
       ;;
     scaleset_active) return 0 ;;
@@ -198,7 +205,8 @@ migration_advance_reverse() {
         migration_write scaleset_ineligible scaleset scaleset_ineligible
       ;;
     scaleset_ineligible)
-      migration_write draining_assigned_jit scaleset scaleset_ineligible
+      scaleset_publish_zero_capacity &&
+        migration_write draining_assigned_jit scaleset scaleset_ineligible
       ;;
     draining_assigned_jit)
       jit_reconcile
@@ -520,7 +528,10 @@ migration_classic_activate() {
     migration_classic_prove_ineligible || return 1
   fi
   rm -f "$MIGRATION_CLASSIC_QUIESCE_FILE"
-  cmd_start
+  # REVIEW(crf-v3q.13.19): cmd_start normally follows the effective backend.
+  # This dynamically scoped capability authorizes only the exact rollback FSM
+  # state whose remote scale sets are ineligible and whose JIT work is drained.
+  MIGRATION_CLASSIC_ACTIVATION=1 cmd_start
 }
 
 migration_classic_prove_effective() {
@@ -537,6 +548,53 @@ migration_classic_prove_effective() {
     { err "classic activation has no online runner"; return 1; }
 }
 migration_jit_drained() {
-  ! find "$JIT_STATE_DIR" -type f -name '*.state' -exec grep -lE '^phase=(running|secret_consumed|container_observed)$' {} + 2>/dev/null |
-    grep -q .
+  local state phase reservation snapshot_ok
+  # REVIEW(crf-v3q.13.17): Rollback needs proof across all three authorities:
+  # durable JIT/reservation state, the fresh GitHub session snapshot, and the
+  # managed Docker inventory. Unknown or ambiguous state always blocks.
+  for state in "$JIT_STATE_DIR"/*.state; do
+    [ -f "$state" ] || continue
+    phase="$(jit_state_field "$state" phase)"
+    [ "$phase" = deleted ] || {
+      err "JIT operation ${state##*/} remains in phase ${phase:-unknown}"
+      return 1
+    }
+  done
+  scaleset_snapshot_refresh || {
+    err "cannot prove JIT drain without a fresh scale-set snapshot"
+    return 1
+  }
+  snapshot_ok="$(php -r '
+    $j=json_decode(file_get_contents($argv[1]),true);$now=time();
+    if(!is_array($j)||!is_array($j["pools"]??null)||count($j["pools"])===0)exit(2);
+    foreach($j["pools"] as $p){
+      $observed=strtotime((string)($p["observed_at"]??""));
+      $valid=strtotime((string)($p["valid_until"]??""));
+      if(($p["session_healthy"]??false)!==true||($p["assigned_jobs"]??-1)!==0||
+        !is_array($p["acquired_handles"]??null)||count($p["acquired_handles"])!==0||
+        $observed===false||$valid===false||$observed>$now+5||$valid<=$now||
+        $valid-$observed>30)exit(3);
+    }
+    echo "yes";
+  ' "$SCALESET_SNAPSHOT" 2>/dev/null)" || {
+    err "assigned, pending, or stale GitHub scale-set work remains"
+    return 1
+  }
+  [ "$snapshot_ok" = yes ] || return 1
+  for reservation in "$RESERVATION_DIR"/*.state; do
+    [ -f "$reservation" ] || continue
+    phase="$(reservation_field "$reservation" phase)"
+    if [ "$phase" = offered ]; then
+      reservation_release "$(basename "$reservation" .state)" || return 1
+      continue
+    fi
+    err "resource reservation ${reservation##*/} remains in phase ${phase:-unknown}"
+    return 1
+  done
+  fleet_inventory_refresh || return 1
+  if awk -F'|' '$12=="scaleset" && ($2=="running" || $2=="created"){found=1}
+      END{exit !found}' "$INVENTORY_FILE"; then
+    err "managed JIT containers remain after scale-set drain"
+    return 1
+  fi
 }

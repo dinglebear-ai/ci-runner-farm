@@ -23,3 +23,21 @@ crf_assert_file_mode() {
   actual="$(stat -c '%a' "$path")"
   crf_assert_eq "$expected" "$actual" "wrong mode for $path"
 }
+
+crf_go125() {
+  local candidate="${CRF_GO:-}" version=""
+  if [ -z "$candidate" ] && command -v go >/dev/null 2>&1; then
+    candidate="$(command -v go)"
+    version="$("$candidate" version 2>/dev/null | awk '{print $3}')"
+    [ "$version" = go1.25.3 ] || candidate=""
+  fi
+  if [ -z "$candidate" ] && command -v mise >/dev/null 2>&1; then
+    candidate="$(mise where go@1.25.3 2>/dev/null)/bin/go"
+  fi
+  [ -n "$candidate" ] && [ -x "$candidate" ] ||
+    { crf_fail "Go 1.25.3 is required (set CRF_GO or install it on PATH)"; return 1; }
+  version="$("$candidate" version 2>/dev/null | awk '{print $3}')"
+  [ "$version" = go1.25.3 ] ||
+    { crf_fail "Go 1.25.3 is required, found ${version:-unknown} at $candidate"; return 1; }
+  printf '%s\n' "$candidate"
+}

@@ -4,6 +4,7 @@
 
 SCALESET_HELPER="${SCALESET_HELPER:-$SCRIPT_DIR/../bin/crf-scaleset}"
 SCALESET_STATE_DIR="${SCALESET_STATE_DIR:-$RUNDIR/scalesets}"
+SCALESET_DURABLE_STATE_DIR="${SCALESET_DURABLE_STATE_DIR:-$CACHE_ROOT/state/scalesets}"
 SCALESET_PID="${SCALESET_PID:-$SCALESET_STATE_DIR/supervisor.pid}"
 SCALESET_SOCKET="${SCALESET_SOCKET:-$SCALESET_STATE_DIR/supervisor.sock}"
 SCALESET_COMPAT="${SCALESET_COMPAT:-$CFGDIR/scaleset-compatibility.json}"
@@ -21,6 +22,7 @@ SCALESET_QUARANTINE_GROUP_NAME=""
 SCALESET_QUARANTINE_GROUP_ID=0
 SCALESET_QUARANTINE_PHASE=""
 SCALESET_QUARANTINE_FOUND_ID=0
+SCALESET_PRODUCTION_GROUP_ID=0
 
 scaleset_plugin_digest() {
   local root="${SCALESET_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}"
@@ -176,6 +178,41 @@ scaleset_quarantine_group_find() {
   return 1
 }
 
+scaleset_production_group_policy_prove() {
+  local page=1 parsed count found
+  SCALESET_PRODUCTION_GROUP_ID=0
+  while [ "$page" -le 100 ]; do
+    gh_api_request GET "/orgs/$GH_OWNER/actions/runner-groups?per_page=100&page=$page" ||
+      return 1
+    parsed="$(printf '%s' "$GH_RESPONSE" | php -r '
+      $j=json_decode(stream_get_contents(STDIN),true);
+      if(!is_array($j)||!is_array($j["runner_groups"]??null))exit(2);
+      $found=[];
+      foreach($j["runner_groups"] as $g)if(($g["name"]??null)===$argv[1])$found[]=$g;
+      if(count($found)>1)exit(3);
+      $id=0;
+      if(count($found)===1){
+        $g=$found[0];
+        if(!is_int($g["id"]??null)||$g["id"]<=0||
+          ($g["visibility"]??"")!=="selected"||
+          ($g["allows_public_repositories"]??null)!==false)exit(4);
+        $id=$g["id"];
+      }
+      echo count($j["runner_groups"]),"|",$id;
+    ' "$RUNNER_GROUP" 2>/dev/null)" || return 1
+    IFS='|' read -r count found <<<"$parsed"
+    [[ "$count" =~ ^[0-9]+$ ]] && [[ "$found" =~ ^[0-9]+$ ]] || return 1
+    if [ "$found" -gt 0 ]; then
+      SCALESET_PRODUCTION_GROUP_ID="$found"
+      return 0
+    fi
+    [ "$count" -lt 100 ] && break
+    page=$((page + 1))
+  done
+  err "runner group $RUNNER_GROUP must use selected visibility and deny public repositories"
+  return 1
+}
+
 scaleset_quarantine_prove_no_repositories() {
   local id="$1"
   gh_api_request GET "/orgs/$GH_OWNER/actions/runner-groups/$id/repositories?per_page=1&page=1" ||
@@ -234,6 +271,11 @@ scaleset_probe_config_write() {
   identity="$(scaleset_bound_identity)" || { err "could not resolve packaged identity"; return 1; }
   IFS='|' read -r plugin image dockerfile entrypoint owner installation host_id <<<"$identity"
   [ "$owner" = "$GH_OWNER" ] || return 1
+  # REVIEW(crf-v3q.13.2, MUST-CHECK): Resolve the production group through the
+  # GitHub REST policy surface immediately before the probe, then bind that ID
+  # into the mode-0600 probe config. A same-name Actions group is insufficient.
+  scaleset_production_group_policy_prove ||
+    { err "production runner-group policy is not restricted"; return 1; }
   scaleset_quarantine_ensure ||
     { err "could not establish the scale-set quarantine runner group"; return 1; }
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
@@ -254,6 +296,7 @@ scaleset_probe_config_write() {
       $auth["private_key_file"]=$argv[16];}
     $runtime=["owner"=>$argv[2],"github_config_url"=>"https://github.com/".$argv[2],"auth"=>$auth];
     $live=["owner"=>$argv[2],"runner_group_name"=>$argv[3],
+      "runner_group_id"=>(int)$argv[18],
       "quarantine_runner_group_name"=>$argv[17],
       "runner_group_policy"=>"selected_repositories","installation_id"=>$argv[4],
       "host_id"=>$argv[5],"plugin_digest"=>$argv[6],"helper_digest"=>str_repeat("0",64),
@@ -264,7 +307,7 @@ scaleset_probe_config_write() {
   ' "$SCALESET_WORKLOAD_EVIDENCE" "$GH_OWNER" "$RUNNER_GROUP" "$installation" "$host_id" \
     "$plugin" "$image" "$dockerfile" "$entrypoint" "$SCALESET_COMPAT" "$tmp" \
     "$AUTH_MODE" "$TOKEN_FILE" "${GITHUB_APP_ID:-}" "${GITHUB_APP_INSTALLATION_ID:-0}" \
-    "$GITHUB_APP_KEY_FILE" "$SCALESET_QUARANTINE_GROUP_NAME" ||
+    "$GITHUB_APP_KEY_FILE" "$SCALESET_QUARANTINE_GROUP_NAME" "$SCALESET_PRODUCTION_GROUP_ID" ||
     { rm -f "$tmp"; err "workload evidence is stale, incomplete, or identity-mismatched"; return 1; }
   chmod 0600 "$tmp" && mv "$tmp" "$SCALESET_PROBE_CONFIG"
 }
@@ -465,6 +508,8 @@ scaleset_runtime_config_write() {
   IFS='|' read -r plugin image dockerfile entrypoint _owner _installation _host <<<"$identity"
   [ "$_owner:$_installation:$_host" = "$GH_OWNER:$installation:$host_id" ] || return 1
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
+  mkdir -p "$SCALESET_DURABLE_STATE_DIR" &&
+    chmod 0700 "$SCALESET_DURABLE_STATE_DIR" || return 1
   pools="$SCALESET_STATE_DIR/runtime-pools.$$.tsv"
   : >"$pools" || return 1
   while IFS= read -r rec; do
@@ -502,7 +547,7 @@ scaleset_runtime_config_write() {
       "installation_id"=>$argv[5],"owner"=>$argv[6],
       "github_config_url"=>"https://github.com/".$argv[6],
       "runner_group_id"=>(int)$argv[7],
-      "quarantine_runner_group_id"=>(int)$argv[21],"state_dir"=>$argv[8],
+      "quarantine_runner_group_id"=>(int)$argv[21],"state_dir"=>$argv[22],
       "ownership_path"=>$argv[9],"heartbeat_seconds"=>10,
       "host_id"=>$argv[10],"plugin_digest"=>$argv[17],"image_digest"=>$argv[18],
       "dockerfile_digest"=>$argv[19],"entrypoint_digest"=>$argv[20],
@@ -512,7 +557,7 @@ scaleset_runtime_config_write() {
     "$group_id" "$SCALESET_STATE_DIR" "$SCALESET_OWNERSHIP" "$host_id" "$tmp" \
     "$AUTH_MODE" "$TOKEN_FILE" "${GITHUB_APP_ID:-}" "${GITHUB_APP_INSTALLATION_ID:-0}" \
     "$GITHUB_APP_KEY_FILE" "$plugin" "$image" "$dockerfile" "$entrypoint" \
-    "$quarantine_group_id" ||
+    "$quarantine_group_id" "$SCALESET_DURABLE_STATE_DIR" ||
     { rm -f "$pools" "$tmp"; return 1; }
   rm -f "$pools"
   chmod 0600 "$tmp" && mv "$tmp" "$SCALESET_RUNTIME_CONFIG"
@@ -564,15 +609,70 @@ scaleset_snapshot_tsv() {
   php -r '
     $j=json_decode(file_get_contents($argv[1]),true);
     if(!is_array($j)||!is_array($j["pools"]??null))exit(2);
+    $now=time();
     foreach($j["pools"] as $p){
       $id=$p["pool_id"]??"";$assigned=$p["assigned_jobs"]??-1;
       $healthy=($p["session_healthy"]??false)===true?1:0;
       $handles=$p["acquired_handles"]??[];
+      $observed=strtotime((string)($p["observed_at"]??""));
+      $valid=strtotime((string)($p["valid_until"]??""));
+      $fresh=$observed!==false&&$valid!==false&&$observed<=$now+5&&
+        $valid>$now&&$valid-$observed<=30?1:0;
       if(!is_string($id)||!is_int($assigned)||$assigned<0||!is_array($handles))exit(3);
       foreach($handles as $h)if(!is_int($h)||$h<=0)exit(4);
-      echo $id,"|",$assigned,"|",$healthy,"|",implode(",",$handles),"\n";
+      echo $id,"|",$assigned,"|",$healthy,"|",implode(",",$handles),"|",$fresh,"\n";
     }
   ' "$SCALESET_SNAPSHOT"
+}
+
+scaleset_publish_zero_capacity() {
+  local pools payload
+  pools="$(mktemp "$SCALESET_STATE_DIR/zero-capacity.XXXXXX")" || return 1
+  trap 'rm -f "$pools"' RETURN
+  while IFS= read -r rec; do
+    [ -n "$rec" ] && printf '%s\n' "${rec%%|*}" >>"$pools"
+  done < <(pool_records)
+  payload="$(php -r '
+    $leases=[];foreach(file($argv[1],FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $pool)
+      $leases[$pool]=0;
+    echo json_encode(["leases"=>$leases],JSON_UNESCAPED_SLASHES);
+  ' "$pools")" || return 1
+  scaleset_request publish_capacity_leases "$payload" >/dev/null
+}
+
+scaleset_activation_prove_effective() {
+  local expected deadline="${SCALESET_ACTIVATION_TIMEOUT_SECONDS:-30}"
+  [[ "$deadline" =~ ^[1-9][0-9]*$ ]] && [ "$deadline" -le 120 ] || return 1
+  expected="$(mktemp "$SCALESET_STATE_DIR/activation-pools.XXXXXX")" || return 1
+  trap 'rm -f "$expected"' RETURN
+  while IFS= read -r rec; do
+    [ -n "$rec" ] && printf '%s\n' "${rec%%|*}" >>"$expected"
+  done < <(pool_records)
+  deadline=$(( $(date +%s) + deadline ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    if scaleset_snapshot_refresh && php -r '
+      $j=json_decode(file_get_contents($argv[1]),true);
+      $expected=array_values(array_filter(file($argv[2],FILE_IGNORE_NEW_LINES)));
+      $now=time();$seen=[];$advertised=0;
+      if(!is_array($j)||!is_array($j["pools"]??null))exit(2);
+      foreach($j["pools"] as $p){
+        $id=$p["pool_id"]??null;$observed=strtotime((string)($p["observed_at"]??""));
+        $valid=strtotime((string)($p["valid_until"]??""));
+        if(!is_string($id)||!in_array($id,$expected,true)||isset($seen[$id])||
+          ($p["session_healthy"]??false)!==true||$observed===false||$valid===false||
+          $observed>$now+5||$valid<=$now||$valid-$observed>30)exit(3);
+        $capacity=$p["advertised_capacity"]??-1;
+        if(!is_int($capacity)||$capacity<0)exit(4);
+        $advertised+=$capacity;$seen[$id]=true;
+      }
+      if(count($seen)!==count($expected)||$advertised<1)exit(5);
+    ' "$SCALESET_SNAPSHOT" "$expected"; then
+      return 0
+    fi
+    sleep 1
+  done
+  err "scale-set activation is waiting for fresh healthy sessions and leased capacity"
+  return 1
 }
 
 scaleset_reservation_count() {
@@ -614,9 +714,38 @@ scaleset_jit_runner_name() {
   printf '%s-jit-%s-%s\n' "$NAME_PREFIX" "$pool" "$digest"
 }
 
-scaleset_autoscale_tick() {
+scaleset_prewarm_target() {
+  local pool="$1" expected_revision="$2" path value
+  path="$RUNDIR/prewarm.$pool"
+  [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %a "$path" 2>/dev/null)" = 600 ] ||
+    return 1
+  value="$(php -r '
+    $lines=file($argv[1],FILE_IGNORE_NEW_LINES);
+    $v=[];
+    foreach($lines?:[] as $line){
+      $parts=explode("=",$line,2);
+      if(count($parts)!==2||isset($v[$parts[0]]))exit(2);
+      $v[$parts[0]]=$parts[1];
+    }
+    if(array_keys($v)!==["target","config_revision","expires"]||
+      !preg_match("/^(0|[1-9][0-9]*)$/",$v["target"])||
+      !preg_match("/^[0-9a-f]{64}$/",$v["config_revision"])||
+      !preg_match("/^[1-9][0-9]*$/",$v["expires"])||
+      !hash_equals($argv[2],$v["config_revision"])||(int)$v["expires"]<=time())exit(3);
+    echo $v["target"];
+  ' "$path" "$expected_revision" 2>/dev/null)" || {
+    # REVIEW(crf-v3q.13.8): Prewarm is temporary configuration-bound intent.
+    # Invalid, expired, or old-revision records are removed atomically from
+    # effective scheduling rather than silently surviving forever.
+    rm -f "$path"
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
+_scaleset_autoscale_tick_locked() {
   local snapshot_tsv plan_input plan_output leases_tsv cursor=0 sequence rec pool assigned healthy handles
-  local warm service charged pending leases max cpu memory desired admitted blocked order removals advertised target capacity ceiling
+  local warm service charged pending leases max cpu memory desired admitted blocked order removals advertised target fresh
   local current add epoch spec config_rev reservation handle container remote payload response descriptor
   scaleset_snapshot_refresh || { err "scale-set demand snapshot is unavailable"; return 1; }
   fleet_inventory_refresh || { err "scale-set Docker inventory is unavailable"; return 1; }
@@ -637,22 +766,19 @@ scaleset_autoscale_tick() {
   while IFS= read -r rec; do
     [ -n "$rec" ] || continue
     pool="${rec%%|*}"
-    IFS='|' read -r _ assigned healthy handles < <(awk -F'|' -v p="$pool" '$1==p{print;exit}' "$snapshot_tsv")
-    [ -n "${assigned:-}" ] || { assigned=0; healthy=0; handles=""; }
+    IFS='|' read -r _ assigned healthy handles fresh < <(awk -F'|' -v p="$pool" '$1==p{print;exit}' "$snapshot_tsv")
+    [ -n "${assigned:-}" ] || { assigned=0; healthy=0; handles=""; fresh=0; }
     warm="$(pool_idle "$pool")"
-    if [ -f "$RUNDIR/prewarm.$pool" ]; then
-      target="$(sed -n 's/^target=//p' "$RUNDIR/prewarm.$pool" | head -1)"
-      [[ "$target" =~ ^[0-9]+$ ]] && warm="$target"
-    fi
+    target="$(scaleset_prewarm_target "$pool" "$config_rev" 2>/dev/null)" && warm="$target"
     service=$(( $(scaleset_jit_service_count "$pool") +
       $(scaleset_reservation_count "$pool" assigned,acting,observed) ))
     charged="$service"
     pending="$(scaleset_reservation_count "$pool" reserved)"
     leases="$(scaleset_reservation_count "$pool" offered)"
     max="$(pool_max "$pool")"; cpu="$(pool_cpu_milli "$pool")"; memory="$(pool_memory_bytes "$pool")"
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "$pool" "$assigned" "$warm" "$service" "$charged" "$pending" "$leases" \
-      "$max" "$cpu" "$memory" "$healthy" >>"$plan_input"
+      "$max" "$cpu" "$memory" "$healthy" "$fresh" >>"$plan_input"
   done < <(pool_records)
   [ -f "$RUNDIR/scaleset.scheduler.cursor" ] &&
     cursor="$(cat "$RUNDIR/scaleset.scheduler.cursor" 2>/dev/null || echo 0)"
@@ -672,17 +798,7 @@ scaleset_autoscale_tick() {
       offer_lease_create "$pool" "${sequence:-0}" "$epoch-$RANDOM" "$cpu" "$memory" \
         "$spec" "$config_rev" "$(( $(date +%s) + 90 ))" || return 1
     done
-    # X-Actions-Results-Scale-Set-Max-Capacity is the total number of jobs
-    # GitHub may assign to this scale set, not the number of start leases
-    # admitted in this scheduler tick. Advertising only `current` drops the
-    # header to zero as soon as a warm runner is online, so the next matching
-    # workflow remains queued forever. Derive the pool's total ceiling from
-    # the host resource budget, then let the global scheduler serialize actual
-    # starts across pools without overcommitting the host.
-    capacity="$(resource_standalone_capacity "$cpu" "$memory")"
-    ceiling="$(pool_capacity_ceiling "$pool")"
-    [ "$capacity" -le "$ceiling" ] || capacity="$ceiling"
-    printf '%s|%s\n' "$pool" "$capacity" >>"$leases_tsv"
+    printf '%s|%s\n' "$pool" "$advertised" >>"$leases_tsv"
   done <"$plan_output"
   payload="$(php -r '
     $leases=[];foreach(file($argv[1],FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $line){
@@ -691,7 +807,7 @@ scaleset_autoscale_tick() {
   ' "$leases_tsv")" || return 1
   scaleset_request publish_capacity_leases "$payload" >/dev/null || return 1
 
-  while IFS='|' read -r pool assigned healthy handles; do
+  while IFS='|' read -r pool assigned healthy handles fresh; do
     [ -n "$handles" ] || continue
     IFS=',' read -r -a handle_list <<<"$handles"
     for handle in "${handle_list[@]}"; do
@@ -719,6 +835,25 @@ scaleset_autoscale_tick() {
       descriptor=""; unset descriptor
     done
   done <"$snapshot_tsv"
+}
+
+scaleset_autoscale_tick() {
+  local lock="$RUNDIR/scaleset.tick.lock" wait_seconds="${SCALESET_TICK_LOCK_TIMEOUT_SECONDS:-30}" rc
+  [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] && [ "$wait_seconds" -le 60 ] || return 1
+  mkdir -p "$RUNDIR" || return 1
+  # REVIEW(crf-v3q.13.7): Daemon, UI, and migration ticks share sequence,
+  # scheduler cursor, offer leases, and plan publication. Serialize the full
+  # snapshot-plan-commit transaction, not just individual file writes.
+  exec 7>"$lock" || return 1
+  if ! flock -w "$wait_seconds" 7; then
+    exec 7>&-
+    err "another scale-set scheduling transaction is still running"
+    return 1
+  fi
+  if _scaleset_autoscale_tick_locked; then rc=0; else rc=$?; fi
+  flock -u 7 || rc=1
+  exec 7>&-
+  return "$rc"
 }
 
 scaleset_prepare_ineligible() {

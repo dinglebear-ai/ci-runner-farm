@@ -65,7 +65,7 @@ func (f *fakeAPI) DeleteRunnerScaleSet(_ context.Context, id int64) error {
 func (*fakeAPI) GetRunnerGroupByName(context.Context, string) (crfgithub.RunnerGroup, error) {
 	return crfgithub.RunnerGroup{}, nil
 }
-func (_ *fakeAPI) CreateMessageSession(_ context.Context, id int64) (crfgithub.Session, error) {
+func (*fakeAPI) CreateMessageSession(_ context.Context, id int64) (crfgithub.Session, error) {
 	return crfgithub.Session{ScaleSetID: id, ID: "session"}, nil
 }
 func (f *fakeAPI) GetMessage(_ context.Context, _ crfgithub.Session, _ int64, capacity int) (crfgithub.MessageBatch, error) {
@@ -161,6 +161,15 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	sequence++
 	if second.OK || second.Code != "work_handle_not_available" || api.jitCalls != 1 {
 		t.Fatalf("JIT descriptor was reusable: response=%#v calls=%d", second, api.jitCalls)
+	}
+	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
+		`{"pool_id":"python","work_handle":501}`)); !response.OK {
+		t.Fatalf("JIT retirement failed: %#v", response)
+	}
+	sequence++
+	issued, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
+	if err != nil || strings.TrimSpace(string(issued)) != "{}" {
+		t.Fatalf("terminal issued handle was not compacted: %q err=%v", issued, err)
 	}
 
 	if response := control.Handle(context.Background(), request(cfg, "reconcile_owned", sequence,

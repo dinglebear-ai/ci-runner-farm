@@ -93,17 +93,17 @@ func WriteAtomic(path string, record Record) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -124,7 +124,7 @@ func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error)
 	if err != nil {
 		return Record{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	dec := json.NewDecoder(io.LimitReader(file, 64<<10))
 	dec.DisallowUnknownFields()
 	var record Record

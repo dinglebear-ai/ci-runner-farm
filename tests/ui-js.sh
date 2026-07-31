@@ -23,12 +23,16 @@ done
 
 grep -Fq "up '+crfEsc(p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq "min=\"'+(scaleSet?0:(auto?Number(p.count)+1:1))" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'input.min=String(scaleSet?0:(auto?Number(p.count)+1:1))' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'id="crf-pools-section"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq 'class="crf-pool-fleet"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq 'data-pool-body="' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq "'<span></span><span>'+crfEsc(title)+'</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq 'class="crf-pool-selector"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "fleet.className='crf-pool-fleet'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'body.dataset.poolBody=id' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'class="crf-pool-title"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "copy.className='crf-pool-selector'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'crfCollectPoolRows(tb)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+if grep -Fq "section.innerHTML=pools.map" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page; then
+  echo 'Fleet still destroys all pool sections during status polling' >&2; exit 1
+fi
 if grep -Eq 'crf-pool-card|crf-pool-row-head' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page; then
   echo 'Fleet still renders pool summaries instead of one runner table per pool' >&2; exit 1
 fi
@@ -52,6 +56,9 @@ grep -Fq 'data-pool-field' "$pools"
 grep -Fq "input.setAttribute('aria-invalid','true')" "$pools"
 grep -Fq "action:'apply-config'" "$pools"
 grep -Fq "action:'validate-pools'" "$pools"
+grep -Fq 'CRF_COMPAT_FAILURES>=8' "$pools"
+grep -Fq 'if(!crfPoolsActive())' "$pools"
+grep -Fq 'crfBuildPoolEditor(settings.RUNNER_POOLS)' "$pools"
 grep -Fq 'button.crfp-pool-action{width:auto!important' "$pools"
 grep -Fq '.crfp-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important' "$pools"
 

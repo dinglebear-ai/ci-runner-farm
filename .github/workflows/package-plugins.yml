@@ -30,6 +30,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go 1.25.3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.25.3
+          cache-dependency-path: tools/crf-scaleset/go.sum
+
       - name: Build .plg from src/
         env:
           REPO: ${{ github.repository }}

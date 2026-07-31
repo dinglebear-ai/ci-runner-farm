@@ -64,11 +64,68 @@ chmod 0600 "$secret_dir/consumed"
 
 if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
   jit_runner="${CRF_JIT_RUNNER:-./run.sh}"
-  jit_config="$runner_credential"
+  jit_config_dir="${CRF_JIT_CONFIG_DIR:-$(pwd)}"
+  if ! command -v jq >/dev/null 2>&1 || ! command -v base64 >/dev/null 2>&1; then
+    echo "ci-runner-farm: JIT descriptor decoding requires jq and base64" >&2
+    exit 1
+  fi
+  [ "${#runner_credential}" -le 65536 ] || {
+    echo "ci-runner-farm: JIT descriptor exceeds the 64 KiB limit" >&2
+    exit 1
+  }
+  [ -d "$jit_config_dir" ] && [ ! -L "$jit_config_dir" ] || {
+    echo "ci-runner-farm: JIT runner configuration directory is invalid" >&2
+    exit 1
+  }
+  jit_json="$(printf '%s' "$runner_credential" | base64 --decode 2>/dev/null)" || {
+    echo "ci-runner-farm: JIT descriptor is not valid base64" >&2
+    exit 1
+  }
   runner_credential=""
   unset runner_credential
+  # REVIEW(crf-v3q.13.1, MUST-CHECK): GitHub documents --jitconfig as an argv
+  # value, but that leaves the credential visible in /proc for the listener's
+  # lifetime. Materialize only the runner's three documented files from the
+  # protected FIFO and start the already-configured listener with no secret in
+  # argv or Env. Unknown keys fail closed rather than becoming arbitrary files.
+  printf '%s' "$jit_json" | jq -e '
+    type == "object" and
+    (keys | sort) == [".credentials", ".credentials_rsaparams", ".runner"] and
+    all(.[]; type == "string" and length > 0 and length <= 65536)
+  ' >/dev/null || {
+    echo "ci-runner-farm: JIT descriptor has an invalid file manifest" >&2
+    exit 1
+  }
+  umask 077
+  jit_tmp_files=()
+  crf_jit_tmp_cleanup() {
+    local path
+    for path in "${jit_tmp_files[@]:-}"; do rm -f "$path"; done
+  }
+  trap crf_jit_tmp_cleanup EXIT
+  for jit_file in .runner .credentials .credentials_rsaparams; do
+    jit_tmp="$(mktemp "$jit_config_dir/.crf-jit.XXXXXX")" || exit 1
+    jit_tmp_files+=("$jit_tmp")
+    printf '%s' "$jit_json" | jq -er --arg key "$jit_file" '.[$key]' |
+      base64 --decode >"$jit_tmp" || {
+        echo "ci-runner-farm: JIT descriptor contains invalid file data" >&2
+        exit 1
+      }
+    [ -s "$jit_tmp" ] && [ "$(stat -c %s "$jit_tmp")" -le 65536 ] || {
+      echo "ci-runner-farm: JIT configuration file is empty or oversized" >&2
+      exit 1
+    }
+    chmod 0600 "$jit_tmp"
+  done
+  for jit_index in 0 1 2; do
+    jit_file=(.runner .credentials .credentials_rsaparams)
+    mv -f "${jit_tmp_files[$jit_index]}" "$jit_config_dir/${jit_file[$jit_index]}"
+  done
+  trap - EXIT
+  jit_json=""
+  unset jit_json jit_tmp jit_tmp_files jit_file jit_index
   export RUNNER_ALLOW_RUNASROOT=1
-  exec "$jit_runner" --jitconfig "$jit_config"
+  exec "$jit_runner"
 else
   # The base image consumes RUNNER_TOKEN while configuring, unexports it before
   # subprocesses, and UNSET_CONFIG_VARS removes it before the long-lived listener.

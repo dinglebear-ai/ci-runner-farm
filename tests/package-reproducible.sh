@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. tests/lib/assert.sh
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/repo"
 cp -a build-plg.sh src tools VERSION CHANGELOG.md "$tmp/repo/"
-go125="$(mise where go@1.25.3)/bin/go"
+go125="$(crf_go125)"
 (
   cd "$tmp/repo"
   CRF_GO="$go125" DATE=2026.07.30.1200 BUILD_NUMBER=1 INTERNAL_VERSION=9.9.9 REPO=jmagar/ci-runner-farm ./build-plg.sh >/dev/null

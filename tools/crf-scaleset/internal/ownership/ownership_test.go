@@ -300,17 +300,17 @@ func TestAmbiguousCreateNeverAdoptsForeignObject(t *testing.T) {
 	_, err := m.Reconcile(context.Background(), []Pool{{
 		ID: "rust", RoutingLabel: "ci-pool-rust", Labels: []string{"self-hosted", "rust"},
 	}}, false)
-	if err == nil || !strings.Contains(err.Error(), "foreign_collision") {
+	if err == nil || !strings.Contains(err.Error(), "ambiguous_create_intent") {
 		t.Fatalf("foreign object was adopted: %v", err)
 	}
 	state, loadErr := m.Load()
 	if loadErr != nil || len(state.Records) != 1 || state.Records[0].ScaleSetID != 0 ||
-		state.Records[0].State != "creating" {
+		state.Records[0].State != "create_ambiguous" {
 		t.Fatalf("create intent was not retained: %#v err=%v", state, loadErr)
 	}
 }
 
-func TestReconcileRecoversDurableCreateIntentAfterRestart(t *testing.T) {
+func TestReconcileNeverNameAdoptsDurableCreateIntentAfterRestart(t *testing.T) {
 	m, api := testManager(t)
 	pool := Pool{ID: "rust", RoutingLabel: "ci-pool-rust",
 		Labels: []string{"self-hosted", "ci-pool-rust"}}
@@ -334,12 +334,15 @@ func TestReconcileRecoversDurableCreateIntentAfterRestart(t *testing.T) {
 	api.sets[91] = crfgithub.ScaleSet{ID: 91, Name: name,
 		RunnerGroupID: m.cfg.QuarantineRunnerGroupID, Labels: slices.Clone(applied)}
 
-	records, err := m.Reconcile(context.Background(), []Pool{pool}, false)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := m.Reconcile(context.Background(), []Pool{pool}, false); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous_create_intent") {
+		t.Fatalf("durable create intent name-adopted a remote object: %v", err)
 	}
-	if len(records) != 1 || records[0].ScaleSetID != 91 || records[0].State != "ineligible" {
-		t.Fatalf("durable create intent was not recovered: %#v", records)
+	persisted, err := m.Load()
+	if err != nil || len(persisted.Records) != 1 ||
+		persisted.Records[0].ScaleSetID != 0 ||
+		persisted.Records[0].State != "create_ambiguous" {
+		t.Fatalf("ambiguous create tombstone was not retained: %#v err=%v", persisted, err)
 	}
 }
 
@@ -358,6 +361,43 @@ func TestDeleteFailureRetainsTombstone(t *testing.T) {
 	state, loadErr := m.Load()
 	if loadErr != nil || len(state.Records) != 1 || state.Records[0].State != "delete_pending" {
 		t.Fatalf("delete tombstone was not retained: %#v err=%v", state, loadErr)
+	}
+}
+
+func TestDeleteRefusesRemoteIdentityDrift(t *testing.T) {
+	m, api := testManager(t)
+	records, err := m.Reconcile(context.Background(), []Pool{{
+		ID: "ops", RoutingLabel: "ci-pool-ops", Labels: []string{"ops"},
+	}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := api.sets[records[0].ScaleSetID]
+	remote.Labels = []string{"foreign"}
+	api.sets[remote.ID] = remote
+	if err := m.DeleteOwned(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "delete_owned_remote_identity_mismatch") {
+		t.Fatalf("drifted remote object was deleted: %v", err)
+	}
+	if len(api.deleted) != 0 {
+		t.Fatalf("delete was issued before identity revalidation: %#v", api.deleted)
+	}
+}
+
+func TestDeleteDoesNotTreatTextual404AsNotFound(t *testing.T) {
+	m, api := testManager(t)
+	if _, err := m.Reconcile(context.Background(), []Pool{{
+		ID: "ops", RoutingLabel: "ci-pool-ops", Labels: []string{"ops"},
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	api.deleteErr = errors.New("proxy failure mentions 404 but is not not-found")
+	if err := m.DeleteOwned(context.Background()); err == nil {
+		t.Fatal("textual 404 was accepted as typed not-found")
+	}
+	state, err := m.Load()
+	if err != nil || len(state.Records) != 1 || state.Records[0].State != "delete_pending" {
+		t.Fatalf("delete tombstone was not retained: %#v err=%v", state, err)
 	}
 }
 

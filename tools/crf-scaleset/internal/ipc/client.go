@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"time"
 
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/protocol"
 )
@@ -33,7 +34,25 @@ func (c Client) Call(ctx context.Context, request protocol.Request) (protocol.Re
 	if err != nil {
 		return protocol.Response{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
+	deadline := time.Now().Add(30 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return protocol.Response{}, err
+	}
+	// REVIEW(crf-v3q.13.11): Context cancellation must bound connected I/O,
+	// not only the Unix-socket dial.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
 	if _, err := conn.Write(frame.Bytes()); err != nil {
 		return protocol.Response{}, err
 	}

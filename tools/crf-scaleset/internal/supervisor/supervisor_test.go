@@ -115,6 +115,12 @@ func TestSnapshotHeartbeatContinuesWhileLongPollsWait(t *testing.T) {
 		cancel()
 		t.Fatalf("snapshot expired during healthy long polls: valid_until=%s", second.ValidUntil)
 	}
+	for _, pool := range second.Pools {
+		if pool.ValidUntil.After(time.Now().UTC()) {
+			cancel()
+			t.Fatalf("pool %s demand freshness was renewed by heartbeat without a completed poll", pool.PoolID)
+		}
+	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -128,21 +134,24 @@ type capacityObservation struct {
 
 type leaseAwarePoller struct {
 	observed chan capacityObservation
+	release  chan PollResult
 }
 
 func (p *leaseAwarePoller) Poll(ctx context.Context, pool Pool, capacity int) (PollResult, error) {
 	p.observed <- capacityObservation{pool: pool.ID, capacity: capacity}
-	<-ctx.Done()
-	return PollResult{}, ctx.Err()
+	select {
+	case result := <-p.release:
+		return result, nil
+	case <-ctx.Done():
+		return PollResult{}, ctx.Err()
+	}
 }
 
-func TestLeaseChangeInterruptsEveryPoolLongPoll(t *testing.T) {
-	p := &leaseAwarePoller{observed: make(chan capacityObservation, 32)}
+func TestLeaseChangePreservesInflightResultThenImmediatelyRepolls(t *testing.T) {
+	p := &leaseAwarePoller{observed: make(chan capacityObservation, 8), release: make(chan PollResult, 8)}
 	cfg := Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: 10 * time.Second}
-	for i := 0; i < 7; i++ {
-		cfg.Pools = append(cfg.Pools, Pool{ID: string(rune('a' + i)), ScaleSetID: int64(i + 1)})
-	}
+	cfg.Pools = []Pool{{ID: "rust", ScaleSetID: 1}}
 	s, err := New(cfg, p)
 	if err != nil {
 		t.Fatal(err)
@@ -150,35 +159,41 @@ func TestLeaseChangeInterruptsEveryPoolLongPoll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
-	for range cfg.Pools {
-		select {
-		case got := <-p.observed:
-			if got.capacity != 0 {
-				cancel()
-				t.Fatalf("initial capacity for %s = %d, want 0", got.pool, got.capacity)
-			}
-		case <-time.After(250 * time.Millisecond):
-			cancel()
-			t.Fatal("not every pool began its initial long poll")
-		}
+	got := <-p.observed
+	if got.capacity != 0 {
+		cancel()
+		t.Fatalf("initial capacity = %d, want 0", got.capacity)
 	}
-	leases := map[string]int{}
-	for _, pool := range cfg.Pools {
-		leases[pool.ID] = 2
+	s.SetLeases(map[string]int{"rust": 2})
+	select {
+	case got := <-p.observed:
+		cancel()
+		t.Fatalf("capacity change canceled an in-flight poll: %#v", got)
+	case <-time.After(20 * time.Millisecond):
 	}
-	s.SetLeases(leases)
-	updated := map[string]bool{}
-	deadline := time.After(250 * time.Millisecond)
-	for len(updated) < len(cfg.Pools) {
-		select {
-		case got := <-p.observed:
-			if got.capacity == 2 {
-				updated[got.pool] = true
-			}
-		case <-deadline:
+	p.release <- PollResult{AssignedJobs: 1, MessageID: 9, AcquiredHandles: []int64{41}}
+	select {
+	case got := <-p.observed:
+		if got.capacity != 2 {
 			cancel()
-			t.Fatalf("lease update reached %d/%d pool polls", len(updated), len(cfg.Pools))
+			t.Fatalf("successor capacity = %d, want 2", got.capacity)
 		}
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		t.Fatal("lease change did not immediately issue a successor poll")
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		snapshot := s.Snapshot()
+		if len(snapshot.Pools) == 1 && snapshot.Pools[0].LastMessageID == 9 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snapshot := s.Snapshot(); len(snapshot.Pools) != 1 ||
+		snapshot.Pools[0].LastMessageID != 9 || snapshot.Pools[0].AdvertisedCapacity != 0 {
+		cancel()
+		t.Fatalf("old-capacity poll result was discarded: %#v", snapshot)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -201,7 +216,7 @@ func (p *cancellationWrappingPoller) Poll(ctx context.Context, _ Pool, capacity 
 	return PollResult{}, errors.New("transport discarded the cancellation cause")
 }
 
-func TestLeaseCancellationDoesNotDowngradeSessionHealth(t *testing.T) {
+func TestLeaseChangeDoesNotCancelPollOrDowngradeSessionHealth(t *testing.T) {
 	p := &cancellationWrappingPoller{observed: make(chan int, 8)}
 	cfg := Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: time.Millisecond,
@@ -231,13 +246,9 @@ func TestLeaseCancellationDoesNotDowngradeSessionHealth(t *testing.T) {
 	s.SetLeases(map[string]int{"rust": 1})
 	select {
 	case capacity := <-p.observed:
-		if capacity != 1 {
-			cancel()
-			t.Fatalf("reissued capacity = %d, want 1", capacity)
-		}
-	case <-time.After(100 * time.Millisecond):
 		cancel()
-		t.Fatal("lease change did not reissue the poll")
+		t.Fatalf("lease change canceled an in-flight poll and reissued capacity %d", capacity)
+	case <-time.After(20 * time.Millisecond):
 	}
 	if !s.Snapshot().Pools[0].SessionHealthy {
 		cancel()
