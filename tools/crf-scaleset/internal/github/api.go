@@ -71,15 +71,33 @@ type ScaleSetAPI interface {
 	GenerateJitRunnerConfig(context.Context, int64, JITRequest) ([]byte, error)
 }
 
+type ScaleSetClientFactory func(int64) (*scaleset.Client, error)
+
 type Adapter struct {
-	client   *scaleset.Client
-	owner    string
-	mu       sync.Mutex
-	sessions map[int64]*scaleset.MessageSessionClient
+	client        *scaleset.Client
+	owner         string
+	clientFactory ScaleSetClientFactory
+	mu            sync.Mutex
+	sessions      map[int64]*scaleset.MessageSessionClient
 }
 
 func NewAdapter(client *scaleset.Client, owner string) *Adapter {
-	return &Adapter{client: client, owner: owner, sessions: make(map[int64]*scaleset.MessageSessionClient)}
+	return NewAdapterWithScaleSetClientFactory(client, owner, nil)
+}
+
+func NewAdapterWithScaleSetClientFactory(client *scaleset.Client, owner string, factory ScaleSetClientFactory) *Adapter {
+	return &Adapter{client: client, owner: owner, clientFactory: factory,
+		sessions: make(map[int64]*scaleset.MessageSessionClient)}
+}
+
+func (a *Adapter) clientForScaleSet(id int64) (*scaleset.Client, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("invalid scale set id")
+	}
+	if a.clientFactory == nil {
+		return a.client, nil
+	}
+	return a.clientFactory(id)
 }
 
 func labels(name string, in []string) []scaleset.Label {
@@ -155,7 +173,11 @@ func (a *Adapter) GetRunnerGroupByName(ctx context.Context, name string) (Runner
 	return RunnerGroup{ID: int64(v.ID), Name: v.Name, IsDefault: v.IsDefault}, nil
 }
 func (a *Adapter) CreateMessageSession(ctx context.Context, id int64) (Session, error) {
-	v, err := a.client.MessageSessionClient(ctx, int(id), a.owner)
+	client, err := a.clientForScaleSet(id)
+	if err != nil {
+		return Session{}, err
+	}
+	v, err := client.MessageSessionClient(ctx, int(id), a.owner)
 	if err != nil {
 		return Session{}, err
 	}
@@ -267,7 +289,11 @@ func (a *Adapter) AcknowledgeMessage(ctx context.Context, s Session, id int64) e
 	return c.DeleteMessage(ctx, int(id))
 }
 func (a *Adapter) GenerateJitRunnerConfig(ctx context.Context, id int64, req JITRequest) ([]byte, error) {
-	v, err := a.client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: req.Name, WorkFolder: req.WorkFolder}, int(id))
+	client, err := a.clientForScaleSet(id)
+	if err != nil {
+		return nil, err
+	}
+	v, err := client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: req.Name, WorkFolder: req.WorkFolder}, int(id))
 	if err != nil {
 		return nil, err
 	}

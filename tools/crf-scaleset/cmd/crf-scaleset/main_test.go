@@ -5,8 +5,47 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/actions/scaleset"
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/controller"
 )
+
+func TestScaleSetClientFactoryBindsDistinctClientIdentities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("secret-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := controller.RuntimeConfig{GitHubConfigURL: "https://github.com/dinglebear-ai",
+		Owner: "dinglebear-ai", Auth: controller.AuthConfig{Mode: "pat", TokenFile: path}}
+	factory, err := newScaleSetClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := factory(scaleSetSystemInfo("controller", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops, err := factory(scaleSetSystemInfo("listener", 74))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rust, err := factory(scaleSetSystemInfo("listener", 70))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin == ops || admin == rust || ops == rust {
+		t.Fatal("scale sets shared one mutable client identity")
+	}
+	for _, tc := range []struct {
+		client    *scaleset.Client
+		subsystem string
+		id        int
+	}{{admin, "controller", 0}, {ops, "listener", 74}, {rust, "listener", 70}} {
+		info := tc.client.SystemInfo()
+		if info.System != "ci-runner-farm" || info.Subsystem != tc.subsystem || info.ScaleSetID != tc.id {
+			t.Fatalf("unexpected client identity: %#v", info)
+		}
+	}
+}
 
 func TestNewScaleSetAPIReadsOnlyPrivateCredentialFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")

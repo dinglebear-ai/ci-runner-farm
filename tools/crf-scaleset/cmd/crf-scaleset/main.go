@@ -224,42 +224,63 @@ func privateCredential(path string, max int64, multiline bool) (string, error) {
 	return value, nil
 }
 
-func newScaleSetAPI(cfg controller.RuntimeConfig) (crfgithub.ScaleSetAPI, error) {
+type scaleSetClientFactory func(scaleset.SystemInfo) (*scaleset.Client, error)
+
+func scaleSetSystemInfo(subsystem string, scaleSetID int64) scaleset.SystemInfo {
+	return scaleset.SystemInfo{System: "ci-runner-farm", Version: moduleVersion,
+		CommitSHA: moduleRevision, ScaleSetID: int(scaleSetID), Subsystem: subsystem}
+}
+
+func newScaleSetClientFactory(cfg controller.RuntimeConfig) (scaleSetClientFactory, error) {
 	if cfg.GitHubConfigURL == "" || cfg.Owner == "" {
 		return nil, fmt.Errorf("github_identity_required")
 	}
-	info := scaleset.SystemInfo{System: "ci-runner-farm", Version: moduleVersion,
-		CommitSHA: moduleRevision, Subsystem: "controller"}
-	var client *scaleset.Client
-	var err error
 	switch cfg.Auth.Mode {
 	case "pat":
-		token, readErr := privateCredential(cfg.Auth.TokenFile, 64<<10, false)
-		if readErr != nil {
-			return nil, readErr
+		token, err := privateCredential(cfg.Auth.TokenFile, 64<<10, false)
+		if err != nil {
+			return nil, err
 		}
-		client, err = scaleset.NewClientWithPersonalAccessToken(
-			scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: cfg.GitHubConfigURL,
-				PersonalAccessToken: token, SystemInfo: info})
+		return func(info scaleset.SystemInfo) (*scaleset.Client, error) {
+			return scaleset.NewClientWithPersonalAccessToken(
+				scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: cfg.GitHubConfigURL,
+					PersonalAccessToken: token, SystemInfo: info})
+		}, nil
 	case "github_app":
-		key, readErr := privateCredential(cfg.Auth.PrivateKeyFile, 64<<10, true)
-		if readErr != nil {
-			return nil, readErr
+		key, err := privateCredential(cfg.Auth.PrivateKeyFile, 64<<10, true)
+		if err != nil {
+			return nil, err
 		}
 		if cfg.Auth.AppClientID == "" || cfg.Auth.InstallationID <= 0 {
 			return nil, fmt.Errorf("github_app_identity_required")
 		}
-		client, err = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
-			GitHubConfigURL: cfg.GitHubConfigURL,
-			GitHubAppAuth: scaleset.GitHubAppAuth{ClientID: cfg.Auth.AppClientID,
-				InstallationID: cfg.Auth.InstallationID, PrivateKey: key}, SystemInfo: info})
+		auth := scaleset.GitHubAppAuth{ClientID: cfg.Auth.AppClientID,
+			InstallationID: cfg.Auth.InstallationID, PrivateKey: key}
+		return func(info scaleset.SystemInfo) (*scaleset.Client, error) {
+			return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
+				GitHubConfigURL: cfg.GitHubConfigURL, GitHubAppAuth: auth, SystemInfo: info})
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported_auth_mode")
 	}
+}
+
+func newScaleSetAPI(cfg controller.RuntimeConfig) (crfgithub.ScaleSetAPI, error) {
+	factory, err := newScaleSetClientFactory(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return crfgithub.NewAdapter(client, cfg.Owner), nil
+	admin, err := factory(scaleSetSystemInfo("controller", 0))
+	if err != nil {
+		return nil, err
+	}
+	return crfgithub.NewAdapterWithScaleSetClientFactory(admin, cfg.Owner,
+		func(id int64) (*scaleset.Client, error) {
+			if id <= 0 {
+				return nil, fmt.Errorf("invalid scale set id")
+			}
+			return factory(scaleSetSystemInfo("listener", id))
+		}), nil
 }
 
 func verifiedCompatibility(path string) (probe.Record, error) {

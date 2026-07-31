@@ -7,6 +7,40 @@ import (
 	"github.com/actions/scaleset"
 )
 
+func TestAdapterSelectsDedicatedScaleSetClient(t *testing.T) {
+	admin, err := scaleset.NewClientWithPersonalAccessToken(
+		scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/dinglebear-ai",
+			PersonalAccessToken: "token", SystemInfo: scaleset.SystemInfo{System: "test", Subsystem: "controller"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := []int64{}
+	adapter := NewAdapterWithScaleSetClientFactory(admin, "dinglebear-ai", func(id int64) (*scaleset.Client, error) {
+		seen = append(seen, id)
+		return scaleset.NewClientWithPersonalAccessToken(
+			scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/dinglebear-ai",
+				PersonalAccessToken: "token", SystemInfo: scaleset.SystemInfo{System: "test", Subsystem: "listener", ScaleSetID: int(id)}})
+	})
+	ops, err := adapter.clientForScaleSet(74)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rust, err := adapter.clientForScaleSet(70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops == rust || ops == admin || rust == admin {
+		t.Fatal("adapter reused one client across scale sets")
+	}
+	if !slices.Equal(seen, []int64{74, 70}) || ops.SystemInfo().ScaleSetID != 74 || rust.SystemInfo().ScaleSetID != 70 {
+		t.Fatalf("scale-set clients were not bound correctly: seen=%v ops=%#v rust=%#v",
+			seen, ops.SystemInfo(), rust.SystemInfo())
+	}
+	if _, err := adapter.clientForScaleSet(0); err == nil {
+		t.Fatal("invalid scale-set ID was accepted")
+	}
+}
+
 func TestLabelsIncludeCanonicalScaleSetName(t *testing.T) {
 	got := labels("crf-install-ops-revision", []string{"ci-pool-ops", "tailscale", "CRF-INSTALL-OPS-REVISION"})
 	if len(got) != 3 {

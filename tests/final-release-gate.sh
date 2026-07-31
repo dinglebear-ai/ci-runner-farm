@@ -72,6 +72,10 @@ grep -Fq 'scaleSetLabelContract = "canonical-name-label-v1"'   tools/crf-scalese
   crf_fail "canonical scale-set name-label migration contract is missing"
 grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/internal/github/api.go ||
   crf_fail "scale-set canonical name label is missing"
+grep -Fq 'ScaleSetID: int(scaleSetID)'   tools/crf-scaleset/cmd/crf-scaleset/main.go ||
+  crf_fail "listener clients are not bound to their scale-set IDs"
+grep -Fq 'NewAdapterWithScaleSetClientFactory'   tools/crf-scaleset/cmd/crf-scaleset/main.go ||
+  crf_fail "one shared mutable client still serves every scale set"
 grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
   crf_fail "scale-set request sequence is not serialized through socket delivery"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
