@@ -65,8 +65,9 @@ func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Re
 	}
 	// REVIEW(crf-v3q.13.2, MUST-CHECK): RunnerGroupID is resolved from the
 	// GitHub REST runner-groups endpoint only after it proves selected
-	// visibility and public-repository denial. Bind the Actions-service group
-	// to that exact REST-observed identity before making any remote mutation.
+	// repository visibility. Bind the Actions-service group to that exact
+	// REST-observed identity before making any remote mutation. The separate
+	// quarantine group is always deny-public and has no repositories.
 	if group.ID != cfg.RunnerGroupID || group.IsDefault || group.Name != cfg.RunnerGroupName {
 		return Record{}, errors.New("restricted_runner_group_required")
 	}

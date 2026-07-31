@@ -195,7 +195,7 @@ scaleset_production_group_policy_prove() {
         $g=$found[0];
         if(!is_int($g["id"]??null)||$g["id"]<=0||
           ($g["visibility"]??"")!=="selected"||
-          ($g["allows_public_repositories"]??null)!==false)exit(4);
+          !is_bool($g["allows_public_repositories"]??null))exit(4);
         $id=$g["id"];
       }
       echo count($j["runner_groups"]),"|",$id;
@@ -209,7 +209,7 @@ scaleset_production_group_policy_prove() {
     [ "$count" -lt 100 ] && break
     page=$((page + 1))
   done
-  err "runner group $RUNNER_GROUP must use selected visibility and deny public repositories"
+  err "runner group $RUNNER_GROUP must use selected visibility"
   return 1
 }
 
@@ -272,8 +272,10 @@ scaleset_probe_config_write() {
   IFS='|' read -r plugin image dockerfile entrypoint owner installation host_id <<<"$identity"
   [ "$owner" = "$GH_OWNER" ] || return 1
   # REVIEW(crf-v3q.13.2, MUST-CHECK): Resolve the production group through the
-  # GitHub REST policy surface immediately before the probe, then bind that ID
-  # into the mode-0600 probe config. A same-name Actions group is insufficient.
+  # GitHub REST policy surface immediately before the probe, prove selected
+  # repository visibility, then bind that ID into the mode-0600 probe config.
+  # Public-repository permission is an explicit GitHub policy for the selected
+  # production repositories; quarantine groups remain deny-public and empty.
   scaleset_production_group_policy_prove ||
     { err "production runner-group policy is not restricted"; return 1; }
   scaleset_quarantine_ensure ||

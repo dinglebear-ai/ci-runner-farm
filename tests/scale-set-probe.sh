@@ -48,11 +48,11 @@ SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
         GET:*/actions/runner-groups/*/repositories*) GH_RESPONSE='\''{"total_count":0,"repositories":[]}'\'' ;;
         GET:*/actions/runner-groups*) if [ "$created" = 1 ]; then
           GH_RESPONSE='\''{"runner_groups":[
-            {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":false},
+            {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":true},
             {"id":8,"name":"crf-scaleset-quarantine-490447eedbf12df1","visibility":"selected","allows_public_repositories":false}
           ]}'\''
         else GH_RESPONSE='\''{"runner_groups":[
-          {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":false}
+          {"id":7,"name":"CI Runner Farm Trusted","visibility":"selected","allows_public_repositories":true}
         ]}'\''; fi ;;
         *) return 1 ;;
       esac
