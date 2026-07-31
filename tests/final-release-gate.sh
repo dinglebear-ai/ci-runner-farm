@@ -74,6 +74,8 @@ grep -Fq 'never adopt by name' tools/crf-scaleset/internal/ownership/ownership.g
 # The complete typed snapshot remains comfortably beneath the expected 256 KiB
 # budget in the deterministic maximum fixture.
 bash tests/performance-contracts.sh >/dev/null
+bash tests/flash-write-paths.sh >/dev/null
+bash tests/jit-recovery.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null
 
 tmp="$(mktemp -d)"

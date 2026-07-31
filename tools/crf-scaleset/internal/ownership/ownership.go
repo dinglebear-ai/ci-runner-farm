@@ -342,6 +342,10 @@ func (m *Manager) updateOwnedSpec(ctx context.Context, state *State, record *Rec
 			specMismatch(remote, record.RemoteName, record.RunnerGroupID, record.AppliedLabels))
 	}
 	if equalSpec(remote, record.RemoteName, targetGroupID, labels) {
+		if record.RunnerGroupID == targetGroupID &&
+			slices.Equal(record.AppliedLabels, labels) && record.State == targetState {
+			return nil
+		}
 		record.RunnerGroupID = targetGroupID
 		record.AppliedLabels = slices.Clone(labels)
 		record.State = targetState
@@ -501,10 +505,12 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 			targetState); err != nil {
 			return nil, err
 		}
-		record.ConfiguredLabels = slices.Clone(pool.Labels)
-		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := m.write(state); err != nil {
-			return nil, err
+		if !slices.Equal(record.ConfiguredLabels, pool.Labels) {
+			record.ConfiguredLabels = slices.Clone(pool.Labels)
+			record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if err := m.write(state); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for i := range state.Records {
@@ -524,10 +530,6 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 		if err := m.updateOwnedSpec(ctx, &state, record, m.cfg.QuarantineRunnerGroupID,
 			applied, "orphan_ineligible"); err != nil {
 			return nil, fmt.Errorf("make_orphan_ineligible: %w", err)
-		}
-		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := m.write(state); err != nil {
-			return nil, err
 		}
 	}
 	return slices.Clone(state.Records), nil

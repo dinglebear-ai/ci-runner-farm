@@ -157,7 +157,11 @@ load_cfg() {
   for key in $CFG_KEYS; do
     printf -v "$key" '%s' "${CFG_DEFAULTS[$key]}"
   done
-  [ -f "$CFG" ] || return 0
+  if [ ! -f "$CFG" ]; then
+    scaleset_paths_refresh
+    jit_paths_refresh
+    return 0
+  fi
   local line val
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
@@ -169,6 +173,8 @@ load_cfg() {
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
     printf -v "$key" '%s' "$val"
   done < "$CFG"
+  scaleset_paths_refresh
+  jit_paths_refresh
 }
 
 load_cfg

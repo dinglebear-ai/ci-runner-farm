@@ -4,7 +4,9 @@
 
 SCALESET_HELPER="${SCALESET_HELPER:-$SCRIPT_DIR/../bin/crf-scaleset}"
 SCALESET_STATE_DIR="${SCALESET_STATE_DIR:-$RUNDIR/scalesets}"
-SCALESET_DURABLE_STATE_DIR="${SCALESET_DURABLE_STATE_DIR:-$CACHE_ROOT/state/scalesets}"
+SCALESET_DURABLE_BOOTSTRAP_STATE_DIR="${SCALESET_DURABLE_BOOTSTRAP_STATE_DIR:-$CACHE_ROOT/state/scalesets}"
+SCALESET_DURABLE_STATE_DIR_PINNED="${SCALESET_DURABLE_STATE_DIR+x}"
+SCALESET_DURABLE_STATE_DIR_CONFIGURED="${SCALESET_DURABLE_STATE_DIR-}"
 SCALESET_PID="${SCALESET_PID:-$SCALESET_STATE_DIR/supervisor.pid}"
 SCALESET_SOCKET="${SCALESET_SOCKET:-$SCALESET_STATE_DIR/supervisor.sock}"
 SCALESET_COMPAT="${SCALESET_COMPAT:-$CFGDIR/scaleset-compatibility.json}"
@@ -23,6 +25,34 @@ SCALESET_QUARANTINE_GROUP_ID=0
 SCALESET_QUARANTINE_PHASE=""
 SCALESET_QUARANTINE_FOUND_ID=0
 SCALESET_PRODUCTION_GROUP_ID=0
+
+scaleset_paths_refresh() {
+  if [ "$SCALESET_DURABLE_STATE_DIR_PINNED" = x ]; then
+    SCALESET_DURABLE_STATE_DIR="$SCALESET_DURABLE_STATE_DIR_CONFIGURED"
+  else
+    SCALESET_DURABLE_STATE_DIR="$CACHE_ROOT/state/scalesets"
+  fi
+}
+
+scaleset_paths_refresh
+
+scaleset_import_bootstrap_durable_state() {
+  local source="$SCALESET_DURABLE_BOOTSTRAP_STATE_DIR" target="$SCALESET_DURABLE_STATE_DIR" backup
+  [ "$source" != "$target" ] || return 0
+  [ -d "$source" ] || return 0
+  find "$source" -mindepth 1 -print -quit 2>/dev/null | grep -q . || return 0
+  mkdir -p "$target" && chmod 0700 "$target" || return 1
+  if find "$target" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+    err "refusing to merge legacy and configured scale-set durable state"
+    return 1
+  fi
+  cp -a -- "$source/." "$target/" || return 1
+  find "$target" -type d -exec chmod 0700 {} + 2>/dev/null || true
+  find "$target" -type f -exec chmod 0600 {} + 2>/dev/null || true
+  backup="$source.migrated-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv -- "$source" "$backup" || return 1
+  log "migrated scale-set durable state to $target"
+}
 
 scaleset_plugin_digest() {
   local root="${SCALESET_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}"
@@ -320,6 +350,8 @@ scaleset_supervisor_start() {
   scaleset_record_valid || { err "scale-set compatibility evidence is missing, stale, incomplete, or mismatched"; return 1; }
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
   if [ -f "$SCALESET_PID" ] && kill -0 "$(cat "$SCALESET_PID" 2>/dev/null)" 2>/dev/null; then return 0; fi
+  scaleset_import_bootstrap_durable_state ||
+    { err "could not migrate scale-set durable state to the configured cache root"; return 1; }
   if [ -f "$helper_log" ] &&
     [ "$(stat -c %s "$helper_log" 2>/dev/null || echo 0)" -ge "$SCALESET_HELPER_LOG_MAX_BYTES" ]; then
     mv "$helper_log" "$helper_log.1" || return 1

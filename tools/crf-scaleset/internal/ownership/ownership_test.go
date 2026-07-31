@@ -156,6 +156,29 @@ func TestReconcilePersistsIntentAndCreatesIneligible(t *testing.T) {
 	}
 }
 
+func TestReconcileNoOpDoesNotRewriteOwnershipFile(t *testing.T) {
+	m, api := testManager(t)
+	pools := []Pool{{ID: "ops", RoutingLabel: "ci-pool-ops",
+		Labels: []string{"ci-pool-ops"}}}
+	if _, err := m.Reconcile(context.Background(), pools, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(api.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Reconcile(context.Background(), pools, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(api.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("no-op ownership reconciliation rewrote the durable state file")
+	}
+}
+
 func TestActivateUsesConfiguredLabelsAndDeleteUsesExactID(t *testing.T) {
 	m, api := testManager(t)
 	pools := []Pool{{ID: "typescript", RoutingLabel: "ci-pool-typescript",
