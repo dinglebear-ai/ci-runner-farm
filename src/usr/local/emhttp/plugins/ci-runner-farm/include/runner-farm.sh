@@ -3320,7 +3320,7 @@ cmd_build_status() {
 # {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
 # (tmpfs) or boot.log before the daemon ran, minus docker's noisy swap-limit warning.
 cmd_farm_log() {
-  local as="$RUNDIR/autoscale.log" bt="$CFGDIR/boot.log" src txt
+  local as="$RUNDIR/autoscale.log" bt="$RUNDIR/boot.log" src txt
   src="$as"; [ -f "$as" ] || src="$bt"
   txt="$([ -f "$src" ] && tail -n 150 "$src" | grep -v 'swap limit capabilities' | tail -n 60)"
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"

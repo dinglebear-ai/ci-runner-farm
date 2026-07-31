@@ -8,6 +8,8 @@ engine=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 jit=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 scalesets=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh
 ownership=tools/crf-scaleset/internal/ownership/ownership.go
+event=src/usr/local/emhttp/plugins/ci-runner-farm/event/docker_started
+builder=build-plg.sh
 
 grep -Fq 'RUNDIR="/var/local/emhttp/${PLUGIN}"' "$engine" ||
   crf_fail "runtime directory is not rooted on Unraid rootfs/tmpfs"
@@ -15,6 +17,16 @@ grep -Fq 'nohup "$0" autoscale-daemon >>"${RUNDIR}/autoscale.log"' "$engine" ||
   crf_fail "autoscale log is not on runtime storage"
 grep -Fq 'nohup "$0" imageupdate-daemon >>"${RUNDIR}/imageupdate.log"' "$engine" ||
   crf_fail "image-update log is not on runtime storage"
+grep -Fq 'bt="$RUNDIR/boot.log"' "$engine" ||
+  crf_fail "fleet boot log reader is not on runtime storage"
+grep -Fq 'RUNDIR="/var/local/emhttp/ci-runner-farm"' "$event" ||
+  crf_fail "Docker-start hook has no runtime directory"
+grep -Fq '>>"$RUNDIR/boot.log"' "$event" ||
+  crf_fail "Docker-start hook writes boot logs to flash"
+grep -Fq 'RUNDIR="/var/local/emhttp/${NAME}"' "$builder" ||
+  crf_fail "plugin install has no runtime directory"
+grep -Fq '>>"\$RUNDIR/boot.log"' "$builder" ||
+  crf_fail "plugin install writes boot logs to flash"
 grep -Fq 'SCALESET_STATE_DIR="${SCALESET_STATE_DIR:-$RUNDIR/scalesets}"' "$scalesets" ||
   crf_fail "scale-set hot state is not on runtime storage"
 grep -Fq 'SCALESET_DURABLE_STATE_DIR="$CACHE_ROOT/state/scalesets"' "$scalesets" ||
@@ -28,9 +40,10 @@ grep -Fq 'slices.Equal(record.AppliedLabels, labels) && record.State == targetSt
 
 for runtime_file in \
   autoscale.log autoscale.pid autoscale.state imageupdate.log imageupdate.pid \
-  queued.cache cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log; do
+  boot.log queued.cache cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log; do
   if rg -F "/boot/config/plugins/ci-runner-farm/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
-     rg -F "\$CFGDIR/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null; then
+     rg -F "\$CFGDIR/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
+     rg -F "\$CFGDIR/$runtime_file" "$builder" >/dev/null; then
     crf_fail "runtime file $runtime_file targets the Unraid boot flash"
   fi
 done

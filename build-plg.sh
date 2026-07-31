@@ -158,7 +158,8 @@ ${changes}
 set -e
 PLGDIR="/usr/local/emhttp/plugins/${NAME}"
 CFGDIR="/boot/config/plugins/${NAME}"
-mkdir -p "\$CFGDIR" "\$PLGDIR"
+RUNDIR="/var/local/emhttp/${NAME}"
+mkdir -p "\$CFGDIR" "\$PLGDIR" "\$RUNDIR"
 # Sweep any older package versions off flash, keeping this build's package.
 find "\$CFGDIR" -maxdepth 1 -name '${NAME}-*.tgz' ! -name '${PACKAGE_NAME}' -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
@@ -211,7 +212,7 @@ fi
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
 # blocking. No-op until a GitHub token is configured.
-( nohup "\$PLGDIR/include/runner-farm.sh" boot-autostart >>"\$CFGDIR/boot.log" 2>&1 & ) || true
+( nohup "\$PLGDIR/include/runner-farm.sh" boot-autostart >>"\$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
 echo "| ci-runner-farm ${VERSION} installed.                         "
