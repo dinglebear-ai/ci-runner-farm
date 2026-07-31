@@ -32,6 +32,10 @@ jit_container_exists() {
   docker inspect "$1" >/dev/null 2>&1
 }
 
+jit_container_running() {
+  [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]
+}
+
 jit_capture_diagnostics() {
   local container="$1" runner_id="$2" out tmp file total
   out="$JIT_LOG_ROOT/$runner_id"
@@ -67,7 +71,7 @@ jit_cleanup_observed() {
 
 jit_execute() {
   local pool="$1" reservation="$2" handle="$3" spec_hash="$4"
-  local config_revision="$5" runner_id container idx rc image_index jit_image descriptor=""
+  local config_revision="$5" runner_id container idx rc jit_image descriptor=""
   IFS= read -r descriptor || [ -n "$descriptor" ] || true
   backend_scaleset_admission_allowed ||
     { err "JIT admission is blocked by backend transition state"; return 1; }
@@ -95,9 +99,13 @@ jit_execute() {
 
   local NO_REGISTER=1
   build_args "$idx" "$container" "$pool" "org:$GH_OWNER" || return 1
-  image_index=$((${#ARGS[@]} - 1))
-  jit_image="${ARGS[$image_index]}"
-  unset "ARGS[$image_index]"
+  [[ "${CRF_IMAGE_ARG_INDEX:-}" =~ ^[0-9]+$ ]] ||
+    { err "runner image argument index is invalid"; return 1; }
+  jit_image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"
+  # JIT invokes ./run.sh --jitconfig itself in the protected wrapper, so keep
+  # all Docker options before the image and intentionally drop the classic
+  # listener command that follows it.
+  ARGS=("${ARGS[@]:0:$CRF_IMAGE_ARG_INDEX}")
   ARGS+=(
     --label "${LABEL_NS}.backend=scaleset"
     --label "${LABEL_NS}.runner-id=$runner_id"
@@ -143,7 +151,7 @@ jit_reconcile() {
         jit_cleanup_observed "$runner_id" "$reservation" "$handle" "$container" || true
         ;;
       running|secret_consumed|container_observed)
-        if ! jit_container_exists "$container"; then
+        if ! jit_container_running "$container"; then
           jit_state_write "$runner_id" terminal "$reservation" "$handle" "$container" &&
             jit_cleanup_observed "$runner_id" "$reservation" "$handle" "$container" || true
         fi

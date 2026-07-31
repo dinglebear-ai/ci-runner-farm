@@ -70,3 +70,96 @@ reservations, and maintenance state correctly. Resume restarted autoscaling.
 Container start ages were unchanged, demonstrating that no busy runner was
 recreated or interrupted. The recoverable code and configuration backups remain
 uniquely named with the stage ID until final acceptance.
+
+## Pool selectors and label contract
+
+V2 pools have an immutable internal ID, an editable routing label, optional
+additional requirement labels, and explicit CPU/memory claims. Workflows must
+request the routing label:
+
+```yaml
+# Examples; use the routing labels saved in Settings.
+runs-on: ci-pool-rust
+runs-on: ci-pool-python
+runs-on: ci-pool-typescript
+```
+
+Rust, Python, TypeScript, Go, Ops, and Residential Egress are convenience
+presets only. A label never installs a toolchain, grants a mount, changes
+network egress, or creates a security boundary. Residential Egress requires a
+separately configured and verified network path before any workflow relies on
+that claim.
+
+## Scaling semantics
+
+- Classic fixed pools use **Scale to**.
+- Classic autoscaled pools use **Scale up to** as a temporary floor; classic
+  demand is not authoritative and classic pools cannot scale to zero.
+- Scale-set pools use **Prewarm to** for operator-requested warm capacity.
+  Assigned GitHub demand is separate and cannot be overridden by prewarm.
+- V2 admission always reserves declared CPU and memory first. The resource
+  broker accounts running/draining runners, pending starts, JIT runners, and
+  outstanding GitHub poll leases. `64` is only a corruption fuse, not normal
+  host policy.
+- The scheduler admits at most two cold starts per pass by default and never
+  more than four. Feasible pools receive one admission per round.
+
+## Scale-set compatibility and activation
+
+Scale-set activation is deliberately unavailable until a disposable live gate
+proves the exact installed package identity. The record binds the plugin,
+static helper, pinned scale-set module revision, Go version, runner image,
+Dockerfile, entrypoint, owner/API URL, host/installation identity, and a
+non-default restricted runner-group ID and policy. It expires after 30 days or
+any bound-input change.
+
+Run the offline package gate normally:
+
+```bash
+bash tests/final-release-gate.sh
+```
+
+Require a live record before claiming activation:
+
+```bash
+CRF_REQUIRE_LIVE_GATE=1 \
+CRF_LIVE_COMPAT_RECORD=/boot/config/plugins/ci-runner-farm/scale-set-compatibility.json \
+bash tests/final-release-gate.sh
+```
+
+The compatibility operation uses an opaque ID and must use a disposable
+repository, collision-proof selectors, a restricted runner group, exact
+recorded remote IDs, and complete cleanup. A missing, stale, tampered, or
+identity-mismatched record leaves classic operational and reports the exact
+invalidation reason. Never bypass this with a synthesized record.
+
+## Backend migration and recovery
+
+Saving `POOL_BACKEND=scaleset` records requested intent only. It does not alter
+the effective backend. **Begin fleet migration** advances a persisted,
+revision-bound state machine only after the gate is valid. The forward path
+creates scale sets ineligible, quiesces classic without stopping busy jobs,
+proves classic remotely ineligible, then enables scale sets. No phase permits
+both backends to be production-eligible.
+
+**Roll back to classic** first makes scale sets ineligible, continues serving
+already assigned JIT work, drains it, restores classic eligibility, and deletes
+only exact owned remote IDs. Ambiguous deletion retains a tombstone for
+operator resolution. Restart resumes the persisted phase; it never infers
+effective state from Settings.
+
+If the helper, demand snapshot, eligibility proof, ownership ledger, or
+compatibility record is stale or invalid, stop migration and keep/restore
+classic through the explicit rollback path. Do not delete scale sets by name
+and do not use destructive fleet Stop as a deployment shortcut.
+
+## Diagnostics and retention
+
+Helper replay state and bounded logs live below
+`<CACHE_ROOT>/controller/`. Per-runner `Runner_*` and `Worker_*` diagnostics
+live below `<CACHE_ROOT>/logs/runners/<runner-id>/`, mode 0600, with a default
+combined limit of 256 MiB and seven days. Aggregate Fleet/Nchan status excludes
+repository names, refs, job IDs, raw messages, JIT blobs, and credentials.
+Ephemeral reservations, leases, snapshots, operations, PIDs, and sockets live
+under `/run/ci-runner-farm`; steady-state control traffic writes nothing to
+`/boot`.

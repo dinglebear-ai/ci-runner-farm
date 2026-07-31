@@ -57,6 +57,18 @@ make_tgz() {
     )
     chmod 0755 "$helper"
   fi
+  # The release archive itself carries the final installed modes. This keeps
+  # code-only staging, package inspection, and normal Unraid installation
+  # identical instead of relying on the .plg post-extract chmod pass.
+  find "$package_root" -type d -exec chmod 0755 {} +
+  find "$package_root" -type f -exec chmod 0644 {} +
+  chmod 0755 "$package_root/include/runner-farm.sh"
+  chmod 0755 "$package_root/include/runner-entrypoint.sh"
+  [ ! -f "$package_root/bin/crf-scaleset" ] || chmod 0755 "$package_root/bin/crf-scaleset"
+  [ ! -d "$package_root/nchan" ] ||
+    find "$package_root/nchan" -type f -exec chmod 0755 {} +
+  [ ! -d "$package_root/event" ] ||
+    find "$package_root/event" -type f -exec chmod 0755 {} +
   if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
     opts=(--sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner)
   fi

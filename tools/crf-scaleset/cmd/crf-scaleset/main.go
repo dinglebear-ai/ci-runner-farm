@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/controller"
+	crfgithub "github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/github"
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/ipc"
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/probe"
 	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/protocol"
@@ -26,7 +29,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage", "expected version, validate-frame, probe, check-compatibility, or supervise")
+		fail("usage", "expected version, validate-frame, request, probe, check-compatibility, or supervise")
 	}
 	switch os.Args[1] {
 	case "version":
@@ -37,10 +40,10 @@ func main() {
 			fail("invalid_frame", err.Error())
 		}
 		write(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: true})
+	case "request":
+		request(os.Args[2:])
 	case "probe":
-		// Live compatibility requires disposable repo/group credentials and a
-		// remotely proven eligibility barrier. Never synthesize green evidence.
-		fail("live_probe_not_configured", "provide the tootie probe operation with restricted runner-group and disposable-repository inputs")
+		runProbe(os.Args[2:])
 	case "check-compatibility":
 		flags := flag.NewFlagSet("check-compatibility", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
@@ -60,48 +63,203 @@ func main() {
 	}
 }
 
+type probeConfig struct {
+	Runtime controller.RuntimeConfig `json:"runtime"`
+	Live    probe.LiveConfig         `json:"live"`
+}
+
+func loadProbeConfig(path string) (probeConfig, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return probeConfig{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() > 256<<10 {
+		return probeConfig{}, fmt.Errorf("probe_config_permissions_or_size")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return probeConfig{}, err
+	}
+	defer file.Close()
+	dec := json.NewDecoder(file)
+	dec.DisallowUnknownFields()
+	var cfg probeConfig
+	if err := dec.Decode(&cfg); err != nil {
+		return probeConfig{}, err
+	}
+	if cfg.Live.Owner == "" || cfg.Live.Owner != cfg.Runtime.Owner ||
+		cfg.Live.RunnerGroupName == "" || cfg.Live.RunnerGroupPolicy == "" {
+		return probeConfig{}, fmt.Errorf("probe_identity_required")
+	}
+	return cfg, nil
+}
+
+func runProbe(args []string) {
+	flags := flag.NewFlagSet("probe", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "mode-0600 live probe configuration")
+	output := flags.String("output", "", "mode-0600 compatibility record")
+	timeout := flags.Duration("timeout", 10*time.Minute, "live probe timeout")
+	if err := flags.Parse(args); err != nil || *configPath == "" || *output == "" ||
+		*timeout < time.Minute || *timeout > 30*time.Minute || flags.NArg() != 0 {
+		fail("invalid_arguments", "probe requires --config, --output, and a bounded --timeout")
+	}
+	cfg, err := loadProbeConfig(*configPath)
+	if err != nil {
+		fail("invalid_probe_config", err.Error())
+	}
+	cfg.Live.HelperDigest, err = executableDigest()
+	if err != nil {
+		fail("helper_digest_failed", err.Error())
+	}
+	cfg.Live.ModuleRevision = moduleRevision
+	cfg.Live.GoVersion = runtime.Version()
+	api, err := newScaleSetAPI(cfg.Runtime)
+	if err != nil {
+		fail("github_client_failed", err.Error())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	record, err := probe.RunLive(ctx, cfg.Live, api)
+	if err != nil {
+		fail("compatibility_probe_failed", err.Error())
+	}
+	if err := probe.WriteAtomic(*output, record); err != nil {
+		fail("compatibility_record_write_failed", err.Error())
+	}
+	verified, err := probe.LoadFresh(*output, time.Now().UTC(), 30*24*time.Hour)
+	if err != nil {
+		fail("compatibility_record_verify_failed", err.Error())
+	}
+	write(map[string]any{"ok": true, "compatibility_record_id": verified.CompatibilityRecordID,
+		"runner_group_id":            verified.RunnerGroupID,
+		"quarantine_runner_group_id": verified.QuarantineRunnerGroupID,
+		"cleanup_complete":           verified.Cleanup.Complete})
+}
+
 func supervise(args []string) {
 	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	socket := flags.String("socket", "", "root-only Unix socket")
 	compatibility := flags.String("compatibility", "", "sealed compatibility record")
-	if err := flags.Parse(args); err != nil || *socket == "" || *compatibility == "" || flags.NArg() != 0 {
-		fail("invalid_arguments", "supervise requires --socket and --compatibility")
+	runtimeConfig := flags.String("runtime-config", "", "mode-0600 runtime configuration")
+	if err := flags.Parse(args); err != nil || *socket == "" || *compatibility == "" ||
+		*runtimeConfig == "" || flags.NArg() != 0 {
+		fail("invalid_arguments", "supervise requires --socket, --compatibility, and --runtime-config")
 	}
 	record, err := verifiedCompatibility(*compatibility)
 	if err != nil {
 		fail("invalid_compatibility_record", err.Error())
 	}
-	controllerID := "crf-" + record.CompatibilityRecordID[:24]
-	handler := func(_ context.Context, request protocol.Request) protocol.Response {
-		response := protocol.Response{SchemaVersion: protocol.SchemaVersion, RequestID: request.RequestID}
-		if request.ConfigRevision != record.PluginDigest ||
-			request.OwnershipRevision != record.CompatibilityRecordID ||
-			request.ControllerInstanceID != controllerID {
-			response.Code = "identity_mismatch"
-			return response
-		}
-		switch request.Operation {
-		case "read_snapshot":
-			now := time.Now().UTC()
-			response.OK = true
-			response.Result = protocol.Snapshot{
-				SchemaVersion: protocol.SchemaVersion, ControllerInstanceID: controllerID,
-				ConfigRevision: record.PluginDigest, OwnershipRevision: record.CompatibilityRecordID,
-				Sequence: request.Sequence, ObservedAt: now, ValidUntil: now.Add(20 * time.Second),
-				Pools: []protocol.PoolSnapshot{},
-			}
-		default:
-			response.Code = "sessions_not_applied"
-			response.Error = "apply_sessions must configure pools before this operation is available"
-		}
-		return response
+	cfg, err := controller.LoadRuntimeConfig(*runtimeConfig)
+	if err != nil {
+		fail("invalid_runtime_config", err.Error())
 	}
+	if cfg.Owner != record.Owner || cfg.RunnerGroupID != record.RunnerGroupID ||
+		cfg.QuarantineRunnerGroupID != record.QuarantineRunnerGroupID ||
+		cfg.InstallationID != record.InstallationID || cfg.HostID != record.HostID ||
+		cfg.PluginDigest != record.PluginDigest || cfg.ImageDigest != record.ImageDigest ||
+		cfg.DockerfileDigest != record.DockerfileDigest ||
+		cfg.EntrypointDigest != record.EntrypointDigest {
+		fail("compatibility_identity_mismatch", "runtime package, image, owner, runner group, installation, or host differs from compatibility evidence")
+	}
+	api, err := newScaleSetAPI(cfg)
+	if err != nil {
+		fail("github_client_failed", err.Error())
+	}
+	control, err := controller.New(cfg, api)
+	if err != nil {
+		fail("controller_failed", err.Error())
+	}
+	defer control.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := (&ipc.Server{Path: *socket, Handler: handler}).Serve(ctx); err != nil {
+	if err := (&ipc.Server{Path: *socket, Handler: control.Handle}).Serve(ctx); err != nil {
 		fail("supervisor_failed", err.Error())
 	}
+}
+
+func request(args []string) {
+	flags := flag.NewFlagSet("request", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	socket := flags.String("socket", "", "root-only Unix socket")
+	timeout := flags.Duration("timeout", 30*time.Second, "request timeout")
+	if err := flags.Parse(args); err != nil || *socket == "" || *timeout <= 0 ||
+		*timeout > 2*time.Minute || flags.NArg() != 0 {
+		fail("invalid_arguments", "request requires --socket and an optional bounded --timeout")
+	}
+	req, err := protocol.Decode(os.Stdin)
+	if err != nil {
+		fail("invalid_frame", err.Error())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	response, err := (ipc.Client{Path: *socket}).Call(ctx, req)
+	if err != nil {
+		fail("request_failed", err.Error())
+	}
+	write(response)
+	if !response.OK {
+		os.Exit(2)
+	}
+}
+
+func privateCredential(path string, max int64, multiline bool) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() <= 0 || info.Size() > max {
+		return "", fmt.Errorf("credential_permissions_or_size")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" || strings.ContainsRune(value, '\x00') ||
+		(!multiline && strings.ContainsAny(value, "\r\n")) {
+		return "", fmt.Errorf("invalid_credential")
+	}
+	return value, nil
+}
+
+func newScaleSetAPI(cfg controller.RuntimeConfig) (crfgithub.ScaleSetAPI, error) {
+	if cfg.GitHubConfigURL == "" || cfg.Owner == "" {
+		return nil, fmt.Errorf("github_identity_required")
+	}
+	info := scaleset.SystemInfo{System: "ci-runner-farm", Version: moduleVersion,
+		CommitSHA: moduleRevision, Subsystem: "controller"}
+	var client *scaleset.Client
+	var err error
+	switch cfg.Auth.Mode {
+	case "pat":
+		token, readErr := privateCredential(cfg.Auth.TokenFile, 64<<10, false)
+		if readErr != nil {
+			return nil, readErr
+		}
+		client, err = scaleset.NewClientWithPersonalAccessToken(
+			scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: cfg.GitHubConfigURL,
+				PersonalAccessToken: token, SystemInfo: info})
+	case "github_app":
+		key, readErr := privateCredential(cfg.Auth.PrivateKeyFile, 64<<10, true)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if cfg.Auth.AppClientID == "" || cfg.Auth.InstallationID <= 0 {
+			return nil, fmt.Errorf("github_app_identity_required")
+		}
+		client, err = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
+			GitHubConfigURL: cfg.GitHubConfigURL,
+			GitHubAppAuth: scaleset.GitHubAppAuth{ClientID: cfg.Auth.AppClientID,
+				InstallationID: cfg.Auth.InstallationID, PrivateKey: key}, SystemInfo: info})
+	default:
+		return nil, fmt.Errorf("unsupported_auth_mode")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return crfgithub.NewAdapter(client, cfg.Owner), nil
 }
 
 func verifiedCompatibility(path string) (probe.Record, error) {
@@ -145,5 +303,3 @@ func fail(code, message string) {
 	write(map[string]any{"ok": false, "code": code, "error": message})
 	os.Exit(2)
 }
-
-var _ = scaleset.HeaderScaleSetMaxCapacity

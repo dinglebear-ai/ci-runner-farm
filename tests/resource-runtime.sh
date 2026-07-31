@@ -48,6 +48,13 @@ crf_assert_contains "$joined" '--memory-swap=4294967296' "no-swap policy"
 crf_assert_contains "$joined" '--pids-limit=2048' "PIDs limit"
 crf_assert_contains "$joined" '--entrypoint' "protected entrypoint option"
 crf_assert_contains "$joined" '/usr/local/bin/crf-runner-entrypoint' "protected entrypoint path"
+crf_assert_contains "$joined" '/usr/local/bin/wait-docker.sh' "base listener startup command"
+crf_assert_contains "$joined" './bin/Runner.Listener' "base listener executable"
+crf_assert_contains "$joined" '--startuptype' "base listener startup mode"
+[ "${ARGS[$CRF_IMAGE_ARG_INDEX]}" = test-image ] ||
+  crf_fail "image argument index is not recorded"
+[ "${ARGS[$((CRF_IMAGE_ARG_INDEX + 1))]}" = /usr/local/bin/wait-docker.sh ] ||
+  crf_fail "image CMD was not preserved after the custom entrypoint"
 crf_assert_contains "$joined" 'effective-labels=ci-rust,rust,build' "effective label metadata"
 crf_assert_contains "$joined" 'backend=classic' "backend metadata"
 case "$joined" in *'/var/run/docker.sock'*) crf_fail "host Docker socket was mounted" ;; esac

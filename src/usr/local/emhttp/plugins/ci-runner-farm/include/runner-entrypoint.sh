@@ -6,9 +6,48 @@ set -euo pipefail
 
 secret_dir="${CRF_SECRET_DIR:-/run/crf}"
 base_entrypoint="${CRF_BASE_ENTRYPOINT:-/entrypoint.sh}"
+docker_log="${CRF_DOCKER_LOG:-/var/log/dockerd.log}"
+docker_pid_file="${CRF_DOCKER_PID_FILE:-/var/run/docker.pid}"
 mkdir -p "$secret_dir"
 chmod 0700 "$secret_dir"
 rm -f "$secret_dir/secret.in" "$secret_dir/ready" "$secret_dir/consumed"
+
+# The classic path enters the base image first, which starts its DinD service,
+# and its CMD then waits for Docker before accepting jobs. JIT deliberately
+# bypasses that entrypoint so the opaque descriptor is handed straight to
+# run.sh; therefore it must establish the same readiness boundary here. Do this
+# before publishing the secret FIFO so the descriptor never sits in a shell
+# argv while a cold daemon starts.
+crf_docker_service_start() {
+  rm -f "$docker_pid_file"
+  service docker start >>"$docker_log" 2>&1 || true
+}
+crf_docker_supervise() {
+  while true; do
+    sleep 3
+    docker info >/dev/null 2>&1 || crf_docker_service_start
+  done
+}
+if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ] &&
+   [ "${START_DOCKER_SERVICE:-false}" = true ]; then
+  docker info >/dev/null 2>&1 || crf_docker_service_start
+  docker_ready=false
+  for _ in $(seq 1 90); do
+    if docker info >/dev/null 2>&1; then
+      docker_ready=true
+      break
+    fi
+    sleep 1
+  done
+  [ "$docker_ready" = true ] || {
+    echo "ci-runner-farm: Docker-in-Docker did not become ready within 90 seconds" >&2
+    exit 1
+  }
+  if [ "${CRF_DOCKER_SUPERVISE:-true}" = true ]; then
+    crf_docker_supervise &
+  fi
+fi
+
 mkfifo -m 0600 "$secret_dir/secret.in"
 : > "$secret_dir/ready"
 chmod 0600 "$secret_dir/ready"

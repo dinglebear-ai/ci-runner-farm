@@ -12,6 +12,46 @@ STATUS_BACKEND_JSON='{"requested":"classic","effective":"classic","transition_ph
 STATUS_COMPATIBILITY_JSON='{"valid":false,"reason":"not_checked"}'
 STATUS_OPERATION_JSON='null'
 
+status_scaleset_pool_tsv() {
+  local pool="$1" snapshot="${SCALESET_SNAPSHOT:-${SCALESET_STATE_DIR:-$RUNDIR/scalesets}/snapshot.json}"
+  local ownership="${SCALESET_OWNERSHIP:-${CFGDIR:-/boot/config/plugins/ci-runner-farm}/scale-set-ownership.json}"
+  local plan="${SCALESET_STATE_DIR:-$RUNDIR/scalesets}/last-plan.tsv"
+  case "$pool" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || {
+    printf '%s\n' '-1|0|0|0|unknown|0|0|0|0|0'
+    return
+  }
+  php -r '
+    $pool=$argv[1];$snapshot=$argv[2];$ownership=$argv[3];$plan=$argv[4];
+    $fallback=[-1,0,0,0,"unknown",0,0,0,0,0];
+    $s=json_decode(@file_get_contents($snapshot),true);
+    if(!is_array($s)||($s["schema_version"]??0)!==1||
+      strtotime((string)($s["valid_until"]??""))<=time()){echo implode("|",$fallback),"\n";exit;}
+    $p=null;foreach(($s["pools"]??[]) as $candidate)
+      if(($candidate["pool_id"]??"")===$pool){$p=$candidate;break;}
+    if(!is_array($p)){echo implode("|",$fallback),"\n";exit;}
+    $state="missing";$remote=(int)($p["scale_set_id"]??0);$tombstone=0;$orphan=0;
+    if(is_file($ownership)&&!is_link($ownership)){
+      $o=json_decode(@file_get_contents($ownership),true);$found=false;
+      foreach(($o["records"]??[]) as $record)if(($record["pool_id"]??"")===$pool){
+        $found=true;$state=(string)($record["state"]??"unknown");
+        $remote=(int)($record["scale_set_id"]??$remote);
+        $tombstone=$state==="delete_pending"?1:0;break;
+      }
+      $orphan=$found?0:1;
+    }
+    $desired=0;$admitted=0;$blocked=0;
+    if(is_file($plan)&&!is_link($plan))foreach(file($plan,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $line){
+      $parts=explode("|",$line);if(($parts[0]??"")!==$pool)continue;
+      $desired=(int)($parts[1]??0);$admitted=(int)($parts[2]??0);$blocked=(int)($parts[3]??0);break;
+    }
+    $out=[max(0,(int)($p["assigned_jobs"]??0)),max(0,(int)($p["advertised_capacity"]??0)),
+      ($p["session_healthy"]??false)===true?1:0,max(0,$remote),$state,$tombstone,$orphan,
+      max(0,$desired),max(0,$admitted),max(0,$blocked)];
+    echo implode("|",$out),"\n";
+  ' "$pool" "$snapshot" "$ownership" "$plan"
+}
+
 status_reservations_json() {
   local dir="${RESERVATION_DIR:-$RUNDIR/reservations}" file first=1
   printf '['
@@ -63,6 +103,13 @@ status_backend_refresh() {
     effective="$MIGRATION_EFFECTIVE_BACKEND"; phase="$MIGRATION_PHASE"
     transition_id="$MIGRATION_TRANSITION_ID"; transition_revision="$MIGRATION_REVISION"
     ownership="$MIGRATION_OWNERSHIP_REVISION"
+  fi
+  # Before the first migration there is no persisted transition ownership yet.
+  # Publish the same production+quarantine-bound revision that runtime-config
+  # will use, otherwise Fleet sends the legacy fallback revision and the
+  # supervisor correctly rejects its first apply_sessions request.
+  if [ -z "$ownership" ] && declare -F scaleset_ownership_revision >/dev/null; then
+    ownership="$(scaleset_ownership_revision 2>/dev/null || true)"
   fi
   if [ -z "$ownership" ]; then
     ownership="$(printf '%s\0%s\0%s\0%s\0%s' "${GH_OWNER:-}" "${AUTH_MODE:-pat}" \

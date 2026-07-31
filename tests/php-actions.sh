@@ -25,7 +25,7 @@ need "escapeshellarg(\$owner)"
 need 'bounded_request_string(post_scalar('
 need "case 'apply-config':"
 need "expected_config_revision"
-need "settings snapshot does not match the server allowlist"
+need "settings snapshot contains no allowed fields or includes an unknown field"
 need "tempnam(\$CFGDIR, '.apply.')"
 need "function_exists('fsync')"
 need '$_POST[$key]'

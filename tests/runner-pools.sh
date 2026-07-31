@@ -7,6 +7,7 @@ HELPER="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-pools.sh"
 ENGINE="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"
 FLEET="src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page"
 SETTINGS="src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page"
+POOLS_PAGE="src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmPools.page"
 EXEC="src/usr/local/emhttp/plugins/ci-runner-farm/include/exec.php"
 
 # shellcheck disable=SC1090
@@ -35,6 +36,9 @@ accept pools "$valid_v2" org
 [ "$POOL_CONFIG_VERSION" = v2 ] && ok || bad 'V2 version was not detected'
 [ "$POOL_SERIALIZED_V2" = 'v2|rust|ci-rust|rust,build|3|2|5|1|4|17179869184;v2|python|ci-python|python,build|1|1|2|1|2|4294967296' ] &&
   ok || bad 'V2 canonical serialization differs'
+POOL_BACKEND=scaleset
+accept pools 'v2|rust|ci-pool-rust||3|0|auto|0|8|10g' org
+POOL_BACKEND=classic
 RUNNER_MODE=pools RUNNER_POOLS="$valid_v2" GH_SCOPE=org GH_OWNER=acme
 [ "$(pool_routing_label python)" = ci-python ] && ok || bad 'explicit routing label was not preserved'
 [ "$(pool_additional_labels rust)" = rust,build ] && ok || bad 'additional labels were not preserved'
@@ -52,6 +56,7 @@ RUNNER_POOLS='v2|inherit|ci-inherit||1|1|2|0|inherit|inherit'
 
 POOL_BACKEND=scaleset RUNNER_POOLS='v2|zero|ci-zero||1|0|auto|0|1|1g'
 accept pools "$RUNNER_POOLS" org
+[ "$(pool_capacity_ceiling zero)" = 64 ] && ok || bad 'auto maximum did not resolve to the emergency fuse for numeric fallback'
 POOL_BACKEND=classic
 reject pools "$RUNNER_POOLS" org
 
@@ -100,6 +105,7 @@ reject pools 'v2|rust|ci-rust||1|1|2|1|1|1g|extra' org
 reject pools 'v2|Rust|ci-rust||1|1|2|1|1|1g' org
 reject pools 'v2|rust|self-hosted||1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust|linux|1|1|2|1|1|1g' org
+reject pools 'v2|rust|ci-rust|ci-pool-python|1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust|build,build|1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust|ci-rust|1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust||1|1|2|1|0|1g' org
@@ -124,16 +130,16 @@ done
 # this suite makes `tests/*.sh` one executable acceptance surface.
 grep -q 'RUNNER_MODE="single"' "$ENGINE" && ok || bad 'engine lacks backward-compatible single mode'
 grep -q 'RUNNER_POOLS' "$SETTINGS" && ok || bad 'Settings lacks the pool config source'
-grep -q 'id="crf-pools-errors".*aria-live="polite"' "$SETTINGS" && ok || bad 'Settings pool errors are not announced'
-grep -q 'ci-pool-python' "$FLEET" "$SETTINGS" "$ENGINE" && ok || bad 'derived pool selector is absent'
+grep -q 'id="crf-pools-errors".*aria-live="polite"' "$POOLS_PAGE" && ok || bad 'Pools tab errors are not announced'
+grep -q 'ci-pool-python' "$FLEET" "$POOLS_PAGE" "$ENGINE" && ok || bad 'derived pool selector is absent'
 grep -q "action:'scale',pool,n" "$FLEET" && ok || bad 'Fleet does not send a pool-aware scale action'
 grep -q 'data-crf-mutation' "$FLEET" && ok || bad 'Fleet mutations cannot be disabled on invalid config'
 grep -q "case 'validate-pools'" "$EXEC" && ok || bad 'server pool validation endpoint missing'
 grep -q 'scheduling routes, not trust boundaries' README.md && ok || bad 'routing/security boundary is undocumented'
 grep -q 'Deploy the plugin while.*Single fleet' README.md && ok || bad 'safe single-mode activation is undocumented'
-grep -q 'runs-on: \[self-hosted, ci-pool-rust\]' README.md && ok || bad 'Rust selector is undocumented'
-grep -q 'runs-on: \[self-hosted, ci-pool-python\]' README.md && ok || bad 'Python selector is undocumented'
-grep -q 'runs-on: \[self-hosted, ci-pool-typescript\]' README.md && ok || bad 'TypeScript selector is undocumented'
+grep -q 'runs-on: ci-pool-rust' README.md && ok || bad 'Rust selector is undocumented'
+grep -q 'runs-on: ci-pool-python' README.md && ok || bad 'Python selector is undocumented'
+grep -q 'runs-on: ci-pool-typescript' README.md && ok || bad 'TypeScript selector is undocumented'
 grep -q 'never edits workflow files in sibling repositories' README.md && ok || bad 'workflow migration ownership is undocumented'
 if grep -qi 'queue-aware autoscal' README.md src/usr/local/emhttp/plugins/ci-runner-farm/README.md; then
   bad 'documentation still claims queue-aware autoscaling'

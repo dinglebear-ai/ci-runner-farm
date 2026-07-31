@@ -65,16 +65,39 @@ cat > "$task_tmp/jit-runner" <<'SCRIPT'
 set -euo pipefail
 [ "$1" = --jitconfig ]
 [ "$2" = "$CRF_EXPECTED_SECRET" ]
+[ -f "$CRF_DOCKER_READY_MARKER" ]
 printf 'jit\n' > "$CRF_TEST_RESULT"
 SCRIPT
 chmod 0755 "$task_tmp/jit-runner"
+mkdir -p "$task_tmp/bin"
+cat > "$task_tmp/bin/docker" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = info ]
+[ -f "$CRF_DOCKER_READY_MARKER" ]
+SCRIPT
+cat > "$task_tmp/bin/service" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = docker ]
+[ "$2" = start ]
+: > "$CRF_DOCKER_READY_MARKER"
+SCRIPT
+chmod 0755 "$task_tmp/bin/docker" "$task_tmp/bin/service"
 rm -rf "$CRF_SECRET_DIR"; : >"$CRF_TEST_RESULT"
 CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
+  START_DOCKER_SERVICE=true CRF_DOCKER_SUPERVISE=false \
+  CRF_DOCKER_READY_MARKER="$task_tmp/docker-ready" CRF_DOCKER_LOG="$task_tmp/dockerd.log" \
+  CRF_DOCKER_PID_FILE="$task_tmp/docker.pid" \
+  PATH="$task_tmp/bin:$PATH" \
   "$entrypoint" >"$task_tmp/jit-stdout" 2>"$task_tmp/jit-stderr" &
 entry_pid=$!
 for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
 printf '%s\n' "$sentinel" >"$CRF_SECRET_DIR/secret.in"
-wait "$entry_pid"
+if ! wait "$entry_pid"; then
+  cat "$task_tmp/jit-stderr" >&2
+  crf_fail "JIT entrypoint failed"
+fi
 crf_assert_eq jit "$(cat "$CRF_TEST_RESULT")" "JIT entrypoint lifecycle"
 if grep -Fq "$sentinel" "$task_tmp/jit-stdout" "$task_tmp/jit-stderr"; then
   crf_fail "JIT descriptor leaked to output"

@@ -2,11 +2,20 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/actions/scaleset"
 )
+
+var ErrNotFound = errors.New("scale_set_not_found")
+
+const maxJSONSafeInteger int64 = 1<<53 - 1
 
 type ScaleSet struct {
 	ID            int64
@@ -35,9 +44,11 @@ type Statistics struct {
 	TotalIdleRunners       int
 }
 type MessageBatch struct {
-	MessageID  int64
-	Statistics *Statistics
-	Assigned   []int64
+	MessageID       int64
+	Statistics      *Statistics
+	Available       []int64
+	AssignedHandles []int64
+	ReleasedHandles []int64
 }
 type AcquireRequest struct{ RequestIDs []int64 }
 type AcquireResult struct{ AcquiredIDs []int64 }
@@ -49,11 +60,12 @@ type JITRequest struct {
 type ScaleSetAPI interface {
 	CreateRunnerScaleSet(context.Context, CreateSpec) (ScaleSet, error)
 	GetRunnerScaleSet(context.Context, int64) (ScaleSet, error)
+	GetRunnerScaleSetByName(context.Context, int64, string) (ScaleSet, error)
 	UpdateRunnerScaleSet(context.Context, int64, UpdateSpec) (ScaleSet, error)
 	DeleteRunnerScaleSet(context.Context, int64) error
 	GetRunnerGroupByName(context.Context, string) (RunnerGroup, error)
 	CreateMessageSession(context.Context, int64) (Session, error)
-	GetMessage(context.Context, Session, int) (MessageBatch, error)
+	GetMessage(context.Context, Session, int64, int) (MessageBatch, error)
 	AcquireJobs(context.Context, Session, AcquireRequest) (AcquireResult, error)
 	AcknowledgeMessage(context.Context, Session, int64) error
 	GenerateJitRunnerConfig(context.Context, int64, JITRequest) ([]byte, error)
@@ -94,19 +106,36 @@ func (a *Adapter) CreateRunnerScaleSet(ctx context.Context, spec CreateSpec) (Sc
 func (a *Adapter) GetRunnerScaleSet(ctx context.Context, id int64) (ScaleSet, error) {
 	v, err := a.client.GetRunnerScaleSetByID(ctx, int(id))
 	if err != nil {
+		if strings.Contains(err.Error(), `status="404`) || strings.Contains(err.Error(), "status code: 404") {
+			return ScaleSet{}, ErrNotFound
+		}
+		return ScaleSet{}, err
+	}
+	return fromScaleSet(v), nil
+}
+func (a *Adapter) GetRunnerScaleSetByName(ctx context.Context, groupID int64, name string) (ScaleSet, error) {
+	v, err := a.client.GetRunnerScaleSet(ctx, int(groupID), name)
+	if err != nil || v == nil {
 		return ScaleSet{}, err
 	}
 	return fromScaleSet(v), nil
 }
 func (a *Adapter) UpdateRunnerScaleSet(ctx context.Context, id int64, spec UpdateSpec) (ScaleSet, error) {
-	v, err := a.client.UpdateRunnerScaleSet(ctx, int(id), &scaleset.RunnerScaleSet{Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID), Labels: labels(spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
+	v, err := a.client.UpdateRunnerScaleSet(ctx, int(id), &scaleset.RunnerScaleSet{
+		ID: int(id), Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID),
+		Labels: labels(spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+	})
 	if err != nil {
 		return ScaleSet{}, err
 	}
 	return fromScaleSet(v), nil
 }
 func (a *Adapter) DeleteRunnerScaleSet(ctx context.Context, id int64) error {
-	return a.client.DeleteRunnerScaleSet(ctx, int(id))
+	err := a.client.DeleteRunnerScaleSet(ctx, int(id))
+	if err != nil && (strings.Contains(err.Error(), `status="404`) || strings.Contains(err.Error(), "status code: 404")) {
+		return ErrNotFound
+	}
+	return err
 }
 func (a *Adapter) GetRunnerGroupByName(ctx context.Context, name string) (RunnerGroup, error) {
 	v, err := a.client.GetRunnerGroupByName(ctx, name)
@@ -125,6 +154,16 @@ func (a *Adapter) CreateMessageSession(ctx context.Context, id int64) (Session, 
 	a.mu.Unlock()
 	return Session{ScaleSetID: id, ID: v.Session().SessionID.String()}, nil
 }
+func (a *Adapter) CloseMessageSession(ctx context.Context, session Session) error {
+	a.mu.Lock()
+	client := a.sessions[session.ScaleSetID]
+	delete(a.sessions, session.ScaleSetID)
+	a.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.Close(ctx)
+}
 func (a *Adapter) session(s Session) (*scaleset.MessageSessionClient, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -140,18 +179,65 @@ func stats(v *scaleset.RunnerScaleSetStatistic) *Statistics {
 	}
 	return &Statistics{v.TotalAvailableJobs, v.TotalAcquiredJobs, v.TotalAssignedJobs, v.TotalRunningJobs, v.TotalRegisteredRunners, v.TotalBusyRunners, v.TotalIdleRunners}
 }
-func (a *Adapter) GetMessage(ctx context.Context, s Session, max int) (MessageBatch, error) {
+
+func jobHandle(scaleSetID int64, job *scaleset.JobMessageBase) (int64, error) {
+	if scaleSetID <= 0 || job == nil {
+		return 0, errors.New("invalid_assigned_job_identity")
+	}
+	identity := strings.TrimSpace(job.JobID)
+	if identity == "" && job.RunnerRequestID > 0 {
+		identity = "request:" + strconv.FormatInt(job.RunnerRequestID, 10)
+	}
+	if identity == "" {
+		return 0, errors.New("invalid_assigned_job_identity")
+	}
+	sum := sha256.Sum256([]byte(strconv.FormatInt(scaleSetID, 10) + "\x00" + identity))
+	handle := int64(binary.BigEndian.Uint64(sum[:8]) & uint64(maxJSONSafeInteger))
+	if handle == 0 {
+		handle = 1
+	}
+	return handle, nil
+}
+
+func assignedJobHandle(scaleSetID int64, job *scaleset.JobAssigned) (int64, error) {
+	if job == nil {
+		return 0, errors.New("invalid_assigned_job_identity")
+	}
+	return jobHandle(scaleSetID, &job.JobMessageBase)
+}
+
+func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64, max int) (MessageBatch, error) {
 	c, err := a.session(s)
 	if err != nil {
 		return MessageBatch{}, err
 	}
-	v, err := c.GetMessage(ctx, 0, max)
+	v, err := c.GetMessage(ctx, int(lastMessageID), max)
 	if err != nil || v == nil {
 		return MessageBatch{}, err
 	}
 	out := MessageBatch{MessageID: int64(v.MessageID), Statistics: stats(v.Statistics)}
+	for _, job := range v.JobAvailableMessages {
+		if job == nil || job.RunnerRequestID <= 0 {
+			return MessageBatch{}, errors.New("invalid_available_job_identity")
+		}
+		out.Available = append(out.Available, job.RunnerRequestID)
+	}
 	for _, job := range v.JobAssignedMessages {
-		out.Assigned = append(out.Assigned, job.RunnerRequestID)
+		handle, err := assignedJobHandle(s.ScaleSetID, job)
+		if err != nil {
+			return MessageBatch{}, err
+		}
+		out.AssignedHandles = append(out.AssignedHandles, handle)
+	}
+	for _, job := range v.JobCompletedMessages {
+		if job == nil {
+			return MessageBatch{}, errors.New("invalid_completed_job_identity")
+		}
+		handle, err := jobHandle(s.ScaleSetID, &job.JobMessageBase)
+		if err != nil {
+			return MessageBatch{}, err
+		}
+		out.ReleasedHandles = append(out.ReleasedHandles, handle)
 	}
 	return out, nil
 }

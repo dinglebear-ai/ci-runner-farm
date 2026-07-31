@@ -6,7 +6,7 @@ Tag="server"
 /* Fleet hub tab: live stats, actions, runner bays with usage, and the fleet log.
    The shared crf* JS core, the @unraid/ui force-loader, and the shared .crf-*
    styles are included from include/crf-core.php (below, via include_once) so all
-   three RunnerFarm tabs share one declared dependency regardless of tab load
+   four RunnerFarm tabs share one declared dependency regardless of tab load
    order. Only Fleet-specific pollers, rendering, and styles live in this file. */
 ?>
 <?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
@@ -39,13 +39,14 @@ Tag="server"
   <uui-button id="crf-scale-button" class="orange" size="xs" onclick="crfScale()" disabled>Scale to</uui-button></span>
 </div>
 
-<div id="crf-pool-cards" class="crf-pool-cards" style="display:none"></div>
-
-<div class="crf-bays">
-  <div class="crf-bay crf-bay-head">
-    <span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>
+<div id="crf-runner-tables">
+  <div id="crf-pools-section" class="crf-pools-section" style="display:none"></div>
+  <div id="crf-single-fleet" class="crf-bays">
+    <div class="crf-bay crf-bay-head">
+      <span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>
+    </div>
+    <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div></div>
   </div>
-  <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div></div>
 </div>
 
 <div class="crf-runstats" id="crf-runstats">
@@ -88,15 +89,19 @@ Tag="server"
   .crf-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px}
   .crf-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--alt-text-color);font-size:13px}
   .crf-scale input[type=number]{width:4em;height:26px;box-sizing:border-box;border-radius:6px;padding:0 8px;font-size:12px;margin:0}
-  .crf-pool-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin:0 0 8px}
-  .crf-pool-card{border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:9px 11px}
-  .crf-pool-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
-  .crf-pool-title{font-weight:600;color:var(--text-color)}
-  .crf-pool-label{font-family:bitstream,monospace;font-size:11px;color:var(--link-text-color);cursor:pointer;background:none;border:0}
-  .crf-pool-counts{display:flex;gap:12px;font-size:12px;color:var(--alt-text-color);margin:6px 0}
-  .crf-pool-details{font-size:11px;color:var(--alt-text-color);margin:5px 0}
-  .crf-pool-details summary{cursor:pointer;color:var(--link-text-color)}
-  .crf-pool-control{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--alt-text-color)}
+  .crf-pools-section{margin:0 0 8px}
+  .crf-pool-fleet{margin:0 0 8px}
+  .crf-pool-fleet-meta{display:flex;align-items:center;gap:12px;min-height:30px;padding:3px 10px;border:1px solid var(--border-color);border-bottom:0;border-radius:6px 6px 0 0;background:var(--shade-bg-color,var(--table-header-background-color));color:var(--alt-text-color);font-size:11px}
+  .crf-pool-fleet-meta .crf-pool-metrics{margin-left:auto}
+  .crf-pool-fleet-meta .crf-pool-control{margin-left:4px}
+  .crf-pool-fleet .crf-bays{border-radius:0 0 6px 6px;margin:0}
+  .crf-pool-fleet .crf-pool-badge{display:none}
+  button.crf-pool-selector{appearance:none!important;border:0!important;background:none!important;box-shadow:none!important;color:var(--link-text-color)!important;cursor:pointer!important;font:11px bitstream,monospace!important;line-height:1.35!important;margin:0!important;padding:0!important;min-width:0!important;max-width:100%!important;height:auto!important;text-align:left!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  button.crf-pool-selector:hover{text-decoration:underline}
+  button.crf-pool-selector:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:2px;border-radius:2px}
+  .crf-pool-metrics{font-size:11px;color:var(--alt-text-color);line-height:1.35;white-space:nowrap}
+  .crf-pool-metrics strong{font-weight:500;color:var(--text-color)}
+  .crf-pool-control{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--alt-text-color);min-width:0;white-space:nowrap}
   .crf-pool-control input{width:4em!important;height:26px;box-sizing:border-box;margin:0!important}
   .crf-pool-state{font-size:11px;color:var(--crf-busy)}
   .crf-pool-badge{display:inline-block;margin-left:6px;border:1px solid var(--border-color);border-radius:8px;padding:0 5px;color:var(--link-text-color);font:10px bitstream,monospace}
@@ -104,7 +109,7 @@ Tag="server"
   .crf-bay{display:grid;grid-template-columns:22px minmax(110px,1fr) 88px minmax(120px,1.6fr) 120px 160px 26px;gap:8px;align-items:center;padding:4px 10px;border-top:1px solid var(--table-border-color,var(--border-color))}
   .crf-bay:first-child{border-top:none}
   .crf-bay-head{background:var(--table-header-background-color);font-size:11px;color:var(--alt-text-color);padding:5px 10px}
-  #crf-bays-body .crf-bay:hover{background:var(--hover-table-row-background-color)}
+  #crf-runner-tables .crf-bay[data-name]:hover{background:var(--hover-table-row-background-color)}
   .crf-name{font-family:bitstream,monospace;font-size:13px;color:var(--text-color)}
   .crf-job{font-size:12px;color:var(--alt-text-color);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crf-job a{color:var(--alt-text-color);text-decoration:none}
@@ -121,14 +126,16 @@ Tag="server"
   .crf-elapsed{font-size:11px;color:var(--alt-text-color);margin-left:6px;font-family:bitstream,monospace}
   .crf-el-warn{color:var(--crf-busy)}
   .crf-el-hot{color:var(--crf-err);font-weight:bold}
-  #crf-bays-body .crf-bay{cursor:pointer}
+  #crf-runner-tables .crf-bay[data-name]{cursor:pointer}
   .crf-recycle{cursor:pointer;color:var(--alt-text-color);font-size:15px;line-height:1;text-align:center;border-radius:4px;padding:1px 2px}
   .crf-recycle:hover{color:var(--crf-busy)}
-  #crf-bays-body .crf-bay:focus-visible,.crf-recycle:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px;border-radius:4px}
+  #crf-runner-tables .crf-bay[data-name]:focus-visible,.crf-recycle:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px;border-radius:4px}
   @media (max-width:860px){
     .crf-bay{grid-template-columns:22px minmax(80px,1fr) 74px minmax(70px,1.3fr) 26px}
     .crf-bay > :nth-child(5),.crf-bay > :nth-child(6){display:none}
     .crf-stat-value{font-size:20px}
+    .crf-pool-fleet-meta{gap:8px;flex-wrap:wrap}
+    .crf-pool-fleet-meta .crf-pool-metrics{margin-left:0}
   }
   .crf-bay-drawer{border-top:1px solid var(--table-border-color,var(--border-color));background:var(--shade-bg-color,var(--background-color));padding:8px 12px 8px 44px;font-family:bitstream,monospace;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:190px;overflow:auto;cursor:default}
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
@@ -141,7 +148,7 @@ Tag="server"
    backgrounded browser tab; offsetParent covers the inactive dynamix sub-tab
    (all tabs share one document, so document.hidden stays false on Settings/Image
    while Fleet's pollers would otherwise keep hitting docker on the NAS). */
-function crfFleetActive(){ const b=document.getElementById('crf-bays-body'); return !document.hidden && !!b && b.offsetParent!==null; }
+function crfFleetActive(){ const b=document.getElementById('crf-runner-tables'); return !document.hidden && !!b && b.offsetParent!==null; }
 let crfUserLog=false;
 function crfLog(o){ crfUserLog=true; document.getElementById('crf-log').innerHTML = crfColorize(o.log||JSON.stringify(o)); }
 /* Until the user triggers an action, the Fleet log shows live farm activity
@@ -192,43 +199,70 @@ function crfScalePool(pool){
     .finally(()=>{CRF_POOL_PENDING.delete(pool);crfRefresh();});
 }
 function crfRenderPools(d){
-  const box=document.getElementById('crf-pool-cards'); if(!box)return;
-  const pools=d.pools||[], active=document.activeElement;
+  const section=document.getElementById('crf-pools-section'); if(!section)return;
+  const pools=(d.pools||[]).slice(), active=document.activeElement;
   const activePool=active&&active.classList&&active.classList.contains('crf-pool-scale')?active.dataset.pool:null;
   const activeScalePool=active&&active.closest&&active.closest('[data-scale-pool]')?active.closest('[data-scale-pool]').dataset.scalePool:null;
   const activeValue=activePool?active.value:null;
-  const openPools=new Set([...box.querySelectorAll('.crf-pool-card details[open]')].map(e=>e.closest('.crf-pool-card').dataset.pool));
-  if(d.mode!=='pools'){box.style.display='none';box.textContent='';return;}
-  box.style.display='grid';
-  box.innerHTML=pools.map(p=>{
+  if(d.mode!=='pools'){section.style.display='none';section.textContent='';return;}
+  const configured=new Set(pools.map(p=>String(p.id)));
+  const legacy=(d.runners||[]).filter(r=>!r.pool||!configured.has(String(r.pool)));
+  if(legacy.length) pools.push({id:'default',label:'',up:legacy.filter(r=>r.state==='running').length,
+    busy:legacy.filter(r=>r.state==='running'&&r.phase==='busy').length,
+    idle:legacy.filter(r=>r.state==='running'&&r.phase==='idle').length,retiring:legacy.length,configured:0});
+  section.style.display='block';
+  const poolTitle=id=>({rust:'Rust',python:'Python',typescript:'TypeScript',go:'Go',ops:'Ops',
+    system:'System','residential-egress':'Residential egress',default:'Retiring'}[id]||
+    String(id).split(/[-_]/).map(s=>s?s.charAt(0).toUpperCase()+s.slice(1):s).join(' '));
+  section.innerHTML=pools.map(p=>{
     const scaleSet=d.backend&&d.backend.effective==='scaleset', auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), retiring=!p.label||Number(p.configured)===0;
     const numericMax=String(p.max)==='auto'?64:Number(p.max), atMax=!scaleSet&&auto&&Number(p.count)>=numericMax;
     const controlLabel=scaleSet?'Prewarm to':(auto?'Scale up to':'Scale to');
     const state=(p.retiring?'<span class="crf-pool-state">retiring '+crfEsc(p.retiring)+'</span>':'')+
       (p.stale?'<span class="crf-pool-state"> updating '+crfEsc(p.stale)+'</span>':'')+
-      (p.pending?'<span class="crf-pool-state"> draining '+crfEsc(p.pending)+'</span>':'');
-    return '<div class="crf-pool-card" data-pool="'+crfEsc(p.id)+'">'+
-      '<div class="crf-pool-head"><span class="crf-pool-title">'+crfEsc(p.id)+'</span><button type="button" class="crf-pool-label" data-copy="'+crfEsc(p.label)+'" title="Copy runs-on selector">'+crfEsc(p.label||'retiring')+'</button></div>'+
-      '<div class="crf-pool-counts"><span>up '+crfEsc(p.up)+'</span><span>busy '+crfEsc(p.busy)+'</span><span>idle '+crfEsc(p.idle)+'</span>'+
-      (p.starting?'<span>starting '+crfEsc(p.starting)+'</span>':'')+(p.error?'<span>error '+crfEsc(p.error)+'</span>':'')+
-      '<span>'+(auto?'floor':'target')+' '+crfEsc(p.effective_target)+'</span></div>'+
-      '<details class="crf-pool-details"><summary>Labels and scheduling budget</summary><div>Labels: '+crfEsc(p.effective_labels||p.label||'')+'</div><div>CPU: '+crfEsc(p.cpu_milli||0)+'m · Memory: '+crfBytes(Number(p.memory_bytes||0))+'</div><div>Assigned: '+crfEsc(p.assigned_jobs)+' · desired '+crfEsc(p.desired)+' · admitted '+crfEsc(p.admitted)+' · advertised '+crfEsc(p.advertised_capacity)+' · session '+(p.session_healthy?'healthy':'not ready')+'</div>'+(p.blocked_reason?'<div class="crf-pool-state">Blocked: '+crfEsc(p.blocked_reason)+'</div>':'')+'</details>'+
-      '<div class="crf-pool-control"><span>'+controlLabel+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(scaleSet?0:(auto?Number(p.count)+1:1))+'" max="'+crfEsc(auto?numericMax:64)+'" value="'+crfEsc(p.count)+'" '+(retiring?'disabled ':'')+'aria-label="'+controlLabel+' '+crfEsc(p.id)+' pool">'+
-      '<uui-button class="orange" size="xs" data-scale-pool="'+crfEsc(p.id)+'" '+((pending||retiring||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>'+controlLabel+'</uui-button>'+state+'</div></div>';
+      (p.pending?'<span class="crf-pool-state"> draining '+crfEsc(p.pending)+'</span>':'')+
+      (p.blocked_reason?'<span class="crf-pool-state"> blocked: '+crfEsc(p.blocked_reason)+'</span>':'');
+    const selector=p.label||'retiring', title=poolTitle(String(p.id));
+    const controls=retiring?'':('<span class="crf-pool-control"><span>'+controlLabel+'</span><input class="crf-pool-scale" data-pool="'+crfEsc(p.id)+'" type="number" min="'+(scaleSet?0:(auto?Number(p.count)+1:1))+'" max="'+crfEsc(auto?numericMax:64)+'" value="'+crfEsc(p.count)+'" aria-label="'+controlLabel+' '+crfEsc(p.id)+' pool">'+
+      '<uui-button class="orange" size="xs" data-scale-pool="'+crfEsc(p.id)+'" title="'+controlLabel+' '+crfEsc(p.id)+'" '+((pending||atMax||d.config_error)?'disabled':'')+' '+(pending?'aria-busy="true"':'')+'>'+(scaleSet?'Set':'Scale')+'</uui-button></span>');
+    return '<section class="crf-pool-fleet" data-pool="'+crfEsc(p.id)+'">'+
+      '<div class="crf-pool-fleet-meta">'+
+      (p.label?'<button type="button" class="crf-pool-selector" data-copy="'+crfEsc(p.label)+'" title="Copy runs-on: '+crfEsc(p.label)+'">'+crfEsc(selector)+'</button>':'<span class="crf-pool-state">classic runners draining</span>')+
+      '<span class="crf-pool-metrics"><strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
+        (p.starting?' · starting '+crfEsc(p.starting):'')+(p.error?' · error '+crfEsc(p.error):'')+'</span>'+
+      state+controls+'</div>'+
+      '<div class="crf-bays"><div class="crf-bay crf-bay-head">'+
+      '<span></span><span>'+crfEsc(title)+'</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>'+
+      '</div><div class="crf-pool-bays-body" data-pool-body="'+crfEsc(p.id)+'"></div></div></section>';
   }).join('');
-  openPools.forEach(id=>{const card=box.querySelector('.crf-pool-card[data-pool="'+crfSelectorValue(id)+'"]');const details=card&&card.querySelector('details');if(details)details.open=true;});
   if(activePool){
-    const restored=box.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(activePool)+'"]');
+    const restored=section.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(activePool)+'"]');
     if(restored&&!restored.disabled){restored.value=activeValue;restored.focus();}
   }else if(activeScalePool){
-    const restored=box.querySelector('[data-scale-pool="'+crfSelectorValue(activeScalePool)+'"]');
+    const restored=section.querySelector('[data-scale-pool="'+crfSelectorValue(activeScalePool)+'"]');
     if(restored)restored.focus();
   }
 }
-document.getElementById('crf-pool-cards').addEventListener('click',e=>{
+function crfPlacePoolRows(d,tb){
+  const single=document.getElementById('crf-single-fleet'), section=document.getElementById('crf-pools-section');
+  if(d.mode!=='pools'){if(single)single.style.display='block';return;}
+  if(single)single.style.display='none';
+  if(!section)return;
+  const configured=new Set((d.pools||[]).map(p=>String(p.id)));
+  Array.from(tb.querySelectorAll('.crf-bay[data-name]')).forEach(row=>{
+    const runner=(d.runners||[]).find(r=>String(r.name)===String(row.dataset.name));
+    const pool=runner&&runner.pool&&configured.has(String(runner.pool))?String(runner.pool):'default';
+    const body=section.querySelector('[data-pool-body="'+crfSelectorValue(pool)+'"]');
+    if(body)body.appendChild(row);
+  });
+  section.querySelectorAll('.crf-pool-bays-body').forEach(body=>{
+    if(!body.querySelector('.crf-bay[data-name]')) body.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">No runners up</span><span></span><span></span><span></span><span></span><span></span></div>';
+  });
+}
+document.getElementById('crf-pools-section').addEventListener('click',e=>{
   const scale=e.target.closest('[data-scale-pool]'); if(scale){crfScalePool(scale.dataset.scalePool);return;}
   const copy=e.target.closest('[data-copy]'); if(copy&&copy.dataset.copy){
-    crfCopyText('runs-on: [self-hosted, '+copy.dataset.copy+']').then(()=>crfToast('Selector copied')).catch(()=>crfToast('Copy failed'));
+    crfCopyText('runs-on: '+copy.dataset.copy).then(()=>crfToast('Selector copied')).catch(()=>crfToast('Copy failed'));
   }
 });
 
@@ -352,6 +386,7 @@ function crfRefresh(){
     if(odr){ window.CRF_DRAWER_PINNED=crfDrawerPinned(odr); window.CRF_DRAWER_SCROLL=odr.scrollTop; }
     if(!rs.length){
       tb.innerHTML=crfEmptyFleetHtml(d);
+      crfPlacePoolRows(d,tb);
       return;
     }
     const dark=crfDark()?' class="dark"':'';
@@ -365,7 +400,7 @@ function crfRefresh(){
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
     const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
-    if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
+    if(d.mode!=='pools'&&tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
         const v=crfVolatile(r);
@@ -409,6 +444,7 @@ function crfRefresh(){
         '<span class="crf-recycle" tabindex="'+(d.config_error?'-1':'0')+'" role="button" aria-disabled="'+(d.config_error?'true':'false')+'" aria-label="Recycle '+crfEsc(r.name)+'" title="'+(d.config_error?'Fix the configuration before recycling':'Recycle this runner')+'">&#10227;</span>'+
       '</div>';
     }).join('');
+    crfPlacePoolRows(d,tb);
     crfDrawerMount();
   }).catch(e=>{
     // A rejected status poll (network down, or a 403 from a CSRF token that expired
@@ -504,7 +540,7 @@ function crfDrawerMount(){
     crfDrawerFill(window.CRF_DRAWER);
     return;
   }
-  const row=document.querySelector('#crf-bays-body .crf-bay[data-name="'+window.CRF_DRAWER+'"]');
+  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+window.CRF_DRAWER+'"]');
   if(!row) return;
   const d=document.createElement('div'); d.className='crf-bay-drawer'; d.dataset.for=window.CRF_DRAWER;
   // Re-seed with the last log so a 5s re-render doesn't flash "loading…"; only the
@@ -518,18 +554,18 @@ function crfToggleDrawer(name){
   const opening = window.CRF_DRAWER!==name;
   window.CRF_DRAWER = opening ? name : null;
   window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true; // fresh cache per open
-  const row=document.querySelector('#crf-bays-body .crf-bay[data-name="'+name+'"]');
+  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+name+'"]');
   if(row) row.setAttribute('aria-expanded', opening?'true':'false');
   crfDrawerMount();
 }
-document.getElementById('crf-bays-body').addEventListener('click',e=>{
+document.getElementById('crf-runner-tables').addEventListener('click',e=>{
   const rc=e.target.closest('.crf-recycle');
   if(rc){ const b=rc.closest('.crf-bay[data-name]'); if(b) crfRecycle(b.dataset.name); return; }
   if(e.target.closest('a,uui-button,.crf-bay-drawer')) return;
   const row=e.target.closest('.crf-bay[data-name]'); if(!row) return;
   crfToggleDrawer(row.dataset.name);
 });
-document.getElementById('crf-bays-body').addEventListener('keydown',e=>{
+document.getElementById('crf-runner-tables').addEventListener('keydown',e=>{
   if(e.key!=='Enter'&&e.key!==' ') return;
   const rc=e.target.closest('.crf-recycle');
   if(rc){ e.preventDefault(); const b=rc.closest('.crf-bay[data-name]'); if(b) crfRecycle(b.dataset.name); return; }

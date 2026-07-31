@@ -50,6 +50,7 @@ if cmd_scale 7; then fail 'autoscale manual scale above max accepted'; fi
 pool_mode_enabled() { return 0; }
 pool_record() { [ "$1" = python ]; }
 pool_max() { echo 8; }
+pool_capacity_ceiling() { pool_max "$1"; }
 current_count() { echo 3; }
 pool_state_generation() { echo test; }
 called=''
@@ -85,6 +86,15 @@ sed -n '/^autoscale_tick()/,/^}/p' "$ENGINE" > "$tick_tmp"
 # shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
 . "$tick_tmp"
 validate_runtime_config() { return 0; }
+backend_effective() { echo scaleset; }
+scaleset_tick_called=0
+scaleset_autoscale_tick() { scaleset_tick_called=1; }
+jit_reconcile() { :; }
+AUTOSCALE=true
+MAINTENANCE_FILE="$RUNDIR/no-maintenance"
+autoscale_tick
+[ "$scaleset_tick_called" = 1 ] || fail 'effective scale-set backend did not use the demand autoscaler'
+backend_effective() { echo classic; }
 cleanup_pool_runtime_state() { :; }
 fleet_inventory_refresh() { INVENTORY_ACTIVE=1; }
 reap_dead_runners() { :; }
@@ -120,6 +130,7 @@ pool_phase_counts() {
 }
 pool_min() { echo 1; }
 pool_max() { echo 2; }
+pool_capacity_ceiling() { pool_max "$1"; }
 pool_idle() { echo 1; }
 pool_state_generation() { echo test; }
 scale_down_called=''

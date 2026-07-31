@@ -15,24 +15,25 @@ import (
 )
 
 type Record struct {
-	SchemaVersion         int             `json:"schema_version"`
-	CompatibilityRecordID string          `json:"compatibility_record_id"`
-	PluginDigest          string          `json:"plugin_digest"`
-	HelperDigest          string          `json:"helper_digest"`
-	ModuleRevision        string          `json:"module_revision"`
-	GoVersion             string          `json:"go_version"`
-	ImageDigest           string          `json:"image_digest"`
-	DockerfileDigest      string          `json:"dockerfile_digest"`
-	EntrypointDigest      string          `json:"entrypoint_digest"`
-	Owner                 string          `json:"owner"`
-	APIURL                string          `json:"api_url"`
-	InstallationID        string          `json:"installation_id"`
-	HostID                string          `json:"host_id"`
-	RunnerGroupID         int64           `json:"runner_group_id"`
-	RunnerGroupPolicy     string          `json:"runner_group_policy"`
-	Capabilities          map[string]bool `json:"capabilities"`
-	TestedAt              time.Time       `json:"tested_at"`
-	Cleanup               Cleanup         `json:"cleanup"`
+	SchemaVersion           int             `json:"schema_version"`
+	CompatibilityRecordID   string          `json:"compatibility_record_id"`
+	PluginDigest            string          `json:"plugin_digest"`
+	HelperDigest            string          `json:"helper_digest"`
+	ModuleRevision          string          `json:"module_revision"`
+	GoVersion               string          `json:"go_version"`
+	ImageDigest             string          `json:"image_digest"`
+	DockerfileDigest        string          `json:"dockerfile_digest"`
+	EntrypointDigest        string          `json:"entrypoint_digest"`
+	Owner                   string          `json:"owner"`
+	APIURL                  string          `json:"api_url"`
+	InstallationID          string          `json:"installation_id"`
+	HostID                  string          `json:"host_id"`
+	RunnerGroupID           int64           `json:"runner_group_id"`
+	QuarantineRunnerGroupID int64           `json:"quarantine_runner_group_id"`
+	RunnerGroupPolicy       string          `json:"runner_group_policy"`
+	Capabilities            map[string]bool `json:"capabilities"`
+	TestedAt                time.Time       `json:"tested_at"`
+	Cleanup                 Cleanup         `json:"cleanup"`
 }
 type Cleanup struct {
 	Complete bool    `json:"complete"`
@@ -43,7 +44,8 @@ var required = []string{
 	"create_get_update_delete", "restricted_group", "multiple_labels",
 	"total_assigned_jobs", "jit_current_image", "zero_to_one",
 	"cancel_reassign", "ack_replay", "dynamic_capacity",
-	"eligibility_barrier", "nested_cgroup_charging", "exact_cleanup",
+	"eligibility_barrier", "nested_cgroup_charging", "classic_quarantine_barrier",
+	"exact_cleanup",
 }
 
 var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -52,7 +54,8 @@ func (r *Record) Seal(now time.Time) error {
 	if !r.Cleanup.Complete || len(r.Cleanup.IDs) != 0 {
 		return errors.New("cleanup_incomplete")
 	}
-	if r.RunnerGroupID <= 0 || r.RunnerGroupPolicy == "" {
+	if r.RunnerGroupID <= 0 || r.QuarantineRunnerGroupID <= 0 ||
+		r.QuarantineRunnerGroupID == r.RunnerGroupID || r.RunnerGroupPolicy == "" {
 		return errors.New("compatibility_record_identity")
 	}
 	for _, name := range required {
@@ -110,7 +113,7 @@ func WriteAtomic(path string, record Record) error {
 }
 
 func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return Record{}, err
 	}
@@ -154,7 +157,9 @@ func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error)
 	}
 	if record.ModuleRevision == "" || record.GoVersion == "" || record.Owner == "" ||
 		record.APIURL == "" || record.InstallationID == "" || record.HostID == "" ||
-		record.RunnerGroupID <= 0 || record.RunnerGroupPolicy == "" {
+		record.RunnerGroupID <= 0 || record.QuarantineRunnerGroupID <= 0 ||
+		record.QuarantineRunnerGroupID == record.RunnerGroupID ||
+		record.RunnerGroupPolicy == "" {
 		return Record{}, errors.New("compatibility_record_identity")
 	}
 	sealedID := record.CompatibilityRecordID

@@ -12,7 +12,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 # shellcheck disable=SC1090
 . "$HELPER"
 for fn in github_scope_validate github_scope_base legacy_runner_scope_target fleet_inventory_invalidate \
-  fleet_inventory_refresh inventory_names inventory_field inventory_count \
+  fleet_inventory_refresh inventory_names inventory_field inventory_count runner_pool runner_index runner_scope_target \
   runner_identity_validate github_registration_token registration_token \
   github_runner_inventory github_runner_inventory_invalidate github_runner_inventory_forget github_runner_id; do
   sed -n "/^${fn}()/,/^}/p" "$ENGINE" >> "$snippet"
@@ -38,7 +38,7 @@ docker() {
   case "$1" in
     ps)
       inc "$ps_calls"
-      printf '%s\n' ci-runner-1 ci-runner-python-1 ci-runner-rust-1
+      printf '%s\n' ci-runner-1 ci-runner-python-1 ci-runner-rust-1 ci-runner-jit-python-0123456789abcdefabcd
       ;;
     inspect)
       inc "$inspect_calls"
@@ -46,9 +46,10 @@ docker() {
         printf '%s\n' RUNNER_SCOPE=repo REPO_URL=https://github.com/acme/legacy
       else
         cat <<'EOF'
-/ci-runner-1|running|healthy|2000000000|17179869184|legacygen|<no value>|<no value>|<no value>|1|true|<no value>|<no value>
-/ci-runner-python-1|running|healthy|2000000000|17179869184|pygen|python|org:acme|1|1|true|1|ci-pool-python
-/ci-runner-rust-1|running|healthy|2000000000|17179869184|rustgen|rust|repo:acme/example|1|1|true|1|ci-pool-rust
+/ci-runner-1|running|healthy|2000000000|17179869184|legacygen|<no value>|<no value>|<no value>|1|true|<no value>|<no value>|classic
+/ci-runner-python-1|running|healthy|2000000000|17179869184|pygen|python|org:acme|1|1|true|1|python|classic
+/ci-runner-rust-1|running|healthy|2000000000|17179869184|rustgen|rust|repo:acme/example|1|1|true|1|rust|classic
+/ci-runner-jit-python-0123456789abcdefabcd|running|healthy|1000000000|2147483648|jitgen|python|org:acme|501|501|true|2|python|scaleset
 EOF
       fi
       ;;
@@ -59,16 +60,35 @@ EOF
 fleet_inventory_refresh || fail 'inventory refresh failed'
 assert_eq "$(cat "$ps_calls")" 1 'inventory did not use exactly one docker ps'
 assert_eq "$(cat "$inspect_calls")" 1 'inventory did not use exactly one batched inspect'
-assert_eq "$(inventory_count)" 3 'inventory lost managed rows'
-assert_eq "$(inventory_count python)" 1 'pool filter did not use parsed metadata'
+assert_eq "$(inventory_count)" 4 'inventory lost managed rows'
+assert_eq "$(inventory_count python)" 2 'pool filter did not use parsed metadata'
 assert_eq "$(inventory_field ci-runner-1 pool)" default 'legacy runner fallback was not preserved'
 assert_eq "$(inventory_field ci-runner-python-1 scope)" org:acme 'stamped scope was not authoritative'
 assert_eq "$(inventory_field ci-runner-rust-1 identity)" invalid-managed 'forged repo-scoped pool identity was adopted'
 runner_identity_validate ci-runner-python-1 || fail 'valid pool identity was rejected'
+runner_identity_validate ci-runner-jit-python-0123456789abcdefabcd || fail 'valid scale-set JIT identity was rejected'
 if runner_identity_validate ci-runner-rust-1; then fail 'invalid-managed pool identity was authorized'; fi
 assert_eq "$(cat "$ps_calls")" 1 'inventory consumer rescanned docker ps'
 assert_eq "$(cat "$inspect_calls")" 1 'inventory consumer rescanned docker inspect'
 assert_eq "$(legacy_runner_scope_target ci-runner-1)" repo:acme/legacy 'legacy original scope was recomputed instead of recovered'
+
+# After one teardown invalidates the shared inventory, later JIT removals fall
+# back to direct labels. That path must recognize the bounded JIT identity too.
+INVENTORY_ACTIVE=0
+docker() {
+  case "$*" in
+    *"${MANAGED_LABEL%=*}"*) printf '%s\n' true ;;
+    *"${LABEL_NS}.pool-index"*) printf '%s\n' 501 ;;
+    *"${LABEL_NS}.pool\""*) printf '%s\n' python ;;
+    *"${LABEL_NS}.scope-target"*) printf '%s\n' org:acme ;;
+    *"${LABEL_NS}.identity-version"*) printf '%s\n' 2 ;;
+    *"${LABEL_NS}.backend"*) printf '%s\n' scaleset ;;
+    *) return 1 ;;
+  esac
+}
+runner_identity_validate ci-runner-jit-python-0123456789abcdefabcd ||
+  fail 'direct-label fallback rejected a valid scale-set JIT identity'
+INVENTORY_ACTIVE=1
 
 # Registration-token cache: two requests in one batch/scope produce one API call.
 ACCESS_TOKEN=test-pat
@@ -116,6 +136,20 @@ grep -Fq 'strict_firewall_ensure || return 1' "$ENGINE" || fail 'replacement pro
 grep -Fq 'ensure_network || return 1' "$ENGINE" || fail 'network creation failure is not propagated'
 grep -Fq 'runner_authoritatively_failed "$c" || continue' "$ENGINE" || fail 'generic log errors can authorize destructive reconciliation'
 grep -Fq 'github_runner_inventory_forget "$target" "$id"' "$ENGINE" || fail 'batch runner inventory is discarded after each delete'
+grep -Fq 'scaleset_make_ineligible "$MIGRATION_OWNERSHIP_REVISION"' "$ENGINE" ||
+  fail 'Stop does not quarantine active scale sets'
+grep -Fq 'scaleset_supervisor_stop' "$ENGINE" ||
+  fail 'Stop does not terminate the scale-set supervisor'
+grep -Fq 'scaleset_supervisor_start' "$ENGINE" ||
+  fail 'Start does not restore the scale-set supervisor'
+grep -Fq 'scaleset_activate_eligible "$MIGRATION_OWNERSHIP_REVISION"' "$ENGINE" ||
+  fail 'Start does not restore scale-set eligibility'
+grep -Fq 'auth_credentials_configured' "$ENGINE" ||
+  fail 'GitHub App credentials cannot pass Start or boot autostart'
+grep -Fq 'scaleset_snapshot_refresh >/dev/null 2>&1 || true' "$ENGINE" ||
+  fail 'Fleet does not materialize the current in-memory scale-set heartbeat'
+grep -Fq 'pidx _routing identity backend;' "$ENGINE" ||
+  fail 'Fleet status does not parse the scale-set backend inventory column'
 
 # Strict isolation must verify every required rule, rather than accepting a
 # partially intact tagged ruleset. Exercise the live validator with one exact
@@ -164,6 +198,27 @@ MISSING_RULE="$FW_TAG:lan192"
 REPAIR_RULES=1
 APPLY_CALLS=0
 strict_firewall_ensure || fail 'strict firewall did not accept a repaired ruleset'
+
+# Exited one-job JIT containers must be reclaimed; Docker inspect alone also
+# succeeds for stopped containers and cannot be the liveness predicate.
+JIT="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh"
+CACHE_ROOT="$tmpdir/cache"
+mkdir -p "$CACHE_ROOT"
+# shellcheck disable=SC1090
+. "$JIT"
+JIT_TEST_RUNNING=true
+docker() {
+  case "$1:$2" in
+    inspect:--format) printf '%s\n' "$JIT_TEST_RUNNING" ;;
+    *) return 1 ;;
+  esac
+}
+jit_container_running ci-runner-jit-python-0123456789abcdefabcd ||
+  fail 'running JIT container was treated as terminal'
+JIT_TEST_RUNNING=false
+if jit_container_running ci-runner-jit-python-0123456789abcdefabcd; then
+  fail 'exited JIT container was treated as running'
+fi
 assert_eq "$APPLY_CALLS" 1 'strict firewall did not attempt one repair'
 
 echo 'runner-runtime: OK'

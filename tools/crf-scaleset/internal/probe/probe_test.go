@@ -19,8 +19,9 @@ func completeRecord() Record {
 		ImageDigest: strings.Repeat("c", 64), DockerfileDigest: strings.Repeat("d", 64),
 		EntrypointDigest: strings.Repeat("e", 64), Owner: "acme", APIURL: "https://api.github.com",
 		InstallationID: "installation", HostID: "host", RunnerGroupID: 42,
-		RunnerGroupPolicy: "selected_repositories",
-		Capabilities:      caps, Cleanup: Cleanup{Complete: true}}
+		QuarantineRunnerGroupID: 43,
+		RunnerGroupPolicy:       "selected_repositories",
+		Capabilities:            caps, Cleanup: Cleanup{Complete: true}}
 }
 
 func TestLoadFreshRevalidatesSealAgeAndPermissions(t *testing.T) {

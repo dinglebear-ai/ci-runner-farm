@@ -10,6 +10,9 @@ endpoint=src/usr/local/emhttp/plugins/ci-runner-farm/include/exec.php
 grep -Fq 'POOL_BACKEND is requested intent only' "$migration"
 grep -Fq 'backend_classic_admission_allowed' "$engine"
 grep -Fq 'backend_scaleset_admission_allowed' src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
+grep -Fq 'classic-quarantine.json' "$migration"
+grep -Fq 'migration_quarantine_move_all' "$migration"
+grep -Fq -- '--data-binary "$request_body"' "$engine"
 grep -Fq "case 'begin-migration': case 'rollback-backend':" "$endpoint"
 ! grep -A100 "case 'apply-config':" "$endpoint" | grep -q 'begin-migration'
 
@@ -20,14 +23,117 @@ while IFS='|' read -r direction from to before after barrier; do
   [ -n "$before$after$barrier" ]
 done < tests/fixtures/migration.tsv
 
-# Production defaults fail closed: only the test gate can emulate remote
-# eligibility proof.
+# Classic quiesce removes only GitHub-proven idle runners and preserves busy
+# work until a later continuation.
 bash -c '
-  set -u
-  RUNDIR=$(mktemp -d); CFGDIR=$RUNDIR; CACHE_ROOT=$RUNDIR; SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; CACHE_ROOT=$root/cache; mkdir -p "$RUNDIR" "$CFGDIR" "$CACHE_ROOT"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  MIGRATION_CLASSIC_QUIESCE_FILE=$RUNDIR/quiesced
+  MIGRATION_TRANSITION_ID=transition
+  MIGRATION_TARGET_CONFIG_REVISION=$(printf a%.0s {1..64})
+  GH_OWNER=dinglebear-ai; NAME_PREFIX=ci-runner
   err(){ :; }
-  . "$SCRIPT_DIR/runner-scalesets.sh"
-  ! scaleset_prepare_ineligible x
+  . "$SCRIPT_DIR/runner-migration.sh"
+  migration_quarantine_ensure(){ return 0; }
+  migration_quarantine_move_all(){ return 0; }
+  runners="ci-runner-rust-1 ci-runner-python-1"
+  fleet_inventory_refresh(){ : >"$RUNDIR/inventory"; }
+  github_phase_refresh(){ return 0; }
+  managed_names(){ printf "%s\n" $runners; }
+  current_count(){ set -- $runners; printf "%s\n" "$#"; }
+  runner_state(){ [ "$1" = ci-runner-rust-1 ] && echo busy || echo idle; }
+  remove_runner(){ runners="${runners/ $1/}"; runners="${runners/$1 /}"; runners="${runners/$1/}"; }
+  ! migration_classic_quiesce
+  case " $runners " in *" ci-runner-rust-1 "*) ;; *) exit 1 ;; esac
+  case " $runners " in *" ci-runner-python-1 "*) exit 1 ;; esac
+  [ -f "$MIGRATION_CLASSIC_QUIESCE_FILE" ]
+'
+
+# The classic admission barrier is a remotely enforced, installation-owned
+# runner group. Creation is intent-first and recovers an accepted POST whose
+# response was lost; moves are exact by runner ID and cleanup deletes only the
+# recorded group.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; mkdir -p "$RUNDIR" "$CFGDIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  MIGRATION_CLASSIC_QUARANTINE_STATE=$CFGDIR/classic-quarantine.json
+  GH_SCOPE=org; GH_OWNER=dinglebear-ai; NAME_PREFIX=ci-runner
+  ACCESS_TOKEN=test-token
+  err(){ printf "%s\n" "$*" >&2; }
+  log(){ :; }
+  host(){ echo tootie; }
+  scaleset_installation_id(){ echo 11111111-2222-3333-4444-555555555555; }
+  . "$SCRIPT_DIR/runner-migration.sh"
+  managed_names(){ printf "%s\n" ci-runner-rust-1 ci-runner-python-1; }
+  github_runner_inventory(){
+    printf "%s\n" \
+      "101|tootie-ci-runner-rust-1|online|1" \
+      "102|ci-runner-python-1|online|0"
+  }
+  gh_api_request(){
+    local method=$1 path=$2 body=${3:-}
+    GH_RESPONSE=""; GH_STATUS=200
+    printf "%s|%s|%s\n" "$method" "$path" "$body" >>"$root/requests"
+    case "$method:$path" in
+      "GET:/orgs/dinglebear-ai/actions/runner-groups?per_page=100&page=1")
+        if [ -f "$root/group-created" ]; then
+          GH_RESPONSE='\''{"runner_groups":[{"id":77,"name":"crf-quarantine-9193c4798a343ce0","visibility":"selected","allows_public_repositories":false}]}'\''
+        else
+          GH_RESPONSE='\''{"runner_groups":[]}'\''
+        fi
+        ;;
+      "POST:/orgs/dinglebear-ai/actions/runner-groups")
+        grep -Fq '\''"visibility":"selected"'\'' <<<"$body"
+        grep -Fq '\''"allows_public_repositories":false'\'' <<<"$body"
+        : >"$root/group-created"
+        GH_STATUS=500
+        return 1
+        ;;
+      "PUT:/orgs/dinglebear-ai/actions/runner-groups/77/runners/101")
+        echo 101 >>"$root/moved"; GH_STATUS=204 ;;
+      "PUT:/orgs/dinglebear-ai/actions/runner-groups/77/runners/102")
+        echo 102 >>"$root/moved"; GH_STATUS=204 ;;
+      "GET:/orgs/dinglebear-ai/actions/runner-groups/77/runners?per_page=100&page=1")
+        GH_RESPONSE='\''{"runners":[{"id":101,"name":"tootie-ci-runner-rust-1","status":"online","busy":true},{"id":102,"name":"ci-runner-python-1","status":"online","busy":false}]}'\''
+        ;;
+      "DELETE:/orgs/dinglebear-ai/actions/runner-groups/77")
+        rm -f "$root/group-created"; GH_STATUS=204 ;;
+      *) printf "unexpected request: %s %s\n" "$method" "$path" >&2; return 1 ;;
+    esac
+  }
+  migration_quarantine_ensure
+  [ "$MIGRATION_QUARANTINE_GROUP_ID" = 77 ]
+  [ "$(stat -c %a "$MIGRATION_CLASSIC_QUARANTINE_STATE")" = 600 ]
+  php -r '\''
+    $j=json_decode(file_get_contents($argv[1]),true);
+    exit(($j["phase"]??"")==="active" && ($j["group_id"]??0)===77 ? 0 : 1);
+  '\'' "$MIGRATION_CLASSIC_QUARANTINE_STATE"
+  migration_quarantine_move_all
+  [ "$(sort -n "$root/moved" | tr "\n" " ")" = "101 102 " ]
+  migration_quarantine_delete
+  [ ! -e "$MIGRATION_CLASSIC_QUARANTINE_STATE" ]
+  [ ! -e "$root/group-created" ]
+'
+
+# A failed remote inventory must fail the eligibility barrier; process
+# substitution must not hide the producer exit code.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; mkdir -p "$RUNDIR" "$CFGDIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  MIGRATION_CLASSIC_QUIESCE_FILE=$RUNDIR/quiesced
+  GH_OWNER=dinglebear-ai; NAME_PREFIX=ci-runner
+  err(){ :; }; host(){ echo tootie; }
+  fleet_inventory_refresh(){ return 0; }; current_count(){ echo 0; }
+  github_runner_inventory(){ return 7; }
+  . "$SCRIPT_DIR/runner-migration.sh"
+  : >"$MIGRATION_CLASSIC_QUIESCE_FILE"
+  ! migration_classic_prove_ineligible
 '
 
 # Exercise every persisted phase with exact revisions. Test gates stand in for
@@ -39,6 +145,8 @@ bash -c '
   mkdir -p "$RUNDIR" "$CFGDIR" "$CACHE_ROOT"
   SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
   POOL_BACKEND=scaleset
+  GH_OWNER=dinglebear-ai
+  NAME_PREFIX=ci-runner
   SCALESET_COMPAT=$CFGDIR/scaleset-compatibility.json
   MIGRATION_STATE=$CFGDIR/backend-transition.json
   JIT_STATE_DIR=$RUNDIR/jit
@@ -47,14 +155,28 @@ bash -c '
   err(){ :; }
   . "$SCRIPT_DIR/runner-scalesets.sh"
   . "$SCRIPT_DIR/runner-migration.sh"
+  migration_quarantine_ensure(){ return 0; }
+  migration_quarantine_move_all(){ return 0; }
+  migration_quarantine_delete(){ return 0; }
   scaleset_supervisor_start(){ return 0; }
   scaleset_record_valid(){ return 0; }
+  scaleset_request(){ return 0; }
   jit_reconcile(){ return 0; }
+  runners=""
+  fleet_inventory_refresh(){ : >"$RUNDIR/inventory"; }
+  github_phase_refresh(){ return 0; }
+  managed_names(){ printf "%s\n" $runners; }
+  current_count(){ set -- $runners; printf "%s\n" "$#"; }
+  runner_state(){ echo idle; }
+  remove_runner(){ runners="${runners/ $1/}"; runners="${runners/$1 /}"; runners="${runners/$1/}"; }
+  github_runner_inventory(){ return 0; }
+  host(){ echo tootie; }
+  cmd_start(){ runners="ci-runner-python-1"; }
   cat >"$SCALESET_COMPAT" <<EOF
-{"compatibility_record_id":"$compatibility","cleanup":{"complete":true},"capabilities":{"eligibility_barrier":true}}
+{"compatibility_record_id":"$compatibility","runner_group_id":7,"quarantine_runner_group_id":8,"cleanup":{"complete":true},"capabilities":{"eligibility_barrier":true}}
 EOF
   chmod 0600 "$SCALESET_COMPAT"
-  CRF_MIGRATION_TEST_GATES=1
+  scaleset_ownership_revision(){ printf "%s\n" "$ownership"; }
   migration_load
   migration_start "$expected" "$ownership" "$compatibility" "$MIGRATION_REVISION"
   [ "$MIGRATION_PHASE" = quiescing_classic ] && [ "$MIGRATION_EFFECTIVE_BACKEND" = classic ]
@@ -70,6 +192,8 @@ EOF
   [ "$MIGRATION_PHASE" = draining_assigned_jit ]
   migration_advance_reverse
   [ "$MIGRATION_PHASE" = activating_classic ] && [ "$MIGRATION_EFFECTIVE_BACKEND" = scaleset ]
+  backend_classic_admission_allowed
+  ! backend_scaleset_admission_allowed
   migration_advance_reverse
   [ "$MIGRATION_PHASE" = classic_active ] && [ "$MIGRATION_EFFECTIVE_BACKEND" = classic ]
   [ "$(stat -c %a "$MIGRATION_STATE")" = 600 ]

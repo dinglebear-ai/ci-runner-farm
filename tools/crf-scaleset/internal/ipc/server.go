@@ -17,10 +17,11 @@ import (
 type Handler func(context.Context, protocol.Request) protocol.Response
 
 type Server struct {
-	Path    string
-	Handler Handler
-	mu      sync.Mutex
-	lastSeq map[string]uint64
+	Path       string
+	Handler    Handler
+	AllowedUID *uint32
+	mu         sync.Mutex
+	lastSeq    map[string]uint64
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -59,7 +60,11 @@ func (s *Server) Serve(ctx context.Context) error {
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	if !rootPeer(conn) {
+	allowedUID := uint32(0)
+	if s.AllowedUID != nil {
+		allowedUID = *s.AllowedUID
+	}
+	if !authorizedPeer(conn, allowedUID) {
 		json.NewEncoder(conn).Encode(protocol.Response{SchemaVersion: 1, OK: false, Code: "peer_not_root"})
 		return
 	}
@@ -80,7 +85,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	json.NewEncoder(conn).Encode(s.Handler(ctx, req))
 }
 
-func rootPeer(conn net.Conn) bool {
+func authorizedPeer(conn net.Conn, allowedUID uint32) bool {
 	unix, ok := conn.(*net.UnixConn)
 	if !ok {
 		return false
@@ -98,5 +103,5 @@ func rootPeer(conn net.Conn) bool {
 	}); err != nil {
 		return false
 	}
-	return uid == 0
+	return uid == allowedUID
 }

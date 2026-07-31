@@ -1,0 +1,439 @@
+Menu="RunnerFarm:2"
+Title="Pools"
+Tag="th"
+---
+<?php
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
+$plugin = 'ci-runner-farm';
+$cfg = parse_plugin_cfg($plugin);
+$csrf = $var['csrf_token'] ?? '';
+$host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec("grep MemTotal /proc/meminfo"))) / 1048576);
+$defaults = [
+  'RUNNER_COUNT'=>'4', 'RUNNER_LABELS'=>'self-hosted,unraid,build',
+  'RUNNER_MODE'=>'single', 'RUNNER_POOLS'=>'rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1',
+  'POOL_BACKEND'=>'classic', 'RUNNER_CPUS'=>'', 'RUNNER_MEMORY'=>'16g',
+  'EPHEMERAL'=>'false', 'RUN_AS_ROOT'=>'false',
+  'RESOURCE_CPU_BUDGET'=>'auto', 'RESOURCE_MEMORY_BUDGET'=>'auto',
+  'RESOURCE_CPU_RESERVE'=>'2', 'RESOURCE_MEMORY_RESERVE'=>'8g',
+  'RESOURCE_CPU_OVERCOMMIT'=>'1.0', 'RESOURCE_MEMORY_SWAP'=>'none',
+  'RESOURCE_PIDS_LIMIT'=>'4096', 'AUTOSCALE'=>'false', 'AUTOSCALE_MIN'=>'2',
+  'AUTOSCALE_MAX'=>'16', 'AUTOSCALE_MIN_IDLE'=>'2', 'AUTOSCALE_STEP'=>'2',
+  'AUTOSCALE_INTERVAL'=>'30', 'AUTOSCALE_IDLE_GRACE'=>'5',
+];
+$config_revision = trim((string)@shell_exec('/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh config-revision 2>/dev/null'));
+if (!preg_match('/^[0-9a-f]{64}$/', $config_revision)) $config_revision = str_repeat('0', 64);
+$gh_scope = $cfg['GH_SCOPE'] ?? 'repo';
+$gh_owner = $cfg['GH_OWNER'] ?? 'unraid';
+if (!function_exists('crfp_g')) {
+  function crfp_g($cfg,$k,$d=''){ global $defaults; return htmlspecialchars($cfg[$k] ?? $defaults[$k] ?? $d, ENT_QUOTES); }
+}
+if (!function_exists('crfp_sel')) {
+  function crfp_sel($cfg,$k,$val,$d=''){ global $defaults; return (($cfg[$k] ?? $defaults[$k] ?? $d) === $val) ? 'selected' : ''; }
+}
+?>
+
+<div class="crfp-context">
+  <strong>Routing context</strong>
+  <span><?=htmlspecialchars($gh_scope === 'org' ? "Organization · $gh_owner" : 'Repository scope', ENT_QUOTES)?></span>
+  <span class="crf-muted">GitHub ownership and credentials remain under Settings.</span>
+</div>
+
+<form markdown="1" name="ci_runner_pools" method="POST" action="">
+
+### Runner pools
+
+_(Runner layout)_:
+: <select name="RUNNER_MODE" id="crf-runner-mode" onchange="crfPoolMode()">
+  <option value="single" <?=crfp_sel($cfg,'RUNNER_MODE','single','single')?>>Single fleet (legacy)</option>
+  <option value="pools" <?=crfp_sel($cfg,'RUNNER_MODE','pools','single')?>>Runner pools</option>
+  </select>
+
+:crf_mode_plug:
+> **Single fleet** preserves one shared count and label set. **Runner pools** reserve independently scaled capacity behind labels such as `ci-pool-python`.
+>
+> Pools are scheduling routes, not security boundaries. They share the host kernel, runner image, network policy, privileged Docker mode, and writable caches.
+:end
+
+_(Requested runner backend)_:
+: <select name="POOL_BACKEND" id="crf-pool-backend">
+  <option value="classic" <?=crfp_sel($cfg,'POOL_BACKEND','classic','classic')?>>Classic persistent runners</option>
+  <option value="scaleset" <?=crfp_sel($cfg,'POOL_BACKEND','scaleset','classic')?>>GitHub scale sets (gated)</option>
+  </select>
+
+:crf_backend_plug:
+> Apply saves requested intent only. It never changes the effective backend. Use the explicit migration controls on Fleet after the compatibility gate passes.
+:end
+
+<div class="crf-banner crf-banner-info" id="crf-scaleset-readiness">Scale-set readiness has not been checked.</div>
+<uui-button class="orange" size="xs" id="crf-compat-run" onclick="crfRunCompatibility();return false;">Run compatibility test</uui-button>
+
+_(Pool definitions)_:
+: <input type="hidden" name="RUNNER_POOLS" id="crf-pools-value" value="<?=htmlspecialchars(crfp_g($cfg,'RUNNER_POOLS'),ENT_QUOTES)?>">
+  <div id="crf-pools-editor"></div>
+  <div id="crf-pools-errors" class="crfp-result" aria-live="polite"></div>
+  <uui-button id="crf-add-pool" class="orange" size="xs" onclick="crfAddPool();return false;">Add pool</uui-button>
+
+:crf_pools_plug:
+> Each pool has its own routing label, fixed target, autoscale floor, optional ceiling, idle buffer, CPU claim, and memory claim. Workflows request the generated selector directly, for example `runs-on: ci-pool-python`. Do not add `self-hosted`; that would also make the job eligible for legacy runners.
+>
+> Set **Max** to `auto` to admit runners from the available CPU and memory budget instead of a fixed runner count. The host resource budget remains the hard admission boundary.
+>
+> Removing or renaming a pool drains its runners as jobs finish; workflows using the old label will queue.
+:end
+
+<div class="crfp-routing-warn" id="crf-routing-warn">Runner pools reserve routed capacity; they are not security isolation. Restrict the GitHub runner group to trusted repositories.</div>
+
+_(Concurrent runners)_:
+: <input type="number" name="RUNNER_COUNT" min="1" max="64" value="<?=crfp_g($cfg,'RUNNER_COUNT','4')?>">
+
+:crf_count_plug:
+> Fixed runner count for Single fleet mode. Each runner executes one job at a time.
+:end
+
+_(Runner labels)_:
+: <input type="text" name="RUNNER_LABELS" value="<?=crfp_g($cfg,'RUNNER_LABELS')?>">
+
+:crf_labels_plug:
+> Comma-separated labels for Single fleet mode.
+:end
+
+_(Default CPUs per runner)_:
+: <input type="text" name="RUNNER_CPUS" value="<?=crfp_g($cfg,'RUNNER_CPUS')?>" placeholder="blank = uncapped">
+
+:crf_cpus_plug:
+> Default CPU cap. A pool can override it. In resource-based autoscaling, every admitted runner is charged its effective CPU claim.
+:end
+
+_(Default memory per runner)_:
+: <input type="text" name="RUNNER_MEMORY" value="<?=crfp_g($cfg,'RUNNER_MEMORY','16g')?>">
+
+:crf_mem_plug:
+> Default hard memory cap. A pool can override it; admission accounts for the effective value.
+:end
+
+_(Ephemeral runners)_:
+: <select name="EPHEMERAL">
+  <option value="false" <?=crfp_sel($cfg,'EPHEMERAL','false','false')?>>false (persistent, warm cache)</option>
+  <option value="true" <?=crfp_sel($cfg,'EPHEMERAL','true','false')?>>true (clean per job)</option>
+  </select>
+
+_(Run jobs as root)_:
+: <select name="RUN_AS_ROOT">
+  <option value="false" <?=crfp_sel($cfg,'RUN_AS_ROOT','false','false')?>>false (non-root runner)</option>
+  <option value="true" <?=crfp_sel($cfg,'RUN_AS_ROOT','true','false')?>>true (root, legacy)</option>
+  </select>
+
+### Resource admission
+
+_(CPU budget)_:
+: <input type="text" name="RESOURCE_CPU_BUDGET" value="<?=crfp_g($cfg,'RESOURCE_CPU_BUDGET','auto')?>" placeholder="auto or CPU count">
+
+:crf_cpu_budget_plug:
+> `auto` uses the host CPU count. A numeric value limits the runner farm before overcommit is applied.
+:end
+
+_(CPU reserved for host)_:
+: <input type="text" name="RESOURCE_CPU_RESERVE" value="<?=crfp_g($cfg,'RESOURCE_CPU_RESERVE','2')?>">
+
+_(CPU overcommit)_:
+: <input type="text" name="RESOURCE_CPU_OVERCOMMIT" value="<?=crfp_g($cfg,'RESOURCE_CPU_OVERCOMMIT','1.0')?>">
+
+:crf_cpu_overcommit_plug:
+> Multiplier from 1.0 through 4.0. CPU can be time-shared; memory cannot.
+:end
+
+_(Memory budget)_:
+: <input type="text" name="RESOURCE_MEMORY_BUDGET" value="<?=crfp_g($cfg,'RESOURCE_MEMORY_BUDGET','auto')?>" placeholder="auto or size">
+
+_(Memory reserved for host)_:
+: <input type="text" name="RESOURCE_MEMORY_RESERVE" value="<?=crfp_g($cfg,'RESOURCE_MEMORY_RESERVE','8g')?>">
+
+_(Memory swap policy)_:
+: <select name="RESOURCE_MEMORY_SWAP">
+  <option value="none" <?=crfp_sel($cfg,'RESOURCE_MEMORY_SWAP','none','none')?>>none (memory limit is total limit)</option>
+  <option value="double" <?=crfp_sel($cfg,'RESOURCE_MEMORY_SWAP','double','none')?>>double (swap up to memory limit again)</option>
+  </select>
+
+_(PIDs per runner)_:
+: <input type="number" name="RESOURCE_PIDS_LIMIT" min="1" max="1048576" value="<?=crfp_g($cfg,'RESOURCE_PIDS_LIMIT','4096')?>">
+
+:crf_resource_plug:
+> `Max = auto` is still bounded by these budgets, the host reserve, each pool's CPU and memory claims, and the 64-runner emergency fuse.
+:end
+
+### Autoscaling
+
+_(Autoscaling)_:
+: <select name="AUTOSCALE">
+  <option value="false" <?=crfp_sel($cfg,'AUTOSCALE','false','false')?>>off (fixed capacity)</option>
+  <option value="true" <?=crfp_sel($cfg,'AUTOSCALE','true','false')?>>on (capacity floats by pool demand)</option>
+  </select>
+
+:crf_autoscale_plug:
+> In pool mode, each pool scales independently from its own assigned demand. A Python queue grows Python capacity without putting Python jobs behind Rust runners.
+:end
+
+_(Single fleet minimum)_:
+: <input type="number" name="AUTOSCALE_MIN" min="0" max="64" value="<?=crfp_g($cfg,'AUTOSCALE_MIN','2')?>">
+
+_(Single fleet maximum)_:
+: <input type="number" name="AUTOSCALE_MAX" min="1" max="64" value="<?=crfp_g($cfg,'AUTOSCALE_MAX','16')?>">
+
+_(Single fleet idle buffer)_:
+: <input type="number" name="AUTOSCALE_MIN_IDLE" min="0" max="64" value="<?=crfp_g($cfg,'AUTOSCALE_MIN_IDLE','2')?>">
+
+_(Adjustment step)_:
+: <input type="number" name="AUTOSCALE_STEP" min="1" max="64" value="<?=crfp_g($cfg,'AUTOSCALE_STEP','2')?>">
+
+_(Check interval (s))_:
+: <input type="number" name="AUTOSCALE_INTERVAL" min="10" max="600" value="<?=crfp_g($cfg,'AUTOSCALE_INTERVAL','30')?>">
+
+_(Scale-down grace checks)_:
+: <input type="number" name="AUTOSCALE_IDLE_GRACE" min="1" max="60" value="<?=crfp_g($cfg,'AUTOSCALE_IDLE_GRACE','5')?>">
+
+<div id="crf-pools-result" class="crfp-result" aria-live="polite"></div>
+
+&nbsp;
+: <input type="submit" name="Apply" value="_(Apply pool settings)_" style="width:auto" class="orange">
+  <input type="button" value="_(Reset pool defaults)_" onclick="crfResetPoolDefaults()" style="width:auto">
+
+</form>
+
+<script>
+const CRF_POOL_DEFAULTS=<?=json_encode($defaults)?>;
+const CRF_POOL_CONFIG_KEYS=Object.freeze(Object.keys(CRF_POOL_DEFAULTS));
+const CRF_POOL_SCOPE=<?=json_encode($gh_scope)?>;
+const CRF_POOL_OWNER=<?=json_encode($gh_owner)?>;
+let CRF_POOL_CONFIG_REVISION=<?=json_encode($config_revision)?>;
+const CRF_POOL_ID=/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/;
+const CRF_POOL_FIELDS=Object.freeze(['id','routing_label','additional_labels','fixed','min','max','idle','cpus','memory']);
+const CRF_POOL_TITLES={id:'Pool ID',routing_label:'Routing label',additional_labels:'Additional labels',fixed:'Fixed',min:'Min',max:'Max',idle:'Idle',cpus:'CPUs',memory:'Memory'};
+let CRF_POOL_ROW_SEQ=0;
+function crfPoolRows(){return [...document.querySelectorAll('#crf-pools-editor .crfp-pool-row')];}
+function crfPoolInput(row,field){return row.querySelector('[data-pool-field="'+field+'"]');}
+function crfSerializePools(){
+  const value=crfPoolRows().map(row=>'v2|'+CRF_POOL_FIELDS.map(field=>crfPoolInput(row,field).value.trim().toLowerCase()).join('|')).join(';');
+  document.getElementById('crf-pools-value').value=value;
+  return value;
+}
+function crfPoolPreview(row){
+  const id=crfPoolInput(row,'id').value.trim(), routing=crfPoolInput(row,'routing_label').value.trim();
+  const selector=CRF_POOL_ID.test(id)&&routing?'runs-on: '+routing:'';
+  const copy=row.querySelector('.crfp-pool-selector');
+  copy.textContent=selector||'Enter a valid pool ID and routing label';
+  copy.disabled=!selector;copy.dataset.copy=selector;
+  row.querySelector('legend').textContent='Runner pool '+(id||row.dataset.rowNumber);
+}
+function crfAddPool(rec='',notify=true,saved=false){
+  const original=String(rec).split('|'), v2=original[0]==='v2';
+  const parts=v2?original.slice(1):rec?[original[0],original[0],'',original[1],original[2],original[3],original[4],'inherit','inherit']:
+    ['pool','','','1','1','auto','1','inherit','inherit'];
+  while(parts.length<CRF_POOL_FIELDS.length)parts.push('');
+  const row=document.createElement('fieldset');row.className='crfp-pool-row';
+  row.dataset.rowNumber=String(++CRF_POOL_ROW_SEQ);
+  const legend=document.createElement('legend');row.appendChild(legend);
+  CRF_POOL_FIELDS.forEach((field,index)=>{
+    const wrap=document.createElement('label');wrap.textContent=CRF_POOL_TITLES[field];
+    const input=document.createElement('input');input.value=parts[index];input.dataset.poolField=field;
+    input.type=['fixed','min','idle'].includes(field)?'number':'text';
+    if(['fixed','min','idle'].includes(field)){input.min=field==='fixed'?'1':'0';input.max='64';}
+    if(field==='id'&&saved)input.readOnly=true;
+    input.setAttribute('aria-label',CRF_POOL_TITLES[field]+' for runner pool row '+row.dataset.rowNumber);
+    input.addEventListener('input',()=>{crfPoolPreview(row);crfValidatePools(false);});
+    wrap.appendChild(input);row.appendChild(wrap);
+  });
+  const selector=document.createElement('button');selector.type='button';selector.className='crfp-pool-selector';
+  selector.addEventListener('click',()=>{if(selector.dataset.copy)crfCopyText(selector.dataset.copy).then(()=>crfToast('Selector copied'));});
+  row.appendChild(selector);
+  const copy=document.createElement('button');copy.type='button';copy.className='orange crfp-pool-action';copy.textContent='Copy selector';
+  copy.addEventListener('click',()=>selector.click());row.appendChild(copy);
+  const duplicate=document.createElement('button');duplicate.type='button';duplicate.className='crfp-pool-action';duplicate.textContent='Duplicate';
+  duplicate.addEventListener('click',()=>{
+    const values=CRF_POOL_FIELDS.map(field=>crfPoolInput(row,field).value.trim());
+    values[0]+='-copy';values[1]+='-copy';crfAddPool('v2|'+values.join('|'),true,false);
+  });row.appendChild(duplicate);
+  const remove=document.createElement('button');remove.type='button';remove.className='crfp-pool-action';remove.textContent='Remove';
+  remove.addEventListener('click',()=>{row.remove();crfValidatePools(false);});row.appendChild(remove);
+  document.getElementById('crf-pools-editor').appendChild(row);crfPoolPreview(row);
+  if(notify)crfValidatePools(false);
+}
+function crfBuildPoolEditor(raw){
+  const editor=document.getElementById('crf-pools-editor');editor.textContent='';
+  String(raw||'').split(';').filter(Boolean).forEach(rec=>crfAddPool(rec,false,true));
+}
+function crfValidatePools(focus=true){
+  const mode=document.getElementById('crf-runner-mode').value, rows=crfPoolRows();
+  const result=document.getElementById('crf-pools-errors'), errors=[], seen=new Set();
+  let firstBad=null,fixedTotal=0,maxTotal=0;
+  rows.forEach(row=>row.querySelectorAll('input').forEach(input=>{input.classList.remove('crfp-invalid');input.removeAttribute('aria-invalid');}));
+  const bad=(input,message)=>{errors.push(message);input.classList.add('crfp-invalid');input.setAttribute('aria-invalid','true');firstBad=firstBad||input;};
+  if(mode==='pools'&&CRF_POOL_SCOPE!=='org')errors.push('Runner pools require Organization scope; change it under Settings.');
+  if(mode==='pools'&&!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(CRF_POOL_OWNER))errors.push('The configured organization owner is invalid.');
+  if(mode==='pools'&&!rows.length)errors.push('Add at least one pool.');
+  if(rows.length>8)errors.push('At most eight pools are supported.');
+  rows.forEach((row,index)=>{
+    const input=Object.fromEntries(CRF_POOL_FIELDS.map(field=>[field,crfPoolInput(row,field)]));
+    const id=input.id.value.trim().toLowerCase(), route=input.routing_label.value.trim().toLowerCase();
+    if(!CRF_POOL_ID.test(id)||['default','invalid'].includes(id))bad(input.id,'Pool '+(index+1)+' has an invalid or reserved ID.');
+    if(seen.has(id))bad(input.id,'Pool ID '+id+' is duplicated.');seen.add(id);
+    if(!/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/.test(route)||
+      ['self-hosted','linux','windows','macos','x64','x86','arm','arm64','default','invalid','ci-runner-farm'].includes(route))
+      bad(input.routing_label,'Routing label for '+id+' is invalid or reserved.');
+    const labels=input.additional_labels.value.trim();
+    if(labels&&labels.split(',').some(label=>!/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/.test(label)||label===route))
+      bad(input.additional_labels,'Additional labels for '+id+' are invalid or duplicate its routing label.');
+    const fixed=input.fixed.value,min=input.min.value,max=input.max.value.toLowerCase(),idle=input.idle.value;
+    if(!/^[1-9][0-9]?$/.test(fixed)||+fixed>64)bad(input.fixed,'Fixed for '+id+' must be 1-64.');
+    if(!/^(?:0|[1-9][0-9]?)$/.test(min)||+min>64)bad(input.min,'Min for '+id+' must be 0-64.');
+    if(max!=='auto'&&(!/^[1-9][0-9]?$/.test(max)||+max>64))bad(input.max,'Max for '+id+' must be 1-64 or auto.');
+    if(!/^(?:0|[1-9][0-9]?)$/.test(idle)||+idle>64)bad(input.idle,'Idle for '+id+' must be 0-64.');
+    if(max!=='auto'&&(+min>+max||+idle>+max))bad(input.max,'Min and Idle cannot exceed Max for '+id+'.');
+    if(!/^(?:inherit|(?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)$/.test(input.cpus.value))bad(input.cpus,'CPUs for '+id+' must be inherit or a positive value.');
+    if(!/^(?:inherit|[1-9][0-9]*(?:b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib)?)$/i.test(input.memory.value))
+      bad(input.memory,'Memory for '+id+' is invalid.');
+    fixedTotal+=+fixed||0;if(max!=='auto')maxTotal+=+max||0;
+  });
+  if(fixedTotal>64)errors.push('Combined fixed capacity exceeds the 64-runner emergency fuse.');
+  if(maxTotal>64)errors.push('Combined numeric maximums exceed the 64-runner emergency fuse; use auto for resource-based admission.');
+  crfSerializePools();result.textContent=errors.join(' ');result.classList.toggle('on',errors.length>0);
+  document.dispatchEvent(new Event('crf-pools-change'));
+  if(errors.length&&focus&&firstBad)firstBad.focus();
+  return errors.length===0;
+}
+function crfPoolMode(){
+  const pools=document.getElementById('crf-runner-mode').value==='pools';
+  document.getElementById('crf-pools-editor').style.display=pools?'grid':'none';
+  document.getElementById('crf-add-pool').style.display=pools?'':'none';
+  document.getElementById('crf-routing-warn').style.display=pools?'':'none';
+  ['RUNNER_COUNT','RUNNER_LABELS','AUTOSCALE_MIN','AUTOSCALE_MAX','AUTOSCALE_MIN_IDLE'].forEach(name=>{
+    const field=document.getElementsByName(name)[0],dd=field&&field.closest('dd');
+    if(dd){dd.style.display=pools?'none':'';if(dd.previousElementSibling)dd.previousElementSibling.style.display=pools?'none':'';}
+  });
+  crfValidatePools(false);
+}
+function crfResetPoolDefaults(){
+  CRF_POOL_CONFIG_KEYS.forEach(key=>{const field=document.getElementsByName(key)[0];if(field)field.value=CRF_POOL_DEFAULTS[key];});
+  crfBuildPoolEditor(CRF_POOL_DEFAULTS.RUNNER_POOLS);crfPoolMode();
+}
+crfBuildPoolEditor(document.getElementById('crf-pools-value').value);crfPoolMode();
+
+let CRF_COMPAT_OPERATION='';
+function crfRenderReadiness(d){
+  const box=document.getElementById('crf-scaleset-readiness'),c=d.compatibility||{},b=d.backend||{};
+  const identity=[c.helper_digest&&('helper '+c.helper_digest.slice(0,12)),c.plugin_digest&&('plugin '+c.plugin_digest.slice(0,12)),
+    c.runner_group_id!=null&&('production group '+c.runner_group_id),
+    c.quarantine_runner_group_id!=null&&('quarantine group '+c.quarantine_runner_group_id)].filter(Boolean).join(' · ');
+  box.textContent='Requested '+(b.requested||'unknown')+' · effective '+(b.effective||'unknown')+' · '+(b.transition_phase||'unknown')+
+    ' · gate '+(c.valid?'valid':(c.reason||'not ready'))+(identity?' · '+identity:'');
+}
+function crfRefreshReadiness(){crfPost({action:'readiness-json'}).then(crfRenderReadiness).catch(()=>{});}
+function crfPollCompatibility(){
+  if(!CRF_COMPAT_OPERATION)return;
+  crfPost({action:'operation-status',operation_id:CRF_COMPAT_OPERATION}).then(status=>{
+    const box=document.getElementById('crf-scaleset-readiness');
+    box.textContent='Compatibility test: '+status.state+(status.message?' · '+status.message:'');
+    if(status.state==='running')setTimeout(crfPollCompatibility,1000);
+    else{CRF_COMPAT_OPERATION='';document.getElementById('crf-compat-run').removeAttribute('aria-busy');crfRefreshReadiness();}
+  }).catch(()=>setTimeout(crfPollCompatibility,1500));
+}
+function crfRunCompatibility(){
+  if(CRF_COMPAT_OPERATION)return;
+  const button=document.getElementById('crf-compat-run');button.setAttribute('aria-busy','true');
+  crfPost({action:'compatibility-test'}).then(result=>{
+    if(!result.operation_id)throw new Error('missing operation ID');
+    CRF_COMPAT_OPERATION=result.operation_id;crfPollCompatibility();
+  }).catch(error=>{button.removeAttribute('aria-busy');crfToast('Compatibility test could not start');console.error(error);});
+}
+crfRefreshReadiness();
+
+(function(){
+  const min=document.getElementsByName('AUTOSCALE_MIN')[0],max=document.getElementsByName('AUTOSCALE_MAX')[0];
+  const warning=document.createElement('div');warning.className='crfp-inline-warning';
+  warning.textContent='Single fleet minimum exceeds maximum; the runtime will clamp it.';
+  (max.closest('dl')||max.parentElement).after(warning);
+  const check=()=>warning.classList.toggle('on',+min.value>+max.value);
+  min.addEventListener('input',check);max.addEventListener('input',check);check();
+})();
+(function(){
+  const host=<?=json_encode($host_mem_gb)?>,memory=document.getElementsByName('RUNNER_MEMORY')[0];
+  if(!host||!memory)return;
+  const warning=document.createElement('div');warning.className='crfp-inline-warning';
+  (memory.closest('dl')||memory.parentElement).after(warning);
+  const parse=value=>{const match=String(value).trim().match(/^([0-9]*\.?[0-9]+)\\s*([kmgt]?)b?$/i);if(!match)return 0;
+    return parseFloat(match[1])*({k:1/1048576,m:1/1024,g:1,t:1024}[(match[2]||'g').toLowerCase()]||1);};
+  const check=()=>{const gb=parse(memory.value),records=crfPoolRows(),auto=document.getElementsByName('AUTOSCALE')[0].value==='true';
+    const count=document.getElementById('crf-runner-mode').value==='pools'?
+      records.reduce((sum,row)=>sum+(+(crfPoolInput(row,auto?'min':'fixed').value)||0),0):
+      +(document.getElementsByName(auto?'AUTOSCALE_MIN':'RUNNER_COUNT')[0].value||0);
+    warning.textContent='Warm floor '+count+' × '+gb+'g = '+(count*gb).toFixed(1)+'g of '+host+'g host memory.';
+    warning.classList.toggle('on',count*gb>host*.8);
+  };
+  document.addEventListener('crf-pools-change',check);memory.addEventListener('input',check);check();
+})();
+
+const crfPoolsForm=document.forms['ci_runner_pools'];
+crfPoolsForm.addEventListener('submit',async event=>{
+  event.preventDefault();if(crfPoolsForm.dataset.applying==='1'||!crfValidatePools(true))return;
+  const settings={};
+  CRF_POOL_CONFIG_KEYS.forEach(key=>{const field=document.getElementsByName(key)[0];settings[key]=String(field.value);});
+  settings.RUNNER_POOLS=crfSerializePools();
+  const submit=crfPoolsForm.querySelector('input[type=submit]'),result=document.getElementById('crf-pools-result');
+  crfPoolsForm.dataset.applying='1';submit.disabled=true;
+  try{
+    const validated=await crfPost({action:'validate-pools',mode:settings.RUNNER_MODE,pools:settings.RUNNER_POOLS,scope:CRF_POOL_SCOPE,owner:CRF_POOL_OWNER});
+    if(!validated.ok)throw new Error(validated.error||'Pool validation failed');
+    const applied=await crfPost({action:'apply-config',expected_config_revision:CRF_POOL_CONFIG_REVISION,settings:JSON.stringify(settings)});
+    if(!applied.ok)throw new Error(applied.error||'Apply failed');
+    CRF_POOL_CONFIG_REVISION=applied.config_revision;result.textContent='Pool settings saved. Use Fleet migration controls to activate a requested backend change.';
+    result.className='crfp-result on saved';crfToast('Pool settings saved');
+  }catch(error){result.textContent='Could not save pool settings: '+error.message;result.className='crfp-result on';}
+  finally{delete crfPoolsForm.dataset.applying;submit.disabled=false;}
+});
+</script>
+
+<style>
+  .crfp-context{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:8px 12px;margin:6px 0 8px;font-size:12px}
+  .crfp-context strong{font-size:13px}
+  .crfp-grid{columns:3 310px;column-gap:8px}
+  .crfp-card{display:inline-block;width:100%;box-sizing:border-box;break-inside:avoid;background:var(--shade-bg-color,transparent);border:1px solid var(--border-color);border-radius:6px;padding:2px 14px 8px;margin:0 0 8px}
+  .crfp-card h3{margin:8px 0 4px;padding:0;border:0;font-size:13px}
+  .crfp-card dl{margin:0!important;padding:2px 0!important;display:flex;align-items:center;gap:10px;background:none!important}
+  .crfp-card dt{float:none!important;width:44%!important;min-width:115px;text-align:right;font-size:12px;margin:0!important;padding:0!important;background:none!important}
+  .crfp-card dd{float:none!important;flex:1;width:auto!important;margin:0!important;padding:0!important;background:none!important}
+  .crfp-card dd input,.crfp-card dd select{width:100%!important;max-width:none!important;box-sizing:border-box;font-size:12px}
+  .crfp-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important;background:var(--shade-bg-color,transparent);border-left:2px solid var(--link-text-color,#29b6f6);border-radius:0;margin:2px 0 6px;padding:6px 10px;line-height:1.45}
+  .crfp-card .inline_help strong,.crfp-card .inline_help code{color:inherit!important}
+  .crfp-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+  #crf-pools-editor{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:6px 0}
+  .crfp-pool-row{display:grid;grid-template-columns:repeat(3,minmax(90px,1fr));gap:8px;align-items:end;min-width:0;border:1px solid var(--border-color);border-radius:6px;padding:10px}
+  .crfp-pool-row legend{font-weight:600;padding:0 5px}
+  .crfp-pool-row label{display:flex;flex-direction:column;gap:2px;min-width:0;font-size:10px;color:var(--alt-text-color)}
+  .crfp-pool-row input{width:100%!important;min-width:0;box-sizing:border-box}
+  button.crfp-pool-selector{grid-column:1/-1;width:100%!important;min-width:0!important;box-sizing:border-box!important;margin:0!important;padding:4px 7px!important;border:1px solid var(--border-color)!important;border-radius:4px!important;background:none!important;color:var(--link-text-color,#29b6f6)!important;text-align:left!important;text-transform:none!important;letter-spacing:0!important;font:11px bitstream,monospace!important;white-space:normal!important;overflow-wrap:anywhere;cursor:pointer}
+  button.crfp-pool-selector:disabled{color:var(--alt-text-color)!important;cursor:default}
+  button.crfp-pool-action{width:auto!important;min-width:0!important;max-width:100%;height:auto!important;margin:0!important;padding:4px 9px!important;font-size:11px!important;line-height:1.25!important;white-space:normal!important;text-transform:none!important;letter-spacing:0!important}
+  .crfp-result{display:none;font-size:12px;font-weight:600;color:var(--brand-red,#e22828);padding:5px 0}
+  .crfp-result.on{display:block}.crfp-result.saved{color:var(--crf-ok)}
+  .crfp-invalid{border-color:var(--brand-red,#e22828)!important}
+  .crfp-routing-warn{border:1px solid var(--brand-orange,#ff8c2f);background:color-mix(in srgb,var(--brand-orange,#ff8c2f) 9%,var(--background-color));border-radius:6px;padding:8px 10px;margin:5px 0;font-size:12px}
+  .crfp-inline-warning{display:none;color:var(--brand-orange,#ff8c2f);font-size:12px;padding:4px 0}.crfp-inline-warning.on{display:block}
+  @media(max-width:1500px){.crfp-grid{columns:2 300px}#crf-pools-editor{grid-template-columns:1fr}}
+  @media(max-width:900px){.crfp-grid{columns:1}.crfp-pool-row{grid-template-columns:repeat(2,minmax(90px,1fr))}}
+</style>
+<script>
+(function(){
+  const form=document.forms['ci_runner_pools'],kids=[...form.children];
+  const heads=kids.filter(node=>/^H[2-4]$/.test(node.tagName));if(heads.length<2)return;
+  const grid=document.createElement('div');grid.className='crfp-grid';
+  let card=null,actions=null;
+  kids.forEach(node=>{
+    if(/^H[2-4]$/.test(node.tagName)){card=document.createElement('section');card.className='crfp-card';grid.appendChild(card);card.appendChild(node);return;}
+    if(node.querySelector&&node.querySelector('input[type=submit]')){actions=node;return;}
+    if(card)card.appendChild(node);
+  });
+  form.appendChild(grid);
+  const editor=document.getElementById('crf-pools-editor'),poolCard=editor&&editor.closest('.crfp-card');
+  if(poolCard){poolCard.style.columnSpan='all';poolCard.style.display='block';}
+  if(actions){const bar=document.createElement('div');bar.className='crfp-actions';actions.querySelectorAll('input').forEach(button=>bar.appendChild(button));actions.remove();form.appendChild(bar);}
+})();
+</script>

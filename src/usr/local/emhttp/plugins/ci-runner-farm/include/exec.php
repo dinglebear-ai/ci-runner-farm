@@ -209,15 +209,27 @@ switch ($action) {
     }
     $keys = config_keys();
     $expectedKeys = array_fill_keys($keys, true);
-    if (count($snapshot) !== count($keys) || array_diff_key($snapshot, $expectedKeys) ||
-        array_diff_key($expectedKeys, $snapshot)) {
-      emit_error(400, 'invalid_snapshot', 'settings snapshot does not match the server allowlist');
+    if (count($snapshot) === 0 || array_diff_key($snapshot, $expectedKeys)) {
+      emit_error(400, 'invalid_snapshot', 'settings snapshot contains no allowed fields or includes an unknown field');
       break;
     }
+    // Each tab owns a disjoint subset of settings. Merge that subset with the
+    // current allowlisted flash values under the expected-revision guard, so
+    // applying Pools cannot erase image/network settings (and vice versa).
+    $merged = [];
+    $currentPath = "$CFGDIR/ci-runner-farm.cfg";
+    if (is_file($currentPath) && !is_link($currentPath)) {
+      foreach (file($currentPath, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+        if (!preg_match('/^([A-Z][A-Z0-9_]*)="([^"\\\\\\r\\n]*)"$/', $line, $m)) continue;
+        if (isset($expectedKeys[$m[1]])) $merged[$m[1]] = $m[2];
+      }
+    }
+    foreach ($snapshot as $key => $value) $merged[$key] = $value;
     $lines = [];
     $invalidKey = '';
     foreach ($keys as $key) {
-      $value = $snapshot[$key];
+      if (!array_key_exists($key, $merged)) continue;
+      $value = $merged[$key];
       $limit = $key === 'RUNNER_POOLS' ? 16384 : ($key === 'CACHE_MOUNTS' ? 16384 : 4096);
       if (!is_string($value) || strlen($value) > $limit ||
           preg_match('/[\x00\r\n"\\\\]/', $value)) {

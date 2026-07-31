@@ -24,4 +24,16 @@ tar -xOf "$tmp/repo/ci-runner-farm.tgz" ./include/runner-entrypoint.sh | grep -F
 grep -Fq 'chmod 0755 "$PLGDIR/include/runner-entrypoint.sh"' "$tmp/repo/ci-runner-farm.plg"
 grep -Fq 'chmod 0755 "$PLGDIR/bin/crf-scaleset"' "$tmp/repo/ci-runner-farm.plg"
 grep -Fxq './bin/crf-scaleset' "$tmp/list2"
+mkdir "$tmp/package"
+tar -xzf "$tmp/repo/ci-runner-farm.tgz" -C "$tmp/package"
+for executable in \
+  bin/crf-scaleset \
+  include/runner-farm.sh \
+  include/runner-entrypoint.sh \
+  event/docker_started \
+  event/stopping_docker \
+  nchan/ci_runner_farm; do
+  [ -x "$tmp/package/$executable" ] ||
+    { echo "package-reproducible: $executable is not executable" >&2; exit 1; }
+done
 echo 'package-reproducible: OK'

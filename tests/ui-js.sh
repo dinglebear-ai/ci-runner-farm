@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Syntax-check the inline Fleet/Settings JavaScript after replacing server-side
+# Syntax-check the inline Fleet/Pools/Settings JavaScript after replacing server-side
 # PHP interpolation expressions with inert JavaScript literals.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,6 +10,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 for page in \
   src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page \
+  src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmPools.page \
   src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page; do
   out="$tmpdir/$(basename "$page").js"
   awk '
@@ -23,20 +24,36 @@ done
 grep -Fq "up '+crfEsc(p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq "min=\"'+(scaleSet?0:(auto?Number(p.count)+1:1))" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
-grep -Fq "mode!=='pools'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'id="crf-pools-section"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'class="crf-pool-fleet"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'data-pool-body="' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "'<span></span><span>'+crfEsc(title)+'</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'class="crf-pool-selector"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+if grep -Eq 'crf-pool-card|crf-pool-row-head' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page; then
+  echo 'Fleet still renders pool summaries instead of one runner table per pool' >&2; exit 1
+fi
 grep -Fq "action:'apply-config'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq 'CRF_CONFIG_KEYS' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq 'data-pool-field' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq "crfSettingsForm.dataset.applying==='1'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+! grep -Fq 'name="RUNNER_MODE"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 if grep -Fq '/update.php' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page; then
   echo 'Settings still delegates writes to /update.php' >&2; exit 1
 fi
-grep -Fq "document.addEventListener('crf-pools-change',check)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq "input.setAttribute('aria-describedby','crf-pools-errors crf-pool-'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq "input.setAttribute('aria-invalid','true')" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq "'Remove '+subject" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
 grep -Fq '.crfs-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
-grep -Fq 'button.crfs-pool-label{font-family:bitstream,monospace' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+
+pools=src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmPools.page
+grep -Fq 'Menu="RunnerFarm:2"' "$pools"
+grep -Fq 'Menu="RunnerFarm:3"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmImage.page
+grep -Fq 'Menu="RunnerFarm:4"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmSettings.page
+grep -Fq 'name="RUNNER_MODE"' "$pools"
+grep -Fq 'name="RESOURCE_CPU_BUDGET"' "$pools"
+grep -Fq 'name="AUTOSCALE"' "$pools"
+grep -Fq 'data-pool-field' "$pools"
+grep -Fq "input.setAttribute('aria-invalid','true')" "$pools"
+grep -Fq "action:'apply-config'" "$pools"
+grep -Fq "action:'validate-pools'" "$pools"
+grep -Fq 'button.crfp-pool-action{width:auto!important' "$pools"
+grep -Fq '.crfp-card .inline_help{font-size:12px;color:var(--link-text-color,#29b6f6)!important' "$pools"
 
 # Execute the empty-state renderer from the page: invalid config must produce a
 # disabled mutation button, while a valid empty fleet remains startable.

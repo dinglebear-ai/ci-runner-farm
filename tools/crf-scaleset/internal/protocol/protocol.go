@@ -88,12 +88,13 @@ func Decode(rd io.Reader) (Request, error) {
 }
 
 type PoolSnapshot struct {
-	PoolID             string `json:"pool_id"`
-	ScaleSetID         int64  `json:"scale_set_id"`
-	AssignedJobs       int    `json:"assigned_jobs"`
-	AdvertisedCapacity int    `json:"advertised_capacity"`
-	LastMessageID      int64  `json:"last_message_id"`
-	SessionHealthy     bool   `json:"session_healthy"`
+	PoolID             string  `json:"pool_id"`
+	ScaleSetID         int64   `json:"scale_set_id"`
+	AssignedJobs       int     `json:"assigned_jobs"`
+	AdvertisedCapacity int     `json:"advertised_capacity"`
+	LastMessageID      int64   `json:"last_message_id"`
+	SessionHealthy     bool    `json:"session_healthy"`
+	AcquiredHandles    []int64 `json:"acquired_handles"`
 }
 
 type Snapshot struct {
@@ -120,6 +121,23 @@ func (s Snapshot) Validate(now time.Time) error {
 	}
 	if len(s.Pools) > 8 {
 		return errors.New("too_many_pools")
+	}
+	seenPools := make(map[string]bool, len(s.Pools))
+	for _, pool := range s.Pools {
+		if !identifier.MatchString(pool.PoolID) || seenPools[pool.PoolID] ||
+			pool.ScaleSetID < 0 || pool.AssignedJobs < 0 ||
+			pool.AdvertisedCapacity < 0 || pool.LastMessageID < 0 ||
+			len(pool.AcquiredHandles) > 64 {
+			return errors.New("invalid_pool_snapshot")
+		}
+		seenPools[pool.PoolID] = true
+		seenHandles := make(map[int64]bool, len(pool.AcquiredHandles))
+		for _, handle := range pool.AcquiredHandles {
+			if handle <= 0 || seenHandles[handle] {
+				return errors.New("invalid_acquired_handle")
+			}
+			seenHandles[handle] = true
+		}
 	}
 	return nil
 }

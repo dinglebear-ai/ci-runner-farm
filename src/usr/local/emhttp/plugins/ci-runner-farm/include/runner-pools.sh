@@ -53,6 +53,13 @@ pool_label_reserved() {
   esac
 }
 
+pool_routing_label_reserved() {
+  case "$1" in
+    self-hosted|linux|windows|macos|x64|x86|arm|arm64|default|invalid|ci-runner-farm) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 parse_cpu_milli() {
   local value="${1,,}" whole fraction
   [ "$value" = "inherit" ] && { printf 'inherit\n'; return 0; }
@@ -160,7 +167,7 @@ pool_v2_record_normalize() {
   routing="${routing,,}"
   pool_label_valid "$routing" ||
     { pool_error "Pool '$id' routing label is invalid." "routing_label"; return 1; }
-  pool_label_reserved "$routing" &&
+  pool_routing_label_reserved "$routing" &&
     { pool_error "Pool '$id' routing label '$routing' is reserved." "routing_label"; return 1; }
   caps="$(pool_additional_normalize "$additional")" ||
     { pool_error "Pool '$id' has invalid, reserved, or duplicate additional labels." "additional_labels"; return 1; }
@@ -368,6 +375,12 @@ pool_min() {
 pool_max() {
   pool_snapshot_load || return 1
   if pool_is_v2; then pool_field "$1" 6; else pool_field "$1" 4; fi
+}
+pool_capacity_ceiling() {
+  local value
+  value="$(pool_max "$1")" || return 1
+  [ "$value" = auto ] && value="$POOL_HARD_MAX"
+  printf '%s\n' "$value"
 }
 pool_idle() {
   pool_snapshot_load || return 1
