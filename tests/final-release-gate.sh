@@ -72,6 +72,8 @@ grep -Fq 'scaleSetLabelContract = "canonical-name-label-v1"'   tools/crf-scalese
   crf_fail "canonical scale-set name-label migration contract is missing"
 grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/internal/github/api.go ||
   crf_fail "scale-set canonical name label is missing"
+grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
+  crf_fail "scale-set request sequence is not serialized through socket delivery"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
@@ -80,6 +82,7 @@ grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/inter
 bash tests/performance-contracts.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
+bash tests/scale-set-control.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null
 
 tmp="$(mktemp -d)"

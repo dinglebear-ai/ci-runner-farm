@@ -597,8 +597,9 @@ scaleset_runtime_config_write() {
   chmod 0600 "$tmp" && mv "$tmp" "$SCALESET_RUNTIME_CONFIG"
 }
 
-scaleset_request() {
-  local operation="$1" payload="${2-}" sequence request_id controller config_rev ownership_rev seq_file output
+_scaleset_request_locked() {
+  local operation="$1" payload="${2-}" sequence request_id controller config_rev ownership_rev
+  local seq_file seq_tmp output
   [ -n "$payload" ] || payload='{}'
   [ -S "$SCALESET_SOCKET" ] && [ -f "$SCALESET_RUNTIME_CONFIG" ] || return 1
   controller="$(php -r '$j=json_decode(file_get_contents($argv[1]),true);echo $j["controller_instance_id"]??"";' \
@@ -611,7 +612,12 @@ scaleset_request() {
   sequence="$(cat "$seq_file" 2>/dev/null || echo 0)"
   [[ "$sequence" =~ ^[0-9]+$ ]] || sequence=0
   sequence=$((sequence + 1))
-  printf '%s\n' "$sequence" >"$seq_file" && chmod 0600 "$seq_file" || return 1
+  seq_tmp="$seq_file.tmp.$$"
+  if ! ( umask 077; printf '%s\n' "$sequence" >"$seq_tmp" ) ||
+     ! chmod 0600 "$seq_tmp" || ! mv "$seq_tmp" "$seq_file"; then
+    rm -f "$seq_tmp"
+    return 1
+  fi
   request_id="request-$sequence"
   output="$(php -r '
     $payload=json_decode($argv[7],true);
@@ -623,6 +629,18 @@ scaleset_request() {
   ' "$request_id" "$operation" "$config_rev" "$ownership_rev" "$controller" "$sequence" "$payload")" ||
     return 1
   printf '%s' "$output" | "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET"
+}
+
+scaleset_request() {
+  local lock_timeout="${SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS:-35}"
+  [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$lock_timeout" -le 120 ] || return 1
+  mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
+  (
+    exec 6>"$SCALESET_STATE_DIR/request.lock" || exit 1
+    chmod 0600 "$SCALESET_STATE_DIR/request.lock" || exit 1
+    flock -w "$lock_timeout" 6 || exit 1
+    _scaleset_request_locked "$@"
+  )
 }
 
 scaleset_snapshot_refresh() {

@@ -63,10 +63,20 @@ php -r '
 # Exercise the real request encoder. The fake helper returns its stdin while a
 # bound Unix socket satisfies the production preflight without accepting data.
 fake_helper="$root/crf-scaleset"
+export CRF_FAKE_ACTIVE="$root/helper-active"
+export CRF_FAKE_OVERLAP="$root/helper-overlap"
 cat >"$fake_helper" <<'EOF'
 #!/bin/bash
+set -euo pipefail
 [ "$1" = request ] || exit 2
-cat
+body="$(cat)"
+if ! mkdir "$CRF_FAKE_ACTIVE" 2>/dev/null; then
+  : >"$CRF_FAKE_OVERLAP"
+  exit 9
+fi
+trap 'rmdir "$CRF_FAKE_ACTIVE" 2>/dev/null || true' EXIT
+sleep 0.03
+printf '%s' "$body"
 EOF
 chmod 0755 "$fake_helper"
 SCALESET_HELPER="$fake_helper"
@@ -90,6 +100,29 @@ php -r '
   exit(is_array($j)&&($j["operation"]??"")==="apply_sessions"&&
     ($j["payload"]["eligible"]??null)===false?0:1);
 ' <<<"$encoded"
+
+# Sequence allocation and socket delivery are one ordered transaction. Without
+# the request lock these concurrent callers overlap in the helper and can reach
+# the controller out of sequence.
+rm -f "$CRF_FAKE_OVERLAP"
+request_pids=""
+for i in $(seq 1 12); do
+  ( scaleset_request read_snapshot '{}' >"$root/concurrent.$i.json" ) &
+  request_pids="$request_pids $!"
+done
+for request_pid in $request_pids; do
+  wait "$request_pid"
+done
+[ ! -e "$CRF_FAKE_OVERLAP" ] || {
+  echo 'scale-set request helper calls overlapped' >&2
+  exit 1
+}
+[ "$(stat -c %a "$SCALESET_STATE_DIR/request.lock")" = 600 ]
+for file in "$root"/concurrent.*.json; do
+  jq -r .sequence "$file"
+done | sort -n >"$root/sequences.actual"
+seq 2 13 >"$root/sequences.expected"
+diff -u "$root/sequences.expected" "$root/sequences.actual"
 
 calls="$root/calls"
 scaleset_request() {
