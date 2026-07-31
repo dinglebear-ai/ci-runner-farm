@@ -34,6 +34,8 @@ grep -Fq 'SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-838860
   "$scalesets" || crf_fail "eight MiB helper-log cap drifted"
 grep -Fq 'SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"' \
   "$scalesets" || crf_fail "operation-record cap drifted"
+grep -Fq 'find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum' \
+  "$scalesets" || crf_fail "plugin identity is locale-sensitive"
 grep -Fq 'soft_limit="${SCHEDULER_START_LIMIT:-2}" hard_limit=4' "$scheduler" ||
   crf_fail "two/four cold-start bounds drifted"
 grep -Fq '"$(( $(date +%s) + 90 ))"' "$scalesets" ||

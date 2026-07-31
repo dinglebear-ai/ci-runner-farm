@@ -29,7 +29,7 @@ scaleset_plugin_digest() {
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   (
     cd "$root" || exit
-    find . -type f -print0 | sort -z | xargs -0 sha256sum
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
   ) | sha256sum | cut -d' ' -f1
 }
 
