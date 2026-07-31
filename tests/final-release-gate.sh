@@ -21,7 +21,12 @@ grep -Fq 'MaxFrameBytes = 1 << 20' "$protocol" || crf_fail "IPC 1 MiB hard limit
 grep -Fq 'len(s.Pools) > 8' "$protocol" || crf_fail "snapshot pool bound missing"
 grep -Fq 'len(cfg.Pools) > 8' "$supervisor" || crf_fail "session goroutine bound missing"
 grep -Fq 'cfg.Heartbeat > 10*time.Second' "$supervisor" || crf_fail "heartbeat limit drifted"
-grep -Fq 'ValidUntil: now.Add(2 * s.cfg.Heartbeat)' "$supervisor" || crf_fail "two-heartbeat staleness missing"
+grep -Fq 'ValidUntil: now.Add(2 * s.cfg.Heartbeat)' "$supervisor" ||
+  crf_fail "control snapshot two-heartbeat staleness missing"
+grep -Fq 'cfg.DemandTTL = 90 * time.Second' "$supervisor" ||
+  crf_fail "bounded GitHub long-poll demand TTL drifted"
+grep -Fq 'result.ValidUntil = now.Add(s.cfg.DemandTTL)' "$supervisor" ||
+  crf_fail "pool demand expires before the bounded long-poll window"
 grep -Fq 'make(chan protocol.PoolSnapshot, len(s.cfg.Pools))' "$supervisor" ||
   crf_fail "per-pool long-poll result bound missing"
 grep -Fq 'MaxJournalBytes int64 = 8 << 20' \
@@ -78,12 +83,15 @@ grep -Fq 'NewAdapterWithScaleSetClientFactory'   tools/crf-scaleset/cmd/crf-scal
   crf_fail "one shared mutable client still serves every scale set"
 grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
   crf_fail "scale-set request sequence is not serialized through socket delivery"
+grep -Fq 'flock -n 5'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "autoscale ticks are not serialized"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
 # The complete typed snapshot remains comfortably beneath the expected 256 KiB
 # budget in the deterministic maximum fixture.
 bash tests/performance-contracts.sh >/dev/null
+bash tests/autoscale-locks.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null

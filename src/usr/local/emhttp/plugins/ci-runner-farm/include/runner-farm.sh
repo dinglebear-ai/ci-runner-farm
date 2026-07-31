@@ -734,7 +734,23 @@ reap_dead_runners() {
 }
 
 # one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
+# Scale-set ticks perform bounded remote IPC and may be invoked by both the
+# daemon and operators. Never queue duplicate ticks behind the request lock.
 autoscale_tick() {
+  local tick_lock="$RUNDIR/autoscale.tick.lock"
+  mkdir -p "$RUNDIR" || return 1
+  (
+    exec 5>"$tick_lock" || exit 1
+    chmod 0600 "$tick_lock" || exit 1
+    if ! flock -n 5; then
+      log "autoscale: tick already running; skipping duplicate"
+      exit 0
+    fi
+    _autoscale_tick
+  )
+}
+
+_autoscale_tick() {
   [ "$AUTOSCALE" = "true" ] || return 0
   [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { log "autoscale: maintenance mode blocks new admissions"; return 0; }
   validate_runtime_config || { err "autoscale: $POOL_CONFIG_ERROR"; return 1; }

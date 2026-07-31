@@ -30,6 +30,7 @@ type Config struct {
 	OwnershipRevision    string
 	Pools                []Pool
 	Heartbeat            time.Duration
+	DemandTTL            time.Duration
 }
 
 type Supervisor struct {
@@ -42,7 +43,11 @@ type Supervisor struct {
 }
 
 func New(cfg Config, poller Poller) (*Supervisor, error) {
-	if len(cfg.Pools) == 0 || len(cfg.Pools) > 8 || cfg.Heartbeat <= 0 || cfg.Heartbeat > 10*time.Second {
+	if cfg.DemandTTL == 0 {
+		cfg.DemandTTL = 90 * time.Second
+	}
+	if len(cfg.Pools) == 0 || len(cfg.Pools) > 8 || cfg.Heartbeat <= 0 || cfg.Heartbeat > 10*time.Second ||
+		cfg.DemandTTL < 2*cfg.Heartbeat || cfg.DemandTTL > 2*time.Minute {
 		return nil, errors.New("invalid_supervisor_config")
 	}
 	s := &Supervisor{cfg: cfg, poller: poller, leases: map[string]int{}}
@@ -106,7 +111,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					SessionHealthy: err == nil, AcquiredHandles: poll.AcquiredHandles}
 				if err == nil {
 					result.ObservedAt = now
-					result.ValidUntil = now.Add(2 * s.cfg.Heartbeat)
+					result.ValidUntil = now.Add(s.cfg.DemandTTL)
 				}
 				select {
 				case results <- result:

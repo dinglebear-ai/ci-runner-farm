@@ -69,7 +69,8 @@ func (p *stickyPoller) Poll(ctx context.Context, pool Pool, capacity int) (PollR
 func TestSnapshotHeartbeatContinuesWhileLongPollsWait(t *testing.T) {
 	p := &stickyPoller{calls: map[int64]int{}}
 	cfg := Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
-		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: 5 * time.Millisecond}
+		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: 5 * time.Millisecond,
+		DemandTTL: 40 * time.Millisecond}
 	for i := 0; i < 7; i++ {
 		cfg.Pools = append(cfg.Pools, Pool{ID: string(rune('a' + i)), ScaleSetID: int64(i + 1)})
 	}
@@ -115,10 +116,23 @@ func TestSnapshotHeartbeatContinuesWhileLongPollsWait(t *testing.T) {
 		cancel()
 		t.Fatalf("snapshot expired during healthy long polls: valid_until=%s", second.ValidUntil)
 	}
-	for _, pool := range second.Pools {
+	now := time.Now().UTC()
+	for i, pool := range second.Pools {
+		if !pool.ValidUntil.After(now) {
+			cancel()
+			t.Fatalf("pool %s expired inside the bounded long-poll window", pool.PoolID)
+		}
+		if !pool.ObservedAt.Equal(first.Pools[i].ObservedAt) {
+			cancel()
+			t.Fatalf("pool %s heartbeat fabricated a completed observation", pool.PoolID)
+		}
+	}
+	time.Sleep(6 * cfg.Heartbeat)
+	third := s.Snapshot()
+	for _, pool := range third.Pools {
 		if pool.ValidUntil.After(time.Now().UTC()) {
 			cancel()
-			t.Fatalf("pool %s demand freshness was renewed by heartbeat without a completed poll", pool.PoolID)
+			t.Fatalf("pool %s stayed fresh beyond the bounded long-poll window", pool.PoolID)
 		}
 	}
 	cancel()
