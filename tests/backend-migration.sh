@@ -195,6 +195,8 @@ bash -c '
   snapshot_mode=stale; ! migration_jit_drained
   snapshot_mode=unhealthy; ! migration_jit_drained
   snapshot_mode=closed; migration_jit_drained
+  sed -i "s/\"acquired_handles\":\[\]/\"acquired_handles\":null/" "$SCALESET_SNAPSHOT"
+  migration_jit_drained
   printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"eligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
   ! migration_jit_drained
   printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"

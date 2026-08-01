@@ -586,8 +586,8 @@ migration_jit_drained() {
     foreach($snapshot["pools"] as $p){
       $id=$p["pool_id"]??"";
       if(!is_string($id)||!isset($expected[$id])||($p["assigned_jobs"]??-1)!==0||
-        ($p["advertised_capacity"]??-1)!==0||!is_array($p["acquired_handles"]??null)||
-        count($p["acquired_handles"])!==0)exit(5);
+        ($p["advertised_capacity"]??-1)!==0||
+        !is_array($handles=$p["acquired_handles"]??[])||count($handles)!==0)exit(5);
       unset($expected[$id]);
       $healthy=($p["session_healthy"]??false)===true;
       $observedRaw=(string)($p["observed_at"]??"");
