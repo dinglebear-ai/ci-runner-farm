@@ -20,6 +20,7 @@ SCALESET_QUARANTINE_STATE="${SCALESET_QUARANTINE_STATE:-$CFGDIR/scaleset-quarant
 GITHUB_APP_TOKEN_FILE="${GITHUB_APP_TOKEN_FILE:-$SCALESET_STATE_DIR/github-app-installation.token}"
 SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-8388608}"
 SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"
+SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"
 SCALESET_QUARANTINE_GROUP_NAME=""
 SCALESET_QUARANTINE_GROUP_ID=0
 SCALESET_QUARANTINE_PHASE=""
@@ -658,9 +659,12 @@ scaleset_snapshot_refresh() {
 }
 
 scaleset_snapshot_tsv() {
+  local max_ttl="$SCALESET_DEMAND_TTL_MAX_SECONDS"
+  [[ "$max_ttl" =~ ^[1-9][0-9]*$ ]] && [ "$max_ttl" -le 300 ] || return 1
   php -r '
     $j=json_decode(file_get_contents($argv[1]),true);
-    if(!is_array($j)||!is_array($j["pools"]??null))exit(2);
+    $max=(int)$argv[2];
+    if(!is_array($j)||!is_array($j["pools"]??null)||$max<=0||$max>300)exit(2);
     $now=time();
     foreach($j["pools"] as $p){
       $id=$p["pool_id"]??"";$assigned=$p["assigned_jobs"]??-1;
@@ -669,12 +673,12 @@ scaleset_snapshot_tsv() {
       $observed=strtotime((string)($p["observed_at"]??""));
       $valid=strtotime((string)($p["valid_until"]??""));
       $fresh=$observed!==false&&$valid!==false&&$observed<=$now+5&&
-        $valid>$now&&$valid-$observed<=30?1:0;
+        $valid>$now&&$valid-$observed<=$max?1:0;
       if(!is_string($id)||!is_int($assigned)||$assigned<0||!is_array($handles))exit(3);
       foreach($handles as $h)if(!is_int($h)||$h<=0)exit(4);
       echo $id,"|",$assigned,"|",$healthy,"|",implode(",",$handles),"|",$fresh,"\n";
     }
-  ' "$SCALESET_SNAPSHOT"
+  ' "$SCALESET_SNAPSHOT" "$max_ttl"
 }
 
 scaleset_publish_zero_capacity() {

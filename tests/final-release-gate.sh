@@ -39,6 +39,8 @@ grep -Fq 'SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-838860
   "$scalesets" || crf_fail "eight MiB helper-log cap drifted"
 grep -Fq 'SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"' \
   "$scalesets" || crf_fail "operation-record cap drifted"
+grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
+  "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq 'find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum' \
   "$scalesets" || crf_fail "plugin identity is locale-sensitive"
 grep -Fq 'soft_limit="${SCHEDULER_START_LIMIT:-2}" hard_limit=4' "$scheduler" ||
@@ -95,6 +97,7 @@ bash tests/autoscale-locks.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
+bash tests/scale-set-supervisor.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null
 
 tmp="$(mktemp -d)"
