@@ -560,10 +560,15 @@ migration_jit_drained() {
       return 1
     }
   done
-  scaleset_snapshot_refresh || {
-    err "cannot prove JIT drain without a fresh scale-set snapshot"
-    return 1
-  }
+  if ! scaleset_snapshot_refresh; then
+    local supervisor_pid=""
+    [ -f "$SCALESET_PID" ] && supervisor_pid="$(cat "$SCALESET_PID" 2>/dev/null)"
+    if { [[ "$supervisor_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$supervisor_pid" 2>/dev/null; } ||
+       [ -S "$SCALESET_SOCKET" ] || [ ! -f "$SCALESET_SNAPSHOT" ]; then
+      err "cannot prove JIT drain without a fresh or stopped-supervisor scale-set snapshot"
+      return 1
+    fi
+  fi
   [ "$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" =     "draining_assigned_jit:scaleset_ineligible" ] || {
     err "scale-set ineligibility barrier is not proven"
     return 1

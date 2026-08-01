@@ -148,6 +148,8 @@ bash -c '
   RUNDIR=$root/run; CFGDIR=$root/cfg; JIT_STATE_DIR=$root/jit
   RESERVATION_DIR=$root/reservations; SCALESET_STATE_DIR=$root/scaleset
   SCALESET_SNAPSHOT=$SCALESET_STATE_DIR/snapshot.json
+  SCALESET_PID=$SCALESET_STATE_DIR/supervisor.pid
+  SCALESET_SOCKET=$SCALESET_STATE_DIR/supervisor.sock
   SCALESET_OWNERSHIP=$CFGDIR/scale-set-ownership.json
   INVENTORY_FILE=$RUNDIR/inventory
   mkdir -p "$RUNDIR" "$CFGDIR" "$JIT_STATE_DIR" "$RESERVATION_DIR" "$SCALESET_STATE_DIR"
@@ -159,7 +161,7 @@ bash -c '
   reservation_release(){ rm -f "$RESERVATION_DIR/$1.state"; }
   snapshot_mode=good; inventory_mode=empty
   scaleset_snapshot_refresh(){
-    local now until assigned=0 capacity=0 handles="" healthy=true
+    local now until assigned=0 capacity=0 handles="" healthy=true refresh_rc=0
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     until=$(date -u -d "+20 seconds" +%Y-%m-%dT%H:%M:%SZ)
     case "$snapshot_mode" in
@@ -169,9 +171,11 @@ bash -c '
       stale) now=$(date -u -d "-2 minutes" +%Y-%m-%dT%H:%M:%SZ) ;;
       unhealthy) healthy=false ;;
       closed) healthy=false; now=0001-01-01T00:00:00Z; until=0001-01-01T00:00:00Z ;;
+      stopped) healthy=false; now=0001-01-01T00:00:00Z; until=0001-01-01T00:00:00Z; refresh_rc=1 ;;
     esac
     printf "{\"pools\":[{\"pool_id\":\"python\",\"session_healthy\":%s,\"assigned_jobs\":%s,\"advertised_capacity\":%s,\"acquired_handles\":[%s],\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
       "$healthy" "$assigned" "$capacity" "$handles" "$now" "$until" >"$SCALESET_SNAPSHOT"
+    return "$refresh_rc"
   }
   fleet_inventory_refresh(){
     : >"$INVENTORY_FILE"
@@ -197,6 +201,7 @@ bash -c '
   snapshot_mode=closed; migration_jit_drained
   sed -i "s/\"acquired_handles\":\[\]/\"acquired_handles\":null/" "$SCALESET_SNAPSHOT"
   migration_jit_drained
+  snapshot_mode=stopped; migration_jit_drained
   printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"eligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
   ! migration_jit_drained
   printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
