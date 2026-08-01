@@ -207,15 +207,20 @@ jit_recent_activity_record() {
 }
 
 jit_retire_handle() {
-  local pool="$1" handle="$2" payload response
+  local pool="$1" handle="$2" payload response rc=0
   pool_id_valid "$pool" && jit_id_valid "$handle" || return 1
   payload="$(php -r 'echo json_encode(["pool_id"=>$argv[1],"work_handle"=>(int)$argv[2]],
     JSON_UNESCAPED_SLASHES);' "$pool" "$handle")" || return 1
-  response="$(scaleset_request retire_jit "$payload")" || return 1
+  response="$(scaleset_request retire_jit "$payload")" || rc=$?
   printf '%s' "$response" | php -r '
     $j=json_decode(stream_get_contents(STDIN),true);
-    if(($j["ok"]??false)!==true||($j["result"]["retired"]??false)!==true)exit(2);
-  '
+    if(($j["ok"]??false)===true&&($j["result"]["retired"]??false)===true)exit(0);
+    // A root-owned local deleting record proves this handle was issued. If the
+    // controller no longer has its tombstone, retirement already committed and
+    // only the response was lost. Treat that one terminal code as idempotent.
+    if(($j["ok"]??true)===false&&($j["code"]??"")==="work_handle_not_issued")exit(0);
+    exit(2);
+  ' || return "$rc"
 }
 
 jit_cleanup_observed() {
@@ -239,7 +244,8 @@ jit_cleanup_observed() {
   # a conservative retry and never permits an old work handle to be reissued.
   jit_retire_handle "$pool" "$handle" || return 1
   reservation_release "$reservation" || return 1
-  jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" "$pool"
+  jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" "$pool" || return 1
+  rm -f "$state"
 }
 
 jit_execute() {

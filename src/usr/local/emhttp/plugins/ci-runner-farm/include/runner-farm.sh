@@ -913,10 +913,38 @@ autoscale_start() {
   echo $! > "$AUTOSCALE_PID"
   log "autoscale daemon started (pid $(cat "$AUTOSCALE_PID"))"
 }
+
+# Enumerate only real autoscale daemon processes. A broad `pkill -f` also
+# matches operator/SSH shells whose command text merely mentions
+# "runner-farm.sh autoscale-daemon", killing the control request before it can
+# restart the singleton. Parse argv from procfs instead: interpreter, this
+# script, then the exact daemon action.
+autoscale_daemon_pids() {
+  local proc pid
+  local -a argv=()
+  for proc in "${AUTOSCALE_PROC_ROOT:-/proc}"/[0-9]*; do
+    [ -r "$proc/cmdline" ] || continue
+    argv=()
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    [ "${#argv[@]}" -ge 3 ] || continue
+    case "${argv[0]##*/}" in bash|sh|zsh) ;; *) continue ;; esac
+    [ "${argv[1]##*/}" = runner-farm.sh ] || continue
+    [ "${argv[2]}" = autoscale-daemon ] || continue
+    pid="${proc##*/}"
+    [ "$pid" = "$$" ] || printf '%s\n' "$pid"
+  done
+}
+
 autoscale_stop() {
-  [ -f "$AUTOSCALE_PID" ] && kill "$(cat "$AUTOSCALE_PID")" 2>/dev/null
+  local pid
+  if [ -f "$AUTOSCALE_PID" ]; then
+    pid="$(cat "$AUTOSCALE_PID" 2>/dev/null)"
+    case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+  fi
   rm -f "$AUTOSCALE_PID"
-  pkill -f "runner-farm.sh autoscale-daemon" 2>/dev/null || true
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done < <(autoscale_daemon_pids)
 }
 autoscale_status() {
   if [ -f "$AUTOSCALE_PID" ] && kill -0 "$(cat "$AUTOSCALE_PID" 2>/dev/null)" 2>/dev/null; then

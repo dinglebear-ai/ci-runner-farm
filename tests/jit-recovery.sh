@@ -26,6 +26,7 @@ jit_paths_refresh
 declare -A fake_exists fake_status fake_consumed fake_pool fake_handle
 removed="$tmp/removed"
 retired="$tmp/retired"
+retire_mode=success
 docker(){
   local op="${1:-}" fmt name
   shift || true
@@ -66,6 +67,10 @@ docker(){
 scaleset_request(){
   [ "$1" = retire_jit ] || return 1
   printf '%s\n' "$2" >>"$retired"
+  if [ "$retire_mode" = already ]; then
+    printf '{"schema_version":1,"request_id":"r","ok":false,"code":"work_handle_not_issued"}\n'
+    return 1
+  fi
   printf '{"schema_version":1,"request_id":"r","ok":true,"result":{"retired":true}}\n'
 }
 
@@ -84,8 +89,7 @@ write_state "$JIT_LEGACY_STATE_DIR/$rust.state" "$rust" running lease-rust-old 1
 jit_reconcile
 [ "${fake_exists[$rust]}" = 0 ] || crf_fail "exited legacy JIT container was not removed"
 [ ! -e "$JIT_LEGACY_STATE_DIR/$rust.state" ] || crf_fail "legacy JIT state was not imported"
-[ "$(jit_state_field "$JIT_STATE_DIR/$rust.state" phase)" = deleted ] || crf_fail "legacy JIT state was not retired"
-[ "$(jit_state_field "$JIT_STATE_DIR/$rust.state" pool_id)" = rust ] || crf_fail "pool identity was not recovered"
+[ ! -e "$JIT_STATE_DIR/$rust.state" ] || crf_fail "fully retired JIT state was not removed"
 grep -Fq '"pool_id":"rust"' "$retired" || crf_fail "retirement used the wrong pool"
 grep -Fq '"work_handle":101' "$retired" || crf_fail "retirement used the wrong work handle"
 
@@ -108,5 +112,16 @@ fake_exists[$orphan]=1; fake_status[$orphan]=exited; fake_consumed[$orphan]=1; f
 jit_reconcile
 [ "${fake_exists[$orphan]}" = 0 ] || crf_fail "orphan exited JIT container was not removed"
 grep -Fq '"work_handle":303' "$retired" || crf_fail "orphan work handle was not retired"
+
+# A controller restart or lost response can leave the root-owned state in
+# deleting after the issued-handle tombstone was already removed. That specific
+# terminal response is an idempotent success, not a permanent cleanup loop.
+lost=ci-runner-jit-rust-dddddddddddddddddddd
+fake_exists[$lost]=0; fake_status[$lost]=exited; fake_consumed[$lost]=1; fake_pool[$lost]=rust; fake_handle[$lost]=404
+write_state "$JIT_STATE_DIR/$lost.state" "$lost" deleting lease-rust-lost 404 "$old" rust
+retire_mode=already
+jit_reconcile
+[ ! -e "$JIT_STATE_DIR/$lost.state" ] || crf_fail "already-retired deleting state did not converge"
+grep -Fq '"work_handle":404' "$retired" || crf_fail "already-retired handle was not retried"
 
 echo "jit-recovery: OK"
