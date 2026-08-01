@@ -46,7 +46,7 @@ func exactScaleSet(actual crfgithub.ScaleSet, id int64, name string, groupID int
 	if actual.ID != id || actual.Name != name || actual.RunnerGroupID != groupID {
 		return false
 	}
-	got, want := slices.Clone(actual.Labels), slices.Clone(labels)
+	got, want := crfgithub.LabelsForComparison(actual, labels), slices.Clone(labels)
 	slices.Sort(got)
 	slices.Sort(want)
 	return slices.Equal(got, want)

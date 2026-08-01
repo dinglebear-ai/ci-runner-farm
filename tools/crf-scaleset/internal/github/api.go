@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,10 +118,25 @@ func labels(name string, in []string) []scaleset.Label {
 func fromScaleSet(in *scaleset.RunnerScaleSet) ScaleSet {
 	out := ScaleSet{ID: int64(in.ID), Name: in.Name, RunnerGroupID: int64(in.RunnerGroupID)}
 	for _, label := range in.Labels {
-		if strings.EqualFold(label.Name, in.Name) {
-			continue
-		}
 		out.Labels = append(out.Labels, label.Name)
+	}
+	return out
+}
+
+// LabelsForComparison removes GitHub's implicit canonical name label only when
+// callers did not intentionally configure that same value as a routing label.
+// Stable routing-name scale sets therefore keep ci-pool-* in the compared
+// labels, while opaque probe/legacy names remain invisible to configured-label
+// ownership checks.
+func LabelsForComparison(actual ScaleSet, expected []string) []string {
+	out := slices.Clone(actual.Labels)
+	nameExpected := slices.ContainsFunc(expected, func(label string) bool {
+		return strings.EqualFold(label, actual.Name)
+	})
+	if !nameExpected {
+		out = slices.DeleteFunc(out, func(label string) bool {
+			return strings.EqualFold(label, actual.Name)
+		})
 	}
 	return out
 }

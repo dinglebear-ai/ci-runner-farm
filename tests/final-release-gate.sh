@@ -83,6 +83,8 @@ grep -Fq 'return routingLabel' tools/crf-scaleset/internal/ownership/ownership.g
   crf_fail "scale-set names are not stable workflow routing names"
 grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/internal/github/api.go ||
   crf_fail "scale-set canonical name label is missing"
+grep -Fq 'func LabelsForComparison' tools/crf-scaleset/internal/github/api.go ||
+  crf_fail "canonical routing-name label comparison is missing"
 grep -Fq 'ScaleSetID: int(scaleSetID)'   tools/crf-scaleset/cmd/crf-scaleset/main.go ||
   crf_fail "listener clients are not bound to their scale-set IDs"
 grep -Fq 'NewAdapterWithScaleSetClientFactory'   tools/crf-scaleset/cmd/crf-scaleset/main.go ||

@@ -56,7 +56,7 @@ func TestLabelsIncludeCanonicalScaleSetName(t *testing.T) {
 	}
 }
 
-func TestFromScaleSetHidesCanonicalNameLabel(t *testing.T) {
+func TestFromScaleSetPreservesAuthoritativeLabels(t *testing.T) {
 	got := fromScaleSet(&scaleset.RunnerScaleSet{
 		ID: 62, Name: "crf-install-ops-revision", RunnerGroupID: 4,
 		Labels: []scaleset.Label{
@@ -65,8 +65,20 @@ func TestFromScaleSetHidesCanonicalNameLabel(t *testing.T) {
 			{Type: "System", Name: "tailscale"},
 		},
 	})
-	if !slices.Equal(got.Labels, []string{"ci-pool-ops", "tailscale"}) {
-		t.Fatalf("adapter leaked canonical name into configured labels: %#v", got.Labels)
+	if !slices.Equal(got.Labels, []string{"crf-install-ops-revision", "ci-pool-ops", "tailscale"}) {
+		t.Fatalf("adapter discarded authoritative labels: %#v", got.Labels)
+	}
+}
+
+func TestLabelsForComparisonDistinguishesImplicitAndConfiguredName(t *testing.T) {
+	opaque := ScaleSet{Name: "crf-install-ops-revision",
+		Labels: []string{"crf-install-ops-revision", "ci-pool-ops", "tailscale"}}
+	if got := LabelsForComparison(opaque, []string{"ci-pool-ops", "tailscale"}); !slices.Equal(got, []string{"ci-pool-ops", "tailscale"}) {
+		t.Fatalf("implicit canonical label was not removed: %#v", got)
+	}
+	stable := ScaleSet{Name: "ci-pool-ops", Labels: []string{"tailscale", "ci-pool-ops"}}
+	if got := LabelsForComparison(stable, []string{"ci-pool-ops", "tailscale"}); !slices.Equal(got, []string{"tailscale", "ci-pool-ops"}) {
+		t.Fatalf("configured routing-name label was removed: %#v", got)
 	}
 }
 

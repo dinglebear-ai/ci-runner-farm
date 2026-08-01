@@ -261,7 +261,7 @@ func equalSpec(remote crfgithub.ScaleSet, name string, groupID int64, labels []s
 	if remote.ID <= 0 || remote.Name != name || remote.RunnerGroupID != groupID {
 		return false
 	}
-	got, want := slices.Clone(remote.Labels), slices.Clone(labels)
+	got, want := crfgithub.LabelsForComparison(remote, labels), slices.Clone(labels)
 	for i := range got {
 		got[i] = strings.ToLower(got[i])
 	}
@@ -274,7 +274,7 @@ func equalSpec(remote crfgithub.ScaleSet, name string, groupID int64, labels []s
 }
 
 func specMismatch(remote crfgithub.ScaleSet, name string, groupID int64, labels []string) error {
-	gotLabels, wantLabels := slices.Clone(remote.Labels), slices.Clone(labels)
+	gotLabels, wantLabels := crfgithub.LabelsForComparison(remote, labels), slices.Clone(labels)
 	sort.Strings(gotLabels)
 	sort.Strings(wantLabels)
 	return fmt.Errorf(
