@@ -82,7 +82,8 @@ grep -q 'autoscale.cursor' "$ENGINE" || fail 'pool autoscale evaluation does not
 # A failed legacy autoscale growth must remain a failed tick and must not reset
 # the grace-state file as though capacity had been created.
 tick_tmp="$(mktemp)"
-sed -n '/^autoscale_tick()/,/^}/p' "$ENGINE" > "$tick_tmp"
+sed -n '/^_autoscale_tick()/,/^}/p' "$ENGINE" > "$tick_tmp"
+sed -n '/^autoscale_tick()/,/^}/p' "$ENGINE" >> "$tick_tmp"
 # shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
 . "$tick_tmp"
 validate_runtime_config() { return 0; }
@@ -92,7 +93,7 @@ scaleset_autoscale_tick() { scaleset_tick_called=1; }
 jit_reconcile() { :; }
 AUTOSCALE=true
 MAINTENANCE_FILE="$RUNDIR/no-maintenance"
-autoscale_tick
+_autoscale_tick
 [ "$scaleset_tick_called" = 1 ] || fail 'effective scale-set backend did not use the demand autoscaler'
 backend_effective() { echo classic; }
 cleanup_pool_runtime_state() { :; }
@@ -110,7 +111,7 @@ AUTOSCALE_MIN_IDLE=1
 AUTOSCALE_MAX=4
 AUTOSCALE_STEP=1
 printf '7\n' > "$RUNDIR/autoscale.state"
-if autoscale_tick; then fail 'legacy autoscale masked a scale-up failure'; fi
+if _autoscale_tick; then fail 'legacy autoscale masked a scale-up failure'; fi
 [ "$(cat "$RUNDIR/autoscale.state")" = 7 ] || fail 'failed autoscale growth reset grace state'
 rm -f "$tick_tmp"
 
@@ -156,6 +157,8 @@ RUNNER_MODE=single
 RUNNER_POOLS='default-pool-records'
 # shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
 . "$reload_tmp"
+scaleset_paths_refresh() { :; }
+jit_paths_refresh() { :; }
 reload_cfg="$RUNDIR/reload.cfg"
 CFG="$reload_cfg"
 printf 'RUNNER_MODE="pools"\nRUNNER_POOLS="python|1|1|2|1"\n' > "$CFG"

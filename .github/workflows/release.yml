@@ -97,8 +97,13 @@ jobs:
           fi
           rm -rf /tmp/plgtree && mkdir -p /tmp/plgtree
           tar -xzf "$tgz" -C /tmp/plgtree
+          if [[ ! -x /tmp/plgtree/bin/crf-scaleset ]]; then
+            echo "PLG package ($tgz) is missing its executable scale-set helper" >&2
+            exit 1
+          fi
+          rm -rf /tmp/plgtree/bin
           if ! diff -r /tmp/plgtree src/usr/local/emhttp/plugins/ci-runner-farm; then
-            echo "PLG package ($tgz) does not match src/ at $tag" >&2
+            echo "PLG package ($tgz) source tree does not match src/ at $tag" >&2
             exit 1
           fi
 

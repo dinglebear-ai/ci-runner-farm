@@ -61,9 +61,12 @@ jobs:
             exit 1
           fi
 
-          # And the package must contain exactly the source plugin tree.
+          # The package contains the source plugin tree plus the generated,
+          # statically linked scale-set helper under bin/.
           rm -rf /tmp/plgtree && mkdir -p /tmp/plgtree
           tar -xzf "$tgz" -C /tmp/plgtree
+          test -x /tmp/plgtree/bin/crf-scaleset
+          rm -rf /tmp/plgtree/bin
           diff -r /tmp/plgtree src/usr/local/emhttp/plugins/ci-runner-farm
           echo "Plugin built and validated (package md5 $tgz_md5)."
 
