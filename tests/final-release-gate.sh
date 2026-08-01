@@ -77,6 +77,10 @@ grep -Fq 'never adopt by name' tools/crf-scaleset/internal/ownership/ownership.g
   crf_fail "foreign name/spec adoption guard is missing"
 grep -Fq 'scaleSetLabelContract = "canonical-name-label-v1"'   tools/crf-scaleset/internal/ownership/ownership.go ||
   crf_fail "canonical scale-set name-label migration contract is missing"
+grep -Fq 'scaleSetNameContract  = "routing-label-name-v1"'   tools/crf-scaleset/internal/ownership/ownership.go ||
+  crf_fail "stable routing-name migration contract is missing"
+grep -Fq 'return routingLabel' tools/crf-scaleset/internal/ownership/ownership.go ||
+  crf_fail "scale-set names are not stable workflow routing names"
 grep -Fq 'scaleset.Label{Type: "System", Name: name}'   tools/crf-scaleset/internal/github/api.go ||
   crf_fail "scale-set canonical name label is missing"
 grep -Fq 'ScaleSetID: int(scaleSetID)'   tools/crf-scaleset/cmd/crf-scaleset/main.go ||

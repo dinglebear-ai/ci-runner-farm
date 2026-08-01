@@ -94,20 +94,20 @@ func New(cfg Config, api crfgithub.ScaleSetAPI) (*Manager, error) {
 	return &Manager{cfg: cfg, api: api}, nil
 }
 
-func remoteName(installationID, poolID, specRevision string) string {
-	install := strings.ReplaceAll(installationID, "-", "")
-	if len(install) > 12 {
-		install = install[:12]
-	}
-	return fmt.Sprintf("crf-%s-%s-%s", install, poolID, specRevision[:12])
+func remoteName(routingLabel string) string {
+	return routingLabel
 }
 
-const scaleSetLabelContract = "canonical-name-label-v1"
+const (
+	scaleSetLabelContract = "canonical-name-label-v1"
+	scaleSetNameContract  = "routing-label-name-v1"
+)
 
 func specRevision(pool Pool, productionGroupID, quarantineGroupID int64) string {
 	labels := slices.Clone(pool.Labels)
 	sort.Strings(labels)
-	data, _ := json.Marshal([]any{scaleSetLabelContract, pool.ID, pool.RoutingLabel, labels, productionGroupID, quarantineGroupID})
+	data, _ := json.Marshal([]any{scaleSetLabelContract, scaleSetNameContract, pool.ID,
+		pool.RoutingLabel, labels, productionGroupID, quarantineGroupID})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -425,11 +425,14 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 		return nil, errors.New("invalid_pool_count")
 	}
 	desired := make(map[string]bool, len(pools))
+	desiredNames := make(map[string]bool, len(pools))
 	for _, pool := range pools {
-		if !validPool(pool) || desired[pool.ID] {
+		nameKey := strings.ToLower(pool.RoutingLabel)
+		if !validPool(pool) || desired[pool.ID] || desiredNames[nameKey] {
 			return nil, errors.New("invalid_pool")
 		}
 		desired[pool.ID] = true
+		desiredNames[nameKey] = true
 	}
 	state, err := m.Load()
 	if err != nil {
@@ -442,7 +445,7 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 	}
 	for _, pool := range pools {
 		specRev := specRevision(pool, m.cfg.ProductionRunnerGroupID, m.cfg.QuarantineRunnerGroupID)
-		name := remoteName(m.cfg.InstallationID, pool.ID, specRev)
+		name := remoteName(pool.RoutingLabel)
 		applied := slices.Clone(pool.Labels)
 		targetGroupID := m.cfg.QuarantineRunnerGroupID
 		targetState := "ineligible"

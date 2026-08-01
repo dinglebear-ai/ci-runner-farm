@@ -129,6 +129,23 @@ func testManager(t *testing.T) (*Manager, *fakeAPI) {
 	return m, api
 }
 
+func TestRemoteNameUsesStableRoutingLabel(t *testing.T) {
+	if got := remoteName("ci-pool-ops"); got != "ci-pool-ops" {
+		t.Fatalf("remote scale-set name drifted from routing label: %q", got)
+	}
+}
+
+func TestReconcileRejectsDuplicateRoutingNames(t *testing.T) {
+	m, _ := testManager(t)
+	_, err := m.Reconcile(context.Background(), []Pool{
+		{ID: "rust", RoutingLabel: "ci-pool-build", Labels: []string{"ci-pool-build"}},
+		{ID: "ops", RoutingLabel: "CI-POOL-BUILD", Labels: []string{"CI-POOL-BUILD"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "invalid_pool") {
+		t.Fatalf("duplicate stable routing names were accepted: %v", err)
+	}
+}
+
 func TestReconcilePersistsIntentAndCreatesIneligible(t *testing.T) {
 	m, api := testManager(t)
 	records, err := m.Reconcile(context.Background(), []Pool{{
@@ -284,7 +301,8 @@ func TestReconcileMigratesAnExactlyOwnedPoolSpecInPlace(t *testing.T) {
 		t.Fatalf("exact owned spec migration failed: %v", err)
 	}
 	wantRevision := specRevision(newPool, m.cfg.ProductionRunnerGroupID, m.cfg.QuarantineRunnerGroupID)
-	if records[0].ScaleSetID == id || records[0].RemoteName == oldName ||
+	if records[0].ScaleSetID == id || records[0].RemoteName != oldName ||
+		records[0].RemoteName != newPool.RoutingLabel ||
 		records[0].RemoteSpecRevision != wantRevision ||
 		!slices.Equal(records[0].AppliedLabels, newPool.Labels) ||
 		!equalSpec(api.sets[records[0].ScaleSetID], records[0].RemoteName,
@@ -316,7 +334,7 @@ func TestReconcileRefusesPoolSpecMigrationAfterRemoteDrift(t *testing.T) {
 
 func TestAmbiguousCreateNeverAdoptsForeignObject(t *testing.T) {
 	m, api := testManager(t)
-	foreign := crfgithub.ScaleSet{ID: 99, Name: remoteName(m.cfg.InstallationID, "rust", m.cfg.ConfigRevision),
+	foreign := crfgithub.ScaleSet{ID: 99, Name: remoteName("ci-pool-rust"),
 		RunnerGroupID: m.cfg.QuarantineRunnerGroupID, Labels: []string{"foreign"}}
 	api.sets[foreign.ID] = foreign
 	api.createErr = errors.New("response lost")
@@ -338,7 +356,7 @@ func TestReconcileNeverNameAdoptsDurableCreateIntentAfterRestart(t *testing.T) {
 	pool := Pool{ID: "rust", RoutingLabel: "ci-pool-rust",
 		Labels: []string{"self-hosted", "ci-pool-rust"}}
 	specRev := specRevision(pool, m.cfg.ProductionRunnerGroupID, m.cfg.QuarantineRunnerGroupID)
-	name := remoteName(m.cfg.InstallationID, pool.ID, specRev)
+	name := remoteName(pool.RoutingLabel)
 	applied := slices.Clone(pool.Labels)
 	state := m.emptyState()
 	state.Records = []Record{{
