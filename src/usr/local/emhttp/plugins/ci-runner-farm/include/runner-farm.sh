@@ -3031,7 +3031,7 @@ cmd_status_json() {
   fi
   if fleet_inventory_refresh; then names="$(inventory_names)"
   else
-    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"recent_activity":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
       "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" \
       "$(printf '%s' "$MIGRATION_EFFECTIVE_BACKEND" | json_escape)" "$(printf '%s' "$MIGRATION_PHASE" | json_escape)" \
       "$(printf '%s' "$MIGRATION_TRANSITION_ID" | json_escape)" "$(printf '%s' "$MIGRATION_REVISION" | json_escape)" \
@@ -3064,13 +3064,18 @@ cmd_status_json() {
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
-  local cur_gen stalec=0 retiringc=0 blockedc=0
-  declare -A pc pup pbusy pidle pstarting perror pstale pretiring
+  local cur_gen stalec=0 retiringc=0 blockedc=0 recent_activity="" recent_path
+  declare -A pc pup pbusy pidle pstarting perror pcompleted pstale pretiring
+  recent_path="${JIT_RECENT_ACTIVITY_FILE:-$RUNDIR/recent-jobs.jsonl}"
+  if [ -f "$recent_path" ] && [ ! -L "$recent_path" ] &&
+     [ "$(stat -c %s "$recent_path" 2>/dev/null || echo 262145)" -le 262144 ]; then
+    recent_activity="$(cat "$recent_path" 2>/dev/null)"
+  fi
   local out="["; local first=1
   local c st _health cpus mem cgen pool scope pidx _routing identity backend
   while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity backend; do
     [ -z "$c" ] && continue
-    local stale=false retiring=false
+    local stale=false retiring=false completed=false
     pool="${pool:-default}"; pidx="${pidx:-${c##*-}}"
     pool_id_valid "$pool" || pool="invalid"
     case "$pidx" in ''|*[!0-9]*) pidx=0 ;; esac
@@ -3104,6 +3109,9 @@ cmd_status_json() {
       jrepo="$(_d64 "$7" | json_escape)"; jpr="$(_uu "$8")"
       jbranch="$(_d64 "$9" | json_escape)"; jrun="$(_uu "${10}")"
     fi
+    if [ "$st" != running ] && [ "$backend" = scaleset ] && [ -n "$recent_activity" ]; then
+      case "$recent_activity" in *"\"runner_name\":\"$c\""*) completed=true ;; esac
+    fi
     pc["$pool"]=$(( ${pc["$pool"]:-0} + 1 ))
     if [ "$st" = running ]; then
       pup["$pool"]=$(( ${pup["$pool"]:-0} + 1 ))
@@ -3114,7 +3122,11 @@ cmd_status_json() {
         *) perror["$pool"]=$(( ${perror["$pool"]:-0} + 1 )) ;;
       esac
     else
-      perror["$pool"]=$(( ${perror["$pool"]:-0} + 1 ))
+      if [ "$completed" = true ]; then
+        pcompleted["$pool"]=$(( ${pcompleted["$pool"]:-0} + 1 ))
+      else
+        perror["$pool"]=$(( ${perror["$pool"]:-0} + 1 ))
+      fi
     fi
     [ "$stale" = true ] && pstale["$pool"]=$(( ${pstale["$pool"]:-0} + 1 ))
     if [ "$retiring" = true ]; then
@@ -3129,7 +3141,7 @@ cmd_status_json() {
     if pool_mode_enabled; then routing_label="$(pool_label "$pool" 2>/dev/null || true)"
     else routing_label="$RUNNER_LABELS"; fi
     [ $first -eq 0 ] && out+=","
-    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"pool\":\"$(printf '%s' "$pool"|json_escape)\",\"routing_label\":\"$(printf '%s' "$routing_label"|json_escape)\",\"scope_target\":\"$(printf '%s' "$scope"|json_escape)\",\"pool_index\":${pidx:-0},\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"stale\":${stale},\"retiring\":${retiring}}"
+    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"pool\":\"$(printf '%s' "$pool"|json_escape)\",\"routing_label\":\"$(printf '%s' "$routing_label"|json_escape)\",\"scope_target\":\"$(printf '%s' "$scope"|json_escape)\",\"pool_index\":${pidx:-0},\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"completed\":${completed},\"stale\":${stale},\"retiring\":${retiring}}"
     first=0
   done < "$INVENTORY_FILE"
   out+="]"
@@ -3174,14 +3186,14 @@ cmd_status_json() {
           blocked_reason="resource_capacity"
       fi
       [ "$pfirst" -eq 0 ] && pools+=","
-      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max_json},\"idle_buffer\":${idle},\"assigned_jobs\":${assigned_jobs},\"demand_fresh\":$([ "$assigned_jobs" -ge 0 ] 2>/dev/null && printf true || printf false),\"desired\":${ss_desired},\"admitted\":${ss_admitted},\"advertised_capacity\":${advertised_capacity},\"lease_age_seconds\":null,\"session_healthy\":${session_healthy},\"ownership_state\":\"$(printf '%s' "$ownership_state"|json_escape)\",\"remote_scale_set_id\":${remote_scale_set_id},\"tombstone\":${tombstone},\"orphan\":${orphan}}"
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max_json},\"idle_buffer\":${idle},\"assigned_jobs\":${assigned_jobs},\"demand_fresh\":$([ "$assigned_jobs" -ge 0 ] 2>/dev/null && printf true || printf false),\"desired\":${ss_desired},\"admitted\":${ss_admitted},\"advertised_capacity\":${advertised_capacity},\"lease_age_seconds\":null,\"session_healthy\":${session_healthy},\"ownership_state\":\"$(printf '%s' "$ownership_state"|json_escape)\",\"remote_scale_set_id\":${remote_scale_set_id},\"tombstone\":${tombstone},\"orphan\":${orphan}}"
       pfirst=0; seen="${seen}${pool} "
     done < <(pool_records)
   fi
   for pool in "${!pc[@]}"; do
     case "$seen" in *" $pool "*) continue ;; esac
     [ "$pfirst" -eq 0 ] && pools+=","
-    pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"\",\"configured\":0,\"effective_target\":0,\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":0,\"min\":0,\"max\":0,\"idle_buffer\":0}"
+    pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"\",\"configured\":0,\"effective_target\":0,\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":0,\"min\":0,\"max\":0,\"idle_buffer\":0}"
     pfirst=0
   done
   pools+="]"
@@ -3206,7 +3218,7 @@ cmd_status_json() {
     done < <(pool_records)
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
-  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":$STATUS_BACKEND_JSON,\"compatibility\":$STATUS_COMPATIBILITY_JSON,\"operation\":$STATUS_OPERATION_JSON,\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu"|json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":$STATUS_BACKEND_JSON,\"compatibility\":$STATUS_COMPATIBILITY_JSON,\"operation\":$STATUS_OPERATION_JSON,\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"recent_activity\":$STATUS_RECENT_ACTIVITY_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu"|json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
 }
 
 cmd_readiness_json() {

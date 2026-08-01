@@ -60,7 +60,11 @@ scaleset_plugin_digest() {
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   (
     cd "$root" || exit
-    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    # The active helper is independently pinned by helper_digest. Emergency
+    # rollback copies must live on cache, but ignore the historical hidden
+    # filename if an older deployment left one inside bin.
+    find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0 |
+      LC_ALL=C sort -z | xargs -0 sha256sum
   ) | sha256sum | cut -d' ' -f1
 }
 

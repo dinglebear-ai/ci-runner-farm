@@ -6,13 +6,23 @@ const engine = fs.readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/incl
 function must(condition, message) { if (!condition) throw new Error(message); }
 must(page.includes('Tracked repository run queue'), 'queue tile is not accurately named');
 must(page.includes('not pool demand'), 'queue tile lacks its demand limitation');
+must(page.includes('id="crf-s-assigned"'), 'Fleet has no assigned-job counter');
+must(page.includes('scale-set demand'), 'assigned-job counter is not identified as scale-set demand');
+must(page.includes('crfRenderActivity'), 'recent one-shot activity is not rendered');
+must(page.includes('Recent one-shot activity'), 'recent activity panel is missing');
+must(page.includes("' · assigned '"), 'pool headers omit assigned jobs');
+must(page.includes("' · capacity '"), 'pool headers omit advertised capacity');
+must(page.includes("r.completed?'completed':'exited'"), 'completed one-shot runners still render as unexplained exits');
 must(page.includes("d.schema_version!==2"), 'Fleet accepts unknown snapshot schemas');
 must(page.includes('unsupported or malformed Fleet snapshot'), 'malformed snapshots do not preserve last-good UI');
 must(page.includes("Scale up to':'Scale to"), 'scale controls do not distinguish autoscale');
 must(page.includes('class="orange"'), 'primary scaling control is not visibly orange');
-must(page.includes('openPools'), 'pool disclosure state is lost on refresh');
+must(page.includes('Reconcile stable pool sections and controls'), 'pool sections are rebuilt destructively on refresh');
 must(page.includes('document.activeElement!==scale'), 'scale input is overwritten while typing');
 must(engine.includes('"schema_version":2'), 'engine does not emit typed Fleet schema');
+must(engine.includes('recent_activity')&&engine.includes('STATUS_RECENT_ACTIVITY_JSON'), 'engine omits recent one-shot activity');
+must(engine.includes('pcompleted'), 'engine does not distinguish completed one-shot runners from errors');
+must(engine.includes('${completed}')&&engine.includes('completed'), 'runner schema omits completed lifecycle state');
 must(engine.includes('github_phase_refresh'), 'busy/idle state is not batched');
 const usage = engine.match(/cmd_usage_refresh\(\) \{([\s\S]*?)\n\}/);
 must(usage, 'usage refresh function missing');
