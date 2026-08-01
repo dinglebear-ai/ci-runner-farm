@@ -93,6 +93,9 @@ grep -Fq 'NewAdapterWithScaleSetClientFactory'   tools/crf-scaleset/cmd/crf-scal
   crf_fail "one shared mutable client still serves every scale set"
 grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
   crf_fail "scale-set request sequence is not serialized through socket delivery"
+grep -Fq 'timeout --foreground --signal=TERM --kill-after=5s' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
+  crf_fail "scale-set request socket I/O is unbounded"
 grep -Fq 'flock -n 5'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "autoscale ticks are not serialized"
 grep -Fq 'image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"' \

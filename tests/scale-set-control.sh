@@ -124,6 +124,29 @@ done | sort -n >"$root/sequences.actual"
 seq 2 13 >"$root/sequences.expected"
 diff -u "$root/sequences.expected" "$root/sequences.actual"
 
+# A helper that accepts the request but never returns must not hold the global
+# request lock forever. The bounded I/O deadline terminates it and releases the
+# lock so a later controller request can recover.
+cat >"$fake_helper" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+[ "$1" = request ] || exit 2
+cat >/dev/null
+sleep 30
+EOF
+chmod 0755 "$fake_helper"
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=1
+started="$(date +%s)"
+set +e
+scaleset_request read_snapshot '{}' >/dev/null 2>&1
+timeout_rc=$?
+set -e
+elapsed=$(( $(date +%s) - started ))
+[ "$timeout_rc" -eq 124 ] || exit 1
+[ "$elapsed" -le 5 ] || exit 1
+( flock -n 6 ) 6>"$SCALESET_STATE_DIR/request.lock" || exit 1
+unset SCALESET_REQUEST_IO_TIMEOUT_SECONDS
+
 calls="$root/calls"
 scaleset_request() {
   local payload="${2-}"

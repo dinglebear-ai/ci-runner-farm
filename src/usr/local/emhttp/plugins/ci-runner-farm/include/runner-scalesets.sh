@@ -604,7 +604,8 @@ scaleset_runtime_config_write() {
 
 _scaleset_request_locked() {
   local operation="$1" payload="${2-}" sequence request_id controller config_rev ownership_rev
-  local seq_file seq_tmp output
+  local seq_file seq_tmp output request_timeout="${SCALESET_REQUEST_IO_TIMEOUT_SECONDS:-20}"
+  [[ "$request_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$request_timeout" -le 120 ] || return 1
   [ -n "$payload" ] || payload='{}'
   [ -S "$SCALESET_SOCKET" ] && [ -f "$SCALESET_RUNTIME_CONFIG" ] || return 1
   controller="$(php -r '$j=json_decode(file_get_contents($argv[1]),true);echo $j["controller_instance_id"]??"";' \
@@ -633,7 +634,9 @@ _scaleset_request_locked() {
       JSON_UNESCAPED_SLASHES),"\n";
   ' "$request_id" "$operation" "$config_rev" "$ownership_rev" "$controller" "$sequence" "$payload")" ||
     return 1
-  printf '%s' "$output" | "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET"
+  command -v timeout >/dev/null 2>&1 || return 1
+  printf '%s' "$output" | timeout --foreground --signal=TERM --kill-after=5s \
+    "${request_timeout}s" "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET"
 }
 
 scaleset_request() {
