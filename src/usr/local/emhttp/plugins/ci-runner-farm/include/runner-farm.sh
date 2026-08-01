@@ -2926,7 +2926,11 @@ recreate_runner() {
   provision_base || { echo '{"ok":false,"error":"provisioning preflight failed"}'; return 1; }
   [ -n "$ACCESS_TOKEN" ] || { echo '{"ok":false,"error":"no GitHub token configured"}'; return 1; }
   build_args "$idx" "$name" "$pool" "$scope" || { echo '{"ok":false,"error":"cannot provision replacement"}'; return 1; }
-  image="${ARGS[${#ARGS[@]}-1]}"
+  [[ "${CRF_IMAGE_ARG_INDEX:-}" =~ ^[0-9]+$ ]] &&
+    [ "$CRF_IMAGE_ARG_INDEX" -lt "${#ARGS[@]}" ] || {
+      echo '{"ok":false,"error":"replacement image argument is unavailable"}'; return 1
+    }
+  image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"
   if [ "$IMAGE_SOURCE" = remote ]; then
     docker pull "$image" >/dev/null 2>&1 || { echo '{"ok":false,"error":"cannot pull replacement image"}'; return 1; }
   else

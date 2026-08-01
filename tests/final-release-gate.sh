@@ -93,6 +93,12 @@ grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-f
   crf_fail "scale-set request sequence is not serialized through socket delivery"
 grep -Fq 'flock -n 5'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "autoscale ticks are not serialized"
+grep -Fq 'image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle does not inspect the recorded image argument"
+! grep -Fq 'image="${ARGS[${#ARGS[@]}-1]}"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle still treats the listener command as the image"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
