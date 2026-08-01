@@ -2945,9 +2945,21 @@ recreate_runner() {
   fi
   log "recycling $name ($mode)"
   if ! docker run "${ARGS[@]}" >/dev/null 2>&1; then
+    CRF_REGISTRATION_SECRET=""
+    unset CRF_REGISTRATION_SECRET
     log "recycle: $name removed but its replacement failed to start"
     echo '{"ok":false,"error":"removed but not recreated"}'; return 1
   fi
+  if [ -n "${CRF_REGISTRATION_SECRET:-}" ] &&
+     ! runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"; then
+    CRF_REGISTRATION_SECRET=""
+    unset CRF_REGISTRATION_SECRET
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    log "recycle: $name did not consume its protected registration credential"
+    echo '{"ok":false,"error":"replacement credential handoff failed"}'; return 1
+  fi
+  CRF_REGISTRATION_SECRET=""
+  unset CRF_REGISTRATION_SECRET
   github_runner_inventory_invalidate "$scope" 2>/dev/null || true
   echo '{"ok":true}'
 }

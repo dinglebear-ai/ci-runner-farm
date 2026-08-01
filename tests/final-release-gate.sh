@@ -99,6 +99,9 @@ grep -Fq 'image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"' \
 ! grep -Fq 'image="${ARGS[${#ARGS[@]}-1]}"' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "runner recycle still treats the listener command as the image"
+grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle does not perform protected credential handoff"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
