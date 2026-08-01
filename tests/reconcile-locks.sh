@@ -48,3 +48,59 @@ done
 }
 
 echo 'reconcile-locks: OK'
+
+# The resource-aware start path must release fd 8 around slow Docker/GitHub
+# work, then reacquire it before finalizing the reservation.
+sed -n '/^fleet_lock_suspend()/,/^}/p' "$ENGINE" > "$tmpdir/lock-suspend.sh"
+sed -n '/^fleet_lock_resume()/,/^}/p' "$ENGINE" >> "$tmpdir/lock-suspend.sh"
+# shellcheck disable=SC1090
+. "$tmpdir/lock-suspend.sh"
+RUNDIR="$tmpdir"
+err() { printf '%s\n' "$*" >&2; }
+(
+  exec 8>"$tmpdir/fleet.lock"
+  flock 8
+  fleet_lock_suspend
+  ( flock -w 1 9 ) 9>"$tmpdir/fleet.lock" || exit 8
+  fleet_lock_resume
+  if ( flock -n 9 ) 9>"$tmpdir/fleet.lock"; then exit 9; fi
+) || {
+  echo "FAIL: fleet lock was not suspended/resumed around slow work" >&2
+  exit 1
+}
+
+echo 'resource-locks: OK'
+
+# A busy retiring identity must not block an idle retiring peer later in the
+# inventory. Reconciliation still mutates at most one runner per pass.
+sed -n '/^reconcile_stale_runners()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-stale.sh"
+(
+  # shellcheck disable=SC1090
+  . "$tmpdir/reconcile-stale.sh"
+  validate_runtime_config() { return 0; }
+  cleanup_pool_runtime_state() { :; }
+  fleet_inventory_refresh() { return 0; }
+  pool_mode_enabled() { return 0; }
+  count_pool_missing_capacity() { echo 0; }
+  managed_names() { printf '%s\n' ci-runner-old-busy ci-runner-old-idle; }
+  runner_identity_validate() { return 0; }
+  runner_pool() { echo removed-pool; }
+  pool_record() { return 1; }
+  inventory_field() { echo running; }
+  runner_state() {
+    case "$1" in
+      ci-runner-old-busy) echo busy ;;
+      ci-runner-old-idle) echo idle ;;
+    esac
+  }
+  remove_runner() { printf '%s\n' "$1" >"$tmpdir/retired"; }
+  start_one_missing_desired() { :; }
+  log() { :; }
+  reconcile_stale_runners
+)
+[ "$(cat "$tmpdir/retired" 2>/dev/null)" = ci-runner-old-idle ] || {
+  echo "FAIL: busy retiring runner blocked an idle retiring peer" >&2
+  exit 1
+}
+
+echo 'reconcile-retiring-fairness: OK'

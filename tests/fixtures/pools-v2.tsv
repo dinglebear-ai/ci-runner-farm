@@ -1,0 +1,3 @@
+# input	expected_serialized
+v2|python|ci-python|python,fast|1|1|4|1|2|4g	v2|python|ci-python|python,fast|1|1|4|1|2|4294967296
+v2|tiny|ci-tiny||1|1|2|0|0.5|512m	v2|tiny|ci-tiny||1|1|2|0|0.5|536870912

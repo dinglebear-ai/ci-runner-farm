@@ -1,7 +1,7 @@
 <?php
 /* Shared CI Runner Farm web core — the crf* JS helpers, the @unraid/ui force-loader,
-   and the shared .crf-* styles used by ALL three RunnerFarm tabs (Fleet/Image/
-   Settings). include_once'd from the top of each tab so the dependency is EXPLICIT
+   and the shared .crf-* styles used by ALL four RunnerFarm tabs (Fleet/Pools/
+   Image/Settings). include_once'd from the top of each tab so the dependency is EXPLICIT
    and load-order-independent, instead of living inside the Fleet tab and being
    relied on by document order (renaming crfPost or reordering the tab ordinals used
    to silently break the other tabs). Emitted once per document via include_once.

@@ -6,3 +6,4 @@
 
 # Local session logs (save-to-md / quick-push notes) — dev artifacts, never committed.
 docs/sessions/
+build/

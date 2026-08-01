@@ -6,7 +6,7 @@ and warm package caches.
 
 Runner pools reserve Rust, Python, TypeScript, or other capacity behind derived
 labels such as `ci-pool-rust`. Target them with
-`runs-on: [self-hosted, ci-pool-rust]`. Pools require organization scope and a
+`runs-on: ci-pool-rust`. Pools require organization scope and a
 nonzero minimum; autoscaling uses live busy/idle headroom, not per-label GitHub
 queue depth.
 

@@ -28,6 +28,7 @@ mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
 CFG="${CFGDIR}/${PLUGIN}.cfg"
 TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
+GITHUB_APP_KEY_FILE="${CFGDIR}/github-app-private-key.pem"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
 NAME_PREFIX="ci-runner"
 LABEL_NS="net.unraid.ci-runner-farm"
@@ -37,12 +38,23 @@ GH_SCOPE="repo"                       # repo | org
 GH_OWNER="unraid"
 GH_REPOS="unraid/repo-a unraid/repo-b"
 RUNNER_GROUP=""
+AUTH_MODE="pat"                       # pat | github_app
+GITHUB_APP_ID=""
+GITHUB_APP_INSTALLATION_ID=""
 RUNNER_COUNT=4
 RUNNER_LABELS="self-hosted,unraid,build"
 RUNNER_MODE="single"                  # single | pools
 RUNNER_POOLS="rust|3|2|5|1;python|1|1|2|1;typescript|1|1|2|1"
+POOL_BACKEND="classic"                # requested only; effective backend is durable runtime state
 RUNNER_CPUS=""                        # per-runner CPU cap; empty = uncapped (CFS time-shares fairly)
 RUNNER_MEMORY="16g"                   # per-runner memory cap (kept: memory isn't time-shared like CPU)
+RESOURCE_CPU_BUDGET="auto"
+RESOURCE_MEMORY_BUDGET="auto"
+RESOURCE_CPU_RESERVE="2"
+RESOURCE_MEMORY_RESERVE="8g"
+RESOURCE_CPU_OVERCOMMIT="1.0"
+RESOURCE_MEMORY_SWAP="none"
+RESOURCE_PIDS_LIMIT="4096"
 CACHE_ROOT="/mnt/cache/github-runner" # must be a dedicated SUBDIR under a pool/disk, never a bare mount root (see crf_safe_cache_root)
 WORK_TMPFS_SIZE="8g"                  # empty => bind workdir to pool instead of RAM
 IMAGE_SOURCE="builtin"                # builtin = run the locally-built image; remote = pull IMAGE from a registry
@@ -104,10 +116,24 @@ DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (rea
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-pools.sh
 . "$SCRIPT_DIR/runner-pools.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-resources.sh
+. "$SCRIPT_DIR/runner-resources.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh
+. "$SCRIPT_DIR/runner-scalesets.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-migration.sh
+. "$SCRIPT_DIR/runner-migration.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scheduler.sh
+. "$SCRIPT_DIR/runner-scheduler.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
+. "$SCRIPT_DIR/runner-jit.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
+. "$SCRIPT_DIR/runner-status.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
-CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS \
+CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP AUTH_MODE GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
 RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
+RESOURCE_CPU_BUDGET RESOURCE_MEMORY_BUDGET RESOURCE_CPU_RESERVE RESOURCE_MEMORY_RESERVE \
+RESOURCE_CPU_OVERCOMMIT RESOURCE_MEMORY_SWAP RESOURCE_PIDS_LIMIT \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
 SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
@@ -131,7 +157,11 @@ load_cfg() {
   for key in $CFG_KEYS; do
     printf -v "$key" '%s' "${CFG_DEFAULTS[$key]}"
   done
-  [ -f "$CFG" ] || return 0
+  if [ ! -f "$CFG" ]; then
+    scaleset_paths_refresh
+    jit_paths_refresh
+    return 0
+  fi
   local line val
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
@@ -143,10 +173,16 @@ load_cfg() {
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
     printf -v "$key" '%s' "$val"
   done < "$CFG"
+  scaleset_paths_refresh
+  jit_paths_refresh
 }
 
 load_cfg
-[ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+if [ "$AUTH_MODE" = pat ]; then
+  [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+else
+  ACCESS_TOKEN=""
+fi
 [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
 # PID files live on tmpfs (RUNDIR), not flash: they're pure per-boot runtime state,
 # so this both spares the USB stick and means a stale PID can't survive a reboot to
@@ -156,13 +192,141 @@ IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
 RECONCILE_PID="${RUNDIR}/reconcile.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
+MAINTENANCE_FILE="${RUNDIR}/maintenance.state"
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
 host() { hostname -s; }
 
+auth_credentials_configured() {
+  case "$AUTH_MODE" in
+    pat) [ -n "$ACCESS_TOKEN" ] ;;
+    github_app)
+      [[ "$GITHUB_APP_ID" =~ ^[1-9][0-9]*$ ]] &&
+        [[ "$GITHUB_APP_INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] &&
+        [ -f "$GITHUB_APP_KEY_FILE" ] &&
+        [ "$(stat -c %a "$GITHUB_APP_KEY_FILE" 2>/dev/null)" = 600 ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 validate_runtime_config() {
-  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$GH_OWNER"
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$GH_OWNER" || return 1
+  resource_v2_preflight || {
+    pool_error "$(resource_reason_text "$RESOURCE_REASON")" resources
+    return 1
+  }
+}
+
+config_revision() {
+  local key
+  for key in $CFG_KEYS; do
+    printf '%s=%s\0' "$key" "${!key-}"
+  done | sha256sum | cut -d' ' -f1
+}
+
+config_json() {
+  local key first=1
+  printf '{'
+  for key in $CFG_KEYS; do
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '"%s":"%s"' "$key" "$(printf '%s' "${!key-}" | json_escape)"
+  done
+  printf '}'
+}
+
+validate_settings_config() {
+  local key value
+  validate_runtime_config || return 1
+  case "$POOL_BACKEND" in classic|scaleset) ;; *) pool_error "POOL_BACKEND must be classic or scaleset" backend; return 1 ;; esac
+  case "$AUTH_MODE" in
+    pat)
+      [ -z "$GITHUB_APP_ID$GITHUB_APP_INSTALLATION_ID" ] ||
+        { pool_error "GitHub App IDs must be empty in PAT mode" auth; return 1; }
+      ;;
+    github_app)
+      [[ "$GITHUB_APP_ID" =~ ^[1-9][0-9]*$ ]] &&
+        [[ "$GITHUB_APP_INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] ||
+        { pool_error "GitHub App and installation IDs must be positive integers" auth; return 1; }
+      [ -f "$GITHUB_APP_KEY_FILE" ] && [ "$(stat -c %a "$GITHUB_APP_KEY_FILE" 2>/dev/null)" = 600 ] ||
+        { pool_error "A mode-0600 GitHub App private key is required" auth; return 1; }
+      ;;
+    *) pool_error "AUTH_MODE must be pat or github_app" auth; return 1 ;;
+  esac
+  case "$IMAGE_SOURCE" in builtin|remote) ;; *) pool_error "IMAGE_SOURCE must be builtin or remote" image_source; return 1 ;; esac
+  case "$NETWORK_ISOLATION" in off|isolate|strict) ;; *) pool_error "NETWORK_ISOLATION must be off, isolate, or strict" network; return 1 ;; esac
+  for key in EPHEMERAL RUN_AS_ROOT SHARE_DOCKER_SOCK DIND SHARED_IMAGE_CACHE AUTOSCALE IMAGE_AUTOUPDATE DASHBOARD_WIDGET_ENABLE; do
+    value="${!key-}"
+    case "$value" in true|false) ;; *) pool_error "$key must be true or false" settings; return 1 ;; esac
+  done
+  for key in RUNNER_COUNT AUTOSCALE_MIN AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT RESOURCE_PIDS_LIMIT; do
+    value="${!key-}"
+    case "$value" in ''|*[!0-9]*) pool_error "$key must be a canonical non-negative integer" settings; return 1 ;; esac
+  done
+  [ "$RUNNER_COUNT" -le 64 ] && [ "$AUTOSCALE_MIN" -le 64 ] &&
+    [ "$AUTOSCALE_MAX" -le 64 ] && [ "$AUTOSCALE_MIN_IDLE" -le 64 ] &&
+    [ "$AUTOSCALE_STEP" -ge 1 ] && [ "$AUTOSCALE_STEP" -le 64 ] || {
+      pool_error "runner counts and autoscale bounds must be within 0-64" settings
+      return 1
+    }
+  if [ "$IMAGE_SOURCE" = remote ] && [ -z "$IMAGE" ]; then
+    pool_error "IMAGE is required for a remote image source" image
+    return 1
+  fi
+  return 0
+}
+
+cmd_apply_config() {
+  local expected="${1:-}" staged="${2:-}" current old_cfg backup_tmp backup new_revision
+  case "$expected" in *[!0-9a-f]*|'') printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2 ;; esac
+  [ "${#expected}" -eq 64 ] || { printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2; }
+  case "$staged" in "$CFGDIR"/.apply.*) ;; *) printf '{"ok":false,"code":"invalid_staging_path","error":"invalid staging path"}\n'; return 2 ;; esac
+  [ -f "$staged" ] && [ ! -L "$staged" ] || { printf '{"ok":false,"code":"invalid_staging_file","error":"staged config is unavailable"}\n'; return 2; }
+
+  current="$(config_revision)"
+  if [ "$current" != "$expected" ]; then
+    printf '{"ok":false,"code":"stale_config","error":"settings changed in another session","config_revision":"%s"}\n' "$current"
+    return 3
+  fi
+
+  old_cfg="$CFG"
+  CFG="$staged"
+  load_cfg
+  if ! validate_settings_config; then
+    printf '{"ok":false,"code":"invalid_config","error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
+    CFG="$old_cfg"
+    load_cfg
+    return 4
+  fi
+  new_revision="$(config_revision)"
+
+  backup="${old_cfg}.bak"
+  backup_tmp="${backup}.tmp.$$"
+  if [ -f "$old_cfg" ]; then
+    cp "$old_cfg" "$backup_tmp" || {
+      CFG="$old_cfg"; load_cfg
+      printf '{"ok":false,"code":"backup_failed","error":"could not preserve the previous configuration"}\n'
+      return 5
+    }
+    chmod 0600 "$backup_tmp" || { rm -f "$backup_tmp"; CFG="$old_cfg"; load_cfg; return 5; }
+    mv -f "$backup_tmp" "$backup" || { rm -f "$backup_tmp"; CFG="$old_cfg"; load_cfg; return 5; }
+  fi
+  chmod 0600 "$staged" || { CFG="$old_cfg"; load_cfg; return 5; }
+  if ! mv -f "$staged" "$old_cfg"; then
+    CFG="$old_cfg"; load_cfg
+    printf '{"ok":false,"code":"commit_failed","error":"could not atomically commit configuration"}\n'
+    return 5
+  fi
+  chmod 0600 "$old_cfg" || true
+  CFG="$old_cfg"
+  load_cfg
+  rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
+  reconcile_start
+  printf '{"ok":true,"config_revision":"%s","settings":' "$new_revision"
+  config_json
+  printf '}\n'
 }
 
 cleanup_pool_runtime_state() {
@@ -182,7 +346,7 @@ cleanup_pool_runtime_state() {
 # One authoritative Docker snapshot for pool-aware hot paths. The file is
 # process-local in intent but tmpfs-backed so subshells created by command
 # substitution can consume the same parsed records. Fields:
-# name|state|health|cpus|memory|confgen|pool|scope|index|routing-label|identity
+# name|state|health|cpus|memory|confgen|pool|scope|index|routing-label|identity|backend
 INVENTORY_FILE="$RUNDIR/fleet-inventory.tsv"
 INVENTORY_ACTIVE=0
 
@@ -192,18 +356,18 @@ fleet_inventory_invalidate() {
 }
 
 fleet_inventory_refresh() {
-  local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing identity expected
+  local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend identity expected
   names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V)"
   tmp="${INVENTORY_FILE}.tmp.$$"
   : > "$tmp" || return 1
   if [ -n "$names" ]; then
     # shellcheck disable=SC2086 # one Docker argument per newline-delimited managed name
-    if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}' $names 2>/dev/null)"; then
+    if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.backend"}}' $names 2>/dev/null)"; then
       rm -f "$tmp"; return 1
     fi
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      IFS='|' read -r name state health cpus mem gen pool scope pidx legacy_idx managed version routing _extra <<< "$row"
+      IFS='|' read -r name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend _extra <<< "$row"
       name="${name#/}"; identity=invalid-managed
       [ "$gen" = "<no value>" ] && gen=""
       [ "$pool" = "<no value>" ] && pool=""
@@ -213,6 +377,7 @@ fleet_inventory_refresh() {
       [ "$managed" = "<no value>" ] && managed=""
       [ "$version" = "<no value>" ] && version=""
       [ "$routing" = "<no value>" ] && routing=""
+      [ "$backend" = "<no value>" ] && backend=""
       # Reject delimiter/control injection in metadata before it reaches the
       # inventory format or later JSON/selector consumers.
       case "$name$scope$pool$pidx$legacy_idx$routing" in
@@ -230,21 +395,27 @@ fleet_inventory_refresh() {
             if [ "$pool" = default ]; then
               expected="${NAME_PREFIX}-${pidx}"
               if [ "$name" = "$expected" ] && { [ -z "$scope" ] || github_scope_validate "$scope"; }; then identity=valid; fi
-            elif pool_id_valid "$pool" && [ "$version" = 1 ]; then
-              expected="${NAME_PREFIX}-${pool}-${pidx}"
-              if [ "$name" = "$expected" ] && github_scope_validate "$scope" && [[ "$scope" == org:* ]]; then identity=valid; fi
+            elif pool_id_valid "$pool" && { [ "$version" = 1 ] || [ "$version" = 2 ]; }; then
+              if [ "$backend" = scaleset ] && [ "$version" = 2 ]; then
+                if [[ "$name" =~ ^${NAME_PREFIX}-jit-${pool}-[0-9a-f]{20}$ ]] &&
+                  github_scope_validate "$scope" && [[ "$scope" == org:* ]]; then identity=valid; fi
+              else
+                expected="${NAME_PREFIX}-${pool}-${pidx}"
+                if [ "$name" = "$expected" ] && github_scope_validate "$scope" && [[ "$scope" == org:* ]]; then identity=valid; fi
+              fi
             fi
             ;;
         esac
       fi
       # Fields sourced from Docker labels must not be able to add columns.
       case "$gen$pool$scope$routing" in *'|'*) identity=invalid-managed; pool=invalid; scope=""; routing="" ;; esac
-      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" >> "$tmp"
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" "${backend:-classic}" >> "$tmp"
     done <<< "$raw"
   fi
   mv "$tmp" "$INVENTORY_FILE" || { rm -f "$tmp"; return 1; }
   INVENTORY_ACTIVE=1
+  reservation_reconcile "$INVENTORY_FILE" >/dev/null 2>&1 || true
 }
 
 inventory_names() {
@@ -259,7 +430,7 @@ inventory_field() {
   case "$field" in
     state) col=2 ;; health) col=3 ;; cpus) col=4 ;; memory) col=5 ;;
     confgen) col=6 ;; pool) col=7 ;; scope) col=8 ;; index) col=9 ;;
-    routing_label) col=10 ;; identity) col=11 ;; *) return 1 ;;
+    routing_label) col=10 ;; identity) col=11 ;; backend) col=12 ;; *) return 1 ;;
   esac
   awk -F'|' -v n="$name" -v c="$col" '$1 == n { print $c; exit }' "$INVENTORY_FILE"
 }
@@ -337,7 +508,7 @@ runner_name_for() {
 }
 
 runner_identity_validate() {
-  local name="$1" managed pool idx scope version expected
+  local name="$1" managed pool idx scope version backend expected
   if [ "$INVENTORY_ACTIVE" = 1 ] && [ -f "$INVENTORY_FILE" ]; then
     [ "$(inventory_field "$name" identity)" = valid ]
     return
@@ -346,35 +517,35 @@ runner_identity_validate() {
   [ "$managed" = true ] || return 1
   pool="$(runner_pool "$name")"; idx="$(runner_index "$name")"; scope="$(runner_scope_target "$name")"
   version="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.identity-version\" }}" "$name" 2>/dev/null)"
+  backend="$(docker inspect -f "{{ index .Config.Labels \"${LABEL_NS}.backend\" }}" "$name" 2>/dev/null)"
   case "$idx" in ''|*[!0-9]*) return 1 ;; esac
   [ -z "$scope" ] || github_scope_validate "$scope" || return 1
   if [ "$pool" = default ]; then
     expected="${NAME_PREFIX}-${idx}"
   else
     pool_id_valid "$pool" || return 1
-    [ "$version" = 1 ] || return 1
+    { [ "$version" = 1 ] || [ "$version" = 2 ]; } || return 1
     case "$scope" in org:*) ;; *) return 1 ;; esac
+    if [ "$backend" = scaleset ] && [ "$version" = 2 ]; then
+      [[ "$name" =~ ^${NAME_PREFIX}-jit-${pool}-[0-9a-f]{20}$ ]]
+      return
+    fi
     expected="${NAME_PREFIX}-${pool}-${idx}"
   fi
   [ "$name" = "$expected" ]
 }
 
-# is a runner actively running a job? (last meaningful log line)
-# Single busy/idle/starting/error predicate shared by the autoscaler (scale-down
-# safety) and the UI status, so the two can never disagree. Deterministic: ask the
-# runner which agent process is live (Runner.Worker = running a job, Runner.Listener
-# = idle-waiting) in one docker exec, matching the image's own healthcheck, with a
-# log-tail fallback for non-standard images or the brief gap between agent processes.
+# Single busy/idle/starting predicate shared by autoscaling and status. The
+# runner-phase cache is refreshed in one GitHub inventory request per scope; this
+# function never performs a per-runner Docker exec/log/inspect. Missing or stale
+# truth is deliberately "starting", which blocks destructive scale-down.
 runner_state() {
-  local c="$1" p
-  p="$(docker exec "$c" sh -c 'pgrep -x Runner.Worker >/dev/null 2>&1 && echo busy || { pgrep -x Runner.Listener >/dev/null 2>&1 && echo idle; }' 2>/dev/null)"
-  case "$p" in busy) echo busy; return;; idle) echo idle; return;; esac
-  case "$(docker logs --tail 15 "$c" 2>&1 | grep -iE 'Running job|Listening for Jobs|Job .* completed|error' | tail -1)" in
-    *"Running job"*)                      echo busy ;;
-    *"Listening for Jobs"*|*"completed"*) echo idle ;;
-    *[Ee]rror*)                           echo error ;;
-    *)                                    echo starting ;;
-  esac
+  local c="$1" cache="$RUNDIR/runner-phases.tsv" age phase
+  [ -f "$cache" ] || { echo starting; return; }
+  age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+  [ "$age" -ge 0 ] && [ "$age" -le 15 ] || { echo starting; return; }
+  phase="$(awk -F'|' -v n="$c" '$1 == n { print $2; exit }' "$cache")"
+  case "$phase" in busy|idle|starting|error) echo "$phase" ;; *) echo starting ;; esac
 }
 runner_busy() { [ "$(runner_state "$1")" = busy ]; }
 runner_authoritatively_failed() {
@@ -409,6 +580,11 @@ crf_confgen() {
   local pool="${1:-default}" scope_target="${2:-}"
   if pool_mode_enabled; then
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+    if [ "$POOL_CONFIG_VERSION" = v2 ] || { pool_snapshot_load >/dev/null 2>&1 && [ "$POOL_CONFIG_VERSION" = v2 ]; }; then
+      printf '%s\0%s' "$(pool_runner_spec_hash "$pool")" "$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)" |
+        sha256sum | cut -c1-12
+      return
+    fi
     printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$RUNNER_GROUP" "$(pool_label "$pool")" "$pool" \
       "$scope_target" "identity-v1" "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" \
       "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" \
@@ -475,7 +651,7 @@ count_reconcile_work() {
 # misconfigured above the ceiling can never bypass the resource cap.
 autoscale_floor() {
   local pool="${1:-default}" f max
-  if pool_mode_enabled; then f="$(pool_min "$pool")"; max="$(pool_max "$pool")"
+  if pool_mode_enabled; then f="$(pool_min "$pool")"; max="$(pool_capacity_ceiling "$pool")"
   else f="$AUTOSCALE_MIN"; max="$AUTOSCALE_MAX"; fi
   [ "$f" -gt "$max" ] && f="$max"
   echo "$f"
@@ -558,11 +734,36 @@ reap_dead_runners() {
 }
 
 # one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
+# Scale-set ticks perform bounded remote IPC and may be invoked by both the
+# daemon and operators. Never queue duplicate ticks behind the request lock.
 autoscale_tick() {
+  local tick_lock="$RUNDIR/autoscale.tick.lock"
+  mkdir -p "$RUNDIR" || return 1
+  (
+    exec 5>"$tick_lock" || exit 1
+    chmod 0600 "$tick_lock" || exit 1
+    if ! flock -n 5; then
+      log "autoscale: tick already running; skipping duplicate"
+      exit 0
+    fi
+    _autoscale_tick
+  )
+}
+
+_autoscale_tick() {
   [ "$AUTOSCALE" = "true" ] || return 0
+  [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { log "autoscale: maintenance mode blocks new admissions"; return 0; }
   validate_runtime_config || { err "autoscale: $POOL_CONFIG_ERROR"; return 1; }
+  if declare -F backend_effective >/dev/null && [ "$(backend_effective)" = scaleset ]; then
+    scaleset_autoscale_tick
+    jit_reconcile
+    return
+  fi
+  [ ! -f "${MIGRATION_CLASSIC_QUIESCE_FILE:-$RUNDIR/classic-admissions.quiesced}" ] ||
+    { log "autoscale: classic admissions are quiesced for backend migration"; return 0; }
   cleanup_pool_runtime_state
   fleet_inventory_refresh || { err "autoscale: could not inventory managed runners"; return 1; }
+  github_phase_refresh >/dev/null 2>&1 || true
   reap_dead_runners        # drop dead containers first so idle accounting is real
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
   if pool_mode_enabled; then
@@ -631,7 +832,7 @@ pool_autoscale_tick() {
   cur="$(current_count "$pool")"
   pool_phase_counts "$pool"
   warm=$((POOL_IDLE + POOL_STARTING))
-  floor="$(pool_min "$pool")"; max="$(pool_max "$pool")"; buffer="$(pool_idle "$pool")"
+  floor="$(pool_min "$pool")"; max="$(pool_capacity_ceiling "$pool")"; buffer="$(pool_idle "$pool")"
   statef="${RUNDIR}/autoscale.${pool}.$(pool_state_generation "$pool").state"
   [ -f "$statef" ] && over="$(cat "$statef" 2>/dev/null || echo 0)"
   case "$over" in ''|*[!0-9]*) over=0 ;; esac
@@ -693,7 +894,14 @@ autoscale_daemon() {
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ "$AUTOSCALE" = "true" ] || { log "autoscale disabled -> daemon exit"; rm -f "$AUTOSCALE_PID"; break; }
-    with_fleet_lock try autoscale_tick
+    if declare -F backend_effective >/dev/null && [ "$(backend_effective)" = scaleset ]; then
+      # Scale-set evaluation performs bounded GitHub IPC and starts JIT
+      # containers only after resource reservations are durable. It must never
+      # inherit the classic fleet lock across those external operations.
+      autoscale_tick
+    else
+      with_fleet_lock try autoscale_tick
+    fi
     sleep "${AUTOSCALE_INTERVAL:-30}"
   done
 }
@@ -799,6 +1007,10 @@ imageupdate_rollover() {
 
 # one update evaluation: pull, and roll only if the runner image actually changed
 imageupdate_tick() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    log "image update paused by backend transition state"; return 0
+  fi
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
   validate_runtime_config || { err "image-update: $POOL_CONFIG_ERROR"; return 1; }
   imageupdate_pull || return 0   # nonzero = image unchanged this cycle
@@ -914,16 +1126,28 @@ gh_api() {
 GH_RESPONSE=""
 GH_STATUS=""
 gh_api_request() {
-  local method="$1" path="$2" body
+  local method="$1" path="$2" request_body="${3:-}" body
   [ -n "$ACCESS_TOKEN" ] || { GH_RESPONSE=""; GH_STATUS="000"; return 1; }
   body="$(mktemp 2>/dev/null)" || { GH_RESPONSE=""; GH_STATUS="000"; return 1; }
-  GH_STATUS="$(
-    printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
-      | curl -sS -m 10 -X "$method" --config - -o "$body" -w '%{http_code}' \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2026-03-10" \
-        "https://api.github.com$path" 2>/dev/null
-  )"
+  if [ "$#" -ge 3 ]; then
+    GH_STATUS="$(
+      printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+        | curl -sS -m 10 -X "$method" --config - -o "$body" -w '%{http_code}' \
+          -H "Accept: application/vnd.github+json" \
+          -H "Content-Type: application/json" \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          --data-binary "$request_body" \
+          "https://api.github.com$path" 2>/dev/null
+    )"
+  else
+    GH_STATUS="$(
+      printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+        | curl -sS -m 10 -X "$method" --config - -o "$body" -w '%{http_code}' \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          "https://api.github.com$path" 2>/dev/null
+    )"
+  fi
   GH_RESPONSE="$(cat "$body" 2>/dev/null)"
   rm -f "$body"
   case "$GH_STATUS" in 2??|404) return 0 ;; *) return 1 ;; esac
@@ -1013,8 +1237,10 @@ github_runner_inventory() {
       if (!is_array($j) || !isset($j["runners"]) || !is_array($j["runners"])) exit(2);
       foreach ($j["runners"] as $r) {
         $id=$r["id"]??null; $name=$r["name"]??null;
-        if (is_int($id) && is_string($name) && !str_contains($name, "|") && !preg_match("/[\\x00-\\x1f]/", $name))
-          echo $id,"|",$name,"\n";
+        $status=$r["status"]??"unknown"; $busy=$r["busy"]??null;
+        if (is_int($id) && is_string($name) && is_string($status) && is_bool($busy) &&
+            !str_contains($name, "|") && !preg_match("/[\\x00-\\x1f]/", $name))
+          echo $id,"|",$name,"|",$status,"|",($busy ? "1" : "0"),"\n";
       }' > "$parsed"; then
       rm -f "$tmp" "$parsed"; return 1
     fi
@@ -1026,6 +1252,42 @@ github_runner_inventory() {
   chmod 600 "$tmp" 2>/dev/null || true
   mv "$tmp" "$cache" || { rm -f "$tmp"; return 1; }
   cat "$cache"
+}
+
+github_phase_refresh() {
+  local tmp="${RUNDIR}/runner-phases.tmp.$$" target id name local_name status busy phase inventory host_prefix
+  local targets=""
+  [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
+  targets="$(awk -F'|' '$8 != "" { print $8 }' "$INVENTORY_FILE" | sort -u)"
+  if [ -z "$targets" ]; then
+    if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then targets="org:$GH_OWNER"
+    else
+      local repo
+      for repo in $GH_REPOS; do targets="${targets}${targets:+$'\n'}repo:$repo"; done
+    fi
+  fi
+  : > "$tmp" || return 1
+  host_prefix="$(host)-"
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    inventory="$(github_runner_inventory "$target")" || { rm -f "$tmp"; return 1; }
+    while IFS='|' read -r id name status busy; do
+      [ -n "$name" ] || continue
+      case "$status:$busy" in
+        online:1) phase=busy ;;
+        online:0) phase=idle ;;
+        offline:*) phase=starting ;;
+        *) phase=error ;;
+      esac
+      local_name="${name#"$host_prefix"}"
+      if ! awk -F'|' -v n="$local_name" '$1 == n { found=1 } END { exit !found }' "$INVENTORY_FILE"; then
+        local_name="$name"
+      fi
+      printf '%s|%s\n' "$local_name" "$phase" >> "$tmp"
+    done <<< "$inventory"
+  done <<< "$targets"
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$RUNDIR/runner-phases.tsv"
 }
 
 github_runner_inventory_invalidate() {
@@ -1427,11 +1689,17 @@ effective_image() {
 # $1=index, $2=name-override(optional), $3=pool(optional), $4=scope-target(optional)
 build_args() {
   local idx="$1" name_override="${2:-}" pool="${3:-default}" scope_target="${4:-}"
-  local name labels
+  local name labels effective_cpu="" effective_memory="" memory_swap identity_version=1
+  CRF_REGISTRATION_SECRET=""
   [ -n "$name_override" ] && name="$name_override" || name="$(runner_name_for "$idx" "$pool")"
   if pool_mode_enabled; then
-    labels="$(pool_label "$pool")"
+    labels="$(pool_effective_labels "$pool")"
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
+    if pool_snapshot_load && [ "$POOL_CONFIG_VERSION" = v2 ]; then
+      effective_cpu="$(pool_cpu_milli "$pool")" || return 1
+      effective_memory="$(pool_memory_bytes "$pool")" || return 1
+      identity_version=2
+    fi
   else
     labels="$RUNNER_LABELS"
     if [ -z "$scope_target" ]; then
@@ -1449,15 +1717,24 @@ build_args() {
     # token instead of resurrecting it with the stale one.
     -d --restart=no
     --name "$name" --hostname "$name"
-    --pids-limit=4096
+    --pids-limit="${RESOURCE_PIDS_LIMIT:-4096}"
+    --tmpfs "/run/crf:rw,noexec,nosuid,nodev,size=1m"
+    --mount "type=bind,src=$SCRIPT_DIR/runner-entrypoint.sh,dst=/usr/local/bin/crf-runner-entrypoint,readonly"
+    --entrypoint /usr/local/bin/crf-runner-entrypoint
     --label "${MANAGED_LABEL%=*}=true"
     --label "net.unraid.ci-runner-farm.index=${idx}"
     --label "${LABEL_NS}.pool=${pool}"
     --label "${LABEL_NS}.pool-index=${idx}"
     --label "${LABEL_NS}.routing-label=$(pool_mode_enabled && pool_label "$pool" || printf '%s' "$RUNNER_LABELS")"
     --label "${LABEL_NS}.scope-target=${scope_target}"
-    --label "${LABEL_NS}.identity-version=1"
+    --label "${LABEL_NS}.identity-version=${identity_version}"
     --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen "$pool" "$scope_target")"
+    --label "${LABEL_NS}.runner-spec-hash=$(pool_runner_spec_hash "$pool")"
+    --label "${LABEL_NS}.config-revision=$(pool_config_revision)"
+    --label "${LABEL_NS}.effective-labels=${labels}"
+    --label "${LABEL_NS}.backend=classic"
+    --label "${LABEL_NS}.cpu-milli=${effective_cpu:-0}"
+    --label "${LABEL_NS}.memory-bytes=${effective_memory:-0}"
     -e RUNNER_NAME="$(host)-${name}"
     -e LABELS="$labels"
     -e DISABLE_AUTO_UPDATE="true"
@@ -1465,6 +1742,7 @@ build_args() {
     -e RUN_AS_ROOT="$RUN_AS_ROOT"
     -e RUNNER_ALLOW_RUNASROOT="1"
     -e RUNNER_WORKDIR="/_work"
+    -e UNSET_CONFIG_VARS="true"
     -e npm_config_cache="/home/runner/.npm"
   )
   # myoung34 entrypoints enable ephemeral mode when the EPHEMERAL env var is
@@ -1478,8 +1756,20 @@ build_args() {
     local hostdir; hostdir="$(crf_safe_mount_subdir "${m%%:*}")" || { err "skipping unsafe cache mount '${m%%:*}'"; continue; }
     ARGS+=( -v "$hostdir:${m#*:}" )
   done
-  [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
-  [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
+  if [ -n "$effective_cpu" ]; then
+    if [ $((effective_cpu % 1000)) -eq 0 ]; then effective_cpu="$((effective_cpu / 1000))"
+    else effective_cpu="$(printf '%s.%03d' "$((effective_cpu / 1000))" "$((effective_cpu % 1000))" | sed 's/0*$//')"; fi
+    ARGS+=( --cpus="$effective_cpu" --memory="$effective_memory" )
+    case "${RESOURCE_MEMORY_SWAP:-none}" in
+      none) memory_swap="$effective_memory" ;;
+      double) memory_swap="$((effective_memory * 2))" ;;
+      *) err "invalid RESOURCE_MEMORY_SWAP policy"; return 1 ;;
+    esac
+    ARGS+=( --memory-swap="$memory_swap" )
+  else
+    [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
+    [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
+  fi
   # network isolation: put the runner on the dedicated bridge (off = default bridge)
   [ "$NETWORK_ISOLATION" != "off" ] && ARGS+=( --network "$RUNNER_NETWORK" )
   if [ "$DIND" = "true" ]; then
@@ -1528,31 +1818,135 @@ build_args() {
   if [ -n "$ACCESS_TOKEN" ] && [ "${NO_REGISTER:-0}" != "1" ]; then
     local reg; reg="$(registration_token "$scope_target")"
     [ -z "$reg" ] && { err "could not mint a runner registration token for ${scope_target#*:} (check the PAT's scope/permissions)"; return 1; }
-    ARGS+=( -e RUNNER_TOKEN="$reg" )
+    CRF_REGISTRATION_SECRET="$reg"
   fi
-  ARGS+=( "$(effective_image)" )
+  # Docker clears an image's inherited CMD when this custom entrypoint is
+  # supplied on affected daemon versions. Preserve the base image's listener
+  # command explicitly so a newly registered classic runner does not exit with
+  # an empty `gosu runner "$@"` invocation.
+  CRF_IMAGE_ARG_INDEX="${#ARGS[@]}"
+  ARGS+=(
+    "$(effective_image)"
+    /usr/local/bin/wait-docker.sh
+    ./bin/Runner.Listener
+    run
+    --startuptype
+    service
+  )
+}
+
+runner_secret_inject() {
+  local name="$1" secret="$2"
+  [ -n "$secret" ] || return 0
+  runner_identity_validate "$name" || {
+    # A freshly created container may not yet be in the shared inventory. Its
+    # exact deterministic name is still bounded before this function is called.
+    case "$name" in
+      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*) ;;
+      *) return 1 ;;
+    esac
+  }
+  docker exec "$name" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 ||
+    return 1
+  ( set +x; printf '%s\n' "$secret" ) |
+    docker exec -i "$name" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || return 1
+  docker exec "$name" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
+}
+
+fleet_lock_suspend() {
+  CRF_FLEET_LOCK_WAS_HELD=0
+  if [ -e "/proc/${BASHPID}/fd/8" ] &&
+     [ "$(readlink "/proc/${BASHPID}/fd/8" 2>/dev/null)" = "$RUNDIR/fleet.lock" ]; then
+    flock -u 8 || return 1
+    CRF_FLEET_LOCK_WAS_HELD=1
+  fi
+}
+
+fleet_lock_resume() {
+  [ "${CRF_FLEET_LOCK_WAS_HELD:-0}" = 1 ] || return 0
+  flock -w 20 8 || { err "fleet busy while finalizing a reserved start"; return 1; }
+  CRF_FLEET_LOCK_WAS_HELD=0
 }
 
 start_one() {
   local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
+  local expected_revision cpu_milli memory_bytes spec_hash reservation_id="" rc observed=0
+  [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { err "maintenance mode blocks new runner admissions"; return 1; }
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    err "classic runner admissions are blocked by backend transition state"; return 1
+  fi
   name="$(runner_name_for "$idx" "$pool")"
   if [ -z "$scope_target" ]; then
     if pool_mode_enabled || [ "$GH_SCOPE" = org ]; then scope_target="org:$GH_OWNER"
     else scope_target="repo:$(repo_for_index "$idx")"; fi
   fi
+  expected_revision="$(pool_config_revision)" || return 1
+  cpu_milli=0; memory_bytes=0
+  if pool_mode_enabled && [ "$POOL_CONFIG_VERSION" = v2 ]; then
+    cpu_milli="$(pool_cpu_milli "$pool")" || return 1
+    memory_bytes="$(pool_memory_bytes "$pool")" || return 1
+    spec_hash="$(pool_runner_spec_hash "$pool")" || return 1
+  else
+    spec_hash="$(crf_confgen "$pool" "$scope_target")"
+  fi
+
+  # Docker/GitHub/token work is deliberately outside the fleet flock.
+  fleet_lock_suspend || return 1
+  fleet_inventory_refresh || { fleet_lock_resume; err "could not inventory before start"; return 1; }
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+    fleet_lock_resume || return 1
     if runner_identity_validate "$name"; then
       log "runner $name already exists; skipping"; return 0
     fi
     err "runner name collision: $name exists but is not a valid managed runner; refusing to touch it"
     return 1
   fi
-  build_args "$idx" "$name" "$pool" "$scope_target" || { err "runner $name not started (registration-token error)"; return 1; }
-  log "starting $name (pool=$pool cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=${scope_target:-$GH_SCOPE})"
+  build_args "$idx" "$name" "$pool" "$scope_target" || {
+    fleet_lock_resume || true
+    err "runner $name not started (registration-token error)"
+    return 1
+  }
+  fleet_lock_resume || return 1
+
+  [ "$(pool_config_revision)" = "$expected_revision" ] ||
+    { err "runner config changed while preparing $name; retrying is required"; return 1; }
+  if [ "$cpu_milli" -gt 0 ]; then
+    reservation_runner_exists "$name" && { err "runner $name already has a pending start"; return 1; }
+    resource_snapshot_refresh "$INVENTORY_FILE" || { err "resource snapshot failed: $RESOURCE_REASON"; return 1; }
+    resource_admit_one "$cpu_milli" "$memory_bytes" ||
+      { err "runner $name blocked: $(resource_reason_text "$RESOURCE_REASON")"; return 1; }
+    reservation_create "$pool" "$name" "$cpu_milli" "$memory_bytes" "$spec_hash" "$expected_revision" ||
+      { err "could not persist admission reservation for $name"; return 1; }
+    reservation_id="$CRF_RESERVATION_ID"
+  fi
+
+  log "starting $name (pool=$pool cpu_milli=$cpu_milli memory_bytes=$memory_bytes scope=${scope_target:-$GH_SCOPE})"
+  fleet_lock_suspend || { [ -z "$reservation_id" ] || reservation_release "$reservation_id"; return 1; }
   docker run "${ARGS[@]}" >/dev/null
-  local rc=$?
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "${CRF_REGISTRATION_SECRET:-}" ]; then
+    if ! runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"; then
+      err "runner $name did not consume its protected registration credential"
+      docker rm -f "$name" >/dev/null 2>&1 || true
+      rc=1
+    fi
+  fi
+  CRF_REGISTRATION_SECRET=""
+  unset CRF_REGISTRATION_SECRET
+  if fleet_inventory_refresh; then
+    awk -F'|' -v n="$name" '$1 == n { found=1 } END { exit !found }' "$INVENTORY_FILE" && observed=1
+  fi
+  fleet_lock_resume || return 1
+  if [ -n "$reservation_id" ] && { [ "$rc" -ne 0 ] || [ "$observed" -eq 1 ]; }; then
+    reservation_release "$reservation_id"
+  fi
+  [ "$rc" -eq 0 ] && [ "$observed" -eq 1 ] || {
+    [ "$observed" -eq 1 ] && rc=0
+    [ "$observed" -eq 0 ] && err "runner $name start outcome was not observed; reservation retained for recovery"
+  }
   [ "$rc" -eq 0 ] && github_runner_inventory_invalidate "$scope_target" 2>/dev/null || true
-  fleet_inventory_invalidate
+  [ "$observed" -eq 1 ] || fleet_inventory_invalidate
   return "$rc"
 }
 
@@ -1710,18 +2104,23 @@ reconcile_stale_runners() {
           log "reconcile: retiring idle runner $c (pool identity no longer desired)"
           if remove_runner "$c"; then start_one_missing_desired
           else log "reconcile: GitHub did not accept retirement of $c — will retry"; fi
+          return 0
           ;;
         error)
           if runner_authoritatively_failed "$c"; then
             log "reconcile: force-retiring authoritatively failed runner $c (pool identity no longer desired)"
             remove_runner_force "$c" && start_one_missing_desired
+            return 0
           else
             log "reconcile: $c has a non-authoritative error signal — preserving it"
+            continue
           fi
           ;;
-        *) log "reconcile: $c is retiring but $state — waiting" ;;
+        *)
+          log "reconcile: $c is retiring but $state — checking other retiring runners"
+          continue
+          ;;
       esac
-      return 0
     fi
     if [ "$docker_state" != running ]; then
       log "reconcile: recreating stopped desired runner $c"
@@ -1809,6 +2208,10 @@ reconcile_stale_runners() {
 # migrate on their next idle via the autoscale tick, or on the next Apply/recycle. Progress
 # is logged to autoscale.log, which the farm-log panel tails.
 cmd_reconcile_drain() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    log "classic reconcile paused by backend transition state"; return 0
+  fi
   # Disown an inherited fleet-lock fd (this can be nohup'd from cmd_start, which holds
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
@@ -1899,6 +2302,27 @@ cmd_reconcile_config() {
   echo "$msg"
 }
 
+cmd_maintenance() {
+  case "${1:-status}" in
+    begin|quiesce)
+      ( umask 077; printf 'entered_at=%s\nreason=operator\n' "$(date +%s)" > "${MAINTENANCE_FILE}.tmp" &&
+        mv "${MAINTENANCE_FILE}.tmp" "$MAINTENANCE_FILE" ) || return 1
+      autoscale_stop
+      printf '{"ok":true,"maintenance":true,"message":"New admissions are paused; busy runners continue."}\n'
+      ;;
+    resume)
+      rm -f "$MAINTENANCE_FILE"
+      [ "$AUTOSCALE" = true ] && autoscale_start >/dev/null
+      reconcile_start
+      printf '{"ok":true,"maintenance":false,"message":"Admissions resumed."}\n'
+      ;;
+    status)
+      printf '{"ok":true,"maintenance":%s}\n' "$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false)"
+      ;;
+    *) printf '{"ok":false,"error":"maintenance action must be begin, resume, or status"}\n'; return 2 ;;
+  esac
+}
+
 pool_effective_target() {
   local pool="$1" configured file value
   configured="$(pool_configured_target "$pool")"
@@ -1977,13 +2401,40 @@ start_one_missing_desired() {
 
 cmd_start() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
+  auth_credentials_configured ||
+    { err "no valid GitHub credentials configured (set them in the web UI). Use 'validate' to test provisioning without credentials."; return 1; }
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp orgp; secp="$(public_repo_problem)"; orgp="$(org_runner_group_problem)"
   [ -n "$secp" ] && err "SECURITY: $secp"       # warn, do not block (operator's call)
   [ -n "$orgp" ] && err "SECURITY: $orgp"
   provision_preflight || return 1               # cache-root guard + dirs/network/mirror/firewall/registry
+  local classic_rollback_activation=0
+  if [ "${MIGRATION_CLASSIC_ACTIVATION:-0}" = 1 ] &&
+     migration_load &&
+     [ "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" = \
+       "scaleset:activating_classic:jit_drained" ] &&
+     backend_classic_admission_allowed; then
+    classic_rollback_activation=1
+  fi
+  if declare -F backend_effective >/dev/null &&
+     [ "$(backend_effective 2>/dev/null)" = scaleset ] &&
+     [ "$classic_rollback_activation" -ne 1 ]; then
+    migration_load && [ "$MIGRATION_PHASE" = scaleset_active ] ||
+      { err "scale-set Start requires an active, completed backend migration"; return 1; }
+    scaleset_supervisor_start ||
+      { err "scale-set supervisor could not start"; return 1; }
+    if ! scaleset_activate_eligible "$MIGRATION_OWNERSHIP_REVISION"; then
+      scaleset_supervisor_stop
+      err "scale sets could not be made eligible"
+      return 1
+    fi
+    jit_reconcile || true
+    [ "$AUTOSCALE" = "true" ] && autoscale_start || true
+    [ "$IMAGE_AUTOUPDATE" = "true" ] && imageupdate_start || true
+    log "scale-set fleet up: $(pool_records | grep -c .) pool(s)"
+    return 0
+  fi
   # If NETWORK_ISOLATION changed while the fleet was up, existing runners are still
   # on the old network — they must be recreated so the new mode actually applies (a
   # half-isolated fleet is a false sense of security). Do this in the BACKGROUND: a
@@ -2087,7 +2538,18 @@ cmd_stop() {
   autoscale_stop
   imageupdate_stop
   reconcile_stop
-  local names; names="$(managed_names)"
+  if declare -F backend_effective >/dev/null &&
+     [ "$(backend_effective 2>/dev/null)" = scaleset ]; then
+    if migration_load && [ "$MIGRATION_PHASE" = scaleset_active ]; then
+      scaleset_make_ineligible "$MIGRATION_OWNERSHIP_REVISION" ||
+        log "warning: scale sets could not be moved to quarantine during Stop"
+    fi
+  fi
+  # Also clears a supervisor left by an interrupted forward migration while the
+  # effective backend still reads classic.
+  scaleset_supervisor_stop
+  fleet_inventory_refresh || { : > "$RUNDIR/usage.cache"; return 1; }
+  local names; names="$(inventory_names)"
   if [ -z "$names" ]; then
     log "no managed runners running"
   else
@@ -2160,6 +2622,10 @@ cmd_scale_internal() {
 }
 
 cmd_scale() {
+  if declare -F backend_classic_admission_allowed >/dev/null &&
+     ! backend_classic_admission_allowed; then
+    err "manual classic scaling is blocked by backend transition state"; return 1
+  fi
   # The autoscaler uses cmd_scale_internal above. A manual scale-up is useful
   # during a burst, but never bypass its configured ceiling or remove runners
   # that the autoscaler is managing.
@@ -2177,7 +2643,7 @@ cmd_scale() {
   [ "$target" -le 64 ] || { err "manual scale target ($target) exceeds the fleet hard maximum (64)"; return 1; }
   if [ "$AUTOSCALE" = "true" ]; then
     local current max
-    if pool_mode_enabled; then max="$(pool_max "$pool")"; else max="$AUTOSCALE_MAX"; fi
+    if pool_mode_enabled; then max="$(pool_capacity_ceiling "$pool")"; else max="$AUTOSCALE_MAX"; fi
     case "$max" in ''|*[!0-9]*) max=16 ;; esac
     current="$(current_count "$pool")"
     [ "$target" -gt "$current" ] || { err "manual scale with Autoscaling on can only add runners (currently $current)"; return 1; }
@@ -2501,7 +2967,7 @@ cmd_usage_refresh() {
   # Everything the 5s status poll would otherwise fork per runner, computed ONCE
   # out-of-band: batched docker stats (cpu/mem), the unified phase, and — for busy
   # runners — the job context. cmd_status_json then paints from this cache + a single
-  # batched inspect, so the hot path no longer runs docker logs/exec per runner.
+  # batched inspect, so the hot path no longer reads logs or enters each container.
   # Line: "name cpu_pct mem_mib phase b64(job) jstarted b64(repo) pr b64(branch) run_id"
   # Also refresh the status-envelope verdicts here, OFF the poll hot path: cache the
   # cache-root (df) warning and keep the public-repo security cache warm, so
@@ -2514,6 +2980,7 @@ cmd_usage_refresh() {
   public_repo_problem > "$RUNDIR/sec.cache" 2>/dev/null
   local names; names="$(managed_names)"
   [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
+  github_phase_refresh >/dev/null 2>&1 || true
   local statsraw
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   statsraw="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null)"
@@ -2526,21 +2993,9 @@ cmd_usage_refresh() {
     cpu="$(printf '%s' "$srow" | cut -d'|' -f2 | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
     mem_mib="$(to_mib "$(printf '%s' "$srow" | cut -d'|' -f3 | awk -F' / ' '{print $1}')")"
     local phase; phase="$(runner_state "$c")"
+    # Detailed job/log context is intentionally drawer-only. Recurring status and
+    # scheduler refreshes never exec into or read logs from each runner.
     local job="" jstarted="_" jrepo="" jpr="_" jbranch="" jrun="_"
-    if [ "$phase" = "busy" ]; then
-      local jline
-      jline="$(docker logs --timestamps --tail 60 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
-      job="${jline##*Running job: }"
-      jstarted="$(echo "$jline" | awk '{print $1}' | grep -oE '^[0-9T:.Z-]+' | head -1)"; jstarted="${jstarted:-_}"
-      local jenv jref
-      jenv="$(docker exec "$c" sh -c 'for p in /proc/[0-9]*/environ; do if tr "\0" "\n" < $p 2>/dev/null | grep -q "^GITHUB_REPOSITORY="; then tr "\0" "\n" < $p | grep -E "^GITHUB_(REPOSITORY|RUN_ID|REF_NAME)="; break; fi; done' 2>/dev/null)"
-      if [ -n "$jenv" ]; then
-        jrepo="$(echo "$jenv" | grep '^GITHUB_REPOSITORY=' | head -1 | cut -d= -f2)"
-        jrun="$(echo "$jenv" | grep '^GITHUB_RUN_ID=' | head -1 | cut -d= -f2 | grep -oE '^[0-9]+' | head -1)"; jrun="${jrun:-_}"
-        jref="$(echo "$jenv" | grep '^GITHUB_REF_NAME=' | head -1 | cut -d= -f2-)"
-        if echo "$jref" | grep -qE '^[0-9]+/merge$'; then jpr="${jref%%/merge*}"; else jbranch="$jref"; fi
-      fi
-    fi
     printf '%s %s %s %s %s %s %s %s %s %s\n' "$c" "${cpu:-0}" "${mem_mib:-0}" "$phase" \
       "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$RUNDIR/usage.cache.tmp"
   done
@@ -2549,10 +3004,22 @@ cmd_usage_refresh() {
 
 cmd_status_json() {
   local names
+  migration_load || true
+  # The supervisor keeps its in-memory heartbeat fresh while GitHub long polls
+  # wait. Materialize that current snapshot for each Fleet read; otherwise a
+  # 30-second autoscale interval can leave the previous 20-second on-disk
+  # snapshot expired for part of every cycle.
+  if [ "${MIGRATION_EFFECTIVE_BACKEND:-}" = scaleset ] &&
+     [ "${MIGRATION_PHASE:-}" = scaleset_active ]; then
+    scaleset_snapshot_refresh >/dev/null 2>&1 || true
+  fi
   if fleet_inventory_refresh; then names="$(inventory_names)"
   else
-    printf '{"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
-      "$(printf '%s' "$RUNNER_MODE" | json_escape)"
+    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+      "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_EFFECTIVE_BACKEND" | json_escape)" "$(printf '%s' "$MIGRATION_PHASE" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_TRANSITION_ID" | json_escape)" "$(printf '%s' "$MIGRATION_REVISION" | json_escape)" \
+      "$(printf '%s' "$MIGRATION_OWNERSHIP_REVISION" | json_escape)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
     return 1
   fi
   local config_error=""
@@ -2584,8 +3051,8 @@ cmd_status_json() {
   local cur_gen stalec=0 retiringc=0 blockedc=0
   declare -A pc pup pbusy pidle pstarting perror pstale pretiring
   local out="["; local first=1
-  local c st _health cpus mem cgen pool scope pidx _routing identity
-  while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity; do
+  local c st _health cpus mem cgen pool scope pidx _routing identity backend
+  while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity backend; do
     [ -z "$c" ] && continue
     local stale=false retiring=false
     pool="${pool:-default}"; pidx="${pidx:-${c##*-}}"
@@ -2650,20 +3117,48 @@ cmd_status_json() {
     first=0
   done < "$INVENTORY_FILE"
   out+="]"
-  local pools="[" pfirst=1 rec pool min max idle configured effective label seen=" " pending=0
+  status_model_refresh
+  local pools="[" pfirst=1 rec pool min max max_json idle configured effective label additional labels cpu_claim memory_claim seen=" " pending=0 blocked_reason="" resource_ok=0
+  local assigned_jobs=-1 advertised_capacity=0 session_healthy=false remote_scale_set_id=null
+  local ownership_state=classic tombstone=false orphan=false ss_desired=0 ss_admitted=0 ss_blocked=0 scale_status
+  resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1 && resource_ok=1
   if [ -z "$config_error" ]; then
     while IFS= read -r rec; do
       pool="${rec%%|*}"; min="$(pool_min "$pool")"
       max="$(pool_max "$pool")"; idle="$(pool_idle "$pool")"; configured="$(pool_configured_target "$pool")"
+      if [ "$max" = auto ]; then max_json='"auto"'; else max_json="$max"; fi
       if pool_mode_enabled; then effective="$(pool_effective_target "$pool")"; label="$(pool_label "$pool")"
       else effective="$configured"; label="$RUNNER_LABELS"; fi
+      additional="$(pool_additional_labels "$pool" 2>/dev/null || true)"
+      labels="$(pool_effective_labels "$pool" 2>/dev/null || printf '%s' "$label")"
+      cpu_claim="$(pool_cpu_milli "$pool" 2>/dev/null || echo 0)"
+      memory_claim="$(pool_memory_bytes "$pool" 2>/dev/null || echo 0)"
       pending=0
       if pool_mode_enabled && [ "$AUTOSCALE" != true ] && [ "${pc["$pool"]:-0}" -gt "$effective" ]; then
         pending=$(( ${pc["$pool"]:-0} - effective ))
         blockedc=$((blockedc + pending))
       fi
+      blocked_reason=""
+      if [ "$POOL_CONFIG_VERSION" = v2 ]; then
+        [ "$resource_ok" = 1 ] || blocked_reason="${RESOURCE_REASON:-resource_state_unavailable}"
+        if [ -z "$blocked_reason" ] && ! resource_admit_one "$cpu_claim" "$memory_claim" >/dev/null 2>&1; then blocked_reason="$RESOURCE_REASON"; fi
+      fi
+      assigned_jobs=-1; advertised_capacity=0; session_healthy=false
+      remote_scale_set_id=null; ownership_state=classic; tombstone=false; orphan=false
+      ss_desired="$effective"; ss_admitted=0; ss_blocked=0
+      if [ "$MIGRATION_EFFECTIVE_BACKEND" = scaleset ]; then
+        scale_status="$(status_scaleset_pool_tsv "$pool")" || scale_status='-1|0|0|0|unknown|0|0|0|0|0'
+        IFS='|' read -r assigned_jobs advertised_capacity _session remote_scale_set_id ownership_state \
+          _tombstone _orphan ss_desired ss_admitted ss_blocked <<<"$scale_status"
+        [ "${_session:-0}" = 1 ] && session_healthy=true
+        [ "${_tombstone:-0}" = 1 ] && tombstone=true
+        [ "${_orphan:-0}" = 1 ] && orphan=true
+        [ "$remote_scale_set_id" -gt 0 ] 2>/dev/null || remote_scale_set_id=null
+        [ "$ss_blocked" -gt 0 ] 2>/dev/null && [ -z "$blocked_reason" ] &&
+          blocked_reason="resource_capacity"
+      fi
       [ "$pfirst" -eq 0 ] && pools+=","
-      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max},\"idle_buffer\":${idle}}"
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max_json},\"idle_buffer\":${idle},\"assigned_jobs\":${assigned_jobs},\"demand_fresh\":$([ "$assigned_jobs" -ge 0 ] 2>/dev/null && printf true || printf false),\"desired\":${ss_desired},\"admitted\":${ss_admitted},\"advertised_capacity\":${advertised_capacity},\"lease_age_seconds\":null,\"session_healthy\":${session_healthy},\"ownership_state\":\"$(printf '%s' "$ownership_state"|json_escape)\",\"remote_scale_set_id\":${remote_scale_set_id},\"tombstone\":${tombstone},\"orphan\":${orphan}}"
       pfirst=0; seen="${seen}${pool} "
     done < <(pool_records)
   fi
@@ -2690,12 +3185,19 @@ cmd_status_json() {
     autoscale_max=0; configured_total=0
     while IFS= read -r rec; do
       pool="${rec%%|*}"
-      autoscale_max=$((autoscale_max + $(pool_max "$pool")))
+      autoscale_max=$((autoscale_max + $(pool_capacity_ceiling "$pool")))
       configured_total=$((configured_total + $(pool_configured_target "$pool")))
     done < <(pool_records)
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
   case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
-  echo "{\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+  echo "{\"schema_version\":2,\"config_revision\":\"$STATUS_CONFIG_REVISION\",\"observed_at\":$STATUS_OBSERVED_AT,\"inventory_revision\":\"$STATUS_INVENTORY_REVISION\",\"backend\":$STATUS_BACKEND_JSON,\"compatibility\":$STATUS_COMPATIBILITY_JSON,\"operation\":$STATUS_OPERATION_JSON,\"maintenance\":$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false),\"resources\":$STATUS_RESOURCES_JSON,\"reservations\":$STATUS_RESERVATIONS_JSON,\"mode\":\"$(printf '%s' "$RUNNER_MODE"|json_escape)\",\"config_error\":\"$(printf '%s' "$config_error"|json_escape)\",\"count\":$(echo "$names" | grep -c . ),\"configured\":${configured_total},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"$(printf '%s' "$as"|json_escape)\",\"image_autoupdate\":\"$(echo "$iu"|json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":$((stalec+retiringc)),\"retiring\":${retiringc},\"blocked_capacity\":${blockedc},\"pools\":${pools},\"runners\":${out}}"
+}
+
+cmd_readiness_json() {
+  migration_load >/dev/null 2>&1 || true
+  status_backend_refresh
+  printf '{"schema_version":2,"backend":%s,"compatibility":%s,"operation":%s}\n' \
+    "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -2834,7 +3336,7 @@ cmd_build_status() {
 # {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
 # (tmpfs) or boot.log before the daemon ran, minus docker's noisy swap-limit warning.
 cmd_farm_log() {
-  local as="$RUNDIR/autoscale.log" bt="$CFGDIR/boot.log" src txt
+  local as="$RUNDIR/autoscale.log" bt="$RUNDIR/boot.log" src txt
   src="$as"; [ -f "$as" ] || src="$bt"
   txt="$([ -f "$src" ] && tail -n 150 "$src" | grep -v 'swap limit capabilities' | tail -n 60)"
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
@@ -2869,7 +3371,8 @@ cmd_build_image() {
 # ones, and (re)starts the autoscale daemon, so the fleet self-heals after a
 # reboot OR a Docker restart.
 cmd_boot_autostart() {
-  [ -n "$ACCESS_TOKEN" ] || { log "boot-autostart: no token configured yet — skipping"; return 0; }
+  auth_credentials_configured ||
+    { log "boot-autostart: no valid GitHub credentials configured yet — skipping"; return 0; }
   local i
   for i in $(seq 1 150); do
     docker info >/dev/null 2>&1 && check_cache_root >/dev/null 2>&1 && break
@@ -2907,8 +3410,11 @@ case "${1:-status}" in
   validate-pools)
     if [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
     else cmd_validate_pools "${2:-}" "${3:-}" "${4:-}"; fi ;;
+  config-revision) config_revision ;;
+  apply-config) with_fleet_lock wait cmd_apply_config "${2:-}" "${3:-}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
+  readiness-json) cmd_readiness_json ;;
   dashboard-json) cmd_dashboard_json ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
@@ -2920,6 +3426,7 @@ case "${1:-status}" in
   stats-json)   cmd_stats_json ;;
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
+  maintenance)  with_fleet_lock wait cmd_maintenance "${2:-status}" ;;
   reconcile-config) cmd_reconcile_config ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
@@ -2932,6 +3439,22 @@ case "${1:-status}" in
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
+  scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
+  prewarm)          backend_scaleset_admission_allowed && scheduler_prewarm_set "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
+  jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
+  jit-reconcile)    jit_reconcile ;;
+  begin-migration)  migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  continue-migration) migration_load && {
+    case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE" in
+      classic:*) migration_advance_forward ;;
+      scaleset:scaleset_active) : ;;
+      scaleset:*) migration_advance_reverse ;;
+    esac
+  } ;;
+  rollback-backend) migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  compatibility-start) scaleset_compatibility_start ;;
+  compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
+  operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
   autoscale-status) autoscale_status ;;

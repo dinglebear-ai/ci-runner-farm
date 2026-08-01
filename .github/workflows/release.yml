@@ -29,6 +29,12 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      - name: Set up Go 1.25.3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.25.3
+          cache-dependency-path: tools/crf-scaleset/go.sum
+
       - name: Validate plugin metadata
         shell: bash
         env:
@@ -91,8 +97,13 @@ jobs:
           fi
           rm -rf /tmp/plgtree && mkdir -p /tmp/plgtree
           tar -xzf "$tgz" -C /tmp/plgtree
+          if [[ ! -x /tmp/plgtree/bin/crf-scaleset ]]; then
+            echo "PLG package ($tgz) is missing its executable scale-set helper" >&2
+            exit 1
+          fi
+          rm -rf /tmp/plgtree/bin
           if ! diff -r /tmp/plgtree src/usr/local/emhttp/plugins/ci-runner-farm; then
-            echo "PLG package ($tgz) does not match src/ at $tag" >&2
+            echo "PLG package ($tgz) source tree does not match src/ at $tag" >&2
             exit 1
           fi
 

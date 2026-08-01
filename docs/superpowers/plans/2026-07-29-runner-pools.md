@@ -46,13 +46,13 @@ Examples:
 
 ```yaml
 # Rust
-runs-on: [self-hosted, ci-pool-rust]
+runs-on: ci-pool-rust
 
 # Python
-runs-on: [self-hosted, ci-pool-python]
+runs-on: ci-pool-python
 
 # TypeScript / Node
-runs-on: [self-hosted, ci-pool-typescript]
+runs-on: ci-pool-typescript
 ```
 
 Pool runners must not inherit the legacy `RUNNER_LABELS`. Otherwise a workflow that still requests `[self-hosted, unraid]` could consume reserved Python or TypeScript capacity. GitHub's default `self-hosted`, OS, and architecture labels remain present.

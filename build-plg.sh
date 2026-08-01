@@ -39,12 +39,41 @@ REPO="${REPO:-unraid/ci-runner-farm}"
 # (never /usr or a root '.' entry that could clobber system-dir perms on extract;
 # the install step extracts --no-same-owner and chowns root:root regardless).
 make_tgz() {
-  local opts=()
+  local opts=() package_root helper go_bin
+  package_root="$(mktemp -d)"
+  trap 'rm -rf "$package_root"' RETURN
+  cp -a "$SRCDIR/." "$package_root/"
+  if [ -d tools/crf-scaleset ]; then
+    go_bin="${CRF_GO:-go}"
+    [ "$("$go_bin" version | awk '{print $3}')" = go1.25.3 ] ||
+      { echo "crf-scaleset requires Go 1.25.3 (set CRF_GO to that binary)" >&2; return 1; }
+    mkdir -p "$package_root/bin"
+    helper="$package_root/bin/crf-scaleset"
+    (
+      cd tools/crf-scaleset
+      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 "$go_bin" \
+        build -mod=vendor -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+        -o "$helper" ./cmd/crf-scaleset
+    )
+    chmod 0755 "$helper"
+  fi
+  # The release archive itself carries the final installed modes. This keeps
+  # code-only staging, package inspection, and normal Unraid installation
+  # identical instead of relying on the .plg post-extract chmod pass.
+  find "$package_root" -type d -exec chmod 0755 {} +
+  find "$package_root" -type f -exec chmod 0644 {} +
+  chmod 0755 "$package_root/include/runner-farm.sh"
+  chmod 0755 "$package_root/include/runner-entrypoint.sh"
+  [ ! -f "$package_root/bin/crf-scaleset" ] || chmod 0755 "$package_root/bin/crf-scaleset"
+  [ ! -d "$package_root/nchan" ] ||
+    find "$package_root/nchan" -type f -exec chmod 0755 {} +
+  [ ! -d "$package_root/event" ] ||
+    find "$package_root/event" -type f -exec chmod 0755 {} +
   if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
     opts=(--sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner)
   fi
   # ${opts[@]+...} keeps this safe under `set -u` when opts is empty (bash 3.2).
-  tar ${opts[@]+"${opts[@]}"} -cf - -C "$SRCDIR" . | gzip -9n > "$TGZ"
+  tar ${opts[@]+"${opts[@]}"} -cf - -C "$package_root" . | gzip -9n > "$TGZ"
 }
 
 # `build-plg.sh --tgz-only` just (re)builds the package — used by the release
@@ -129,7 +158,8 @@ ${changes}
 set -e
 PLGDIR="/usr/local/emhttp/plugins/${NAME}"
 CFGDIR="/boot/config/plugins/${NAME}"
-mkdir -p "\$CFGDIR" "\$PLGDIR"
+RUNDIR="/var/local/emhttp/${NAME}"
+mkdir -p "\$CFGDIR" "\$PLGDIR" "\$RUNDIR"
 # Sweep any older package versions off flash, keeping this build's package.
 find "\$CFGDIR" -maxdepth 1 -name '${NAME}-*.tgz' ! -name '${PACKAGE_NAME}' -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
@@ -140,6 +170,8 @@ chown -R root:root "\$PLGDIR"
 find "\$PLGDIR" -type d -exec chmod 0755 {} +
 find "\$PLGDIR" -type f -exec chmod 0644 {} +
 chmod 0755 "\$PLGDIR/include/runner-farm.sh"
+chmod 0755 "\$PLGDIR/include/runner-entrypoint.sh"
+[ ! -f "\$PLGDIR/bin/crf-scaleset" ] || chmod 0755 "\$PLGDIR/bin/crf-scaleset"
 [ -d "\$PLGDIR/nchan" ] && find "\$PLGDIR/nchan" -type f -exec chmod 0755 {} +
 # Unraid's emhttp_event executes these on Docker service start/stop — must be +x
 [ -d "\$PLGDIR/event" ] && find "\$PLGDIR/event" -type f -exec chmod 0755 {} +
@@ -180,7 +212,7 @@ fi
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
 # blocking. No-op until a GitHub token is configured.
-( nohup "\$PLGDIR/include/runner-farm.sh" boot-autostart >>"\$CFGDIR/boot.log" 2>&1 & ) || true
+( nohup "\$PLGDIR/include/runner-farm.sh" boot-autostart >>"\$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
 echo "| ci-runner-farm ${VERSION} installed.                         "

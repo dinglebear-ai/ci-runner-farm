@@ -1,0 +1,11 @@
+# direction|from|to|effective-before|effective-after|barrier-after
+forward|classic_active|preparing_scaleset_ineligible|classic|classic|classic_only
+forward|preparing_scaleset_ineligible|quiescing_classic|classic|classic|scaleset_ineligible
+forward|quiescing_classic|classic_ineligible|classic|classic|classic_drained
+forward|classic_ineligible|activating_scaleset|classic|classic|classic_ineligible
+forward|activating_scaleset|scaleset_active|classic|scaleset|scaleset_eligible
+reverse|scaleset_active|quiescing_scaleset|scaleset|scaleset|scaleset_eligible
+reverse|quiescing_scaleset|scaleset_ineligible|scaleset|scaleset|scaleset_ineligible
+reverse|scaleset_ineligible|draining_assigned_jit|scaleset|scaleset|scaleset_ineligible
+reverse|draining_assigned_jit|activating_classic|scaleset|scaleset|jit_drained
+reverse|activating_classic|classic_active|scaleset|classic|classic_only

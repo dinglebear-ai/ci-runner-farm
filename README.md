@@ -161,13 +161,13 @@ copyable workflow selector:
 
 ```yaml
 # Rust
-runs-on: [self-hosted, ci-pool-rust]
+runs-on: ci-pool-rust
 
 # Python
-runs-on: [self-hosted, ci-pool-python]
+runs-on: ci-pool-python
 
 # TypeScript / Node
-runs-on: [self-hosted, ci-pool-typescript]
+runs-on: ci-pool-typescript
 ```
 
 GitHub matches every requested label. A job that asks only for `self-hosted`
