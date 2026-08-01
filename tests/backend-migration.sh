@@ -148,8 +148,10 @@ bash -c '
   RUNDIR=$root/run; CFGDIR=$root/cfg; JIT_STATE_DIR=$root/jit
   RESERVATION_DIR=$root/reservations; SCALESET_STATE_DIR=$root/scaleset
   SCALESET_SNAPSHOT=$SCALESET_STATE_DIR/snapshot.json
+  SCALESET_OWNERSHIP=$CFGDIR/scale-set-ownership.json
   INVENTORY_FILE=$RUNDIR/inventory
   mkdir -p "$RUNDIR" "$CFGDIR" "$JIT_STATE_DIR" "$RESERVATION_DIR" "$SCALESET_STATE_DIR"
+  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
   SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
   err(){ :; }
   jit_state_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
@@ -157,17 +159,19 @@ bash -c '
   reservation_release(){ rm -f "$RESERVATION_DIR/$1.state"; }
   snapshot_mode=good; inventory_mode=empty
   scaleset_snapshot_refresh(){
-    local now until assigned=0 handles="" healthy=true
+    local now until assigned=0 capacity=0 handles="" healthy=true
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     until=$(date -u -d "+20 seconds" +%Y-%m-%dT%H:%M:%SZ)
     case "$snapshot_mode" in
       assigned) assigned=1 ;;
       handles) handles=501 ;;
+      capacity) capacity=1 ;;
       stale) now=$(date -u -d "-2 minutes" +%Y-%m-%dT%H:%M:%SZ) ;;
       unhealthy) healthy=false ;;
+      closed) healthy=false; now=0001-01-01T00:00:00Z; until=0001-01-01T00:00:00Z ;;
     esac
-    printf "{\"pools\":[{\"pool_id\":\"python\",\"session_healthy\":%s,\"assigned_jobs\":%s,\"acquired_handles\":[%s],\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
-      "$healthy" "$assigned" "$handles" "$now" "$until" >"$SCALESET_SNAPSHOT"
+    printf "{\"pools\":[{\"pool_id\":\"python\",\"session_healthy\":%s,\"assigned_jobs\":%s,\"advertised_capacity\":%s,\"acquired_handles\":[%s],\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
+      "$healthy" "$assigned" "$capacity" "$handles" "$now" "$until" >"$SCALESET_SNAPSHOT"
   }
   fleet_inventory_refresh(){
     : >"$INVENTORY_FILE"
@@ -176,6 +180,8 @@ bash -c '
     return 0
   }
   . "$SCRIPT_DIR/runner-migration.sh"
+  MIGRATION_PHASE=draining_assigned_jit
+  MIGRATION_LAST_BARRIER=scaleset_ineligible
   migration_jit_drained
   printf "phase=running\n" >"$JIT_STATE_DIR/runner.state"
   ! migration_jit_drained
@@ -185,8 +191,13 @@ bash -c '
   rm -f "$RESERVATION_DIR/work.state"
   snapshot_mode=assigned; ! migration_jit_drained
   snapshot_mode=handles; ! migration_jit_drained
+  snapshot_mode=capacity; ! migration_jit_drained
   snapshot_mode=stale; ! migration_jit_drained
   snapshot_mode=unhealthy; ! migration_jit_drained
+  snapshot_mode=closed; migration_jit_drained
+  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"eligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
+  ! migration_jit_drained
+  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
   snapshot_mode=good; inventory_mode=jit; ! migration_jit_drained
   inventory_mode=empty
   printf "phase=offered\n" >"$RESERVATION_DIR/offer.state"

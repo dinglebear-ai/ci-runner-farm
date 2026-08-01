@@ -564,20 +564,46 @@ migration_jit_drained() {
     err "cannot prove JIT drain without a fresh scale-set snapshot"
     return 1
   }
+  [ "$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" =     "draining_assigned_jit:scaleset_ineligible" ] || {
+    err "scale-set ineligibility barrier is not proven"
+    return 1
+  }
   snapshot_ok="$(php -r '
-    $j=json_decode(file_get_contents($argv[1]),true);$now=time();
-    if(!is_array($j)||!is_array($j["pools"]??null)||count($j["pools"])===0)exit(2);
-    foreach($j["pools"] as $p){
-      $observed=strtotime((string)($p["observed_at"]??""));
-      $valid=strtotime((string)($p["valid_until"]??""));
-      if(($p["session_healthy"]??false)!==true||($p["assigned_jobs"]??-1)!==0||
-        !is_array($p["acquired_handles"]??null)||count($p["acquired_handles"])!==0||
-        $observed===false||$valid===false||$observed>$now+5||$valid<=$now||
-        $valid-$observed>30)exit(3);
+    $snapshot=json_decode(file_get_contents($argv[1]),true);
+    $ownership=json_decode(file_get_contents($argv[2]),true);
+    $max=(int)$argv[3];$now=time();
+    if(!is_array($snapshot)||!is_array($snapshot["pools"]??null)||
+      !is_array($ownership)||($ownership["schema_version"]??0)!==2||
+      !is_array($ownership["records"]??null)||$max<=0||$max>300)exit(2);
+    $expected=[];
+    foreach($ownership["records"] as $record){
+      $id=$record["pool_id"]??"";
+      if(!is_string($id)||$id===""||isset($expected[$id])||
+        ($record["state"]??"")!=="ineligible"||($record["scale_set_id"]??0)<=0)exit(3);
+      $expected[$id]=true;
     }
+    if(count($expected)===0||count($snapshot["pools"])!==count($expected))exit(4);
+    foreach($snapshot["pools"] as $p){
+      $id=$p["pool_id"]??"";
+      if(!is_string($id)||!isset($expected[$id])||($p["assigned_jobs"]??-1)!==0||
+        ($p["advertised_capacity"]??-1)!==0||!is_array($p["acquired_handles"]??null)||
+        count($p["acquired_handles"])!==0)exit(5);
+      unset($expected[$id]);
+      $healthy=($p["session_healthy"]??false)===true;
+      $observedRaw=(string)($p["observed_at"]??"");
+      $validRaw=(string)($p["valid_until"]??"");
+      if($healthy){
+        $observed=strtotime($observedRaw);$valid=strtotime($validRaw);
+        if($observed===false||$valid===false||$observed>$now+5||$valid<=$now||
+          $valid-$observed>$max)exit(6);
+      }elseif($observedRaw!=="0001-01-01T00:00:00Z"||$validRaw!=="0001-01-01T00:00:00Z"){
+        exit(7);
+      }
+    }
+    if(count($expected)!==0)exit(8);
     echo "yes";
-  ' "$SCALESET_SNAPSHOT" 2>/dev/null)" || {
-    err "assigned, pending, or stale GitHub scale-set work remains"
+  ' "$SCALESET_SNAPSHOT" "$SCALESET_OWNERSHIP"     "${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}" 2>/dev/null)" || {
+    err "assigned, pending, stale, or insufficiently proven scale-set work remains"
     return 1
   }
   [ "$snapshot_ok" = yes ] || return 1
