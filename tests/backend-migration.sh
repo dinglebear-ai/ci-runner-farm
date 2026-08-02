@@ -153,7 +153,7 @@ bash -c '
   SCALESET_OWNERSHIP=$CFGDIR/scale-set-ownership.json
   INVENTORY_FILE=$RUNDIR/inventory
   mkdir -p "$RUNDIR" "$CFGDIR" "$JIT_STATE_DIR" "$RESERVATION_DIR" "$SCALESET_STATE_DIR"
-  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
+  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"ineligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
   SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
   err(){ :; }
   jit_state_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
@@ -202,9 +202,9 @@ bash -c '
   sed -i "s/\"acquired_handles\":\[\]/\"acquired_handles\":null/" "$SCALESET_SNAPSHOT"
   migration_jit_drained
   snapshot_mode=stopped; migration_jit_drained
-  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"eligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
+  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"eligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
   ! migration_jit_drained
-  printf '%s\n' '{"schema_version":2,"records":[{"pool_id":"python","state":"ineligible","scale_set_id":41}]}' >"$SCALESET_OWNERSHIP"
+  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"ineligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
   snapshot_mode=good; inventory_mode=jit; ! migration_jit_drained
   inventory_mode=empty
   printf "phase=offered\n" >"$RESERVATION_DIR/offer.state"
