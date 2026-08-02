@@ -94,7 +94,8 @@ Tag="server"
   .crf-activity-head .crf-muted{margin-left:8px;font-weight:normal}
   .crf-activity-row{display:grid;grid-template-columns:72px 150px minmax(140px,1fr) 76px;gap:10px;align-items:center;padding:5px 10px;border-top:1px solid var(--table-border-color,var(--border-color));font-size:11px}
   .crf-activity-time,.crf-activity-pool{font-family:bitstream,monospace;color:var(--alt-text-color)}
-  .crf-activity-job{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-color)}
+  .crf-activity-pool{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-activity-job{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-color)}
   .crf-activity-result{text-align:right;font-weight:500}
   .crf-activity-failure{color:var(--crf-err)}
   .crf-activity-cancelled,.crf-activity-unknown{color:var(--alt-text-color)}
@@ -151,6 +152,7 @@ Tag="server"
     .crf-stat-value{font-size:20px}
     .crf-pool-fleet-meta{gap:8px;flex-wrap:wrap}
     .crf-pool-fleet-meta .crf-pool-metrics{margin-left:0}
+    .crf-activity-row{grid-template-columns:58px minmax(54px,.7fr) minmax(0,1.5fr) minmax(48px,auto);gap:6px;padding:5px 7px}
   }
   .crf-bay-drawer{border-top:1px solid var(--table-border-color,var(--border-color));background:var(--shade-bg-color,var(--background-color));padding:8px 12px 8px 44px;font-family:bitstream,monospace;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:190px;overflow:auto;cursor:default}
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
@@ -255,7 +257,7 @@ function crfRenderPools(d){
       route.innerHTML='<span class="crf-pool-state">classic runners draining</span>';
     }
     fleet.querySelector('.crf-pool-metrics').innerHTML='<strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
-      (scaleSet?' · assigned '+crfEsc(Math.max(0,Number(p.assigned_jobs)||0))+' · capacity '+crfEsc(Math.max(0,Number(p.advertised_capacity)||0)):'')+
+      (scaleSet?' · assigned '+crfEsc(crfDemandValue(p,'assigned_jobs'))+' · capacity '+crfEsc(crfDemandValue(p,'advertised_capacity')):'')+
       (p.starting?' · starting '+crfEsc(p.starting):'')+(p.completed?' · completed '+crfEsc(p.completed):'')+(p.error?' · error '+crfEsc(p.error):'');
     fleet.querySelector('.crf-pool-state-wrap').innerHTML=state;
     fleet.querySelector('.crf-pool-title').textContent=title;
@@ -312,10 +314,20 @@ document.getElementById('crf-pools-section').addEventListener('click',e=>{
   }
 });
 
+function crfDemandValue(pool,key){
+  const value=Number(pool&&pool[key]);
+  return pool&&pool.demand_fresh===true&&Number.isFinite(value)&&value>=0?String(value):'—';
+}
+function crfAssignedDemand(d){
+  const pools=Array.isArray(d&&d.pools)?d.pools:[];
+  if(!pools.every(p=>p&&p.demand_fresh===true&&Number.isFinite(Number(p.assigned_jobs))&&Number(p.assigned_jobs)>=0))return null;
+  return pools.reduce((n,p)=>n+Number(p.assigned_jobs),0);
+}
+
 function crfBackendAction(action){
   if(CRF_BACKEND_PENDING)return;
   const d=window.CRF_LAST||{}, b=d.backend||{}, c=d.compatibility||{};
-  const assigned=(d.pools||[]).reduce((n,p)=>n+Math.max(0,Number(p.assigned_jobs)||0),0);
+  const assigned=crfAssignedDemand(d);
   const busy=(d.runners||[]).filter(r=>r.state==='running'&&r.phase==='busy').length;
   const idle=(d.runners||[]).filter(r=>r.state==='running'&&r.phase==='idle').length;
   const payload={action,expected_config_revision:d.config_revision,
@@ -329,7 +341,7 @@ function crfBackendAction(action){
       .finally(()=>{CRF_BACKEND_PENDING=false;crfRefresh();});
   };
   const consequence=action==='begin-migration'?'Classic remains effective until its remote eligibility barrier is proven.':'Scale sets become ineligible first; assigned JIT work drains before classic is reactivated.';
-  const text='Busy '+busy+' · idle '+idle+' · assigned '+assigned+'\nConfig '+String(d.config_revision||'').slice(0,12)+' · transition '+String(b.transition_revision||'').slice(0,12)+'\n\n'+consequence;
+  const text='Busy '+busy+' · idle '+idle+' · assigned '+(assigned===null?'—':assigned)+'\nConfig '+String(d.config_revision||'').slice(0,12)+' · transition '+String(b.transition_revision||'').slice(0,12)+'\n\n'+consequence;
   if(window.swal)swal({title:action==='begin-migration'?'Begin fleet migration?':'Roll back to classic?',text,type:'warning',showCancelButton:true,confirmButtonText:action==='begin-migration'?'Begin migration':'Begin rollback'},ok=>{if(ok)run();});
   else if(window.confirm(text))run();
 }
@@ -367,6 +379,15 @@ function crfEmptyFleetHtml(d){
     '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
     '<uui-button size="sm" data-crf-mutation'+(crfDark()?' class="dark"':'')+(d.config_error?' disabled':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
 }
+function crfActivityWhen(iso){
+  const t=Date.parse(iso||''); if(isNaN(t))return '—';
+  const age=Math.max(0,Date.now()-t), minute=60000, hour=60*minute, day=24*hour;
+  if(age<minute)return 'now';
+  if(age<hour)return Math.floor(age/minute)+'m ago';
+  if(age<day)return Math.floor(age/hour)+'h ago';
+  if(age<7*day)return Math.floor(age/day)+'d ago';
+  return new Date(t).toLocaleDateString([], {month:'short',day:'numeric'});
+}
 function crfRenderActivity(d){
   const box=document.getElementById('crf-activity'), body=document.getElementById('crf-activity-body');
   if(!box||!body)return;
@@ -374,10 +395,10 @@ function crfRenderActivity(d){
   if(!rows.length){box.style.display='none';body.innerHTML='';return;}
   box.style.display='block';
   body.innerHTML=rows.map(a=>{
-    const t=Date.parse(a.completed_at||''), when=isNaN(t)?'—':new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    const when=crfActivityWhen(a.completed_at);
     const conclusion=String(a.conclusion||'unknown'), cls=conclusion==='success'?'crf-c-ok':'crf-activity-'+conclusion;
     return '<div class="crf-activity-row">'+
-      '<span class="crf-activity-time">'+crfEsc(when)+'</span>'+
+      '<span class="crf-activity-time" title="'+crfEsc(a.completed_at||'')+'">'+crfEsc(when)+'</span>'+
       '<span class="crf-activity-pool">'+crfEsc(a.pool_id||'unknown')+'</span>'+
       '<span class="crf-activity-job" title="'+crfEsc(a.job||'')+'">'+crfEsc(a.job||'unnamed job')+'</span>'+
       '<span class="crf-activity-result '+cls+'">'+crfEsc(conclusion)+'</span></div>';
@@ -413,8 +434,8 @@ function crfRefresh(){
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
     const backend=d.backend||{}, compatibility=d.compatibility||{};
-    const assigned=(d.pools||[]).reduce((n,p)=>n+Math.max(0,Number(p.assigned_jobs)||0),0);
-    put('crf-s-assigned',backend.effective==='scaleset'?assigned:'—');
+    const assigned=crfAssignedDemand(d);
+    put('crf-s-assigned',backend.effective==='scaleset'?(assigned===null?'—':assigned):'—');
     put('crf-s-backend',(backend.requested||'?')+' → '+(backend.effective||'?'));
     put('crf-s-transition',backend.transition_phase||'?');
     const begin=document.getElementById('crf-begin-migration'), rollback=document.getElementById('crf-rollback-backend'), backendReason=document.getElementById('crf-backend-reason');

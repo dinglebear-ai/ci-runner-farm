@@ -212,7 +212,8 @@ jit_retire_handle() {
   payload="$(php -r 'echo json_encode(["pool_id"=>$argv[1],"work_handle"=>(int)$argv[2]],
     JSON_UNESCAPED_SLASHES);' "$pool" "$handle")" || return 1
   response="$(scaleset_request retire_jit "$payload")" || rc=$?
-  printf '%s' "$response" | php -r '
+  local validation_rc
+  if printf '%s' "$response" | php -r '
     $j=json_decode(stream_get_contents(STDIN),true);
     if(($j["ok"]??false)===true&&($j["result"]["retired"]??false)===true)exit(0);
     // A root-owned local deleting record proves this handle was issued. If the
@@ -220,7 +221,13 @@ jit_retire_handle() {
     // only the response was lost. Treat that one terminal code as idempotent.
     if(($j["ok"]??true)===false&&($j["code"]??"")==="work_handle_not_issued")exit(0);
     exit(2);
-  ' || return "$rc"
+  '; then
+    return 0
+  else
+    validation_rc=$?
+  fi
+  [ "$rc" -ne 0 ] && return "$rc"
+  return "$validation_rc"
 }
 
 jit_cleanup_observed() {

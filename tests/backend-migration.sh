@@ -140,8 +140,8 @@ bash -c '
 '
 
 # Rollback drain proof fails closed on every remaining authority: nonterminal
-# JIT state, resource reservations, assigned/leased GitHub work, stale session
-# evidence, and managed JIT containers.
+# JIT state, resource reservations, assigned/leased GitHub work, stale or
+# pre-barrier session evidence, mismatched identities, and managed JIT containers.
 bash -c '
   set -euo pipefail
   root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
@@ -153,7 +153,16 @@ bash -c '
   SCALESET_OWNERSHIP=$CFGDIR/scale-set-ownership.json
   INVENTORY_FILE=$RUNDIR/inventory
   mkdir -p "$RUNDIR" "$CFGDIR" "$JIT_STATE_DIR" "$RESERVATION_DIR" "$SCALESET_STATE_DIR"
-  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"ineligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
+  config=$(printf a%.0s {1..64}); ownership=$(printf b%.0s {1..64})
+  MIGRATION_TARGET_CONFIG_REVISION=$config
+  MIGRATION_OWNERSHIP_REVISION=$ownership
+  ownership_updated=$(date -u -d "-30 seconds" +%Y-%m-%dT%H:%M:%SZ)
+  write_ownership(){
+    local state="${1:-ineligible}" scale_id="${2:-41}" config_rev="${3:-$config}" updated="${4:-$ownership_updated}"
+    printf "{\"schema_version\":2,\"config_revision\":\"%s\",\"records\":[{\"pool_id\":\"python\",\"state\":\"%s\",\"scale_set_id\":%s,\"updated_at\":\"%s\"}]}\n" \
+      "$config_rev" "$state" "$scale_id" "$updated" >"$SCALESET_OWNERSHIP"
+  }
+  write_ownership
   SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
   err(){ :; }
   jit_state_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
@@ -161,20 +170,26 @@ bash -c '
   reservation_release(){ rm -f "$RESERVATION_DIR/$1.state"; }
   snapshot_mode=good; inventory_mode=empty
   scaleset_snapshot_refresh(){
-    local now until assigned=0 capacity=0 handles="" healthy=true refresh_rc=0
-    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    until=$(date -u -d "+20 seconds" +%Y-%m-%dT%H:%M:%SZ)
+    local observed valid assigned=0 capacity=0 handles="[]" healthy=true refresh_rc=0
+    local snapshot_config="$config" snapshot_ownership="$ownership" scale_id=41
+    observed=$(date -u -d "-5 seconds" +%Y-%m-%dT%H:%M:%SZ)
+    valid=$(date -u -d "+20 seconds" +%Y-%m-%dT%H:%M:%SZ)
     case "$snapshot_mode" in
       assigned) assigned=1 ;;
-      handles) handles=501 ;;
+      handles) handles="[501]" ;;
       capacity) capacity=1 ;;
-      stale) now=$(date -u -d "-2 minutes" +%Y-%m-%dT%H:%M:%SZ) ;;
+      stale) observed=$(date -u -d "-2 minutes" +%Y-%m-%dT%H:%M:%SZ); valid=$(date -u -d "-1 minute" +%Y-%m-%dT%H:%M:%SZ) ;;
       unhealthy) healthy=false ;;
-      closed) healthy=false; now=0001-01-01T00:00:00Z; until=0001-01-01T00:00:00Z ;;
-      stopped) healthy=false; now=0001-01-01T00:00:00Z; until=0001-01-01T00:00:00Z; refresh_rc=1 ;;
+      zero) healthy=false; observed=0001-01-01T00:00:00Z; valid=0001-01-01T00:00:00Z ;;
+      stopped) healthy=false; observed=$(date -u -d "-20 seconds" +%Y-%m-%dT%H:%M:%SZ); valid=$(date -u -d "-10 seconds" +%Y-%m-%dT%H:%M:%SZ); refresh_rc=1 ;;
+      prebarrier) observed=$(date -u -d "-40 seconds" +%Y-%m-%dT%H:%M:%SZ) ;;
+      null_handles) handles=null ;;
+      wrong_scale) scale_id=99 ;;
+      wrong_config) snapshot_config=$(printf c%.0s {1..64}) ;;
+      wrong_ownership) snapshot_ownership=$(printf d%.0s {1..64}) ;;
     esac
-    printf "{\"pools\":[{\"pool_id\":\"python\",\"session_healthy\":%s,\"assigned_jobs\":%s,\"advertised_capacity\":%s,\"acquired_handles\":[%s],\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
-      "$healthy" "$assigned" "$capacity" "$handles" "$now" "$until" >"$SCALESET_SNAPSHOT"
+    printf "{\"schema_version\":1,\"controller_instance_id\":\"controller\",\"config_revision\":\"%s\",\"ownership_revision\":\"%s\",\"sequence\":1,\"observed_at\":\"%s\",\"valid_until\":\"%s\",\"pools\":[{\"pool_id\":\"python\",\"scale_set_id\":%s,\"assigned_jobs\":%s,\"advertised_capacity\":%s,\"last_message_id\":1,\"session_healthy\":%s,\"acquired_handles\":%s,\"observed_at\":\"%s\",\"valid_until\":\"%s\"}]}\n" \
+      "$snapshot_config" "$snapshot_ownership" "$observed" "$valid" "$scale_id" "$assigned" "$capacity" "$healthy" "$handles" "$observed" "$valid" >"$SCALESET_SNAPSHOT"
     return "$refresh_rc"
   }
   fleet_inventory_refresh(){
@@ -184,6 +199,8 @@ bash -c '
     return 0
   }
   . "$SCRIPT_DIR/runner-migration.sh"
+  MIGRATION_TARGET_CONFIG_REVISION=$config
+  MIGRATION_OWNERSHIP_REVISION=$ownership
   MIGRATION_PHASE=draining_assigned_jit
   MIGRATION_LAST_BARRIER=scaleset_ineligible
   migration_jit_drained
@@ -197,14 +214,17 @@ bash -c '
   snapshot_mode=handles; ! migration_jit_drained
   snapshot_mode=capacity; ! migration_jit_drained
   snapshot_mode=stale; ! migration_jit_drained
-  snapshot_mode=unhealthy; ! migration_jit_drained
-  snapshot_mode=closed; migration_jit_drained
-  sed -i "s/\"acquired_handles\":\[\]/\"acquired_handles\":null/" "$SCALESET_SNAPSHOT"
-  migration_jit_drained
+  snapshot_mode=unhealthy; migration_jit_drained
+  snapshot_mode=zero; ! migration_jit_drained
+  snapshot_mode=null_handles; ! migration_jit_drained
+  snapshot_mode=wrong_scale; ! migration_jit_drained
+  snapshot_mode=wrong_config; ! migration_jit_drained
+  snapshot_mode=wrong_ownership; ! migration_jit_drained
+  snapshot_mode=prebarrier; ! migration_jit_drained
   snapshot_mode=stopped; migration_jit_drained
-  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"eligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
+  write_ownership eligible
   ! migration_jit_drained
-  printf "%s\n" "{\"schema_version\":2,\"records\":[{\"pool_id\":\"python\",\"state\":\"ineligible\",\"scale_set_id\":41}]}" >"$SCALESET_OWNERSHIP"
+  write_ownership ineligible
   snapshot_mode=good; inventory_mode=jit; ! migration_jit_drained
   inventory_mode=empty
   printf "phase=offered\n" >"$RESERVATION_DIR/offer.state"

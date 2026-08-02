@@ -71,6 +71,10 @@ scaleset_request(){
     printf '{"schema_version":1,"request_id":"r","ok":false,"code":"work_handle_not_issued"}\n'
     return 1
   fi
+  if [ "$retire_mode" = unconfirmed ]; then
+    printf '{"schema_version":1,"request_id":"r","ok":true,"result":{"retired":false}}\n'
+    return 0
+  fi
   printf '{"schema_version":1,"request_id":"r","ok":true,"result":{"retired":true}}\n'
 }
 
@@ -112,6 +116,17 @@ fake_exists[$orphan]=1; fake_status[$orphan]=exited; fake_consumed[$orphan]=1; f
 jit_reconcile
 [ "${fake_exists[$orphan]}" = 0 ] || crf_fail "orphan exited JIT container was not removed"
 grep -Fq '"work_handle":303' "$retired" || crf_fail "orphan work handle was not retired"
+
+# A delivered request without explicit retirement confirmation must remain in
+# deleting state so reconciliation retries instead of releasing the reservation.
+unconfirmed=ci-runner-jit-ops-eeeeeeeeeeeeeeeeeeee
+fake_exists[$unconfirmed]=0; fake_status[$unconfirmed]=exited; fake_consumed[$unconfirmed]=1; fake_pool[$unconfirmed]=ops; fake_handle[$unconfirmed]=505
+write_state "$JIT_STATE_DIR/$unconfirmed.state" "$unconfirmed" deleting lease-ops-unconfirmed 505 "$old" ops
+retire_mode=unconfirmed
+jit_reconcile
+[ -e "$JIT_STATE_DIR/$unconfirmed.state" ] || crf_fail "unconfirmed retirement deleted retry state"
+[ "$(jit_state_field "$JIT_STATE_DIR/$unconfirmed.state" phase)" = deleting ] || crf_fail "unconfirmed retirement changed retry phase"
+grep -Fq '"work_handle":505' "$retired" || crf_fail "unconfirmed handle was not attempted"
 
 # A controller restart or lost response can leave the root-owned state in
 # deleting after the issued-handle tombstone was already removed. That specific

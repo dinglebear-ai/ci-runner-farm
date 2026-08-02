@@ -3123,11 +3123,12 @@ cmd_status_json() {
   fi
   if fleet_inventory_refresh; then names="$(inventory_names)"
   else
-    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"recent_activity":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
+    printf '{"schema_version":2,"config_revision":"","observed_at":%s,"inventory_revision":"","backend":{"requested":"%s","effective":"%s","transition_phase":"%s","transition_id":"%s","transition_revision":"%s","ownership_revision":"%s"},"compatibility":{"valid":false,"reason":"inventory_unavailable"},"operation":null,"maintenance":%s,"resources":{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}},"reservations":[],"recent_activity":[],"mode":"%s","config_error":"Docker inventory unavailable","count":0,"configured":0,"token":false,"autoscale_enabled":false,"autoscale_max":0,"autoscale":"off","image_autoupdate":"off","warning":"","security":"","stale":0,"retiring":0,"blocked_capacity":0,"pools":[],"runners":[]}\n' \
       "$(date +%s)" "$(printf '%s' "$POOL_BACKEND" | json_escape)" \
       "$(printf '%s' "$MIGRATION_EFFECTIVE_BACKEND" | json_escape)" "$(printf '%s' "$MIGRATION_PHASE" | json_escape)" \
       "$(printf '%s' "$MIGRATION_TRANSITION_ID" | json_escape)" "$(printf '%s' "$MIGRATION_REVISION" | json_escape)" \
-      "$(printf '%s' "$MIGRATION_OWNERSHIP_REVISION" | json_escape)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
+      "$(printf '%s' "$MIGRATION_OWNERSHIP_REVISION" | json_escape)" \
+      "$([ -f "$MAINTENANCE_FILE" ] && echo true || echo false)" "$(printf '%s' "$RUNNER_MODE" | json_escape)"
     return 1
   fi
   local config_error=""

@@ -81,4 +81,6 @@ const valid=ctx.crfEmptyFleetHtml({configured:3,config_error:''});
 if(!valid.includes('data-crf-mutation')||valid.includes(' disabled')) throw new Error('valid empty fleet Start is disabled');
 NODE
 
+node tests/fleet-behavior.js
+
 echo 'ui-js: OK'

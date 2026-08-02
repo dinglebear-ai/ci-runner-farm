@@ -635,13 +635,16 @@ _scaleset_request_locked() {
   ' "$request_id" "$operation" "$config_rev" "$ownership_rev" "$controller" "$sequence" "$payload")" ||
     return 1
   command -v timeout >/dev/null 2>&1 || return 1
-  printf '%s' "$output" | timeout --foreground --signal=TERM --kill-after=5s \
+  printf '%s' "$output" | timeout --signal=TERM --kill-after=5s \
     "${request_timeout}s" "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET" 6>&-
 }
 
 scaleset_request() {
-  local lock_timeout="${SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS:-35}"
-  [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$lock_timeout" -le 120 ] || return 1
+  local request_timeout="${SCALESET_REQUEST_IO_TIMEOUT_SECONDS:-20}" lock_timeout
+  [[ "$request_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$request_timeout" -le 120 ] || return 1
+  lock_timeout="${SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS:-$((request_timeout + 15))}"
+  [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$lock_timeout" -le 180 ] &&
+    [ "$lock_timeout" -ge "$((request_timeout + 5))" ] || return 1
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
   (
     exec 6>"$SCALESET_STATE_DIR/request.lock" || exit 1

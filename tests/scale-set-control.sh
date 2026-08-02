@@ -127,12 +127,17 @@ diff -u "$root/sequences.expected" "$root/sequences.actual"
 # A helper that accepts the request but never returns must not hold the global
 # request lock forever. The bounded I/O deadline terminates it and releases the
 # lock so a later controller request can recover.
+CRF_FAKE_CHILD_PID="$root/helper-child.pid"
+export CRF_FAKE_CHILD_PID
 cat >"$fake_helper" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 [ "$1" = request ] || exit 2
 cat >/dev/null
-sleep 30
+sleep 30 &
+child=$!
+printf '%s\n' "$child" >"$CRF_FAKE_CHILD_PID"
+wait "$child"
 EOF
 chmod 0755 "$fake_helper"
 SCALESET_REQUEST_IO_TIMEOUT_SECONDS=1
@@ -142,10 +147,27 @@ scaleset_request read_snapshot '{}' >/dev/null 2>&1
 timeout_rc=$?
 set -e
 elapsed=$(( $(date +%s) - started ))
-[ "$timeout_rc" -eq 124 ] || exit 1
-[ "$elapsed" -le 5 ] || exit 1
+[ "$timeout_rc" -eq 124 ] || { echo "scale-set helper timeout returned $timeout_rc, expected 124" >&2; exit 1; }
+[ "$elapsed" -le 10 ] || { echo "scale-set helper timeout took ${elapsed}s" >&2; exit 1; }
+[ -s "$CRF_FAKE_CHILD_PID" ] || { echo "timed-out helper did not record its child" >&2; exit 1; }
+child_pid="$(cat "$CRF_FAKE_CHILD_PID")"
+for _ in $(seq 1 50); do
+  kill -0 "$child_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$child_pid" 2>/dev/null; then
+  kill -KILL "$child_pid" 2>/dev/null || true
+  echo "timed-out helper left its child running" >&2
+  exit 1
+fi
 ( flock -n 6 ) 6>"$SCALESET_STATE_DIR/request.lock" || exit 1
-unset SCALESET_REQUEST_IO_TIMEOUT_SECONDS
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=40
+SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS=35
+if scaleset_request read_snapshot '{}' >/dev/null 2>&1; then
+  echo "scale-set request accepted a lock deadline shorter than its I/O deadline" >&2
+  exit 1
+fi
+unset SCALESET_REQUEST_IO_TIMEOUT_SECONDS SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS CRF_FAKE_CHILD_PID
 
 calls="$root/calls"
 scaleset_request() {

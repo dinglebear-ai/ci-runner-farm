@@ -576,39 +576,46 @@ migration_jit_drained() {
   snapshot_ok="$(php -r '
     $snapshot=json_decode(file_get_contents($argv[1]),true);
     $ownership=json_decode(file_get_contents($argv[2]),true);
-    $max=(int)$argv[3];$now=time();
-    if(!is_array($snapshot)||!is_array($snapshot["pools"]??null)||
+    $max=(int)$argv[3];$expectedConfig=$argv[4];$expectedOwnership=$argv[5];$now=time();
+    if(!preg_match("/^[0-9a-f]{64}$/",$expectedConfig)||
+      !preg_match("/^[0-9a-f]{64}$/",$expectedOwnership)||$max<=0||$max>300||
+      !is_array($snapshot)||($snapshot["schema_version"]??0)!==1||
+      !hash_equals($expectedConfig,(string)($snapshot["config_revision"]??""))||
+      !hash_equals($expectedOwnership,(string)($snapshot["ownership_revision"]??""))||
+      !is_array($snapshot["pools"]??null)||
       !is_array($ownership)||($ownership["schema_version"]??0)!==2||
-      !is_array($ownership["records"]??null)||$max<=0||$max>300)exit(2);
+      !hash_equals($expectedConfig,(string)($ownership["config_revision"]??""))||
+      !is_array($ownership["records"]??null))exit(2);
     $expected=[];
     foreach($ownership["records"] as $record){
-      $id=$record["pool_id"]??"";
+      $id=$record["pool_id"]??"";$scaleSetID=$record["scale_set_id"]??0;
+      $updated=strtotime((string)($record["updated_at"]??""));
       if(!is_string($id)||$id===""||isset($expected[$id])||
-        ($record["state"]??"")!=="ineligible"||($record["scale_set_id"]??0)<=0)exit(3);
-      $expected[$id]=true;
+        ($record["state"]??"")!=="ineligible"||!is_int($scaleSetID)||$scaleSetID<=0||
+        $updated===false||$updated>$now+5)exit(3);
+      $expected[$id]=["scale_set_id"=>$scaleSetID,"updated_at"=>$updated];
     }
     if(count($expected)===0||count($snapshot["pools"])!==count($expected))exit(4);
     foreach($snapshot["pools"] as $p){
       $id=$p["pool_id"]??"";
-      if(!is_string($id)||!isset($expected[$id])||($p["assigned_jobs"]??-1)!==0||
-        ($p["advertised_capacity"]??-1)!==0||
-        !is_array($handles=$p["acquired_handles"]??[])||count($handles)!==0)exit(5);
+      if(!is_string($id)||!isset($expected[$id])||
+        ($p["scale_set_id"]??0)!==$expected[$id]["scale_set_id"]||
+        ($p["assigned_jobs"]??-1)!==0||($p["advertised_capacity"]??-1)!==0||
+        !array_key_exists("acquired_handles",$p)||!is_array($p["acquired_handles"])||
+        count($p["acquired_handles"])!==0||!is_bool($p["session_healthy"]??null))exit(5);
+      $observed=strtotime((string)($p["observed_at"]??""));
+      $valid=strtotime((string)($p["valid_until"]??""));
+      if($observed===false||$valid===false||$observed>$now+5||$valid<=$observed||
+        $valid-$observed>$max||$observed<$expected[$id]["updated_at"])exit(6);
+      if(($p["session_healthy"]??false)===true&&$valid<=$now)exit(7);
       unset($expected[$id]);
-      $healthy=($p["session_healthy"]??false)===true;
-      $observedRaw=(string)($p["observed_at"]??"");
-      $validRaw=(string)($p["valid_until"]??"");
-      if($healthy){
-        $observed=strtotime($observedRaw);$valid=strtotime($validRaw);
-        if($observed===false||$valid===false||$observed>$now+5||$valid<=$now||
-          $valid-$observed>$max)exit(6);
-      }elseif($observedRaw!=="0001-01-01T00:00:00Z"||$validRaw!=="0001-01-01T00:00:00Z"){
-        exit(7);
-      }
     }
     if(count($expected)!==0)exit(8);
     echo "yes";
-  ' "$SCALESET_SNAPSHOT" "$SCALESET_OWNERSHIP"     "${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}" 2>/dev/null)" || {
-    err "assigned, pending, stale, or insufficiently proven scale-set work remains"
+  ' "$SCALESET_SNAPSHOT" "$SCALESET_OWNERSHIP" \
+    "${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}" "$MIGRATION_TARGET_CONFIG_REVISION" \
+    "$MIGRATION_OWNERSHIP_REVISION" 2>/dev/null)" || {
+    err "assigned, pending, stale, mismatched, or insufficiently proven scale-set work remains"
     return 1
   }
   [ "$snapshot_ok" = yes ] || return 1
