@@ -14,6 +14,7 @@ RUNDIR="$tmpdir/run"
 mkdir -p "$RUNDIR"
 executions="$tmpdir/executions"
 started="$tmpdir/started"
+release="$tmpdir/release"
 logfile="$tmpdir/log"
 
 log() { printf '%s
@@ -22,7 +23,11 @@ _autoscale_tick() {
   printf 'start
 ' >>"$executions"
   : >"$started"
-  sleep 0.25
+  for _ in $(seq 1 500); do
+    [ -f "$release" ] && break
+    sleep 0.01
+  done
+  [ -f "$release" ] || return 1
   printf 'done
 ' >>"$executions"
 }
@@ -36,8 +41,11 @@ done
 [ -f "$started" ] || { echo 'first autoscale tick did not start' >&2; exit 1; }
 
 # A concurrent operator or daemon tick must skip immediately rather than queue
-# behind remote IPC and later replay stale scheduling work.
+# behind remote IPC and later replay stale scheduling work. The first tick stays
+# blocked behind an explicit test barrier so this assertion never depends on a
+# scheduler-sized sleep window.
 autoscale_tick
+: >"$release"
 wait "$first"
 
 [ "$(grep -c '^start$' "$executions")" -eq 1 ] || {
