@@ -577,27 +577,39 @@ busy_count() {
 # change and migrate them onto the new config as they go idle. IMPORTANT: whenever you
 # add a setting that build_args bakes into the container, add it here too.
 crf_confgen() {
-  local pool="${1:-default}" scope_target="${2:-}"
+  local pool="${1:-default}" scope_target="${2:-}" image_ref image_identity entrypoint_hash
+  image_ref="$(effective_image)"
+  image_identity="$(docker image inspect "$image_ref" -f '{{.Id}}' 2>/dev/null || printf '%s' "$image_ref")"
+  entrypoint_hash="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
   if pool_mode_enabled; then
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
     if [ "$POOL_CONFIG_VERSION" = v2 ] || { pool_snapshot_load >/dev/null 2>&1 && [ "$POOL_CONFIG_VERSION" = v2 ]; }; then
-      printf '%s\0%s' "$(pool_runner_spec_hash "$pool")" "$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)" |
-        sha256sum | cut -c1-12
+      printf '%s\0' "$(pool_runner_spec_hash "$pool")" "$GH_SCOPE" "$GH_OWNER" \
+        "$RUNNER_GROUP" "$scope_target" "identity-v2" "$EPHEMERAL" \
+        "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" \
+        "$IMAGE_SOURCE" "$IMAGE" "$image_ref" "$image_identity" \
+        "$REGISTRY_SERVER" "$REGISTRY_USERNAME" "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" \
+        "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+        "${RESOURCE_PIDS_LIMIT:-4096}" "${RESOURCE_MEMORY_SWAP:-none}" "$entrypoint_hash" \
+        | sha256sum | cut -c1-12
       return
     fi
     printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$RUNNER_GROUP" "$(pool_label "$pool")" "$pool" \
       "$scope_target" "identity-v1" "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" \
       "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" \
-      "$IMAGE_SOURCE" "$IMAGE" "$REGISTRY_SERVER" "$REGISTRY_USERNAME" \
-      "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+      "$IMAGE_SOURCE" "$IMAGE" "$image_ref" "$image_identity" \
+      "$REGISTRY_SERVER" "$REGISTRY_USERNAME" "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" \
+      "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+      "${RESOURCE_PIDS_LIMIT:-4096}" "${RESOURCE_MEMORY_SWAP:-none}" "$entrypoint_hash" \
       | sha256sum | cut -c1-12
     return
   fi
   printf '%s\0' "$GH_SCOPE" "$GH_OWNER" "$GH_REPOS" "$RUNNER_GROUP" "$RUNNER_LABELS" \
     "$EPHEMERAL" "$RUNNER_CPUS" "$RUNNER_MEMORY" "$WORK_TMPFS_SIZE" "$CACHE_MOUNTS" \
     "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" "$IMAGE_SOURCE" "$IMAGE" \
-    "$REGISTRY_SERVER" "$REGISTRY_USERNAME" "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" \
-    "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+    "$image_ref" "$image_identity" "$REGISTRY_SERVER" "$REGISTRY_USERNAME" \
+    "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+    "${RESOURCE_PIDS_LIMIT:-4096}" "${RESOURCE_MEMORY_SWAP:-none}" "$entrypoint_hash" \
     | sha256sum | cut -c1-12
 }
 # The config fingerprint a running runner was created with ('' for runners created before
@@ -1881,9 +1893,12 @@ runner_secret_inject() {
   }
   docker exec "$container_ref" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 ||
     return 1
+  # With host pipefail enabled, printf may report SIGPIPE after the FIFO reader
+  # has already consumed the credential. The durable consumed marker is the
+  # authoritative handoff result; a genuine write failure times out below.
   ( set +x; printf '%s\n' "$secret" ) |
-    docker exec -i "$container_ref" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || return 1
-  docker exec "$container_ref" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
+    docker exec -i "$container_ref" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || true
+  docker exec "$container_ref" sh -c 'for i in $(seq 1 120); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
 }
 
 fleet_lock_suspend() {
@@ -2241,6 +2256,7 @@ reconcile_stale_runners() {
 # migrate on their next idle via the autoscale tick, or on the next Apply/recycle. Progress
 # is logged to autoscale.log, which the farm-log panel tails.
 cmd_reconcile_drain() {
+  trap 'rm -f "$RECONCILE_PID"' EXIT INT TERM
   if declare -F backend_classic_admission_allowed >/dev/null &&
      ! backend_classic_admission_allowed; then
     log "classic reconcile paused by backend transition state"; return 0
@@ -2305,10 +2321,21 @@ cmd_reconcile_drain() {
   rm -f "$RECONCILE_PID"
 }
 
+reconcile_pid_active() {
+  local pid state
+  [ -f "$RECONCILE_PID" ] || return 1
+  pid="$(cat "$RECONCILE_PID" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  case "$state" in ''|Z*) return 1 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq reconcile-drain
+}
+
 reconcile_start() {
-  if [ -f "$RECONCILE_PID" ] && kill -0 "$(cat "$RECONCILE_PID" 2>/dev/null)" 2>/dev/null; then
-    return 0
-  fi
+  reconcile_pid_active && return 0
+  rm -f "$RECONCILE_PID"
   nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
   printf '%s\n' "$!" > "$RECONCILE_PID"
 }
