@@ -3037,9 +3037,20 @@ cmd_usage_refresh() {
     cpu="$(printf '%s' "$srow" | cut -d'|' -f2 | tr -d '%' | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1)"
     mem_mib="$(to_mib "$(printf '%s' "$srow" | cut -d'|' -f3 | awk -F' / ' '{print $1}')")"
     local phase; phase="$(runner_state "$c")"
-    # Detailed job/log context is intentionally drawer-only. Recurring status and
-    # scheduler refreshes never exec into or read logs from each runner.
+    # Fleet rows need the active job name, but the 5s status endpoint must remain
+    # cheap. Read only the bounded Docker log tail for runners GitHub reports busy;
+    # never exec into containers. Repository/run metadata stays drawer-only.
     local job="" jstarted="_" jrepo="" jpr="_" jbranch="" jrun="_"
+    if [ "$phase" = busy ]; then
+      local jline
+      jline="$(docker logs --timestamps --tail 80 "$c" 2>&1 | grep 'Running job: ' | tail -1 | tr -d '\r')"
+      if [ -n "$jline" ]; then
+        job="${jline##*Running job: }"
+        job="${job:0:512}"
+        jstarted="$(printf '%s\n' "$jline" | cut -d' ' -f1 | grep -oE '^[0-9T:.Z+-]+' | head -1)"
+        jstarted="${jstarted:-_}"
+      fi
+    fi
     printf '%s %s %s %s %s %s %s %s %s %s\n' "$c" "${cpu:-0}" "${mem_mib:-0}" "$phase" \
       "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$RUNDIR/usage.cache.tmp"
   done

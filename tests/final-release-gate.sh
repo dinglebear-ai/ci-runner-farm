@@ -115,6 +115,7 @@ grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
 bash tests/performance-contracts.sh >/dev/null
 bash tests/autoscale-locks.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
+bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
