@@ -1863,8 +1863,13 @@ build_args() {
   )
 }
 
+runner_registration_secret_clear() {
+  CRF_REGISTRATION_SECRET=""
+  unset CRF_REGISTRATION_SECRET
+}
+
 runner_secret_inject() {
-  local name="$1" secret="$2"
+  local name="$1" secret="$2" container_ref="${3:-$1}"
   [ -n "$secret" ] || return 0
   runner_identity_validate "$name" || {
     # A freshly created container may not yet be in the shared inventory. Its
@@ -1874,11 +1879,11 @@ runner_secret_inject() {
       *) return 1 ;;
     esac
   }
-  docker exec "$name" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 ||
+  docker exec "$container_ref" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 ||
     return 1
   ( set +x; printf '%s\n' "$secret" ) |
-    docker exec -i "$name" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || return 1
-  docker exec "$name" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
+    docker exec -i "$container_ref" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || return 1
+  docker exec "$container_ref" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1
 }
 
 fleet_lock_suspend() {
@@ -2940,7 +2945,7 @@ cmd_queued_json() {
 }
 
 recreate_runner() {
-  local name="$1" mode="${2:-force}" idx pool scope image
+  local name="$1" mode="${2:-force}" idx pool scope image created_id current_id handoff_ok=true
   runner_identity_validate "$name" || { echo '{"ok":false,"error":"runner is not a valid managed identity"}'; return 1; }
   idx="$(runner_index "$name")"; pool="$(runner_pool "$name")"
   if pool_mode_enabled; then
@@ -2953,41 +2958,89 @@ recreate_runner() {
   else scope="repo:$(repo_for_index "$idx")"; fi
   provision_base || { echo '{"ok":false,"error":"provisioning preflight failed"}'; return 1; }
   [ -n "$ACCESS_TOKEN" ] || { echo '{"ok":false,"error":"no GitHub token configured"}'; return 1; }
-  build_args "$idx" "$name" "$pool" "$scope" || { echo '{"ok":false,"error":"cannot provision replacement"}'; return 1; }
+  build_args "$idx" "$name" "$pool" "$scope" || {
+    runner_registration_secret_clear
+    echo '{"ok":false,"error":"cannot provision replacement"}'; return 1
+  }
   [[ "${CRF_IMAGE_ARG_INDEX:-}" =~ ^[0-9]+$ ]] &&
     [ "$CRF_IMAGE_ARG_INDEX" -lt "${#ARGS[@]}" ] || {
+      runner_registration_secret_clear
       echo '{"ok":false,"error":"replacement image argument is unavailable"}'; return 1
     }
   image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"
   if [ "$IMAGE_SOURCE" = remote ]; then
-    docker pull "$image" >/dev/null 2>&1 || { echo '{"ok":false,"error":"cannot pull replacement image"}'; return 1; }
+    docker pull "$image" >/dev/null 2>&1 || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"cannot pull replacement image"}'; return 1
+    }
   else
-    docker image inspect "$image" >/dev/null 2>&1 || { echo '{"ok":false,"error":"built-in replacement image is unavailable"}'; return 1; }
+    docker image inspect "$image" >/dev/null 2>&1 || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"built-in replacement image is unavailable"}'; return 1
+    }
   fi
   if [ "$mode" = graceful ]; then
-    [ "$(runner_state "$name")" = idle ] || { echo '{"ok":false,"error":"runner is not idle"}'; return 1; }
-    deregister_runner_api "$name" || { echo '{"ok":false,"error":"GitHub did not accept runner retirement"}'; return 1; }
-    remove_runner_container "$name"
+    [ "$(runner_state "$name")" = idle ] || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"runner is not idle"}'; return 1
+    }
+    deregister_runner_api "$name" || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"GitHub did not accept runner retirement"}'; return 1
+    }
+    remove_runner_container "$name" || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"remove failed"}'; return 1
+    }
   else
-    remove_runner_force "$name" || { echo '{"ok":false,"error":"remove failed"}'; return 1; }
+    remove_runner_force "$name" || {
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"remove failed"}'; return 1
+    }
   fi
   log "recycling $name ($mode)"
-  if ! docker run "${ARGS[@]}" >/dev/null 2>&1; then
-    CRF_REGISTRATION_SECRET=""
-    unset CRF_REGISTRATION_SECRET
+  if ! created_id="$(docker run "${ARGS[@]}" 2>/dev/null)"; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    runner_registration_secret_clear
     log "recycle: $name removed but its replacement failed to start"
     echo '{"ok":false,"error":"removed but not recreated"}'; return 1
   fi
-  if [ -n "${CRF_REGISTRATION_SECRET:-}" ] &&
-     ! runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"; then
-    CRF_REGISTRATION_SECRET=""
-    unset CRF_REGISTRATION_SECRET
-    docker rm -f "$name" >/dev/null 2>&1 || true
-    log "recycle: $name did not consume its protected registration credential"
-    echo '{"ok":false,"error":"replacement credential handoff failed"}'; return 1
+  current_id="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
+  if [ -z "$created_id" ] || [ "$current_id" != "$created_id" ]; then
+    [ -z "$created_id" ] || docker rm -f "$created_id" >/dev/null 2>&1 || true
+    runner_registration_secret_clear
+    log "recycle: $name replacement identity could not be verified"
+    echo '{"ok":false,"error":"replacement identity could not be verified"}'; return 1
   fi
-  CRF_REGISTRATION_SECRET=""
-  unset CRF_REGISTRATION_SECRET
+  if [ -n "${CRF_REGISTRATION_SECRET:-}" ]; then
+    # The protected handoff can wait up to 150 seconds. Release the fleet mutex
+    # after Docker has atomically claimed the runner name, then re-take it before
+    # reporting the mutation. Cleanup uses the exact created container ID so a
+    # concurrent Stop/Recycle can never cause us to delete its replacement.
+    if ! fleet_lock_suspend; then
+      docker rm -f "$created_id" >/dev/null 2>&1 || true
+      runner_registration_secret_clear
+      echo '{"ok":false,"error":"could not release fleet lock for credential handoff"}'; return 1
+    fi
+    runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET" "$created_id" || handoff_ok=false
+    runner_registration_secret_clear
+    if ! fleet_lock_resume; then
+      [ "$handoff_ok" = true ] || docker rm -f "$created_id" >/dev/null 2>&1 || true
+      echo '{"ok":false,"error":"fleet lock could not be reacquired after credential handoff"}'; return 1
+    fi
+    if [ "$handoff_ok" != true ]; then
+      docker rm -f "$created_id" >/dev/null 2>&1 || true
+      log "recycle: $name did not consume its protected registration credential"
+      echo '{"ok":false,"error":"replacement credential handoff failed"}'; return 1
+    fi
+    current_id="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
+    if [ "$current_id" != "$created_id" ]; then
+      log "recycle: $name changed while its protected credential was handed off"
+      echo '{"ok":false,"error":"replacement changed during credential handoff"}'; return 1
+    fi
+  else
+    runner_registration_secret_clear
+  fi
   github_runner_inventory_invalidate "$scope" 2>/dev/null || true
   echo '{"ok":true}'
 }
