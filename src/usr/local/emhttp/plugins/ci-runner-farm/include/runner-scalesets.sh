@@ -636,7 +636,7 @@ _scaleset_request_locked() {
     return 1
   command -v timeout >/dev/null 2>&1 || return 1
   printf '%s' "$output" | timeout --foreground --signal=TERM --kill-after=5s \
-    "${request_timeout}s" "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET"
+    "${request_timeout}s" "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET" 6>&-
 }
 
 scaleset_request() {
