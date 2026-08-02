@@ -14,6 +14,8 @@ JIT_LEGACY_STATE_DIR="${JIT_LEGACY_STATE_DIR:-$RUNDIR/jit}"
 JIT_LOG_MAX_BYTES="${JIT_LOG_MAX_BYTES:-268435456}"
 JIT_LOG_MAX_DAYS="${JIT_LOG_MAX_DAYS:-7}"
 JIT_HANDOFF_GRACE_SECONDS="${JIT_HANDOFF_GRACE_SECONDS:-300}"
+JIT_RECENT_ACTIVITY_FILE="${JIT_RECENT_ACTIVITY_FILE:-$RUNDIR/recent-jobs.jsonl}"
+JIT_RECENT_ACTIVITY_MAX="${JIT_RECENT_ACTIVITY_MAX:-50}"
 
 jit_paths_refresh() {
   if [ "$JIT_STATE_DIR_PINNED" = x ]; then
@@ -169,16 +171,63 @@ jit_capture_diagnostics() {
   [ -z "$total" ] || while IFS= read -r file; do rm -f -- "$file"; done <<<"$total"
 }
 
+jit_recent_activity_record() {
+  local runner_id="$1" pool="$2" handle="$3" out job result conclusion completed_at
+  local record lock tmp max="$JIT_RECENT_ACTIVITY_MAX"
+  jit_id_valid "$runner_id" && pool_id_valid "$pool" && [[ "$handle" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$max" =~ ^[1-9][0-9]*$ ]] && [ "$max" -le 200 ] || return 1
+  out="$JIT_LOG_ROOT/$runner_id"
+  [ -d "$out" ] || return 0
+  job="$(grep -h 'Running job:' "$out"/Runner_* 2>/dev/null | tail -n 1 | sed 's/^.*Running job: //')"
+  [ -n "$job" ] || return 0
+  result="$(grep -h 'Job result after all job steps finish:' "$out"/Worker_* 2>/dev/null | tail -n 1 | sed 's/^.*finish: //')"
+  case "$result" in Succeeded) conclusion=success ;; Failed) conclusion=failure ;;
+    Canceled|Cancelled) conclusion=cancelled ;; *) conclusion=unknown ;; esac
+  completed_at="$(grep -h 'Job completed' "$out"/Worker_* 2>/dev/null | tail -n 1 | sed -n 's/^\[\([^ ]* [^ ]*Z\).*/\1/p')"
+  record="$(php -r '
+    $time=strtotime($argv[6]);if($time===false)$time=time();
+    echo json_encode(["schema_version"=>1,"observed_at"=>time(),
+      "completed_at"=>gmdate("c",$time),"runner_name"=>$argv[1],"pool_id"=>$argv[2],
+      "work_handle"=>(int)$argv[3],"job"=>substr($argv[4],0,512),
+      "conclusion"=>$argv[5]],JSON_UNESCAPED_SLASHES);
+  ' "$runner_id" "$pool" "$handle" "$job" "$conclusion" "$completed_at")" || return 1
+  mkdir -p "$(dirname "$JIT_RECENT_ACTIVITY_FILE")" || return 1
+  lock="$JIT_RECENT_ACTIVITY_FILE.lock"; tmp="$JIT_RECENT_ACTIVITY_FILE.tmp.$$"
+  (
+    umask 077; exec 7>"$lock" || exit 1; chmod 0600 "$lock" || exit 1; flock -x 7 || exit 1
+    if [ -f "$JIT_RECENT_ACTIVITY_FILE" ] && [ ! -L "$JIT_RECENT_ACTIVITY_FILE" ]; then
+      grep -Fv "\"runner_name\":\"$runner_id\"" "$JIT_RECENT_ACTIVITY_FILE" 2>/dev/null |
+        tail -n "$((max - 1))" >"$tmp" || true
+    else
+      : >"$tmp"
+    fi
+    printf '%s\n' "$record" >>"$tmp"
+    chmod 0600 "$tmp" && mv -f "$tmp" "$JIT_RECENT_ACTIVITY_FILE"
+  )
+}
+
 jit_retire_handle() {
-  local pool="$1" handle="$2" payload response
+  local pool="$1" handle="$2" payload response rc=0
   pool_id_valid "$pool" && jit_id_valid "$handle" || return 1
   payload="$(php -r 'echo json_encode(["pool_id"=>$argv[1],"work_handle"=>(int)$argv[2]],
     JSON_UNESCAPED_SLASHES);' "$pool" "$handle")" || return 1
-  response="$(scaleset_request retire_jit "$payload")" || return 1
-  printf '%s' "$response" | php -r '
+  response="$(scaleset_request retire_jit "$payload")" || rc=$?
+  local validation_rc
+  if printf '%s' "$response" | php -r '
     $j=json_decode(stream_get_contents(STDIN),true);
-    if(($j["ok"]??false)!==true||($j["result"]["retired"]??false)!==true)exit(2);
-  '
+    if(($j["ok"]??false)===true&&($j["result"]["retired"]??false)===true)exit(0);
+    // A root-owned local deleting record proves this handle was issued. If the
+    // controller no longer has its tombstone, retirement already committed and
+    // only the response was lost. Treat that one terminal code as idempotent.
+    if(($j["ok"]??true)===false&&($j["code"]??"")==="work_handle_not_issued")exit(0);
+    exit(2);
+  '; then
+    return 0
+  else
+    validation_rc=$?
+  fi
+  [ "$rc" -ne 0 ] && return "$rc"
+  return "$validation_rc"
 }
 
 jit_cleanup_observed() {
@@ -192,6 +241,7 @@ jit_cleanup_observed() {
   fi
   jit_state_write "$runner_id" deleting "$reservation" "$handle" "$container" "$pool" || return 1
   jit_capture_diagnostics "$container" "$runner_id" || true
+  jit_recent_activity_record "$runner_id" "$pool" "$handle" || true
   docker rm -f "$container" >/dev/null 2>&1 || true
   if jit_container_exists "$container"; then
     return 1
@@ -201,7 +251,8 @@ jit_cleanup_observed() {
   # a conservative retry and never permits an old work handle to be reissued.
   jit_retire_handle "$pool" "$handle" || return 1
   reservation_release "$reservation" || return 1
-  jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" "$pool"
+  jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" "$pool" || return 1
+  rm -f "$state"
 }
 
 jit_execute() {

@@ -11,6 +11,7 @@ STATUS_RESERVATIONS_JSON='[]'
 STATUS_BACKEND_JSON='{"requested":"classic","effective":"classic","transition_phase":"classic_active","transition_id":"","transition_revision":"","ownership_revision":""}'
 STATUS_COMPATIBILITY_JSON='{"valid":false,"reason":"not_checked"}'
 STATUS_OPERATION_JSON='null'
+STATUS_RECENT_ACTIVITY_JSON='[]'
 
 status_scaleset_pool_tsv() {
   local pool="$1" snapshot="${SCALESET_SNAPSHOT:-${SCALESET_STATE_DIR:-$RUNDIR/scalesets}/snapshot.json}"
@@ -75,6 +76,33 @@ status_reservations_json() {
   printf ']'
 }
 
+
+status_recent_activity_json() {
+  local path="${JIT_RECENT_ACTIVITY_FILE:-${RUNDIR:-/run/ci-runner-farm}/recent-jobs.jsonl}"
+  local max="${STATUS_RECENT_ACTIVITY_MAX:-20}" size mode
+  STATUS_RECENT_ACTIVITY_JSON='[]'
+  [[ "$max" =~ ^[1-9][0-9]*$ ]] && [ "$max" -le 50 ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  size="$(stat -c %s "$path" 2>/dev/null || echo 262145)"
+  mode="$(stat -c %a "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le 262144 ] && [ "$mode" = 600 ] || return 1
+  STATUS_RECENT_ACTIVITY_JSON="$(php -r '
+    $max=(int)$argv[2];$rows=[];
+    $valid=function($v){return is_array($v)&&($v["schema_version"]??0)===1&&
+      is_int($v["observed_at"]??null)&&$v["observed_at"]>0&&
+      is_string($v["completed_at"]??null)&&strlen($v["completed_at"])<=64&&
+      is_string($v["runner_name"]??null)&&preg_match("/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/",$v["runner_name"])&&
+      is_string($v["pool_id"]??null)&&preg_match("/^[a-z0-9]+(?:-[a-z0-9]+)*$/",$v["pool_id"])&&
+      is_int($v["work_handle"]??null)&&$v["work_handle"]>0&&
+      is_string($v["job"]??null)&&strlen($v["job"])<=512&&
+      in_array($v["conclusion"]??null,["success","failure","cancelled","unknown"],true);};
+    foreach(file($argv[1],FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES)?:[] as $line){
+      $row=json_decode($line,true);if($valid($row))$rows[]=$row;
+    }
+    echo json_encode(array_reverse(array_slice($rows,-$max)),JSON_UNESCAPED_SLASHES);
+  ' "$path" "$max")" || { STATUS_RECENT_ACTIVITY_JSON='[]'; return 1; }
+}
+
 status_model_refresh() {
   local cpu_reserve=0 memory_reserve=0
   STATUS_OBSERVED_AT="$(date +%s)"
@@ -90,6 +118,7 @@ status_model_refresh() {
     STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
   fi
   STATUS_RESERVATIONS_JSON="$(status_reservations_json)"
+  status_recent_activity_json || STATUS_RECENT_ACTIVITY_JSON='[]'
   status_backend_refresh
 }
 

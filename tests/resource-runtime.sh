@@ -34,6 +34,7 @@ mkdir -p "$CACHE_ROOT"
 runner_name_for() { printf 'ci-runner-%s-%s\n' "$2" "$1"; }
 host() { echo testhost; }
 crf_safe_mount_subdir() { printf '%s/%s\n' "$CACHE_ROOT" "$1"; }
+crf_confgen_prepare() { :; }
 crf_confgen() { echo spec123; }
 effective_image() { echo test-image; }
 repo_for_index() { echo acme/repo; }

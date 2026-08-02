@@ -18,6 +18,7 @@ Tag="server"
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div></uui-card-wrapper>
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Assigned jobs</span><span class="crf-stat-value crf-c-busy" id="crf-s-assigned">&ndash;</span><span class="crf-stat-note">scale-set demand</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Tracked repository run queue</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span><span class="crf-stat-note">not pool demand</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div></uui-card-wrapper>
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runner backend</span><span class="crf-stat-small" id="crf-s-backend">&ndash;</span><span class="crf-stat-note" id="crf-s-transition">&ndash;</span></div></uui-card-wrapper>
@@ -47,6 +48,11 @@ Tag="server"
     </div>
     <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div></div>
   </div>
+</div>
+
+<div class="crf-activity" id="crf-activity" style="display:none">
+  <div class="crf-activity-head">Recent one-shot activity <span class="crf-muted">completed runners</span></div>
+  <div id="crf-activity-body"></div>
 </div>
 
 <div class="crf-runstats" id="crf-runstats">
@@ -83,6 +89,16 @@ Tag="server"
   .crf-cache-clear{font-size:11px;color:var(--link-text-color);text-decoration:none;margin-top:3px;cursor:pointer;width:fit-content}
   .crf-cache-clear:hover{text-decoration:underline}
   .crf-cache-clear:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:1px;border-radius:3px}
+  .crf-activity{border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);margin:0 0 8px;overflow:hidden}
+  .crf-activity-head{padding:6px 10px;background:var(--table-header-background-color);font-size:11px;color:var(--text-color);letter-spacing:.02em}
+  .crf-activity-head .crf-muted{margin-left:8px;font-weight:normal}
+  .crf-activity-row{display:grid;grid-template-columns:72px 150px minmax(140px,1fr) 76px;gap:10px;align-items:center;padding:5px 10px;border-top:1px solid var(--table-border-color,var(--border-color));font-size:11px}
+  .crf-activity-time,.crf-activity-pool{font-family:bitstream,monospace;color:var(--alt-text-color)}
+  .crf-activity-pool{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-activity-job{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-color)}
+  .crf-activity-result{text-align:right;font-weight:500}
+  .crf-activity-failure{color:var(--crf-err)}
+  .crf-activity-cancelled,.crf-activity-unknown{color:var(--alt-text-color)}
   .crf-runstats{display:flex;align-items:center;gap:16px;flex-wrap:wrap;border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:8px 14px;margin:0 0 8px;font-size:13px;color:var(--text-color)}
   .crf-rs-title{font-size:11px;color:var(--alt-text-color);letter-spacing:.03em}
   .crf-rs-seg b{font-weight:500}
@@ -136,6 +152,7 @@ Tag="server"
     .crf-stat-value{font-size:20px}
     .crf-pool-fleet-meta{gap:8px;flex-wrap:wrap}
     .crf-pool-fleet-meta .crf-pool-metrics{margin-left:0}
+    .crf-activity-row{grid-template-columns:58px minmax(54px,.7fr) minmax(0,1.5fr) minmax(48px,auto);gap:6px;padding:5px 7px}
   }
   .crf-bay-drawer{border-top:1px solid var(--table-border-color,var(--border-color));background:var(--shade-bg-color,var(--background-color));padding:8px 12px 8px 44px;font-family:bitstream,monospace;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:190px;overflow:auto;cursor:default}
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
@@ -240,7 +257,8 @@ function crfRenderPools(d){
       route.innerHTML='<span class="crf-pool-state">classic runners draining</span>';
     }
     fleet.querySelector('.crf-pool-metrics').innerHTML='<strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
-      (p.starting?' · starting '+crfEsc(p.starting):'')+(p.error?' · error '+crfEsc(p.error):'');
+      (scaleSet?' · assigned '+crfEsc(crfDemandValue(p,'assigned_jobs'))+' · capacity '+crfEsc(crfDemandValue(p,'advertised_capacity')):'')+
+      (p.starting?' · starting '+crfEsc(p.starting):'')+(p.completed?' · completed '+crfEsc(p.completed):'')+(p.error?' · error '+crfEsc(p.error):'');
     fleet.querySelector('.crf-pool-state-wrap').innerHTML=state;
     fleet.querySelector('.crf-pool-title').textContent=title;
     const body=fleet.querySelector('.crf-pool-bays-body');body.dataset.poolBody=id;
@@ -296,10 +314,20 @@ document.getElementById('crf-pools-section').addEventListener('click',e=>{
   }
 });
 
+function crfDemandValue(pool,key){
+  const value=Number(pool&&pool[key]);
+  return pool&&pool.demand_fresh===true&&Number.isFinite(value)&&value>=0?String(value):'—';
+}
+function crfAssignedDemand(d){
+  const pools=Array.isArray(d&&d.pools)?d.pools:[];
+  if(!pools.every(p=>p&&p.demand_fresh===true&&Number.isFinite(Number(p.assigned_jobs))&&Number(p.assigned_jobs)>=0))return null;
+  return pools.reduce((n,p)=>n+Number(p.assigned_jobs),0);
+}
+
 function crfBackendAction(action){
   if(CRF_BACKEND_PENDING)return;
   const d=window.CRF_LAST||{}, b=d.backend||{}, c=d.compatibility||{};
-  const assigned=(d.pools||[]).reduce((n,p)=>n+Math.max(0,Number(p.assigned_jobs)||0),0);
+  const assigned=crfAssignedDemand(d);
   const busy=(d.runners||[]).filter(r=>r.state==='running'&&r.phase==='busy').length;
   const idle=(d.runners||[]).filter(r=>r.state==='running'&&r.phase==='idle').length;
   const payload={action,expected_config_revision:d.config_revision,
@@ -313,7 +341,7 @@ function crfBackendAction(action){
       .finally(()=>{CRF_BACKEND_PENDING=false;crfRefresh();});
   };
   const consequence=action==='begin-migration'?'Classic remains effective until its remote eligibility barrier is proven.':'Scale sets become ineligible first; assigned JIT work drains before classic is reactivated.';
-  const text='Busy '+busy+' · idle '+idle+' · assigned '+assigned+'\nConfig '+String(d.config_revision||'').slice(0,12)+' · transition '+String(b.transition_revision||'').slice(0,12)+'\n\n'+consequence;
+  const text='Busy '+busy+' · idle '+idle+' · assigned '+(assigned===null?'—':assigned)+'\nConfig '+String(d.config_revision||'').slice(0,12)+' · transition '+String(b.transition_revision||'').slice(0,12)+'\n\n'+consequence;
   if(window.swal)swal({title:action==='begin-migration'?'Begin fleet migration?':'Roll back to classic?',text,type:'warning',showCancelButton:true,confirmButtonText:action==='begin-migration'?'Begin migration':'Begin rollback'},ok=>{if(ok)run();});
   else if(window.confirm(text))run();
 }
@@ -351,6 +379,32 @@ function crfEmptyFleetHtml(d){
     '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
     '<uui-button size="sm" data-crf-mutation'+(crfDark()?' class="dark"':'')+(d.config_error?' disabled':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
 }
+function crfActivityWhen(iso){
+  const t=Date.parse(iso||''); if(isNaN(t))return '—';
+  const age=Math.max(0,Date.now()-t), minute=60000, hour=60*minute, day=24*hour;
+  if(age<minute)return 'now';
+  if(age<hour)return Math.floor(age/minute)+'m ago';
+  if(age<day)return Math.floor(age/hour)+'h ago';
+  if(age<7*day)return Math.floor(age/day)+'d ago';
+  return new Date(t).toLocaleDateString([], {month:'short',day:'numeric'});
+}
+function crfRenderActivity(d){
+  const box=document.getElementById('crf-activity'), body=document.getElementById('crf-activity-body');
+  if(!box||!body)return;
+  const rows=Array.isArray(d.recent_activity)?d.recent_activity.slice(0,10):[];
+  if(!rows.length){box.style.display='none';body.innerHTML='';return;}
+  box.style.display='block';
+  body.innerHTML=rows.map(a=>{
+    const when=crfActivityWhen(a.completed_at);
+    const conclusion=String(a.conclusion||'unknown'), cls=conclusion==='success'?'crf-c-ok':'crf-activity-'+conclusion;
+    return '<div class="crf-activity-row">'+
+      '<span class="crf-activity-time" title="'+crfEsc(a.completed_at||'')+'">'+crfEsc(when)+'</span>'+
+      '<span class="crf-activity-pool">'+crfEsc(a.pool_id||'unknown')+'</span>'+
+      '<span class="crf-activity-job" title="'+crfEsc(a.job||'')+'">'+crfEsc(a.job||'unnamed job')+'</span>'+
+      '<span class="crf-activity-result '+cls+'">'+crfEsc(conclusion)+'</span></div>';
+  }).join('');
+}
+
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
   // outstanding, so a slow backend can't spiral into overlapping polls.
@@ -373,12 +427,15 @@ function crfRefresh(){
     if(mig){ if(d.stale>0){ mig.textContent='⟳ '+d.stale+' runner'+(d.stale>1?'s':'')+' updating or retiring — recycling as they go idle, so running jobs finish first.'+(d.blocked_capacity>0?' '+d.blocked_capacity+' currently blocked by active or starting work.':''); mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
     const rs=d.runners||[];
     crfRenderPools(d);
+    crfRenderActivity(d);
     const up=rs.filter(r=>r.state==='running').length;
     const busy=rs.filter(r=>r.state==='running'&&r.phase==='busy').length;
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
     const backend=d.backend||{}, compatibility=d.compatibility||{};
+    const assigned=crfAssignedDemand(d);
+    put('crf-s-assigned',backend.effective==='scaleset'?(assigned===null?'—':assigned):'—');
     put('crf-s-backend',(backend.requested||'?')+' → '+(backend.effective||'?'));
     put('crf-s-transition',backend.transition_phase||'?');
     const begin=document.getElementById('crf-begin-migration'), rollback=document.getElementById('crf-rollback-backend'), backendReason=document.getElementById('crf-backend-reason');
@@ -430,7 +487,7 @@ function crfRefresh(){
     // and falls through to the full rebuild below. busy-with-job_started is in the
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
-    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
+    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.completed,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
     if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
@@ -448,9 +505,9 @@ function crfRefresh(){
     tb.__crfSig=sig;
     tb.innerHTML=rs.map(r=>{
       const running=r.state==='running';
-      const ph=running?r.phase:'exited';
-      const ball=running?('crf-ball-'+r.phase):'crf-ball';
-      const bvar=ph==='busy'?'orange':ph==='idle'?'green':ph==='error'?'red':'gray';
+      const ph=running?r.phase:(r.completed?'completed':'exited');
+      const ball=running?('crf-ball-'+r.phase):(r.completed?'crf-ball-idle':'crf-ball');
+      const bvar=ph==='busy'?'orange':(ph==='idle'||ph==='completed')?'green':ph==='error'?'red':'gray';
       let jobHtml;
       const v=crfVolatile(r);
       if(running&&r.phase==='busy'){
@@ -463,9 +520,9 @@ function crfRefresh(){
         else if(r.branch) jobHtml+='<span class="crf-ref">'+crfEsc(r.branch)+'</span>';
         jobHtml+=v.elapsedHtml;
       } else {
-        jobHtml=crfEsc(running?'waiting for jobs':r.state);
+        jobHtml=crfEsc(r.completed?'one-shot job completed':(running?'waiting for jobs':r.state));
       }
-      const jobCls=running&&r.phase==='busy'&&r.job?'crf-job':'crf-job crf-muted';
+      const jobCls=(running&&r.phase==='busy'&&r.job)||r.completed?'crf-job':'crf-job crf-muted';
       return '<div class="crf-bay" data-name="'+crfEsc(r.name)+'" tabindex="0" role="button" aria-expanded="'+(window.CRF_DRAWER===r.name?'true':'false')+'" aria-label="Runner '+crfEsc(r.name)+', toggle log">'+
         '<span class="crf-ball '+ball+'"></span>'+
         '<span class="crf-name">'+crfEsc(r.name)+(r.pool?'<span class="crf-pool-badge">'+crfEsc(r.pool)+'</span>':'')+'</span>'+

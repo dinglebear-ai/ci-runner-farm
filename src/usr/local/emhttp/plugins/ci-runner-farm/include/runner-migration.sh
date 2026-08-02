@@ -560,24 +560,62 @@ migration_jit_drained() {
       return 1
     }
   done
-  scaleset_snapshot_refresh || {
-    err "cannot prove JIT drain without a fresh scale-set snapshot"
+  if ! scaleset_snapshot_refresh; then
+    local supervisor_pid=""
+    [ -f "$SCALESET_PID" ] && supervisor_pid="$(cat "$SCALESET_PID" 2>/dev/null)"
+    if { [[ "$supervisor_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$supervisor_pid" 2>/dev/null; } ||
+       [ -S "$SCALESET_SOCKET" ] || [ ! -f "$SCALESET_SNAPSHOT" ]; then
+      err "cannot prove JIT drain without a fresh or stopped-supervisor scale-set snapshot"
+      return 1
+    fi
+  fi
+  [ "$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" =     "draining_assigned_jit:scaleset_ineligible" ] || {
+    err "scale-set ineligibility barrier is not proven"
     return 1
   }
   snapshot_ok="$(php -r '
-    $j=json_decode(file_get_contents($argv[1]),true);$now=time();
-    if(!is_array($j)||!is_array($j["pools"]??null)||count($j["pools"])===0)exit(2);
-    foreach($j["pools"] as $p){
+    $snapshot=json_decode(file_get_contents($argv[1]),true);
+    $ownership=json_decode(file_get_contents($argv[2]),true);
+    $max=(int)$argv[3];$expectedConfig=$argv[4];$expectedOwnership=$argv[5];$now=time();
+    if(!preg_match("/^[0-9a-f]{64}$/",$expectedConfig)||
+      !preg_match("/^[0-9a-f]{64}$/",$expectedOwnership)||$max<=0||$max>300||
+      !is_array($snapshot)||($snapshot["schema_version"]??0)!==1||
+      !hash_equals($expectedConfig,(string)($snapshot["config_revision"]??""))||
+      !hash_equals($expectedOwnership,(string)($snapshot["ownership_revision"]??""))||
+      !is_array($snapshot["pools"]??null)||
+      !is_array($ownership)||($ownership["schema_version"]??0)!==2||
+      !hash_equals($expectedConfig,(string)($ownership["config_revision"]??""))||
+      !is_array($ownership["records"]??null))exit(2);
+    $expected=[];
+    foreach($ownership["records"] as $record){
+      $id=$record["pool_id"]??"";$scaleSetID=$record["scale_set_id"]??0;
+      $updated=strtotime((string)($record["updated_at"]??""));
+      if(!is_string($id)||$id===""||isset($expected[$id])||
+        ($record["state"]??"")!=="ineligible"||!is_int($scaleSetID)||$scaleSetID<=0||
+        $updated===false||$updated>$now+5)exit(3);
+      $expected[$id]=["scale_set_id"=>$scaleSetID,"updated_at"=>$updated];
+    }
+    if(count($expected)===0||count($snapshot["pools"])!==count($expected))exit(4);
+    foreach($snapshot["pools"] as $p){
+      $id=$p["pool_id"]??"";
+      if(!is_string($id)||!isset($expected[$id])||
+        ($p["scale_set_id"]??0)!==$expected[$id]["scale_set_id"]||
+        ($p["assigned_jobs"]??-1)!==0||($p["advertised_capacity"]??-1)!==0||
+        !array_key_exists("acquired_handles",$p)||!is_array($p["acquired_handles"])||
+        count($p["acquired_handles"])!==0||!is_bool($p["session_healthy"]??null))exit(5);
       $observed=strtotime((string)($p["observed_at"]??""));
       $valid=strtotime((string)($p["valid_until"]??""));
-      if(($p["session_healthy"]??false)!==true||($p["assigned_jobs"]??-1)!==0||
-        !is_array($p["acquired_handles"]??null)||count($p["acquired_handles"])!==0||
-        $observed===false||$valid===false||$observed>$now+5||$valid<=$now||
-        $valid-$observed>30)exit(3);
+      if($observed===false||$valid===false||$observed>$now+5||$valid<=$observed||
+        $valid-$observed>$max||$observed<$expected[$id]["updated_at"])exit(6);
+      if(($p["session_healthy"]??false)===true&&$valid<=$now)exit(7);
+      unset($expected[$id]);
     }
+    if(count($expected)!==0)exit(8);
     echo "yes";
-  ' "$SCALESET_SNAPSHOT" 2>/dev/null)" || {
-    err "assigned, pending, or stale GitHub scale-set work remains"
+  ' "$SCALESET_SNAPSHOT" "$SCALESET_OWNERSHIP" \
+    "${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}" "$MIGRATION_TARGET_CONFIG_REVISION" \
+    "$MIGRATION_OWNERSHIP_REVISION" 2>/dev/null)" || {
+    err "assigned, pending, stale, mismatched, or insufficiently proven scale-set work remains"
     return 1
   }
   [ "$snapshot_ok" = yes ] || return 1

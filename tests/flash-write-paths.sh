@@ -35,12 +35,17 @@ grep -Fq 'JIT_STATE_DIR="$CACHE_ROOT/state/jit"' "$jit" ||
   crf_fail "JIT durable state does not follow CACHE_ROOT"
 grep -Fq 'JIT_LOG_ROOT="$CACHE_ROOT/logs/runners"' "$jit" ||
   crf_fail "JIT diagnostics do not follow CACHE_ROOT"
+grep -Fq 'JIT_RECENT_ACTIVITY_FILE="${JIT_RECENT_ACTIVITY_FILE:-$RUNDIR/recent-jobs.jsonl}"' "$jit" ||
+  crf_fail "recent one-shot activity is not on runtime tmpfs"
+grep -Fq "! -path './bin/.crf-scaleset.rollback-*'" "$scalesets" ||
+  crf_fail "rollback helpers can poison the packaged identity digest"
 grep -Fq 'slices.Equal(record.AppliedLabels, labels) && record.State == targetState' "$ownership" ||
   crf_fail "no-op ownership reconciliation can rewrite flash state"
 
 for runtime_file in \
   autoscale.log autoscale.pid autoscale.state imageupdate.log imageupdate.pid \
-  boot.log queued.cache cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log; do
+  boot.log queued.cache cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log \
+  recent-jobs.jsonl recent-jobs.jsonl.lock; do
   if rg -F "/boot/config/plugins/ci-runner-farm/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
      rg -F "\$CFGDIR/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
      rg -F "\$CFGDIR/$runtime_file" "$builder" >/dev/null; then
@@ -66,6 +71,8 @@ trap 'rm -rf "$tmp"' EXIT
   jit_paths_refresh
   [ "$JIT_STATE_DIR" = "$tmp/configured/state/jit" ] || crf_fail "JIT state ignored configured CACHE_ROOT"
   [ "$JIT_LOG_ROOT" = "$tmp/configured/logs/runners" ] || crf_fail "JIT logs ignored configured CACHE_ROOT"
+  [ "$JIT_RECENT_ACTIVITY_FILE" = "$RUNDIR/recent-jobs.jsonl" ] ||
+    crf_fail "recent activity ignored runtime tmpfs"
 )
 (
   RUNDIR="$tmp/run2"

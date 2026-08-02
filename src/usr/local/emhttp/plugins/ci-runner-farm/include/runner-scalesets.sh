@@ -60,7 +60,11 @@ scaleset_plugin_digest() {
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   (
     cd "$root" || exit
-    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    # The active helper is independently pinned by helper_digest. Emergency
+    # rollback copies must live on cache, but ignore the historical hidden
+    # filename if an older deployment left one inside bin.
+    find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0 |
+      LC_ALL=C sort -z | xargs -0 sha256sum
   ) | sha256sum | cut -d' ' -f1
 }
 
@@ -600,7 +604,8 @@ scaleset_runtime_config_write() {
 
 _scaleset_request_locked() {
   local operation="$1" payload="${2-}" sequence request_id controller config_rev ownership_rev
-  local seq_file seq_tmp output
+  local seq_file seq_tmp output request_timeout="${SCALESET_REQUEST_IO_TIMEOUT_SECONDS:-20}"
+  [[ "$request_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$request_timeout" -le 120 ] || return 1
   [ -n "$payload" ] || payload='{}'
   [ -S "$SCALESET_SOCKET" ] && [ -f "$SCALESET_RUNTIME_CONFIG" ] || return 1
   controller="$(php -r '$j=json_decode(file_get_contents($argv[1]),true);echo $j["controller_instance_id"]??"";' \
@@ -629,12 +634,17 @@ _scaleset_request_locked() {
       JSON_UNESCAPED_SLASHES),"\n";
   ' "$request_id" "$operation" "$config_rev" "$ownership_rev" "$controller" "$sequence" "$payload")" ||
     return 1
-  printf '%s' "$output" | "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET"
+  command -v timeout >/dev/null 2>&1 || return 1
+  printf '%s' "$output" | timeout --signal=TERM --kill-after=5s \
+    "${request_timeout}s" "$SCALESET_HELPER" request --socket "$SCALESET_SOCKET" 6>&-
 }
 
 scaleset_request() {
-  local lock_timeout="${SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS:-35}"
-  [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$lock_timeout" -le 120 ] || return 1
+  local request_timeout="${SCALESET_REQUEST_IO_TIMEOUT_SECONDS:-20}" lock_timeout
+  [[ "$request_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$request_timeout" -le 120 ] || return 1
+  lock_timeout="${SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS:-$((request_timeout + 15))}"
+  [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]] && [ "$lock_timeout" -le 180 ] &&
+    [ "$lock_timeout" -ge "$((request_timeout + 5))" ] || return 1
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
   (
     exec 6>"$SCALESET_STATE_DIR/request.lock" || exit 1

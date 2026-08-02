@@ -41,8 +41,10 @@ grep -Fq 'SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"' \
   "$scalesets" || crf_fail "operation-record cap drifted"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
-grep -Fq 'find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum' \
-  "$scalesets" || crf_fail "plugin identity is locale-sensitive"
+grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
+  "$scalesets" || crf_fail "plugin identity includes rollback helpers"
+grep -Fq 'LC_ALL=C sort -z | xargs -0 sha256sum' "$scalesets" ||
+  crf_fail "plugin identity is locale-sensitive"
 grep -Fq 'soft_limit="${SCHEDULER_START_LIMIT:-2}" hard_limit=4' "$scheduler" ||
   crf_fail "two/four cold-start bounds drifted"
 grep -Fq '"$(( $(date +%s) + 90 ))"' "$scalesets" ||
@@ -91,8 +93,23 @@ grep -Fq 'NewAdapterWithScaleSetClientFactory'   tools/crf-scaleset/cmd/crf-scal
   crf_fail "one shared mutable client still serves every scale set"
 grep -Fq 'flock -w "$lock_timeout" 6'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
   crf_fail "scale-set request sequence is not serialized through socket delivery"
+grep -Fq 'timeout --signal=TERM --kill-after=5s' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
+  crf_fail "scale-set request socket I/O is unbounded"
+! grep -Fq 'timeout --foreground' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh ||
+  crf_fail "scale-set request timeout leaves helper descendants running"
 grep -Fq 'flock -n 5'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "autoscale ticks are not serialized"
+grep -Fq 'image="${ARGS[$CRF_IMAGE_ARG_INDEX]}"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle does not inspect the recorded image argument"
+! grep -Fq 'image="${ARGS[${#ARGS[@]}-1]}"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle still treats the listener command as the image"
+grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "runner recycle does not perform protected credential handoff"
 ! grep -R -Eq 'CRF_MIGRATION_TEST_GATES|live_probe_not_configured|not yet compatibility-proven' src tools ||
   crf_fail "test-only or placeholder scale-set gate remains in production"
 
@@ -101,7 +118,10 @@ grep -Fq 'flock -n 5'   src/usr/local/emhttp/plugins/ci-runner-farm/include/runn
 bash tests/performance-contracts.sh >/dev/null
 bash tests/autoscale-locks.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
+bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
+bash tests/recent-activity.sh >/dev/null
+bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null

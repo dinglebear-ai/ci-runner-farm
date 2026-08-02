@@ -170,4 +170,37 @@ load_cfg
 [ "$RUNNER_POOLS" = default-pool-records ] || fail 'legacy config reload retained stale pool records'
 rm -f "$reload_tmp"
 
+# Autoscale shutdown must identify the daemon by exact argv, never by a broad
+# command-line substring. The latter kills SSH/operator shells that merely
+# contain the daemon text and aborts maintenance resume before restart.
+daemon_tmp="$(mktemp)"
+for fn in autoscale_daemon_pids autoscale_stop; do
+  sed -n "/^${fn}()/,/^}/p" "$ENGINE" >> "$daemon_tmp"
+done
+# shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
+. "$daemon_tmp"
+AUTOSCALE_PROC_ROOT="$RUNDIR/proc"
+mkdir -p "$AUTOSCALE_PROC_ROOT"
+write_cmdline() {
+  local pid="$1"; shift
+  mkdir -p "$AUTOSCALE_PROC_ROOT/$pid"
+  printf '%s\0' "$@" > "$AUTOSCALE_PROC_ROOT/$pid/cmdline"
+}
+write_cmdline 41001 /bin/bash /usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh autoscale-daemon
+write_cmdline 41002 zsh -c 'runner-farm.sh autoscale-daemon mentioned by operator shell'
+write_cmdline 41003 /bin/bash /usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh maintenance resume
+write_cmdline 41004 grep 'runner-farm.sh autoscale-daemon'
+[ "$(autoscale_daemon_pids)" = 41001 ] || fail 'autoscale daemon argv matching selected an operator shell or missed the daemon'
+AUTOSCALE_PID="$RUNDIR/autoscale.pid"
+printf '41999\n' > "$AUTOSCALE_PID"
+killed=''
+kill() { killed="${killed:+$killed }$1"; }
+autoscale_stop
+[ "$killed" = '41999 41001' ] || fail "autoscale stop killed unexpected processes: $killed"
+[ ! -e "$AUTOSCALE_PID" ] || fail 'autoscale stop left its pid file behind'
+if sed -n '/^autoscale_stop()/,/^}/p' "$ENGINE" | grep -q 'pkill -f'; then
+  fail 'autoscale stop still uses broad command-line matching'
+fi
+rm -f "$daemon_tmp"
+
 echo 'autoscale-controls: OK'

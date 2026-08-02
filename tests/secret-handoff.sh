@@ -58,6 +58,31 @@ grep -Fq -- 'cat > /run/crf/secret.in' "$engine" ||
 grep -Fq -- '-e UNSET_CONFIG_VARS="true"' "$engine" ||
   crf_fail "base image is not told to clear configuration variables"
 
+# Host pipefail can report the FIFO producer as SIGPIPE after the container
+# already consumed the credential. The durable consumed acknowledgement must win.
+sed -n '/^runner_secret_inject()/,/^}/p' "$engine" > "$task_tmp/runner-secret-inject.sh"
+# shellcheck disable=SC1090
+. "$task_tmp/runner-secret-inject.sh"
+NAME_PREFIX=ci-runner
+runner_identity_validate() { return 0; }
+docker() {
+  if [ "${1:-}" = exec ] && [ "${2:-}" = -i ]; then
+    cat >/dev/null
+    : > "$task_tmp/fifo-writer-called"
+    return 141
+  fi
+  case "$*" in
+    *'/run/crf/ready'*) return 0 ;;
+    *'/run/crf/consumed'*) return 0 ;;
+  esac
+  return 1
+}
+if ! runner_secret_inject ci-runner-python-1 "$sentinel" container-id; then
+  crf_fail 'successful consumed marker was overridden by FIFO producer SIGPIPE'
+fi
+[ -f "$task_tmp/fifo-writer-called" ] || crf_fail 'host FIFO writer was not exercised'
+unset -f docker runner_identity_validate
+
 # JIT mode consumes the same FIFO, materializes only the three allowlisted
 # mode-0600 runner files, and invokes the listener without putting the opaque
 # descriptor in argv or the environment.
