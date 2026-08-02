@@ -133,3 +133,51 @@ sed -n '/^reconcile_stale_runners()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-stale
 }
 
 echo 'reconcile-retiring-fairness: OK'
+
+
+# A stale, reused, or unrelated PID must not suppress reconciliation. Only a
+# live process whose argv contains the exact reconcile-drain subcommand owns the
+# PID file.
+sed -n '/^reconcile_pid_active()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-pid-active.sh"
+# shellcheck disable=SC1090
+. "$tmpdir/reconcile-pid-active.sh"
+RECONCILE_PID="$tmpdir/reconcile.pid"
+
+printf '99999999\n' > "$RECONCILE_PID"
+if reconcile_pid_active; then
+  echo "FAIL: dead reconcile PID was accepted" >&2
+  exit 1
+fi
+
+sleep 30 &
+unrelated_pid=$!
+printf '%s\n' "$unrelated_pid" > "$RECONCILE_PID"
+if reconcile_pid_active; then
+  kill "$unrelated_pid" 2>/dev/null || true
+  echo "FAIL: unrelated live PID was accepted as reconcile worker" >&2
+  exit 1
+fi
+kill "$unrelated_pid" 2>/dev/null || true
+wait "$unrelated_pid" 2>/dev/null || true
+
+bash -c 'exec -a reconcile-drain sleep 30' &
+worker_pid=$!
+printf '%s\n' "$worker_pid" > "$RECONCILE_PID"
+for _ in 1 2 3 4 5; do
+  reconcile_pid_active && break
+  sleep 0.05
+done
+if ! reconcile_pid_active; then
+  kill "$worker_pid" 2>/dev/null || true
+  echo "FAIL: live reconcile worker was rejected" >&2
+  exit 1
+fi
+kill "$worker_pid" 2>/dev/null || true
+wait "$worker_pid" 2>/dev/null || true
+
+grep -Fq 'trap '\''rm -f "$RECONCILE_PID"'\'' EXIT INT TERM' "$ENGINE" || {
+  echo "FAIL: reconcile drain does not clean its PID file on every exit" >&2
+  exit 1
+}
+
+echo 'reconcile-pid-ownership: OK'
