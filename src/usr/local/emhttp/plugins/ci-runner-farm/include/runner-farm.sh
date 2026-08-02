@@ -576,11 +576,24 @@ busy_count() {
 # a label on every runner so the reconciler can tell which runners predate a config
 # change and migrate them onto the new config as they go idle. IMPORTANT: whenever you
 # add a setting that build_args bakes into the container, add it here too.
+crf_confgen_prepare() {
+  CRF_CONFGEN_IMAGE_REF="$(effective_image)"
+  CRF_CONFGEN_IMAGE_IDENTITY="$(docker image inspect "$CRF_CONFGEN_IMAGE_REF" -f '{{.Id}}' 2>/dev/null || printf '%s' "$CRF_CONFGEN_IMAGE_REF")"
+  CRF_CONFGEN_ENTRYPOINT_HASH="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
+}
+
 crf_confgen() {
   local pool="${1:-default}" scope_target="${2:-}" image_ref image_identity entrypoint_hash
-  image_ref="$(effective_image)"
-  image_identity="$(docker image inspect "$image_ref" -f '{{.Id}}' 2>/dev/null || printf '%s' "$image_ref")"
-  entrypoint_hash="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
+  if [ -n "${CRF_CONFGEN_IMAGE_REF:-}" ] && [ -n "${CRF_CONFGEN_IMAGE_IDENTITY:-}" ] &&
+     [ -n "${CRF_CONFGEN_ENTRYPOINT_HASH:-}" ]; then
+    image_ref="$CRF_CONFGEN_IMAGE_REF"
+    image_identity="$CRF_CONFGEN_IMAGE_IDENTITY"
+    entrypoint_hash="$CRF_CONFGEN_ENTRYPOINT_HASH"
+  else
+    image_ref="$(effective_image)"
+    image_identity="$(docker image inspect "$image_ref" -f '{{.Id}}' 2>/dev/null || printf '%s' "$image_ref")"
+    entrypoint_hash="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
+  fi
   if pool_mode_enabled; then
     [ -n "$scope_target" ] || scope_target="org:$GH_OWNER"
     if [ "$POOL_CONFIG_VERSION" = v2 ] || { pool_snapshot_load >/dev/null 2>&1 && [ "$POOL_CONFIG_VERSION" = v2 ]; }; then
@@ -623,6 +636,7 @@ runner_confgen() {
 count_stale_runners() {
   local cur c n=0 pool target
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
+  crf_confgen_prepare
   for c in $(managed_names); do
     [ -n "$c" ] || continue
     runner_identity_validate "$c" || continue
@@ -1747,6 +1761,7 @@ build_args() {
       else scope_target="repo:$(repo_for_index "$idx")"; fi
     fi
   fi
+  crf_confgen_prepare
   ARGS=(
     # --restart=no (NOT unless-stopped): the registration token baked in below is
     # short-lived (~1h) and the runner re-runs config on start, so letting Docker
@@ -1930,6 +1945,7 @@ start_one() {
     else scope_target="repo:$(repo_for_index "$idx")"; fi
   fi
   expected_revision="$(pool_config_revision)" || return 1
+  crf_confgen_prepare
   cpu_milli=0; memory_bytes=0
   if pool_mode_enabled && [ "$POOL_CONFIG_VERSION" = v2 ]; then
     cpu_milli="$(pool_cpu_milli "$pool")" || return 1
@@ -2124,6 +2140,7 @@ reconcile_stale_runners() {
   cleanup_pool_runtime_state
   local cur c gen pool scope state docker_state desired rec target
   fleet_inventory_refresh || { err "reconcile: could not inventory managed runners"; return 1; }
+  crf_confgen_prepare
   if pool_mode_enabled && [ "$(count_pool_missing_capacity)" -gt 0 ]; then
     provision_base || { err "reconcile: provisioning preflight failed before capacity transition"; return 1; }
   fi
@@ -3040,7 +3057,7 @@ recreate_runner() {
     echo '{"ok":false,"error":"replacement identity could not be verified"}'; return 1
   fi
   if [ -n "${CRF_REGISTRATION_SECRET:-}" ]; then
-    # The protected handoff can wait up to 150 seconds. Release the fleet mutex
+    # The protected handoff can wait up to 180 seconds. Release the fleet mutex
     # after Docker has atomically claimed the runner name, then re-take it before
     # reporting the mutation. Cleanup uses the exact created container ID so a
     # concurrent Stop/Recycle can never cause us to delete its replacement.
@@ -3160,6 +3177,7 @@ cmd_status_json() {
   fi
   local config_error=""
   validate_runtime_config || config_error="$POOL_CONFIG_ERROR"
+  [ -n "$config_error" ] || crf_confgen_prepare
   # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
   # cmd_usage_refresh) so this 5s-per-tab call makes just TWO docker calls total (the
   # `docker ps` in managed_names + one batched inspect for live state and resource

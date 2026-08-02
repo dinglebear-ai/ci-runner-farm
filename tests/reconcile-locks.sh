@@ -108,6 +108,7 @@ sed -n '/^reconcile_stale_runners()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-stale
   validate_runtime_config() { return 0; }
   cleanup_pool_runtime_state() { :; }
   fleet_inventory_refresh() { return 0; }
+  crf_confgen_prepare() { :; }
   pool_mode_enabled() { return 0; }
   count_pool_missing_capacity() { echo 0; }
   managed_names() { printf '%s\n' ci-runner-old-busy ci-runner-old-idle; }
