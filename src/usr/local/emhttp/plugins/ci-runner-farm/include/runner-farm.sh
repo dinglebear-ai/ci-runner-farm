@@ -190,6 +190,7 @@ fi
 AUTOSCALE_PID="${RUNDIR}/autoscale.pid"
 IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
 RECONCILE_PID="${RUNDIR}/reconcile.pid"
+KACHE_WATCHDOG_PID="${RUNDIR}/kache-watchdog.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 MAINTENANCE_FILE="${RUNDIR}/maintenance.state"
@@ -976,6 +977,108 @@ autoscale_status() {
   if [ -f "$AUTOSCALE_PID" ] && kill -0 "$(cat "$AUTOSCALE_PID" 2>/dev/null)" 2>/dev/null; then
     echo "running (pid $(cat "$AUTOSCALE_PID"))"
   else echo "stopped"; fi
+}
+
+# The runner image launches kache-supervise.sh before Runner.Listener. A very
+# fast first job can still let GitHub's orphan cleanup reap that one supervisor
+# before it becomes a stable container-lifetime process. The host watchdog is a
+# second ownership layer: it never touches jobs or the daemon directly; it only
+# restores a missing supervisor inside a valid, running managed container.
+kache_supervisor_running() {
+  local c="$1"
+  docker top "$c" -eo args 2>/dev/null | tail -n +2 |
+    grep -Eq '(^|[[:space:]])(/bin/)?bash /usr/local/bin/kache-supervise\.sh$'
+}
+
+kache_supervisor_reconcile() {
+  local c
+  fleet_inventory_refresh || return 1
+  for c in $(managed_names); do
+    [ -n "$c" ] || continue
+    runner_identity_validate "$c" || continue
+    [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || continue
+    docker exec "$c" test -x /usr/local/bin/kache-supervise.sh >/dev/null 2>&1 || continue
+    kache_supervisor_running "$c" && continue
+    if docker exec -d -u runner "$c" env -i \
+      HOME=/home/runner PATH=/usr/local/bin:/usr/bin:/bin \
+      KACHE_CACHE_DIR=/_work/.kache \
+      /bin/bash /usr/local/bin/kache-supervise.sh >/dev/null 2>&1; then
+      log "kache-watchdog: restored supervisor in $c"
+    else
+      log "kache-watchdog: failed to restore supervisor in $c"
+    fi
+  done
+}
+
+kache_watchdog_daemon() {
+  trap 'rm -f "$KACHE_WATCHDOG_PID"' EXIT INT TERM
+  exec 8>&- 7>&- 9>&- 2>/dev/null || true
+  log "kache-watchdog: daemon started"
+  while true; do
+    load_cfg
+    kache_supervisor_reconcile || log "kache-watchdog: inventory/reconcile failed; retrying"
+    sleep "${KACHE_WATCHDOG_INTERVAL:-10}"
+  done
+}
+
+kache_watchdog_daemon_pids() {
+  local proc pid
+  local -a argv=()
+  for proc in "${KACHE_WATCHDOG_PROC_ROOT:-/proc}"/[0-9]*; do
+    [ -r "$proc/cmdline" ] || continue
+    argv=()
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    [ "${#argv[@]}" -ge 3 ] || continue
+    case "${argv[0]##*/}" in bash|sh|zsh) ;; *) continue ;; esac
+    [ "${argv[1]##*/}" = runner-farm.sh ] || continue
+    [ "${argv[2]}" = kache-watchdog-daemon ] || continue
+    pid="${proc##*/}"
+    [ "$pid" = "$$" ] || printf '%s\n' "$pid"
+  done
+}
+
+kache_watchdog_pid_active() {
+  local pid proc
+  local -a argv=()
+  [ -f "$KACHE_WATCHDOG_PID" ] || return 1
+  pid="$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  proc="${KACHE_WATCHDOG_PROC_ROOT:-/proc}/$pid"
+  [ -r "$proc/cmdline" ] || return 1
+  mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || return 1
+  [ "${#argv[@]}" -ge 3 ] || return 1
+  case "${argv[0]##*/}" in bash|sh|zsh) ;; *) return 1 ;; esac
+  [ "${argv[1]##*/}" = runner-farm.sh ] || return 1
+  [ "${argv[2]}" = kache-watchdog-daemon ]
+}
+
+kache_watchdog_stop() {
+  local pid
+  if kache_watchdog_pid_active; then
+    pid="$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)"
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$KACHE_WATCHDOG_PID"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done < <(kache_watchdog_daemon_pids)
+}
+
+kache_watchdog_start() {
+  kache_watchdog_pid_active && return 0
+  kache_watchdog_stop
+  nohup "$0" kache-watchdog-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
+  echo $! > "$KACHE_WATCHDOG_PID"
+  log "kache-watchdog: started (pid $(cat "$KACHE_WATCHDOG_PID"))"
+}
+
+kache_watchdog_status() {
+  if kache_watchdog_pid_active; then
+    echo "running (pid $(cat "$KACHE_WATCHDOG_PID"))"
+  else
+    echo "stopped"
+  fi
 }
 
 # ---- image auto-update -----------------------------------------------------
@@ -2509,6 +2612,7 @@ cmd_start() {
     jit_reconcile || true
     [ "$AUTOSCALE" = "true" ] && autoscale_start || true
     [ "$IMAGE_AUTOUPDATE" = "true" ] && imageupdate_start || true
+    kache_watchdog_start || true
     log "scale-set fleet up: $(pool_records | grep -c .) pool(s)"
     return 0
   fi
@@ -2557,6 +2661,7 @@ cmd_start() {
   log "fleet up: $(managed_names | wc -l) runner(s)"
   [ "$AUTOSCALE" = "true" ] && autoscale_start || true
   [ "$IMAGE_AUTOUPDATE" = "true" ] && imageupdate_start || true
+  kache_watchdog_start || true
   [ "$start_rc" -eq 0 ] || err "fleet started with partial capacity; see errors above and retry Start"
   return "$start_rc"
 }
@@ -2612,6 +2717,7 @@ remove_runner_force() {
 # token — so a later Start rebuilds the container with its cache warm; only the
 # container is removed here, not the cached layers.
 cmd_stop() {
+  kache_watchdog_stop
   autoscale_stop
   imageupdate_stop
   reconcile_stop
@@ -3605,6 +3711,10 @@ case "${1:-status}" in
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
+  kache-watchdog-daemon) kache_watchdog_daemon ;;
+  kache-watchdog-start)  kache_watchdog_start ;;
+  kache-watchdog-stop)   kache_watchdog_stop ;;
+  kache-watchdog-status) kache_watchdog_status ;;
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
   prewarm)          backend_scaleset_admission_allowed && scheduler_prewarm_set "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
@@ -3629,5 +3739,5 @@ case "${1:-status}" in
   imageupdate-start)  imageupdate_start ;;
   imageupdate-stop)   imageupdate_stop ;;
   imageupdate-status) imageupdate_status ;;
-  *) echo "usage: $0 {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
+  *) echo "usage: $0 {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|kache-watchdog-start|kache-watchdog-stop|kache-watchdog-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
 esac
