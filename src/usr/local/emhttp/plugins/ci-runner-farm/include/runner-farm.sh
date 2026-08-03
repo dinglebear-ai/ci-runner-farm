@@ -984,25 +984,52 @@ autoscale_status() {
 # before it becomes a stable container-lifetime process. The host watchdog is a
 # second ownership layer: it never touches jobs or the daemon directly; it only
 # restores a missing supervisor inside a valid, running managed container.
-kache_supervisor_running() {
+kache_supervisor_pids() {
   local c="$1"
-  docker top "$c" -eo args 2>/dev/null | tail -n +2 |
-    grep -Eq '(^|[[:space:]])(/bin/)?bash /usr/local/bin/kache-supervise\.sh$'
+  docker top "$c" -eo pid,args 2>/dev/null |
+    awk 'NR > 1 && ($2 == "bash" || $2 == "/bin/bash") &&
+         $3 == "/usr/local/bin/kache-supervise.sh" && NF == 3 { print $1 }'
+}
+
+kache_supervisor_running() {
+  [ -n "$(kache_supervisor_pids "$1")" ]
+}
+
+kache_daemon_running() {
+  local c="$1"
+  docker top "$c" -eo pid,args 2>/dev/null |
+    awk 'NR > 1 && $2 ~ /(^|\/)kache$/ && $3 == "daemon" &&
+         $4 == "run" && NF == 4 { found=1 } END { exit !found }'
 }
 
 kache_supervisor_reconcile() {
-  local c
+  local c pid
+  local -a supervisors=()
   fleet_inventory_refresh || return 1
   for c in $(managed_names); do
     [ -n "$c" ] || continue
     runner_identity_validate "$c" || continue
     [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || continue
     docker exec "$c" test -x /usr/local/bin/kache-supervise.sh >/dev/null 2>&1 || continue
-    kache_supervisor_running "$c" && continue
-    if docker exec -d -u runner "$c" env -i \
-      HOME=/home/runner PATH=/usr/local/bin:/usr/bin:/bin \
-      KACHE_CACHE_DIR=/_work/.kache \
-      /bin/bash /usr/local/bin/kache-supervise.sh >/dev/null 2>&1; then
+
+    supervisors=()
+    mapfile -t supervisors < <(kache_supervisor_pids "$c")
+    if [ "${#supervisors[@]}" -gt 1 ]; then
+      for pid in "${supervisors[@]:1}"; do kill "$pid" 2>/dev/null || true; done
+      log "kache-watchdog: removed $((${#supervisors[@]} - 1)) duplicate supervisor(s) from $c"
+      supervisors=("${supervisors[0]}")
+    fi
+
+    if [ "${#supervisors[@]}" -eq 1 ] && kache_daemon_running "$c"; then
+      continue
+    fi
+    if [ "${#supervisors[@]}" -eq 1 ]; then
+      kill "${supervisors[0]}" 2>/dev/null || true
+      log "kache-watchdog: restarting unhealthy supervisor in $c (daemon missing)"
+      sleep 1
+    fi
+
+    if docker exec -d -u runner "$c" env -i       HOME=/home/runner PATH=/usr/local/bin:/usr/bin:/bin       KACHE_CACHE_DIR=/_work/.kache       /bin/bash /usr/local/bin/kache-supervise.sh >/dev/null 2>&1; then
       log "kache-watchdog: restored supervisor in $c"
     else
       log "kache-watchdog: failed to restore supervisor in $c"
@@ -1011,7 +1038,8 @@ kache_supervisor_reconcile() {
 }
 
 kache_watchdog_daemon() {
-  trap 'rm -f "$KACHE_WATCHDOG_PID"' EXIT INT TERM
+  trap 'rm -f "$KACHE_WATCHDOG_PID"' EXIT
+  trap 'exit 0' INT TERM
   exec 8>&- 7>&- 9>&- 2>/dev/null || true
   log "kache-watchdog: daemon started"
   while true; do
@@ -1054,15 +1082,24 @@ kache_watchdog_pid_active() {
 }
 
 kache_watchdog_stop() {
-  local pid
+  local pid alive
+  local -a pids=()
   if kache_watchdog_pid_active; then
-    pid="$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)"
-    kill "$pid" 2>/dev/null || true
+    pids+=("$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)")
   fi
-  rm -f "$KACHE_WATCHDOG_PID"
   while IFS= read -r pid; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    [ -n "$pid" ] || continue
+    case " ${pids[*]} " in *" $pid "*) ;; *) pids+=("$pid") ;; esac
   done < <(kache_watchdog_daemon_pids)
+  rm -f "$KACHE_WATCHDOG_PID"
+  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for _ in $(seq 1 20); do
+    alive=0
+    for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.1
+  done
+  for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
 }
 
 kache_watchdog_start() {

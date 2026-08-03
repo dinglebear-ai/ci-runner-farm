@@ -9,7 +9,9 @@ trap 'jobs -pr | xargs -r kill 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
 # Exercise the live reconcile functions with a fake Docker surface. A valid
 # running container that lost only kache-supervise.sh must be repaired once;
 # healthy, stopped, invalid, and incompatible containers must be untouched.
-sed -n '/^kache_supervisor_running()/,/^}/p' "$ENGINE" >"$tmpdir/functions.sh"
+sed -n '/^kache_supervisor_pids()/,/^}/p' "$ENGINE" >"$tmpdir/functions.sh"
+sed -n '/^kache_supervisor_running()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
+sed -n '/^kache_daemon_running()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
 sed -n '/^kache_supervisor_reconcile()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
 # shellcheck disable=SC1090
 . "$tmpdir/functions.sh"
@@ -34,8 +36,9 @@ docker() {
   case "$cmd" in
     top)
       c="$1"
-      printf 'COMMAND\n'
-      [ "${supervisor[$c]:-0}" = 1 ] && printf 'bash /usr/local/bin/kache-supervise.sh\n'
+      printf 'PID COMMAND\n'
+      [ "${supervisor[$c]:-0}" = 1 ] && printf '123 bash /usr/local/bin/kache-supervise.sh   \n'
+      case "$c" in runner-ok|runner-missing) printf '900 /opt/hostedtoolcache/kache/0.12.0/x64/kache daemon run   \n' ;; esac
       ;;
     inspect)
       c="${@: -1}"
@@ -110,6 +113,7 @@ printf '/bin/bash\0/tmp/runner-farm.sh\0autoscale-daemon\0' >"$KACHE_WATCHDOG_PR
   kache_watchdog_daemon_pids >&2
   exit 1
 }
+rm -rf "$KACHE_WATCHDOG_PROC_ROOT/111" "$KACHE_WATCHDOG_PROC_ROOT/222"
 kache_watchdog_stop
 wait "$live" 2>/dev/null || true
 if kill -0 "$live" 2>/dev/null; then
