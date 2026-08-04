@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	crfgithub "github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/github"
+	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 )
 
 type WorkloadEvidence struct {

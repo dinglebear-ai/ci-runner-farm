@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/protocol"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/protocol"
 )
 
 type Handler func(context.Context, protocol.Request) protocol.Response

@@ -9,7 +9,7 @@ cp -a build-plg.sh src tools VERSION CHANGELOG.md "$tmp/repo/"
 go125="$(crf_go125)"
 (
   cd "$tmp/repo"
-  CRF_GO="$go125" DATE=2026.07.30.1200 BUILD_NUMBER=1 INTERNAL_VERSION=9.9.9 REPO=jmagar/ci-runner-farm ./build-plg.sh >/dev/null
+  CRF_GO="$go125" DATE=2026.07.30.1200 BUILD_NUMBER=1 INTERNAL_VERSION=9.9.9 REPO=dinglebear-ai/ci-runner-farm ./build-plg.sh >/dev/null
   sha256sum ci-runner-farm.tgz | cut -d' ' -f1 > "$tmp/sha1"
   tar -tzf ci-runner-farm.tgz | sort > "$tmp/list1"
   tar -tvzf ci-runner-farm.tgz > "$tmp/modes1"

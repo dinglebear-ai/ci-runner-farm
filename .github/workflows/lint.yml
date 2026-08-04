@@ -21,7 +21,8 @@ concurrency:
 jobs:
   lint:
     name: Shell + PHP syntax and config parity
-    runs-on: ubuntu-latest
+    # Trusted org runs use the isolated ops pool; public fork PRs stay GitHub-hosted.
+    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0

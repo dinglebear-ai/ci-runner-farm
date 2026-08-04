@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+* Move the canonical repository and scale-set helper module identity to `dinglebear-ai/ci-runner-farm`.
+* Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
+
 ## [1.7.0](https://github.com/unraid/ci-runner-farm/compare/v1.6.0...v1.7.0) (2026-07-24)
 
 

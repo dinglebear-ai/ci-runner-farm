@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/controller"
-	crfgithub "github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/github"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/ipc"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/probe"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/protocol"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/controller"
+	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/ipc"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/probe"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/protocol"
 )
 
 const (
