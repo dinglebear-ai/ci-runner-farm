@@ -37,6 +37,9 @@ RUN mkdir -p /home/runner/.config/kache \
   "modified_input_guard = true" \
   "local_max_size = \"80GiB\"" \
   "" \
+  "[cc]" \
+  "extra_allowlist_flags = [\"-fmerge-all-constants\"]" \
+  "" \
   "[cache.remote]" \
   "type = \"s3\"" \
   "bucket = \"kache\"" \

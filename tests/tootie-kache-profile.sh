@@ -18,6 +18,8 @@ for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq '"prefetch_enabled = false"' "$dockerfile"
   grep -Fq '"modified_input_guard = true"' "$dockerfile"
   grep -Eq 'local_max_size.*80GiB' "$dockerfile"
+  grep -Fq '"[cc]"' "$dockerfile"
+  grep -Fq '"extra_allowlist_flags = [\"-fmerge-all-constants\"]"' "$dockerfile"
   ! grep -Fq 'prefetch_max_bytes' "$dockerfile"
 done
 
