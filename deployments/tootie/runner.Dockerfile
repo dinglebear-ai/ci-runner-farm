@@ -38,15 +38,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
 
-# Fleet Kache backport: one canonical tool-cache binary, checksum-pinned.
+# Fleet Kache release: one canonical tool-cache binary, checksum-pinned.
 # /usr/local/bin/kache is a symlink to the tool-cache entry so the container
 # supervisor and kache-action clients resolve the same inode and protocol epoch.
-ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1
-ARG KACHE_FLEET_ARCHIVE=kache-fleet-v0.13.0-prefetch-controls.1-x86_64-unknown-linux-gnu.tar.gz
-ARG KACHE_FLEET_ARCHIVE_SHA256=f9250450073dd48c23ee457093bb860a9acafc037608f11a1643471c0d00af6b
-ARG KACHE_FLEET_BINARY_SHA256=87cddc742db80394a77e3c9e9cd53fb280bf2b3da2b2fd4c344d70820df46b06
+ARG KACHE_FLEET_TAG=v0.13.0
+ARG KACHE_FLEET_ARCHIVE=kache-x86_64-unknown-linux-musl.tar.gz
+ARG KACHE_FLEET_ARCHIVE_SHA256=30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0
+ARG KACHE_FLEET_BINARY_SHA256=5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972
 RUN set -euo pipefail \
- && url="https://github.com/jmagar/kache/releases/download/${KACHE_FLEET_TAG}/${KACHE_FLEET_ARCHIVE}" \
+ && url="https://github.com/kunobi-ninja/kache/releases/download/${KACHE_FLEET_TAG}/${KACHE_FLEET_ARCHIVE}" \
  && tmp="$(mktemp -d)" \
  && curl -fsSL --retry 3 -o "$tmp/${KACHE_FLEET_ARCHIVE}" "$url" \
  && echo "${KACHE_FLEET_ARCHIVE_SHA256}  $tmp/${KACHE_FLEET_ARCHIVE}" | sha256sum -c - \

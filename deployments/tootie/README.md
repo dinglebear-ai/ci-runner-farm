@@ -5,8 +5,8 @@ image deployed on Tootie. It captures the fleet-specific Ubuntu 26.04, Rust,
 Cargo-profile, MinIO, and Kache configuration that is intentionally more
 specialized than the plugin's generic starter Dockerfile.
 
-Kache uses the checksum-pinned `jmagar/kache` fleet release based on upstream
-v0.12.0. The binary is installed once in GitHub's tool-cache and exposed through
+Kache uses the checksum-pinned upstream `kunobi-ninja/kache` v0.13.0 release.
+The binary is installed once in GitHub's tool-cache and exposed through
 `/usr/local/bin/kache` as a symlink. This keeps the container supervisor and
 `kache-action` clients on the same inode and daemon protocol epoch.
 
