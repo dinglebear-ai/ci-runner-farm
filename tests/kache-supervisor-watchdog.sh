@@ -108,9 +108,11 @@ kache_watchdog_pid_active || {
 mkdir -p "$KACHE_WATCHDOG_PROC_ROOT/111" "$KACHE_WATCHDOG_PROC_ROOT/222"
 printf '/bin/bash\0/tmp/runner-farm.sh\0kache-watchdog-daemon\0' >"$KACHE_WATCHDOG_PROC_ROOT/111/cmdline"
 printf '/bin/bash\0/tmp/runner-farm.sh\0autoscale-daemon\0' >"$KACHE_WATCHDOG_PROC_ROOT/222/cmdline"
-[ "$(kache_watchdog_daemon_pids | tr '\n' ' ' | xargs)" = "111 $live" ] || {
+actual_pids="$(kache_watchdog_daemon_pids | sort -n | tr '\n' ' ' | xargs)"
+expected_pids="$(printf '%s\n' 111 "$live" | sort -n | tr '\n' ' ' | xargs)"
+[ "$actual_pids" = "$expected_pids" ] || {
   echo 'FAIL: watchdog process enumeration was not exact' >&2
-  kache_watchdog_daemon_pids >&2
+  printf 'expected: %s\nactual:   %s\n' "$expected_pids" "$actual_pids" >&2
   exit 1
 }
 rm -rf "$KACHE_WATCHDOG_PROC_ROOT/111" "$KACHE_WATCHDOG_PROC_ROOT/222"
