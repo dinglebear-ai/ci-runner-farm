@@ -38,7 +38,7 @@ docker() {
       c="$1"
       printf 'PID COMMAND\n'
       [ "${supervisor[$c]:-0}" = 1 ] && printf '123 bash /usr/local/bin/kache-supervise.sh   \n'
-      case "$c" in runner-ok|runner-missing) printf '900 /opt/hostedtoolcache/kache/0.12.0/x64/kache daemon run   \n' ;; esac
+      case "$c" in runner-ok|runner-missing) printf '900 /opt/hostedtoolcache/kache/0.13.0/x64/kache daemon run   \n' ;; esac
       ;;
     inspect)
       c="${@: -1}"

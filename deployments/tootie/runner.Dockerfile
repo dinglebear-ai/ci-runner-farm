@@ -41,10 +41,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fleet Kache backport: one canonical tool-cache binary, checksum-pinned.
 # /usr/local/bin/kache is a symlink to the tool-cache entry so the container
 # supervisor and kache-action clients resolve the same inode and protocol epoch.
-ARG KACHE_FLEET_TAG=fleet-v0.12.0-prefetch-controls.1
-ARG KACHE_FLEET_ARCHIVE=kache-fleet-v0.12.0-prefetch-controls.1-x86_64-unknown-linux-gnu.tar.gz
-ARG KACHE_FLEET_ARCHIVE_SHA256=2c7e86b2fde706387389958ead210b94ca5f1469c730ceaf7f242032957f2eec
-ARG KACHE_FLEET_BINARY_SHA256=86d13a5c8c7a1c38c947deb1d7b36c881c524d111233d2420b957d89112b34b2
+ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1
+ARG KACHE_FLEET_ARCHIVE=kache-fleet-v0.13.0-prefetch-controls.1-x86_64-unknown-linux-gnu.tar.gz
+ARG KACHE_FLEET_ARCHIVE_SHA256=f9250450073dd48c23ee457093bb860a9acafc037608f11a1643471c0d00af6b
+ARG KACHE_FLEET_BINARY_SHA256=87cddc742db80394a77e3c9e9cd53fb280bf2b3da2b2fd4c344d70820df46b06
 RUN set -euo pipefail \
  && url="https://github.com/jmagar/kache/releases/download/${KACHE_FLEET_TAG}/${KACHE_FLEET_ARCHIVE}" \
  && tmp="$(mktemp -d)" \
@@ -52,10 +52,10 @@ RUN set -euo pipefail \
  && echo "${KACHE_FLEET_ARCHIVE_SHA256}  $tmp/${KACHE_FLEET_ARCHIVE}" | sha256sum -c - \
  && tar -xzf "$tmp/${KACHE_FLEET_ARCHIVE}" -C "$tmp" \
  && echo "${KACHE_FLEET_BINARY_SHA256}  $tmp/kache" | sha256sum -c - \
- && install -d -m 0755 /opt/hostedtoolcache/kache/0.12.0/x64 \
- && install -m 0755 "$tmp/kache" /opt/hostedtoolcache/kache/0.12.0/x64/kache \
- && : > /opt/hostedtoolcache/kache/0.12.0/x64.complete \
- && ln -sfn /opt/hostedtoolcache/kache/0.12.0/x64/kache /usr/local/bin/kache \
+ && install -d -m 0755 /opt/hostedtoolcache/kache/0.13.0/x64 \
+ && install -m 0755 "$tmp/kache" /opt/hostedtoolcache/kache/0.13.0/x64/kache \
+ && : > /opt/hostedtoolcache/kache/0.13.0/x64.complete \
+ && ln -sfn /opt/hostedtoolcache/kache/0.13.0/x64/kache /usr/local/bin/kache \
  && rm -rf "$tmp" \
  && /usr/local/bin/kache --version \
  && test "$(sha256sum /usr/local/bin/kache | awk '{print $1}')" = "$KACHE_FLEET_BINARY_SHA256"
