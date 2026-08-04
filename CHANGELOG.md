@@ -8,7 +8,7 @@
 * Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
 * Include PHP CLI, ripgrep, and file inspection tools in the Tootie runner image so the repository's syntax, behavioral, and release gates run on the farm.
 * Make the watchdog process-enumeration regression test independent of host PID ordering.
-* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile.
+* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
 
 ## [1.7.0](https://github.com/unraid/ci-runner-farm/compare/v1.6.0...v1.7.0) (2026-07-24)
 

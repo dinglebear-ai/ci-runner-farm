@@ -1,4 +1,4 @@
-FROM ci-runner-farm-runner:s3-v7-kache-013-20260803
+FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
