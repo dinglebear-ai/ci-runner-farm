@@ -1,6 +1,11 @@
-FROM ci-runner-farm-runner:s3-v5-20260802
+FROM ci-runner-farm-runner:s3-v7-kache-013-20260803
 
 USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      php-cli ripgrep file \
+ && rm -rf /var/lib/apt/lists/*
 
 ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1
 ARG KACHE_FLEET_ARCHIVE=kache-fleet-v0.13.0-prefetch-controls.1-x86_64-unknown-linux-gnu.tar.gz

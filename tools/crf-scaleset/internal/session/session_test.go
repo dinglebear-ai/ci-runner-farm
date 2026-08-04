@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	crfgithub "github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/github"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/journal"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/supervisor"
+	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/supervisor"
 )
 
 type fakeAPI struct {

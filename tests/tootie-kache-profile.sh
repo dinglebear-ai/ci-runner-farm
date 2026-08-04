@@ -8,6 +8,7 @@ SUPERVISOR=deployments/tootie/kache-supervise.sh
 
 bash -n "$SUPERVISOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
+  grep -Fq 'php-cli ripgrep file' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=f9250450073dd48c23ee457093bb860a9acafc037608f11a1643471c0d00af6b' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=87cddc742db80394a77e3c9e9cd53fb280bf2b3da2b2fd4c344d70820df46b06' "$dockerfile"
@@ -20,7 +21,7 @@ for dockerfile in "$FULL" "$OVERLAY"; do
   ! grep -Fq 'prefetch_max_bytes' "$dockerfile"
 done
 
-grep -Fq 'FROM ci-runner-farm-runner:s3-v5-20260802' "$OVERLAY"
+grep -Fq 'FROM ci-runner-farm-runner:s3-v7-kache-013-20260803' "$OVERLAY"
 ! grep -Fq 'remote key cache populated' "$SUPERVISOR"
 ! grep -Fq 'daemon status' "$SUPERVISOR"
 grep -Fq 'KACHE_VERIFY_RESTORES=sampled' "$SUPERVISOR"

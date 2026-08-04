@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/actions/scaleset"
-	"github.com/jmagar/ci-runner-farm/tools/crf-scaleset/internal/controller"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/controller"
 )
 
 func TestScaleSetClientFactoryBindsDistinctClientIdentities(t *testing.T) {

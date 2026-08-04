@@ -1,4 +1,4 @@
-module github.com/jmagar/ci-runner-farm/tools/crf-scaleset
+module github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset
 
 go 1.25.3
 

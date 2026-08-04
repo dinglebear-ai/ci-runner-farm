@@ -141,6 +141,24 @@ grep -q 'runs-on: ci-pool-rust' README.md && ok || bad 'Rust selector is undocum
 grep -q 'runs-on: ci-pool-python' README.md && ok || bad 'Python selector is undocumented'
 grep -q 'runs-on: ci-pool-typescript' README.md && ok || bad 'TypeScript selector is undocumented'
 grep -q 'never edits workflow files in sibling repositories' README.md && ok || bad 'workflow migration ownership is undocumented'
+
+WORKFLOW_DIR=".github/workflows"
+route_jobs="$(awk '/^[[:space:]]*runs-on:/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$route_jobs" -eq 6 ] && ok || bad "expected 6 workflow jobs with runner routes, found $route_jobs"
+ops_routes="$(awk '/^[[:space:]]*runs-on:.*ci-pool-ops/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$ops_routes" -eq 6 ] && ok || bad "expected 6 trusted ops-pool routes, found $ops_routes"
+hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$hosted_fallbacks" -eq 6 ] && ok || bad "expected 6 hosted fork fallbacks, found $hosted_fallbacks"
+owner_guards="$(awk '/^[[:space:]]*runs-on:.*github.repository_owner.*dinglebear-ai/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$owner_guards" -eq 6 ] && ok || bad "expected 6 dinglebear-ai owner guards, found $owner_guards"
+same_repo_guards="$(awk '/^[[:space:]]*runs-on:.*github.event.pull_request.head.repo.full_name == github.repository/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$same_repo_guards" -eq 6 ] && ok || bad "expected 6 same-repository PR guards, found $same_repo_guards"
+if grep -RInE '^[[:space:]]*runs-on:[[:space:]]*(ubuntu-latest|self-hosted|ci-pool-ops)[[:space:]]*$' "$WORKFLOW_DIR"; then
+  bad 'workflow has an unguarded direct runner selector'
+else
+  ok
+fi
+
 if grep -qi 'queue-aware autoscal' README.md src/usr/local/emhttp/plugins/ci-runner-farm/README.md; then
   bad 'documentation still claims queue-aware autoscaling'
 else
