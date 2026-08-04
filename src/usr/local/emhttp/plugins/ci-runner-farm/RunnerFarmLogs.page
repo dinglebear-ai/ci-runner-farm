@@ -3,6 +3,8 @@ Title="Logs"
 Tag="file-text"
 ---
 <?php
+require_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-frame.php';
+if (!crf_begin_embedded_page('RunnerFarmLogs', 'Runner Farm: Logs')) return;
 include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 crf_render_shell('logs');
 ?>

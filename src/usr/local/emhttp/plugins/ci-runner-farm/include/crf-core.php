@@ -6,6 +6,7 @@
    relied on by document order (renaming crfPost or reordering the tab ordinals used
    to silently break the other tabs). Emitted once per document via include_once.
    Runs in the tab's scope, so $var (the CSRF token) is available. */
+require_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-frame.php';
 $crf_csrf = $var['csrf_token'] ?? '';
 $crf_uui_base = '/plugins/dynamix.my.servers/unraid-components/uui/';
 $crf_util_css = '';
@@ -17,21 +18,21 @@ if (!function_exists('crf_render_shell')) {
   /** Render the product-local navigation shared by every CI Runner Farm screen. */
   function crf_render_shell(string $active = 'runners', string $settings_tab = ''): void {
     $primary = [
-      'runners' => ['Runners', '/Utilities/RunnerFarm/RunnerFarmFleet', 'fa-server'],
-      'history' => ['History', '/Utilities/RunnerFarm/RunnerFarmHistory', 'fa-history'],
-      'logs' => ['Logs', '/Utilities/RunnerFarm/RunnerFarmLogs', 'fa-file-text-o'],
-      'settings' => ['Settings', '/Utilities/RunnerFarm/RunnerFarmSettings', 'fa-cog'],
+      'runners' => ['Runners', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmFleet'), 'fa-server'],
+      'history' => ['History', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmHistory'), 'fa-history'],
+      'logs' => ['Logs', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmLogs'), 'fa-file-text-o'],
+      'settings' => ['Settings', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmSettings'), 'fa-cog'],
     ];
     $secondary = [
-      'general' => ['General', '/Utilities/RunnerFarm/RunnerFarmSettings'],
-      'pools' => ['Pools', '/Utilities/RunnerFarm/RunnerFarmPools'],
-      'image' => ['Runner image', '/Utilities/RunnerFarm/RunnerFarmImage'],
+      'general' => ['General', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmSettings')],
+      'pools' => ['Pools', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmPools')],
+      'image' => ['Runner image', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmImage')],
     ];
     ?>
     <header class="crf-app-header">
       <div class="crf-app-brand-rail" aria-hidden="true"></div>
       <div class="crf-app-header-inner">
-        <a class="crf-app-brand" href="/Utilities/RunnerFarm/RunnerFarmFleet" aria-label="CI Runner Farm runners">
+        <a class="crf-app-brand" href="<?=htmlspecialchars(crf_frame_url('/Utilities/RunnerFarm/RunnerFarmFleet'), ENT_QUOTES)?>" aria-label="CI Runner Farm runners">
           <span class="crf-app-brand-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/brand-server.svg" alt=""></span>
           <span class="crf-app-brand-copy"><strong>Runner Farm</strong><small>ci-runner-farm</small></span>
         </a>
@@ -192,6 +193,7 @@ if (!function_exists('crf_render_shell')) {
 </style>
 <script>
 const CRF_CSRF = <?=json_encode($crf_csrf, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT)?>;
+const CRF_EMBEDDED = <?=crf_is_embedded() ? 'true' : 'false'?>;
 const CRF_URL  = "/plugins/ci-runner-farm/include/exec.php";
 const CRF_UUI_BASE = "<?=$crf_uui_base?>";
 const CRF_UTIL_CSS = "<?=$crf_util_css?>";
@@ -281,7 +283,37 @@ document.addEventListener('DOMContentLoaded',()=>{
     settings.classList.toggle('has-dirty',dirty);
   }
 },{once:true});
-const CRF_PRIMARY_ROUTES=['/Utilities/RunnerFarm/RunnerFarmFleet','/Utilities/RunnerFarm/RunnerFarmHistory','/Utilities/RunnerFarm/RunnerFarmLogs','/Utilities/RunnerFarm/RunnerFarmSettings'];
+const CRF_PRIMARY_ROUTES=<?=json_encode([
+  crf_frame_url('/Utilities/RunnerFarm/RunnerFarmFleet'),
+  crf_frame_url('/Utilities/RunnerFarm/RunnerFarmHistory'),
+  crf_frame_url('/Utilities/RunnerFarm/RunnerFarmLogs'),
+  crf_frame_url('/Utilities/RunnerFarm/RunnerFarmSettings'),
+], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT)?>;
+function crfReportFrameState(){
+  if(!CRF_EMBEDDED||window.parent===window)return;
+  const root=document.documentElement, body=document.body;
+  const height=Math.max(root?.scrollHeight||0,root?.offsetHeight||0,body?.scrollHeight||0,body?.offsetHeight||0);
+  const label=document.querySelector('.crf-app-main')?.dataset.screenLabel||'Runner Farm';
+  parent.postMessage({type:'crf:frame-state',height,path:location.pathname,title:'Runner Farm: '+label},location.origin);
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  if(!CRF_EMBEDDED||window.parent===window)return;
+  document.documentElement.classList.add('crf-embedded');
+  let pending=0;
+  const schedule=()=>{
+    if(pending)return;
+    pending=requestAnimationFrame(()=>{pending=0;crfReportFrameState();});
+  };
+  const observer=new ResizeObserver(schedule);
+  observer.observe(document.documentElement);
+  if(document.body)observer.observe(document.body);
+  addEventListener('load',schedule,{once:true});
+  addEventListener('resize',schedule);
+  addEventListener('message',event=>{
+    if(event.origin===location.origin&&event.source===parent&&event.data?.type==='crf:frame-parent-ready')schedule();
+  });
+  schedule();setTimeout(schedule,250);setTimeout(schedule,1000);
+},{once:true});
 document.addEventListener('keydown',event=>{
   if(event.metaKey||event.ctrlKey||event.altKey||event.defaultPrevented)return;
   const target=event.target;

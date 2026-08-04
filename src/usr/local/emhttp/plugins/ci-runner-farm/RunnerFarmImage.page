@@ -3,6 +3,8 @@ Title="Runner image"
 Tag="cube"
 ---
 <?php
+require_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-frame.php';
+if (!crf_begin_embedded_page('RunnerFarmImage', 'Runner Farm: Runner image')) return;
 include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 crf_render_shell('settings', 'image');
 /* Runner image builder tab: image status band, editable highlighted Dockerfile,

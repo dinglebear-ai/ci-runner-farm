@@ -3,6 +3,8 @@ Title="Settings"
 Tag="gear"
 ---
 <?php
+require_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-frame.php';
+if (!crf_begin_embedded_page('RunnerFarmSettings', 'Runner Farm: Settings')) return;
 include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 /* CI Runner Farm settings page - native Unraid markdown form + inline help.
    The crf* JS core (crfPost etc.) + shared .crf-* styles come from

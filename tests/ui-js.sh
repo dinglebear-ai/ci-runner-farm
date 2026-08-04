@@ -24,6 +24,15 @@ for page in \
   node --check "$out"
 done
 
+core_js="$tmpdir/crf-core.js"
+awk '
+  /^<script>$/ { inside=1; next }
+  /^<\/script>$/ { inside=0; next }
+  inside { print }
+' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php |
+  perl -0pe 's/<\?=.*?\?>/null/gs' > "$core_js"
+node --check "$core_js"
+
 grep -Fq "put('up','up '+p.up)" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'CRF_POOL_PENDING.has(pool)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'input.min=String(scaleSet?0:(auto?Number(p.count)+1:1))' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
@@ -92,7 +101,7 @@ grep -Fq 'crfiRestoreSettingsDraft();' "$image_page"
 if grep -Fq "action:'apply-config'" "$image_page"; then
   echo 'Runner Image bypasses the shared Settings review/apply transaction' >&2; exit 1
 fi
-grep -Fq "'history' => ['History', '/Utilities/RunnerFarm/RunnerFarmHistory', 'fa-history']" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
+grep -Fq "'history' => ['History', crf_frame_url('/Utilities/RunnerFarm/RunnerFarmHistory'), 'fa-history']" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 grep -Fq 'class="fa <?=$icon?> crf-primary-icon"' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 grep -Fq 'grid-template-columns:repeat(4,minmax(0,1fr))' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 grep -Fq 'height:calc(66px + env(safe-area-inset-bottom,0px))' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
@@ -102,6 +111,8 @@ grep -Fq "path==='/Settings/RunnerFarm/RunnerFarm'" src/usr/local/emhttp/plugins
 grep -Fq '.crfl-line{min-width:0;width:100%' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmLogs.page
 grep -Fq 'grid-template-areas:"name phase menu" "job job menu"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
 grep -Fq 'if(!Number.isInteger(key)||key<1||key>CRF_PRIMARY_ROUTES.length)return' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
+grep -Fq "const CRF_EMBEDDED = <?=crf_is_embedded() ? 'true' : 'false'?>;" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
+grep -Fq "parent.postMessage({type:'crf:frame-state'" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 if grep -Fq 'const index=Number(event.key)-1' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php; then
   echo 'non-numeric keys can still navigate to /undefined' >&2; exit 1
 fi

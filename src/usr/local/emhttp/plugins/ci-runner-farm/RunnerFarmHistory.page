@@ -3,6 +3,8 @@ Title="History"
 Tag="history"
 ---
 <?php
+require_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-frame.php';
+if (!crf_begin_embedded_page('RunnerFarmHistory', 'Runner Farm: History')) return;
 include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 crf_render_shell('history');
 ?>
