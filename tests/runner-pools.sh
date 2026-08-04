@@ -151,8 +151,8 @@ hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { pr
 [ "$hosted_fallbacks" -eq 6 ] && ok || bad "expected 6 hosted fork fallbacks, found $hosted_fallbacks"
 owner_guards="$(awk '/^[[:space:]]*runs-on:.*github.repository_owner.*dinglebear-ai/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
 [ "$owner_guards" -eq 6 ] && ok || bad "expected 6 dinglebear-ai owner guards, found $owner_guards"
-fork_guards="$(awk '/^[[:space:]]*runs-on:.*github.event.pull_request.head.repo.fork != true/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
-[ "$fork_guards" -eq 6 ] && ok || bad "expected 6 fork safety guards, found $fork_guards"
+same_repo_guards="$(awk '/^[[:space:]]*runs-on:.*github.event.pull_request.head.repo.full_name == github.repository/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+[ "$same_repo_guards" -eq 6 ] && ok || bad "expected 6 same-repository PR guards, found $same_repo_guards"
 if grep -RInE '^[[:space:]]*runs-on:[[:space:]]*(ubuntu-latest|self-hosted|ci-pool-ops)[[:space:]]*$' "$WORKFLOW_DIR"; then
   bad 'workflow has an unguarded direct runner selector'
 else

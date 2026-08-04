@@ -18,7 +18,7 @@ concurrency:
 jobs:
   release-please:
     # Trusted org runs use the isolated ops pool; public fork PRs stay GitHub-hosted.
-    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
     outputs:
       pr: ${{ steps.release.outputs.pr || '' }}
       release_created: ${{ steps.release.outputs.release_created || 'false' }}
@@ -37,7 +37,7 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.pr != '' }}
     # Trusted org runs use the isolated ops pool; public fork PRs stay GitHub-hosted.
-    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
     steps:
       - name: Checkout release PR
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -93,7 +93,7 @@ jobs:
       - validate-plugin-release
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     # Trusted org runs use the isolated ops pool; public fork PRs stay GitHub-hosted.
-    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
