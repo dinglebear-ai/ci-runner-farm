@@ -23,7 +23,7 @@ for dockerfile in "$FULL" "$OVERLAY"; do
   ! grep -Fq 'prefetch_max_bytes' "$dockerfile"
 done
 
-grep -Fq 'FROM ci-runner-farm-runner:s3-v7-kache-013-20260803' "$OVERLAY"
+grep -Fq 'FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804' "$OVERLAY"
 ! grep -Fq 'remote key cache populated' "$SUPERVISOR"
 ! grep -Fq 'daemon status' "$SUPERVISOR"
 grep -Fq 'KACHE_VERIFY_RESTORES=sampled' "$SUPERVISOR"
