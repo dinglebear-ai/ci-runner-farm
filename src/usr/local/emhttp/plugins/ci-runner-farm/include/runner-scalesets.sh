@@ -781,10 +781,12 @@ scaleset_jit_runner_name() {
 }
 
 scaleset_prewarm_target() {
-  local pool="$1" expected_revision="$2" path value
+  local pool="$1" expected_revision="$2" path value size
   path="$RUNDIR/prewarm.$pool"
   [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %a "$path" 2>/dev/null)" = 600 ] ||
     return 1
+  size="$(stat -c %s "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[1-9][0-9]*$ ]] && [ "$size" -le 1024 ] || { rm -f "$path"; return 1; }
   value="$(php -r '
     $lines=file($argv[1],FILE_IGNORE_NEW_LINES);
     $v=[];
@@ -795,6 +797,7 @@ scaleset_prewarm_target() {
     }
     if(array_keys($v)!==["target","config_revision","expires"]||
       !preg_match("/^(0|[1-9][0-9]*)$/",$v["target"])||
+      (int)$v["target"]>64||
       !preg_match("/^[0-9a-f]{64}$/",$v["config_revision"])||
       !preg_match("/^[1-9][0-9]*$/",$v["expires"])||
       !hash_equals($argv[2],$v["config_revision"])||(int)$v["expires"]<=time())exit(3);
@@ -809,9 +812,30 @@ scaleset_prewarm_target() {
   printf '%s\n' "$value"
 }
 
+# Translate one pool's policy into the pure scheduler's assigned|warm|max
+# contract. Automatic pools add idle headroom but never fall below min. Fixed
+# pools treat their configured/prewarm value as an exact total target while
+# preserving work GitHub already assigned so an in-flight job is never shed.
+scaleset_scheduler_policy() {
+  local pool="$1" assigned="$2" config_rev="$3" warm max target fixed_target floor
+  if pool_autoscale_enabled "$pool"; then
+    warm="$(pool_idle "$pool")"
+    max="$(pool_max "$pool")"
+    target="$(scaleset_prewarm_target "$pool" "$config_rev" 2>/dev/null)" && warm="$target"
+    floor="$(pool_min "$pool")"
+    if [ $((assigned+warm)) -lt "$floor" ]; then warm=$((floor-assigned)); fi
+  else
+    fixed_target="$(pool_configured_target "$pool")"
+    target="$(scaleset_prewarm_target "$pool" "$config_rev" 2>/dev/null)" && fixed_target="$target"
+    if [ "$assigned" -lt "$fixed_target" ]; then warm=$((fixed_target-assigned)); else warm=0; fi
+    max="$POOL_HARD_MAX"
+  fi
+  printf '%s|%s|%s\n' "$assigned" "$warm" "$max"
+}
+
 _scaleset_autoscale_tick_locked() {
   local snapshot_tsv plan_input plan_output leases_tsv cursor=0 sequence rec pool assigned healthy handles
-  local warm service charged pending leases max cpu memory desired admitted blocked order removals advertised target fresh
+  local warm service charged pending leases max cpu memory desired admitted blocked order removals advertised target fresh scheduler_assigned
   local current add epoch spec config_rev reservation handle container remote payload response descriptor
   scaleset_snapshot_refresh || { err "scale-set demand snapshot is unavailable"; return 1; }
   fleet_inventory_refresh || { err "scale-set Docker inventory is unavailable"; return 1; }
@@ -834,16 +858,17 @@ _scaleset_autoscale_tick_locked() {
     pool="${rec%%|*}"
     IFS='|' read -r _ assigned healthy handles fresh < <(awk -F'|' -v p="$pool" '$1==p{print;exit}' "$snapshot_tsv")
     [ -n "${assigned:-}" ] || { assigned=0; healthy=0; handles=""; fresh=0; }
-    warm="$(pool_idle "$pool")"
-    target="$(scaleset_prewarm_target "$pool" "$config_rev" 2>/dev/null)" && warm="$target"
+    IFS='|' read -r scheduler_assigned warm max < <(
+      scaleset_scheduler_policy "$pool" "$assigned" "$config_rev"
+    ) || return 1
     service=$(( $(scaleset_jit_service_count "$pool") +
       $(scaleset_reservation_count "$pool" assigned,acting,observed) ))
     charged="$service"
     pending="$(scaleset_reservation_count "$pool" reserved)"
     leases="$(scaleset_reservation_count "$pool" offered)"
-    max="$(pool_max "$pool")"; cpu="$(pool_cpu_milli "$pool")"; memory="$(pool_memory_bytes "$pool")"
+    cpu="$(pool_cpu_milli "$pool")"; memory="$(pool_memory_bytes "$pool")"
     printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-      "$pool" "$assigned" "$warm" "$service" "$charged" "$pending" "$leases" \
+      "$pool" "$scheduler_assigned" "$warm" "$service" "$charged" "$pending" "$leases" \
       "$max" "$cpu" "$memory" "$healthy" "$fresh" >>"$plan_input"
   done < <(pool_records)
   [ -f "$RUNDIR/scaleset.scheduler.cursor" ] &&

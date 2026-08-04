@@ -140,8 +140,16 @@ scheduler_prewarm_set() {
   local pool="$1" target="$2" expected_revision="$3" max path tmp
   pool_snapshot_load && pool_record "$pool" >/dev/null 2>&1 || return 1
   scheduler_uint "$target" && [ "$target" -le "$POOL_HARD_MAX" ] || return 1
-  [ "$(pool_config_revision)" = "$expected_revision" ] || return 3
-  max="$(pool_max "$pool")"; [ "$max" = auto ] || [ "$target" -le "$max" ] || return 1
+  # Fleet submits the authoritative full config revision exposed by status,
+  # which is also what the scale-set tick binds temporary intent to. Comparing
+  # against the pool-only hash makes every live UI request stale by definition.
+  declare -F config_revision >/dev/null && [ "$(config_revision)" = "$expected_revision" ] || return 3
+  # Automatic pools are bounded by their autoscale ceiling. A fixed pool's
+  # prewarm record is a temporary runtime target, equivalent to its classic
+  # scale override, and is bounded by the fleet fuse instead.
+  if pool_autoscale_enabled "$pool"; then
+    max="$(pool_max "$pool")"; [ "$max" = auto ] || [ "$target" -le "$max" ] || return 1
+  fi
   mkdir -p "$RUNDIR" || return 1
   path="$RUNDIR/prewarm.$pool"; tmp="$path.tmp.$$"
   ( umask 077; printf 'target=%s\nconfig_revision=%s\nexpires=%s\n' \

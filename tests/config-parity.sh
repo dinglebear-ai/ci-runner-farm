@@ -5,7 +5,7 @@
 # places that can silently drift apart:
 #   1. include/runner-farm.sh  — the bash engine (the runtime authority)
 #   2. default.cfg             — the documented cfg shipped/referenced for operators
-#   3. RunnerFarmSettings.page — the UI $defaults array (form fallback + "Reset")
+#   3. RunnerFarmSettings.page + RunnerFarmPools.page — tab-owned UI $defaults
 # Nothing else asserts they agree, and they HAVE drifted before (SHARED_IMAGE_CACHE
 # once existed in the engine + cfg but was missing from the UI). This script fails
 # CI on any value mismatch, any UI field with no engine backing, any cfg key not
@@ -18,7 +18,8 @@ cd "$(dirname "$0")/.."
 D="src/usr/local/emhttp/plugins/ci-runner-farm"
 ENGINE="$D/include/runner-farm.sh"
 CFG="$D/default.cfg"
-UI="$D/RunnerFarmSettings.page"
+UI_SETTINGS="$D/RunnerFarmSettings.page"
+UI_POOLS="$D/RunnerFarmPools.page"
 EXEC="$D/include/exec.php"
 
 fail=0
@@ -55,7 +56,7 @@ while IFS= read -r pair; do
   k="${pair%%\'=>*}"; k="${k#\'}"
   v="${pair#*=>\'}"; v="${v%\'}"
   UIV["$k"]="$v"
-done < <(grep -oE "'[A-Za-z_][A-Za-z0-9_]*'[[:space:]]*=>[[:space:]]*'[^']*'" "$UI")
+done < <(grep -hoE "'[A-Za-z_][A-Za-z0-9_]*'[[:space:]]*=>[[:space:]]*'[^']*'" "$UI_SETTINGS" "$UI_POOLS")
 
 # 1. every UI form field must have an engine default, with the same value
 for k in "${!UIV[@]}"; do

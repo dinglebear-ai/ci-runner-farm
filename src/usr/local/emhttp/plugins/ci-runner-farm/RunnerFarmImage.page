@@ -1,18 +1,29 @@
-Menu="RunnerFarm:3"
+Menu="RunnerFarm:6"
 Title="Runner image"
 Tag="cube"
 ---
 <?php
 include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
-/* Runner image builder tab: image status band, ACE-powered Dockerfile editor
-   (core dynamix ships ace with a dockerfile mode), and the build pipeline.
+crf_render_shell('settings', 'image');
+/* Runner image builder tab: image status band, editable highlighted Dockerfile,
+   and the build pipeline.
    The crf* JS core + .crf-* styles come from include/crf-core.php (above, shared
    by all tabs via include_once). */
 $crf_plugin = 'ci-runner-farm';
+$crfi_cfg = parse_plugin_cfg($crf_plugin);
+$crfi_image_source = $crfi_cfg['IMAGE_SOURCE'] ?? 'builtin';
+$crfi_image_ref = $crfi_cfg['IMAGE'] ?? '';
+$crfi_autoupdate = $crfi_cfg['IMAGE_AUTOUPDATE'] ?? 'false';
+$crfi_autoupdate_interval = $crfi_cfg['IMAGE_AUTOUPDATE_INTERVAL'] ?? '1800';
+$crfi_drain_timeout = $crfi_cfg['IMAGE_DRAIN_TIMEOUT'] ?? '3600';
+$crfi_config_revision = trim((string)@shell_exec('/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh config-revision 2>/dev/null'));
+if (!preg_match('/^[0-9a-f]{64}$/', $crfi_config_revision)) $crfi_config_revision = str_repeat('0', 64);
 $crf_df     = "/boot/config/plugins/$crf_plugin/Dockerfile";
 $crf_df_saved = is_file($crf_df);
 if (!$crf_df_saved) $crf_df = "/usr/local/emhttp/plugins/$crf_plugin/default.Dockerfile";
 $crf_dockerfile = is_file($crf_df) ? file_get_contents($crf_df) : '';
+$crf_df_lines = $crf_dockerfile === '' ? 0 : substr_count(rtrim($crf_dockerfile, "\r\n"), "\n") + 1;
+$crf_df_chars = strlen($crf_dockerfile);
 
 /* Toolchain install blocks the Runner image tab can splice into the Dockerfile.
    Nowdoc keeps $ and backslashes literal; delimited markers make add/remove
@@ -87,135 +98,388 @@ RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk-
 # <<< ci-runner-farm toolchain: android <<<
 DFBLOCK;
 ?>
-<script src="<?autov('/plugins/dynamix/javascript/ace/ace.js')?>"></script>
-
-<div class="crfi-band" id="crfi-band">
-  <div class="crfs-tok-status">
-    <span class="crf-ball" id="crfi-ball"></span>
-    <span class="crfs-tok-text">
-      <strong id="crfi-title">Checking runner image...</strong>
-      <span class="crfs-tok-sub" id="crfi-sub">ci-runner-farm-runner:latest</span>
-    </span>
+<main class="crf-app-main" data-screen-label="Runner image">
+<section class="crfi-overview crf-surface" id="crfi-band">
+  <div class="crfi-overview-head">
+    <div class="crfi-image-identity">
+      <span class="crfi-image-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/image-cube.svg" alt=""></span>
+      <span class="crfi-image-copy">
+        <strong id="crfi-title">Runner Image</strong>
+        <span id="crfi-sub">Checking runner image&hellip;</span>
+      </span>
+    </div>
+    <div class="crfi-actions crf-page-actions">
+      <span class="crfi-status crfi-action-status"><span class="crf-ball" id="crfi-build-ball" style="display:none"></span><span id="crf-build-status"></span></span>
+      <button type="button" class="crf-button" onclick="crfiResetDf()">Reset to shipped default</button>
+      <button type="button" class="crf-button" onclick="crfSaveDf()">Save Dockerfile</button>
+      <button type="button" class="crf-button crf-button-primary" onclick="crfBuild()">Save + Build</button>
+    </div>
   </div>
-  <div class="crfi-chips" id="crfi-chips"></div>
-</div>
+  <div class="crfi-overview-foot">
+    <span class="crf-ball" id="crfi-ball" aria-hidden="true"></span>
+    <span class="crfi-tc-label crf-section-label">Toolchains</span>
+    <div class="crfi-toolchains">
+      <span class="crfi-tc" data-tc="rust" role="button" tabindex="0" title="Click to add or remove its install block, then Save + Build" onclick="crfiToolchain('rust')">Rust</span>
+      <span class="crfi-tc" data-tc="python" role="button" tabindex="0" title="Click to add or remove its install block, then Save + Build" onclick="crfiToolchain('python')">Python</span>
+      <span class="crfi-tc" data-tc="node" role="button" tabindex="0" title="Click to add or remove its install block, then Save + Build" onclick="crfiToolchain('node')">Node / TS</span>
+      <span class="crfi-tc" data-tc="android" role="button" tabindex="0" title="Click to add or remove its install block, then Save + Build" onclick="crfiToolchain('android')">Android</span>
+      <span class="crfi-tc-hint">Click to add or remove an install block, then Save + Build</span>
+    </div>
+    <span class="crfi-facts-divider" aria-hidden="true"></span>
+    <div class="crfi-chips" id="crfi-chips"></div>
+  </div>
+</section>
 
-<div class="crfi-toolchains">
-  <span class="crfi-tc-label">Toolchains</span>
-  <span class="crfi-tc" data-tc="rust" role="button" tabindex="0" onclick="crfiToolchain('rust')">Rust</span>
-  <span class="crfi-tc" data-tc="python" role="button" tabindex="0" onclick="crfiToolchain('python')">Python</span>
-  <span class="crfi-tc" data-tc="node" role="button" tabindex="0" onclick="crfiToolchain('node')">Node / TS</span>
-  <span class="crfi-tc" data-tc="android" role="button" tabindex="0" onclick="crfiToolchain('android')">Android</span>
-  <span class="crfi-tc-hint crf-muted">click to add or remove an install block, then Save + Build</span>
-</div>
-
-<div class="crfi-editor">
+<section class="crfi-editor crf-surface">
   <div class="crfi-editor-head">
-    <span class="crfi-path"><span class="crf-ball crfi-dot" id="crfi-dirty" title="Unsaved changes"></span><code id="crfi-df-path"><?=htmlspecialchars($crf_df, ENT_QUOTES)?></code></span>
-    <span class="crfi-editor-tools">
-      <span class="crfi-status"><span class="crf-ball" id="crfi-build-ball" style="display:none"></span><span id="crf-build-status" class="crf-muted"></span></span>
-      <uui-button variant="ghost" size="xs" onclick="crfiResetDf()">Reset to shipped default</uui-button>
-      <uui-button variant="secondary" size="xs" onclick="crfSaveDf()">Save Dockerfile</uui-button>
-      <uui-button size="xs" onclick="crfBuild()">Save + Build</uui-button>
+    <span class="crfi-path">
+      <span class="crfi-editor-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/image-cube.svg" alt=""></span>
+      <span class="crf-ball crfi-dot" id="crfi-dirty" title="Unsaved changes"></span>
+      <code class="crf-mono" id="crfi-df-path"><?=htmlspecialchars($crf_df, ENT_QUOTES)?></code>
     </span>
+    <span class="crfi-df-stats" id="crfi-df-stats"><?=$crf_df_lines?> lines &middot; <?=$crf_df_chars?> chars</span>
   </div>
-  <div id="crfi-ace"></div>
-  <textarea id="crf-dockerfile" style="display:none"><?=htmlspecialchars($crf_dockerfile, ENT_QUOTES)?></textarea>
-</div>
+  <div class="crfi-editor-body">
+    <pre id="crfi-highlight" aria-hidden="true"></pre>
+    <textarea id="crf-dockerfile" spellcheck="false" aria-label="Runner image Dockerfile"><?=htmlspecialchars($crf_dockerfile, ENT_QUOTES)?></textarea>
+  </div>
+</section>
 
-<div class="crf-console">
+<section class="crfi-config-grid" aria-label="Runner image configuration">
+  <article class="crfi-config-card crf-surface">
+    <header class="crfi-config-head">
+      <span class="crfi-config-icon crfi-config-icon-source" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/image-cube.svg" alt=""></span>
+      <h2>Runner image source</h2>
+    </header>
+    <div class="crfi-config-fields">
+      <label for="crfi-image-source">Image source</label>
+      <select id="crfi-image-source" onchange="crfiSetImageSource(this.value)">
+        <option value="builtin"<?=$crfi_image_source === 'builtin' ? ' selected' : ''?>>Built-in (build locally)</option>
+        <option value="remote"<?=$crfi_image_source === 'remote' ? ' selected' : ''?>>Registry (pull)</option>
+      </select>
+      <label class="crfi-remote-field" for="crfi-image-ref">Image ref</label>
+      <input class="crfi-remote-field crfi-mono-input" id="crfi-image-ref" type="text" value="<?=htmlspecialchars($crfi_image_ref, ENT_QUOTES)?>" placeholder="ghcr.io/org/runner:latest" onchange="crfiSaveImageRef(this.value)">
+    </div>
+    <p>Built-in uses the Dockerfile from the Runner image tab.</p>
+  </article>
+
+  <article class="crfi-config-card crf-surface">
+    <header class="crfi-config-head">
+      <span class="crfi-config-icon crfi-config-icon-update" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/image-update.svg" alt=""></span>
+      <h2>Image auto-update</h2>
+      <button type="button" class="crfi-card-reset" aria-label="Reset image auto-update settings" title="Reset this card to defaults" onclick="crfiResetAutoUpdate()"><img src="/plugins/ci-runner-farm/assets/icons/reset.svg" alt="" aria-hidden="true"></button>
+    </header>
+    <div class="crfi-config-fields">
+      <label for="crfi-auto-update">Auto-update</label>
+      <select id="crfi-auto-update" onchange="crfiSetAutoUpdate(this.value)">
+        <option value="false"<?=$crfi_autoupdate === 'false' ? ' selected' : ''?>>off (update manually)</option>
+        <option value="true"<?=$crfi_autoupdate === 'true' ? ' selected' : ''?>>on (auto-pull and roll)</option>
+      </select>
+      <label class="crfi-auto-dependent" for="crfi-auto-interval">Check interval</label>
+      <div class="crfi-number-row crfi-auto-dependent"><input id="crfi-auto-interval" type="number" min="300" max="86400" value="<?=htmlspecialchars($crfi_autoupdate_interval, ENT_QUOTES)?>" onchange="crfiSaveAutoNumber('IMAGE_AUTOUPDATE_INTERVAL',this,300,86400)"><span>seconds</span></div>
+      <label class="crfi-auto-dependent" for="crfi-drain-timeout">Drain timeout</label>
+      <div class="crfi-number-row crfi-auto-dependent"><input id="crfi-drain-timeout" type="number" min="60" max="86400" value="<?=htmlspecialchars($crfi_drain_timeout, ENT_QUOTES)?>" onchange="crfiSaveAutoNumber('IMAGE_DRAIN_TIMEOUT',this,60,86400)"><span>seconds</span></div>
+    </div>
+  </article>
+</section>
+
+<section class="crf-console crfi-log crf-surface">
   <div class="crf-console-head">
-    <span>Build log</span>
-    <uui-button variant="outline" size="xs" onclick="crfCopyFrom('crf-build-log',this)">Copy</uui-button>
+    <span class="crf-section-label">Build log</span>
+    <span class="crfi-log-state" id="crfi-log-state">idle</span>
+    <span class="crfi-head-spacer"></span>
+    <button type="button" class="crfi-copy" onclick="crfCopyFrom('crf-build-log',this)">Copy</button>
   </div>
-  <div id="crf-build-log" class="crf-console-body"><span class="crf-muted">Build output appears here. Set Image source to Built-in on the Settings tab and restart the fleet to use a new build.</span></div>
-</div>
+  <div id="crf-build-log" class="crf-console-body"><div class="crfi-log-line"><span class="crf-muted">Build output appears here. Set Image source to Built-in on the Settings tab and restart the runners to use a new build.</span></div></div>
+</section>
+</main>
 
 <style>
-  .crfi-band{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:10px 14px;margin:6px 0 8px}
-  .crfi-chips{display:flex;gap:8px;flex-wrap:wrap}
-  .crfi-chip{font-size:11px;color:var(--alt-text-color);border:1px solid var(--border-color);border-radius:10px;padding:2px 10px;white-space:nowrap}
-  .crfi-chip b{color:var(--text-color);font-weight:normal}
-  .crfi-editor{border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:0 0 8px}
-  .crfi-editor-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 6px 3px 12px;min-height:30px;box-sizing:border-box;background:var(--table-header-background-color)}
-  .crfi-path{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--alt-text-color)}
-  .crfi-path code{font-family:bitstream,monospace;font-size:11px}
-  .crfi-dot{width:8px;height:8px;visibility:hidden}
+  .crfi-overview-head{min-height:58px;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  .crfi-image-identity{display:flex;align-items:center;gap:11px;min-width:0}
+  .crfi-image-icon,.crfi-editor-icon{display:grid;place-items:center;flex:none;border-radius:7px;background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crfi-image-icon{width:30px;height:30px;font-size:14px}
+  .crfi-editor-icon{width:28px;height:28px;font-size:12px}
+  .crfi-image-icon img{display:block;width:15px;height:15px}
+  .crfi-editor-icon img{display:block;width:13px;height:13px}
+  .crfi-image-copy{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+  .crfi-image-copy strong{font-size:18px;font-weight:600;letter-spacing:-.015em;color:var(--crf-ink);white-space:nowrap}
+  .crfi-image-copy>span{font-size:11.5px;color:var(--crf-ink-3);white-space:nowrap}
+  .crfi-actions{margin-left:auto}
+  @media(min-width:761px){
+    .crfi-actions>.crf-button:nth-of-type(1){width:175.8125px;padding:0 14px;border-color:#d4d4d4;background:linear-gradient(180deg,#fff,#f7f7f7);color:#737373;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+    .crfi-actions>.crf-button:nth-of-type(1):hover{background:linear-gradient(180deg,#f7f7f7,#efefef);border-color:#b8b8b8;color:#1c1b1b}
+    .crfi-actions>.crf-button:nth-of-type(2){width:120.984375px;padding:0 14px;border-color:#e5e5e5;background:#fff;color:#1c1b1b;font-weight:500}
+    .crfi-actions>.crf-button:nth-of-type(3){width:114.734375px;padding:0 18px;border:2px solid transparent;background:linear-gradient(90deg,#e22828,#ff8c2f) border-box;color:#fff;font-weight:600;box-shadow:0 1px 3px rgba(226,40,40,.3)}
+    .crfi-actions>.crf-button:nth-of-type(3):hover{background:linear-gradient(90deg,rgba(226,40,40,.85),rgba(255,140,47,.85)) border-box;box-shadow:0 3px 8px rgba(226,40,40,.35)}
+  }
+  .crfi-overview-foot{min-height:43px;padding:9px 20px;border-top:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .crfi-overview-foot>#crfi-ball{width:8px;height:8px;flex:none}
+  .crfi-tc-label{font-size:11px;letter-spacing:.08em;color:var(--crf-ink-3)}
+  .crfi-toolchains,.crfi-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .crfi-tc{display:inline-flex;align-items:center;border:1px solid var(--crf-border);border-radius:9999px;padding:3px 11px;font-size:11.5px;line-height:normal;font-weight:600;cursor:pointer;color:var(--crf-ink-3);background:#fff;user-select:none;transition:background .12s,border-color .12s,color .12s}
+  .crfi-tc:hover{border-color:#fed7aa;color:var(--crf-orange-ink)}
+  .crfi-tc.on{background:var(--crf-orange-soft);border-color:#fed7aa;color:var(--crf-orange-ink)}
+  .crfi-tc-hint{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .crfi-facts-divider{width:1px;height:16px;background:#e0e0e0;flex:none}
+  .crfi-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #ececec;border-radius:9999px;padding:2px 9px;background:#fff;color:var(--crf-ink-3);font-size:11px;line-height:normal;white-space:nowrap}
+  .crfi-chip b{color:var(--crf-ink);font-weight:600}
+  .crfi-chip:first-child b{font-family:ui-monospace,Menlo,monospace}
+  .crfi-editor{min-width:0}
+  .crfi-editor-head{min-height:49px;padding:10px 18px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft)}
+  .crfi-path{position:relative;display:flex;align-items:center;gap:9px;min-width:0;color:var(--crf-ink-2)}
+  .crfi-path code{overflow:hidden;text-overflow:ellipsis;font-size:12px;white-space:nowrap}
+  .crfi-dot{position:absolute;left:22px;top:1px;width:8px;height:8px;visibility:hidden;box-shadow:0 0 0 2px var(--crf-panel-soft)}
   .crfi-dot.on{visibility:visible;background:var(--crf-busy)}
-  .crfi-editor-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-  .crfi-editor-tools input[type=button]{margin:0;font-size:11px}
-  .crfi-editor-tools uui-button:not(:defined),.crfi-editor-tools uui-brand-button:not(:defined){cursor:pointer;border:1px solid var(--border-color);border-radius:6px;padding:3px 10px;font-size:11px;color:var(--text-color)}
-  .crfi-status{display:flex;align-items:center;gap:6px;font-size:11px}
-  #crfi-ace{height:340px;font-size:12px;font-family:bitstream,monospace}
-  .crfi-toolchains{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px}
-  .crfi-tc-label{font-size:12px;color:var(--alt-text-color);margin-right:2px}
-  .crfi-tc{font-size:12px;border:1px solid var(--border-color);border-radius:12px;padding:3px 12px;cursor:pointer;color:var(--text-color);user-select:none}
-  .crfi-tc:hover{border-color:var(--link-text-color)}
-  .crfi-tc.on{background:color-mix(in srgb,var(--brand-orange,#ff8c2f) 18%,var(--background-color));border-color:var(--brand-orange,#ff8c2f)}
-  .crfi-tc:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:1px}
-  .crfi-tc-hint{font-size:11px;margin-left:4px}
+  .crfi-df-stats{font-size:11.5px;color:var(--crf-ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .crfi-editor-body{position:relative;min-height:520px;background:#fff}
+  #crfi-highlight,#crf-dockerfile{box-sizing:border-box;margin:0;padding:14px 18px;font:12.5px/1.65 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;tab-size:2}
+  #crfi-highlight{position:absolute;inset:0;overflow:hidden;pointer-events:none;color:#383735}
+  #crf-dockerfile{position:relative;display:block;width:100%;height:520px;min-height:520px;border:0;outline:0;resize:vertical;overflow:auto;background:transparent;color:transparent;caret-color:var(--crf-ink)}
+  .crfi-hl-comment{color:#a3a3a3;font-style:italic}.crfi-hl-instruction{color:#f15a2c;font-weight:700}.crfi-hl-string{color:#457b3e}.crfi-hl-flag{color:#1e40af}.crfi-hl-var{color:#6b21a8}.crfi-hl-op{color:#8a6914;font-weight:600}
+  .crfi-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;align-items:start}
+  .crfi-config-card{padding:18px;display:flex;flex-direction:column;gap:14px;overflow:visible}
+  .crfi-config-head{display:flex;align-items:center;gap:9px}
+  .crfi-config-head h2{margin:0;padding:0;border:0;font-size:11px;line-height:normal;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}
+  .crfi-config-icon{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;flex:none;font-size:13px}
+  .crfi-config-icon-source{background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crfi-config-icon-source img{display:block;width:13px;height:13px}
+  .crfi-config-icon-update{background:var(--crf-warning-soft);color:var(--crf-warning-ink)}
+  .crfi-config-icon-update img{display:block;width:13px;height:13px}
+  button.crfi-card-reset{margin:0 0 0 auto!important;padding:0!important;width:22px!important;min-width:22px!important;height:22px!important;border:0!important;border-radius:5px!important;background:transparent!important;color:#d4d4d4!important;font-size:11px!important;box-shadow:none!important;letter-spacing:0!important;text-transform:none!important;cursor:pointer}
+  button.crfi-card-reset:hover{background:#f5f5f5!important;color:var(--crf-ink)!important}
+  button.crfi-card-reset img{display:block;width:11px;height:11px}
+  .crfi-config-fields{display:grid;grid-template-columns:132px minmax(0,1fr);align-items:center;column-gap:14px;row-gap:13px;min-width:0}
+  .crfi-config-fields>label{font-size:13px;font-weight:600;text-align:end;white-space:nowrap;color:#383735;letter-spacing:-.005em}
+  .crfi-config-fields input,.crfi-config-fields select{box-sizing:border-box;width:min(100%,290px);height:36px;border:1px solid #d4d4d4;border-radius:6px;background:#fff;color:var(--crf-ink);padding:0 11px;font:500 13.5px/1.2 clear-sans,ui-sans-serif,system-ui,sans-serif;outline:none;min-width:0;transition:border-color .15s,box-shadow .15s}
+  .crfi-config-fields select{appearance:none;cursor:pointer}
+  .crfi-config-fields input:focus,.crfi-config-fields select:focus{border-color:#ff8c2f;box-shadow:0 0 0 3px rgba(255,140,47,.18)}
+  .crfi-config-fields .crfi-mono-input{font-family:ui-monospace,Menlo,monospace;font-weight:400}
+  .crfi-config-card>p{margin:0;font-size:12px;color:var(--crf-ink-4);line-height:1.5}
+  .crfi-number-row{display:flex;align-items:center;gap:8px;min-width:0}
+  .crfi-config-fields .crfi-number-row input{width:90px;text-align:center;font-family:ui-monospace,Menlo,monospace;font-weight:400}
+  .crfi-number-row span{font-size:12px;color:var(--crf-ink-4);font-weight:500}
+  .crfi-auto-dependent{transition:opacity .15s}
+  .crfi-auto-dependent.is-disabled{opacity:.45}
+  .crfi-remote-field[hidden]{display:none!important}
+  .crfi-log{margin:0;border:2px solid #f5f5f5}
+  .crfi-log .crf-console-head{height:41px;min-height:41px;padding:10px 18px;gap:10px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft)}
+  .crfi-status{display:inline-flex;align-items:center;gap:6px;border-radius:9999px;padding:2px 9px;background:#e5e7eb;color:#4b5563;font-size:11px;font-weight:600}
+  .crfi-status .crf-ball{width:7px;height:7px}
+  .crfi-action-status:has(#crf-build-status:empty){display:none}
+  .crfi-log-state{display:inline-flex;align-items:center;border-radius:9999px;padding:2px 9px;background:#e5e7eb;color:#4b5563;font-size:11px;font-weight:600}
+  .crfi-log-state.is-busy{background:var(--crf-warning-soft);color:var(--crf-warning-ink)}
+  .crfi-log-state.is-ok{background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crfi-log-state.is-err{background:var(--crf-error-soft);color:var(--crf-error-ink)}
+  .crfi-head-spacer{flex:1}
+  .crfi-copy{padding:0;border:0;background:transparent;color:var(--crf-busy);font:600 11.5px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
+  .crfi-actions .crf-button:not(.crf-button-primary){line-height:normal}
+  .crfi-log .crf-section-label{font-weight:600;letter-spacing:.08em}
+  .crfi-log .crf-console-body{min-height:0;max-height:240px;padding:12px 0;background:#fff;font:12px/1.65 ui-monospace,Menlo,Consolas,monospace}
+  .crfi-log-line{padding:2px 18px}
+  .crfi-log-output{padding:0 18px}
+  @media(max-width:760px){
+    .crfi-overview{border-radius:12px}
+    .crfi-overview-head{padding:14px;align-items:flex-start;gap:12px}
+    .crfi-image-identity{width:100%;align-items:flex-start}
+    .crfi-image-icon{width:38px;height:38px;border-radius:10px}
+    .crfi-image-icon img{width:18px;height:18px}
+    .crfi-image-copy{flex:1;min-width:0}
+    .crfi-image-copy strong{font-size:19px;white-space:normal}
+    .crfi-image-copy>span{margin-top:3px;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+    .crfi-actions{width:100%;margin-left:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .crfi-action-status{grid-column:1/-1;justify-self:start;min-height:30px}
+    .crfi-actions .crf-button{width:100%;min-width:0;height:auto;min-height:46px;padding:8px 10px;line-height:1.25;white-space:normal;text-align:center}
+    .crfi-actions .crf-button-primary{grid-column:1/-1}
+    .crfi-overview-foot{padding:12px 14px;align-items:flex-start;gap:9px}
+    .crfi-overview-foot>#crfi-ball{margin-top:7px}
+    .crfi-tc-label{margin-top:5px}
+    .crfi-toolchains{flex:1;min-width:0;gap:7px}
+    .crfi-tc{min-height:44px;padding:10px 12px;font-size:11.5px}
+    .crfi-facts-divider{display:none}
+    .crfi-chips{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+    .crfi-chip{min-width:0;min-height:34px;padding:6px 9px;white-space:normal;overflow-wrap:anywhere}
+    .crfi-chip:first-child{grid-column:1/-1}
+    .crfi-editor{border-radius:12px;overflow:hidden}
+    .crfi-editor-head{min-height:54px;padding:10px 12px;align-items:flex-start}
+    .crfi-path{flex:1;align-items:flex-start}
+    .crfi-editor-icon{width:34px;height:34px;border-radius:9px}
+    .crfi-path code{padding-top:6px;font-size:11px;line-height:1.45;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+    .crfi-dot{left:25px;top:1px}
+    .crfi-df-stats{display:none}
+    .crfi-editor-body{min-height:58dvh;max-height:72dvh;overflow:hidden}
+    #crfi-highlight,#crf-dockerfile{padding:14px;font-size:12px;line-height:1.65;white-space:pre;word-break:normal;overflow-wrap:normal;tab-size:2}
+    #crfi-highlight{overflow:hidden}
+    #crf-dockerfile{height:58dvh;min-height:420px;max-height:72dvh;resize:none;overflow:auto;overscroll-behavior:contain}
+    .crfi-config-grid{grid-template-columns:1fr;gap:12px}
+    .crfi-config-card{padding:14px;gap:12px;border-radius:12px}
+    .crfi-config-head h2{font-size:11.5px}
+    button.crfi-card-reset{width:44px!important;min-width:44px!important;height:44px!important;border:1px solid var(--crf-border)!important;border-radius:9px!important}
+    button.crfi-card-reset img{width:14px;height:14px}
+    .crfi-config-fields{grid-template-columns:1fr;row-gap:7px}
+    .crfi-config-fields>label{text-align:left;margin-top:6px;white-space:normal}
+    .crfi-config-fields input,.crfi-config-fields select{width:100%;height:44px;font-size:16px}
+    .crfi-config-fields .crfi-number-row{width:100%}
+    .crfi-config-fields .crfi-number-row input{width:min(150px,60%)}
+    .crfi-log{border-width:1px;border-radius:12px;overflow:hidden}
+    .crfi-log .crf-console-head{height:auto;min-height:48px;padding:9px 12px;flex-wrap:wrap}
+    .crfi-log .crf-console-body{max-height:340px;padding:10px 0;font-size:11.5px;overflow-wrap:anywhere}
+    .crfi-log-line,.crfi-log-output{padding-left:12px;padding-right:12px}
+    .crfi-copy{min-width:44px;min-height:40px;padding:0 10px;border:1px solid var(--crf-border);border-radius:8px}
+  }
+  @media(max-width:390px){
+    .crfi-actions{grid-template-columns:1fr}
+    .crfi-actions .crf-button-primary,.crfi-action-status{grid-column:1}
+    .crfi-chips{grid-template-columns:1fr}
+    .crfi-chip:first-child{grid-column:1}
+  }
 </style>
 
 <script>
+const CRFI_CONFIG_REVISION = <?=json_encode($crfi_config_revision)?>;
+const CRFI_DRAFT_KEY='ci-runner-farm:settings-draft:v1';
+const CRFI_APPLIED_SETTINGS={
+  IMAGE_SOURCE:<?=json_encode($crfi_image_source)?>,
+  IMAGE:<?=json_encode($crfi_image_ref)?>,
+  IMAGE_AUTOUPDATE:<?=json_encode($crfi_autoupdate)?>,
+  IMAGE_AUTOUPDATE_INTERVAL:<?=json_encode($crfi_autoupdate_interval)?>,
+  IMAGE_DRAIN_TIMEOUT:<?=json_encode($crfi_drain_timeout)?>
+};
+function crfiReadDraft(){
+  let draft=null;try{draft=JSON.parse(sessionStorage.getItem(CRFI_DRAFT_KEY)||'null');}catch(_error){}
+  if(!draft||draft.config_revision!==CRFI_CONFIG_REVISION||!draft.settings){
+    try{sessionStorage.removeItem(CRFI_DRAFT_KEY);}catch(_error){}
+    return {config_revision:CRFI_CONFIG_REVISION,settings:{}};
+  }
+  return draft;
+}
+function crfiRefreshSettingsDot(){
+  const settings=document.querySelector('[data-crf-primary-key="settings"]');
+  let dirty=false;try{dirty=!!(sessionStorage.getItem(CRFI_DRAFT_KEY)||sessionStorage.getItem('ci-runner-farm:pools-draft:v1'));}catch(_error){}
+  if(settings&&!settings.hasAttribute('aria-current'))settings.classList.toggle('has-dirty',dirty);
+}
+/* The source UI treats Runner image source/rollout controls as the same staged
+   Settings transaction as General. Preserve that contract across Unraid's
+   separate .page routes: stage into sessionStorage, show the Settings dot, and
+   let General's review/apply flow commit the complete draft atomically. */
+function crfiStageSettings(updates){
+  const draft=crfiReadDraft();
+  for(const [key,value] of Object.entries(updates)){
+    const normalized=String(value);
+    if(normalized===String(CRFI_APPLIED_SETTINGS[key]??''))delete draft.settings[key];
+    else draft.settings[key]=normalized;
+  }
+  try{
+    if(Object.keys(draft.settings).length)sessionStorage.setItem(CRFI_DRAFT_KEY,JSON.stringify(draft));
+    else sessionStorage.removeItem(CRFI_DRAFT_KEY);
+  }catch(_error){}
+  crfiRefreshSettingsDot();
+}
+function crfiRestoreSettingsDraft(){
+  const settings=crfiReadDraft().settings;
+  const fields={IMAGE_SOURCE:'crfi-image-source',IMAGE:'crfi-image-ref',IMAGE_AUTOUPDATE:'crfi-auto-update',IMAGE_AUTOUPDATE_INTERVAL:'crfi-auto-interval',IMAGE_DRAIN_TIMEOUT:'crfi-drain-timeout'};
+  for(const [key,id] of Object.entries(fields)){if(settings[key]!=null){const field=document.getElementById(id);if(field)field.value=String(settings[key]);}}
+}
+function crfiSyncImageConfig(){
+  const remote=document.getElementById('crfi-image-source').value==='remote';
+  document.querySelectorAll('.crfi-remote-field').forEach(el=>{el.hidden=!remote;});
+  const on=document.getElementById('crfi-auto-update').value==='true';
+  document.querySelectorAll('.crfi-auto-dependent').forEach(el=>el.classList.toggle('is-disabled',!on));
+  document.getElementById('crfi-auto-interval').disabled=!on;
+  document.getElementById('crfi-drain-timeout').disabled=!on;
+}
+function crfiSetImageSource(value){
+  const input=document.getElementById('crfi-image-ref'),ref=input.value.trim();crfiSyncImageConfig();
+  const settings=value==='remote'?{IMAGE_SOURCE:'remote',IMAGE:ref}:{IMAGE_SOURCE:'builtin'};
+  crfiStageSettings(settings);
+}
+function crfiSaveImageRef(value){
+  const source=document.getElementById('crfi-image-source'),ref=String(value).trim();
+  const settings=source.value==='remote'?{IMAGE_SOURCE:'remote',IMAGE:ref}:{IMAGE:ref};
+  crfiStageSettings(settings);
+}
+function crfiSetAutoUpdate(value){crfiSyncImageConfig();crfiStageSettings({IMAGE_AUTOUPDATE:String(value)});}
+function crfiSaveAutoNumber(key,input,min,max){
+  const value=Math.max(min,Math.min(max,Number.parseInt(input.value,10)||min));input.value=String(value);
+  crfiStageSettings({[key]:String(value)});
+}
+function crfiResetAutoUpdate(){
+  document.getElementById('crfi-auto-update').value='false';document.getElementById('crfi-auto-interval').value='1800';document.getElementById('crfi-drain-timeout').value='3600';crfiSyncImageConfig();
+  crfiStageSettings({IMAGE_AUTOUPDATE:'false',IMAGE_AUTOUPDATE_INTERVAL:'1800',IMAGE_DRAIN_TIMEOUT:'3600'});
+}
+crfiRestoreSettingsDraft();
+crfiSyncImageConfig();
 function crfiRelTime(iso){
   const t=Date.parse(iso); if(isNaN(t)) return '';
   const m=Math.round((Date.now()-t)/60000);
-  if(m<1) return 'just now'; if(m<60) return m+'m ago';
-  const h=Math.round(m/60); if(h<48) return h+'h ago';
-  return Math.round(h/24)+'d ago';
+  if(m<1) return 'just now'; if(m<60) return m+' minute'+(m===1?'':'s')+' ago';
+  const h=Math.round(m/60); if(h<48) return h+' hour'+(h===1?'':'s')+' ago';
+  const d=Math.round(h/24); return d+' day'+(d===1?'':'s')+' ago';
 }
+function crfiSize(mb){ const n=Number(mb)||0; return n>=1024?(Math.round(n/102.4)/10)+' GB':n+' MB'; }
 function crfiInfo(){
   crfPost({action:'image-info'}).then(d=>{
     const ball=document.getElementById('crfi-ball'), title=document.getElementById('crfi-title'),
           sub=document.getElementById('crfi-sub'), chips=document.getElementById('crfi-chips');
     if(!d.exists){
       ball.className='crf-ball crf-ball-error';
-      title.textContent='Runner image not built yet';
-      sub.textContent=(d.image||'ci-runner-farm-runner:latest')+' — save the Dockerfile and press Save + Build.';
+      title.textContent='Runner Image';
+      sub.textContent='Not built yet · '+(d.image||'ci-runner-farm-runner:latest')+' — save the Dockerfile and press Save + Build';
       chips.innerHTML='';
       return;
     }
     ball.className='crf-ball crf-ball-idle';
-    title.textContent='Runner image built '+crfiRelTime(d.created);
-    sub.textContent=d.image+' · '+d.id;
+    title.textContent='Runner Image';
+    sub.textContent='Built '+crfiRelTime(d.created)+' · '+d.image+' · '+d.id;
     const chip=(l,v)=>'<span class="crfi-chip">'+l+' <b>'+crfEsc(v)+'</b></span>';
     chips.innerHTML=
       chip('base',d.base||'?')+
-      chip('size',(d.size_mb||0)+' MB')+
+      chip('size',crfiSize(d.size_mb))+
       chip('runners on it',d.in_use+'')+
       (d.source==='remote'?chip('image source','Remote — builds here are unused until Settings switches to Built-in'):'');
   }).catch(()=>{});
 }
 crfiInfo();
 
-let crfiAce=null, crfiSaved='';
+let crfiSaved='';
+function crfiStats(v){
+  const el=document.getElementById('crfi-df-stats'); if(!el) return;
+  const text=String(v||''), lines=text===''?0:text.replace(/\r\n/g,'\n').replace(/\n+$/,'').split('\n').length;
+  el.textContent=lines+' lines · '+text.length+' chars';
+}
+function crfiHighlight(src){
+  const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const instruction=/^(FROM|RUN|CMD|LABEL|MAINTAINER|EXPOSE|ENV|ADD|COPY|ENTRYPOINT|VOLUME|USER|WORKDIR|ARG|ONBUILD|STOPSIGNAL|HEALTHCHECK|SHELL|AS)\b/;
+  const tokens=/("[^"]*"|'[^']*'|--[a-zA-Z][\w-]*|\$\{?[A-Za-z_][\w]*\}?|&&|\\$)/g;
+  return String(src).split('\n').map(line=>{
+    if(/^\s*#/.test(line)) return '<span class="crfi-hl-comment">'+esc(line)+'</span>';
+    let rest=line,out='',match=rest.match(instruction);
+    if(match){out='<span class="crfi-hl-instruction">'+esc(match[0])+'</span>';rest=rest.slice(match[0].length);}
+    let last=0,token;
+    while((token=tokens.exec(rest))!==null){
+      out+=esc(rest.slice(last,token.index));
+      const value=token[0],kind=(value[0]==='"'||value[0]==="'")?'string':value.startsWith('--')?'flag':value[0]==='$'?'var':'op';
+      out+='<span class="crfi-hl-'+kind+'">'+esc(value)+'</span>';
+      last=token.index+value.length;
+    }
+    return out+esc(rest.slice(last));
+  }).join('\n');
+}
+function crfiPaint(v){
+  const highlight=document.getElementById('crfi-highlight');
+  if(highlight) highlight.innerHTML=crfiHighlight(v);
+  crfiStats(v);
+}
 (function(){
-  const ta=document.getElementById('crf-dockerfile');
-  if(!window.ace){ ta.style.display='block'; ta.rows=18; crfiSaved=ta.value;
-    ta.addEventListener('input',()=>{ document.getElementById('crfi-dirty').classList.toggle('on', ta.value!==crfiSaved); }); return; }
-  ace.config.set('basePath','/plugins/dynamix/javascript/ace');
-  crfiAce=ace.edit('crfi-ace');
-  const dark=crfDark();  // shared helper defined on the Fleet tab
-  crfiAce.setTheme('ace/theme/'+(dark?'tomorrow_night':'tomorrow'));
-  crfiAce.session.setMode('ace/mode/dockerfile');
-  crfiAce.setOptions({fontFamily:'bitstream,monospace',fontSize:'12px',showPrintMargin:false,useWorker:false,tabSize:2});
-  crfiSaved=ta.value; crfiAce.setValue(ta.value,-1);
-  crfiAce.session.on('change',()=>{
-    ta.value=crfiAce.getValue();
-    document.getElementById('crfi-dirty').classList.toggle('on',ta.value!==crfiSaved);
-  });
+  const ta=document.getElementById('crf-dockerfile'),highlight=document.getElementById('crfi-highlight');
+  crfiSaved=ta.value;crfiPaint(ta.value);
+  ta.addEventListener('input',()=>{document.getElementById('crfi-dirty').classList.toggle('on',ta.value!==crfiSaved);crfiPaint(ta.value);crfiSyncTC();});
+  ta.addEventListener('scroll',()=>{highlight.scrollTop=ta.scrollTop;highlight.scrollLeft=ta.scrollLeft;});
 })();
-/* All three sub-tabs' scripts run at page load in one document with Fleet (tab1)
-   active, so this editor is built while hidden — ACE measures gutter/cursor geometry
-   at construction and gets zeros with no layout box, rendering mismeasured until the
-   first click. Switching to a dynamix sub-tab doesn't fire visibilitychange, so
-   re-measure when the Runner image sub-tab (tab2) is shown. */
-document.getElementById('tab2') && document.getElementById('tab2').addEventListener('click',()=>{ setTimeout(()=>{ if(crfiAce) crfiAce.resize(true); },60); });
-crfiSyncTC();
 function crfiResetDf(){
   crfPost({action:'get-default-dockerfile'}).then(d=>{
     if(!d.dockerfile) return;
-    crfiSet(d.dockerfile);  // via crfiSet so the dirty marker updates in both the ACE and textarea-fallback paths
+    crfiSet(d.dockerfile);  // Keep highlighting, text, and the dirty marker in sync.
     document.getElementById('crf-build-status').textContent='shipped default loaded — not saved yet';
     crfiSyncTC();
   }).catch(e=>{ document.getElementById('crf-build-status').textContent='could not load default — see console'; console.error('ci-runner-farm reset:',e); });
@@ -225,14 +489,22 @@ function crfiResetDf(){
 // / CLI) equivalent, so they can't be composed headlessly, and the block library
 // must be kept in sync with default.Dockerfile by hand.
 const CRFI_TC = <?=json_encode($crfi_tc)?>;
-function crfiGet(){ return crfiAce ? crfiAce.getValue() : document.getElementById('crf-dockerfile').value; }
+function crfiGet(){ return document.getElementById('crf-dockerfile').value; }
 function crfiSet(v){
-  if(crfiAce){ crfiAce.setValue(v,-1); }  // ACE change handler updates the textarea + dirty
-  else { document.getElementById('crf-dockerfile').value=v; document.getElementById('crfi-dirty').classList.toggle('on', v!==crfiSaved); }
+  const ta=document.getElementById('crf-dockerfile');
+  ta.value=v;
+  document.getElementById('crfi-dirty').classList.toggle('on',v!==crfiSaved);
+  crfiPaint(v);
 }
 function crfiTcRe(k){ const esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
   return new RegExp('\\n?'+esc('# >>> ci-runner-farm toolchain: '+k+' >>>')+'[\\s\\S]*?'+esc('# <<< ci-runner-farm toolchain: '+k+' <<<')+'\\n?','g'); }
-function crfiHasTC(c,k){ return c.indexOf('# >>> ci-runner-farm toolchain: '+k+' >>>')>=0; }
+const CRFI_LEGACY_TC={
+  rust:/^RUN .*rustup\.rs.*# rust\s*$/m,
+  python:/^RUN .*python3.*# python\s*$/m,
+  node:/^RUN .*nodesource.*# node\/ts\s*$/m,
+  android:/^RUN .*sdkmanager.*# android\s*$/m,
+};
+function crfiHasTC(c,k){ return c.indexOf('# >>> ci-runner-farm toolchain: '+k+' >>>')>=0||!!(CRFI_LEGACY_TC[k]&&CRFI_LEGACY_TC[k].test(c)); }
 function crfiInsertTC(c,k){
   const block=CRFI_TC[k]; if(!block) return c;
   const lines=c.split('\n'); let idx=-1;
@@ -247,25 +519,31 @@ function crfiToolchain(k){
     return;
   }
   let next;
-  if(crfiHasTC(c,k)){
+  if(c.indexOf('# >>> ci-runner-farm toolchain: '+k+' >>>')>=0){
     next=c.replace(crfiTcRe(k),'\n');
     if(next===c) next=crfiInsertTC(c.replace(new RegExp('# >>> ci-runner-farm toolchain: '+k+' >>>'),''),k); // closing marker was edited away — re-insert clean
+  } else if(CRFI_LEGACY_TC[k]&&CRFI_LEGACY_TC[k].test(c)){
+    next=c.replace(CRFI_LEGACY_TC[k],'').replace(/\n{3,}/g,'\n\n');
   } else next=crfiInsertTC(c,k);
   crfiSet(next); crfiSyncTC();
 }
 function crfiSyncTC(){ const c=crfiGet(); document.querySelectorAll('.crfi-tc').forEach(el=>el.classList.toggle('on', crfiHasTC(c,el.dataset.tc))); }
+crfiSyncTC();
 document.querySelector('.crfi-toolchains').addEventListener('keydown',e=>{ if((e.key==='Enter'||e.key===' ')&&e.target.classList.contains('crfi-tc')){ e.preventDefault(); crfiToolchain(e.target.dataset.tc); } });
 function crfiBuildState(state,msg){
   const b=document.getElementById('crfi-build-ball');
   b.style.display=state?'inline-block':'none';
   b.className='crf-ball '+(state==='busy'?'crf-ball-busy':state==='ok'?'crf-ball-idle':state==='err'?'crf-ball-error':'');
   document.getElementById('crf-build-status').textContent=msg||'';
+  const logState=document.getElementById('crfi-log-state');
+  logState.className='crfi-log-state'+(state?' is-'+state:'');
+  logState.textContent=state==='busy'?'building':state==='ok'?'success':state==='err'?'failed':'idle';
 }
 function crfSaveDf(cb){ crfPost({action:'save-dockerfile',dockerfile:document.getElementById('crf-dockerfile').value}).then(o=>{
   if(o.ok){ crfiSaved=document.getElementById('crf-dockerfile').value; document.getElementById('crfi-dirty').classList.remove('on');
     document.getElementById('crfi-df-path').textContent='/boot/config/plugins/ci-runner-farm/Dockerfile'; }
   crfiBuildState(o.ok?'ok':'err', o.ok?'saved':('error: '+(o.error||'')));
-  if(typeof cb==='function') cb(!!o.ok); }).catch(e=>{ crfiBuildState('err','could not save Dockerfile — see console'); console.error('ci-runner-farm save-dockerfile:',e); if(typeof cb==='function') cb(false); }); }
+  if(typeof cb==='function') cb(!!o.ok,String(o.dockerfile_sha||'')); }).catch(e=>{ crfiBuildState('err','could not save Dockerfile — see console'); console.error('ci-runner-farm save-dockerfile:',e); if(typeof cb==='function') cb(false,''); }); }
 function crfBuild(){
   // Re-entrancy guard: a build (and its poll loop) is already live. Without this, a
   // second Save+Build while a build runs would save the Dockerfile (clearing the dirty
@@ -274,9 +552,9 @@ function crfBuild(){
   if(window.__crfBuilding) return;
   window.__crfBuilding=true; window.__crfBuildNull=0; window.__crfBuildErr=0;
   crfiBuildState('busy','saving + building...');
-  crfSaveDf(function(ok){
+  crfSaveDf(function(ok,dockerfileSha){
     if(!ok){ window.__crfBuilding=false; return; }   // save failed — crfSaveDf already painted the error and kept the dirty dot
-    crfPost({action:'build-image'}).then(o=>{
+    crfPost({action:'build-image',dockerfile_sha:dockerfileSha}).then(o=>{
       if(o&&o.ok===false){ window.__crfBuilding=false; crfiBuildState('err', o.error||'could not start build'); return; }
       crfPollBuild();
     }).catch(e=>{ window.__crfBuilding=false; crfiBuildState('err','could not start build — see console'); console.error('ci-runner-farm build:',e); });
@@ -285,7 +563,7 @@ function crfBuild(){
 // Keep tracking a running build when the tab is backgrounded, just poll slower — the
 // NAS is busiest mid-build, so don't hammer build-log every 2s into a hidden tab.
 function crfBuildNext(ms){ setTimeout(crfPollBuild, document.hidden ? Math.max(ms,8000) : ms); }
-function crfPollBuild(){ crfPost({action:'build-log'}).then(d=>{ window.__crfBuildErr=0; const el=document.getElementById('crf-build-log'); el.innerHTML=crfColorize(d.log||''); el.scrollTop=el.scrollHeight;
+function crfPollBuild(){ crfPost({action:'build-log'}).then(d=>{ window.__crfBuildErr=0; const el=document.getElementById('crf-build-log'); el.innerHTML='<div class="crfi-log-output">'+crfColorize(d.log||'')+'</div>'; el.scrollTop=el.scrollHeight;
   if(d.running){ window.__crfBuildNull=0; crfiBuildState('busy','building...'); crfBuildNext(2000); }
   else if(d.rc===0){ window.__crfBuilding=false; crfiBuildState('ok','build finished — restart the fleet to use it'); crfiInfo(); }
   else if(typeof d.rc==='number'){ window.__crfBuilding=false; crfiBuildState('err','build failed (exit '+d.rc+') — see log'); crfiInfo(); }
@@ -297,4 +575,14 @@ function crfPollBuild(){ crfPost({action:'build-log'}).then(d=>{ window.__crfBui
     // running server-side. Retry a bounded number of times before giving up.
     if((window.__crfBuildErr=(window.__crfBuildErr||0)+1) < 5){ crfiBuildState('busy','reconnecting…'); crfBuildNext(3000); }
     else { window.__crfBuildErr=0; window.__crfBuilding=false; crfiBuildState('err','build status unknown — see console'); } }); }
+function crfiRestoreBuild(){
+  crfPost({action:'build-log'}).then(d=>{
+    const el=document.getElementById('crf-build-log');
+    if(d.log){el.innerHTML='<div class="crfi-log-output">'+crfColorize(d.log)+'</div>';el.scrollTop=el.scrollHeight;}
+    if(d.running){window.__crfBuilding=true;window.__crfBuildNull=0;window.__crfBuildErr=0;crfiBuildState('busy','building...');crfBuildNext(2000);}
+    else if(d.log&&d.rc===0)crfiBuildState('ok','build finished — restart the fleet to use it');
+    else if(d.log&&typeof d.rc==='number')crfiBuildState('err','build failed (exit '+d.rc+') — see log');
+  }).catch(e=>console.error('ci-runner-farm restore build:',e));
+}
+crfiRestoreBuild();
 </script>

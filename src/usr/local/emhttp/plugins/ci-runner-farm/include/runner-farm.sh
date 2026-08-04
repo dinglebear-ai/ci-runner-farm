@@ -97,6 +97,7 @@ RUNNER_GID="121"                      # gid of the 'runner' group
 CACHE_MOUNTS="cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright"
 # ---- autoscaling (live utilization): fleet floats between MIN and MAX -------
 AUTOSCALE="false"                     # true => a daemon grows/shrinks the fleet by demand
+POOL_AUTOSCALE="inherit"              # inherit, empty (all fixed), or comma-separated pool IDs
 AUTOSCALE_MIN="2"                     # never go below this many runners
 AUTOSCALE_MAX="16"                    # never go above this many
 AUTOSCALE_MIN_IDLE="2"                # keep at least this many idle (warm) runners as headroom
@@ -135,7 +136,7 @@ RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERA
 RESOURCE_CPU_BUDGET RESOURCE_MEMORY_BUDGET RESOURCE_CPU_RESERVE RESOURCE_MEMORY_RESERVE \
 RESOURCE_CPU_OVERCOMMIT RESOURCE_MEMORY_SWAP RESOURCE_PIDS_LIMIT \
 RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
-SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
+SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE POOL_AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
 AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT \
 DASHBOARD_WIDGET_ENABLE"
@@ -275,23 +276,47 @@ validate_settings_config() {
     pool_error "IMAGE is required for a remote image source" image
     return 1
   fi
+  if [ "$IMAGE_SOURCE" = remote ]; then
+    [ "${#IMAGE}" -le 255 ] && [[ "$IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || {
+      pool_error "IMAGE must be a valid Docker image reference without whitespace or a leading option" image
+      return 1
+    }
+  fi
+  [ "$IMAGE_AUTOUPDATE_INTERVAL" -ge 300 ] && [ "$IMAGE_AUTOUPDATE_INTERVAL" -le 86400 ] || {
+    pool_error "IMAGE_AUTOUPDATE_INTERVAL must be between 300 and 86400 seconds" settings
+    return 1
+  }
+  { [ "$IMAGE_DRAIN_TIMEOUT" -eq 0 ] || {
+      [ "$IMAGE_DRAIN_TIMEOUT" -ge 60 ] && [ "$IMAGE_DRAIN_TIMEOUT" -le 86400 ];
+    }; } || {
+    pool_error "IMAGE_DRAIN_TIMEOUT must be 0 (wait forever) or between 60 and 86400 seconds" settings
+    return 1
+  }
   return 0
 }
 
 cmd_apply_config() {
   local expected="${1:-}" staged="${2:-}" current old_cfg backup_tmp backup new_revision
+  local old_capacity old_imageupdate new_capacity new_imageupdate old_autoscale fleet_active=0 daemon_pid
   case "$expected" in *[!0-9a-f]*|'') printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2 ;; esac
   [ "${#expected}" -eq 64 ] || { printf '{"ok":false,"code":"invalid_revision","error":"invalid expected config revision"}\n'; return 2; }
   case "$staged" in "$CFGDIR"/.apply.*) ;; *) printf '{"ok":false,"code":"invalid_staging_path","error":"invalid staging path"}\n'; return 2 ;; esac
   [ -f "$staged" ] && [ ! -L "$staged" ] || { printf '{"ok":false,"code":"invalid_staging_file","error":"staged config is unavailable"}\n'; return 2; }
 
+  # The process loads config before it waits on fleet.lock. Refresh it after the
+  # lock is acquired so optimistic concurrency compares against the config that
+  # actually won the preceding transaction, not a stale process-start snapshot.
+  old_cfg="$CFG"
+  load_cfg
+  old_autoscale="$AUTOSCALE"
+  old_capacity="$RUNNER_MODE|$RUNNER_POOLS|$RUNNER_COUNT|$AUTOSCALE|$POOL_AUTOSCALE|$AUTOSCALE_MIN|$AUTOSCALE_MAX|$AUTOSCALE_MIN_IDLE|$AUTOSCALE_STEP|$AUTOSCALE_INTERVAL|$AUTOSCALE_IDLE_GRACE"
+  old_imageupdate="$IMAGE_AUTOUPDATE|$IMAGE_AUTOUPDATE_INTERVAL|$IMAGE_DRAIN_TIMEOUT|$IMAGE_SOURCE|$IMAGE"
   current="$(config_revision)"
   if [ "$current" != "$expected" ]; then
     printf '{"ok":false,"code":"stale_config","error":"settings changed in another session","config_revision":"%s"}\n' "$current"
     return 3
   fi
 
-  old_cfg="$CFG"
   CFG="$staged"
   load_cfg
   if ! validate_settings_config; then
@@ -301,6 +326,8 @@ cmd_apply_config() {
     return 4
   fi
   new_revision="$(config_revision)"
+  new_capacity="$RUNNER_MODE|$RUNNER_POOLS|$RUNNER_COUNT|$AUTOSCALE|$POOL_AUTOSCALE|$AUTOSCALE_MIN|$AUTOSCALE_MAX|$AUTOSCALE_MIN_IDLE|$AUTOSCALE_STEP|$AUTOSCALE_INTERVAL|$AUTOSCALE_IDLE_GRACE"
+  new_imageupdate="$IMAGE_AUTOUPDATE|$IMAGE_AUTOUPDATE_INTERVAL|$IMAGE_DRAIN_TIMEOUT|$IMAGE_SOURCE|$IMAGE"
 
   backup="${old_cfg}.bak"
   backup_tmp="${backup}.tmp.$$"
@@ -322,8 +349,37 @@ cmd_apply_config() {
   chmod 0600 "$old_cfg" || true
   CFG="$old_cfg"
   load_cfg
-  rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
+  if [ "$old_capacity" != "$new_capacity" ]; then
+    rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
+  fi
   reconcile_start
+  # Apply is live for a running fleet. Enabling the daemon master must not wait
+  # for a separate Start click; disabling it must stop admissions immediately.
+  # Preserve the stopped state by only launching when classic runners or the
+  # scale-set supervisor prove that this fleet is already active.
+  managed_names | grep -q . && fleet_active=1
+  if [ "$fleet_active" = 0 ] && [ -f "$SCALESET_PID" ]; then
+    daemon_pid="$(cat "$SCALESET_PID" 2>/dev/null)"
+    [[ "$daemon_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$daemon_pid" 2>/dev/null && fleet_active=1
+  fi
+  if [ "$AUTOSCALE" = true ]; then
+    daemon_pid="$(cat "$AUTOSCALE_PID" 2>/dev/null)"
+    if [ "$fleet_active" = 1 ] && { [ "$old_autoscale" != true ] ||
+       ! { [[ "$daemon_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$daemon_pid" 2>/dev/null; }; }; then
+      autoscale_start
+    fi
+  else
+    autoscale_stop
+  fi
+  if [ "$IMAGE_AUTOUPDATE" = true ]; then
+    if [ "$old_imageupdate" != "$new_imageupdate" ] ||
+       ! { [ -f "$IMAGEUPDATE_PID" ] && kill -0 "$(cat "$IMAGEUPDATE_PID" 2>/dev/null)" 2>/dev/null; }; then
+      imageupdate_stop
+      managed_names | grep -q . && imageupdate_start
+    fi
+  else
+    imageupdate_stop
+  fi
   printf '{"ok":true,"config_revision":"%s","settings":' "$new_revision"
   config_json
   printf '}\n'
@@ -346,7 +402,7 @@ cleanup_pool_runtime_state() {
 # One authoritative Docker snapshot for pool-aware hot paths. The file is
 # process-local in intent but tmpfs-backed so subshells created by command
 # substitution can consume the same parsed records. Fields:
-# name|state|health|cpus|memory|confgen|pool|scope|index|routing-label|identity|backend
+# name|state|health|cpus|memory|confgen|pool|scope|index|routing-label|identity|backend|started-at
 INVENTORY_FILE="$RUNDIR/fleet-inventory.tsv"
 INVENTORY_ACTIVE=0
 
@@ -356,18 +412,18 @@ fleet_inventory_invalidate() {
 }
 
 fleet_inventory_refresh() {
-  local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend identity expected
+  local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend started_at identity expected
   names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V)"
   tmp="${INVENTORY_FILE}.tmp.$$"
   : > "$tmp" || return 1
   if [ -n "$names" ]; then
     # shellcheck disable=SC2086 # one Docker argument per newline-delimited managed name
-    if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.backend"}}' $names 2>/dev/null)"; then
+    if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.backend"}}|{{.State.StartedAt}}' $names 2>/dev/null)"; then
       rm -f "$tmp"; return 1
     fi
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      IFS='|' read -r name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend _extra <<< "$row"
+      IFS='|' read -r name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend started_at _extra <<< "$row"
       name="${name#/}"; identity=invalid-managed
       [ "$gen" = "<no value>" ] && gen=""
       [ "$pool" = "<no value>" ] && pool=""
@@ -378,9 +434,10 @@ fleet_inventory_refresh() {
       [ "$version" = "<no value>" ] && version=""
       [ "$routing" = "<no value>" ] && routing=""
       [ "$backend" = "<no value>" ] && backend=""
+      [ "$started_at" = "<no value>" ] && started_at=""
       # Reject delimiter/control injection in metadata before it reaches the
       # inventory format or later JSON/selector consumers.
-      case "$name$scope$pool$pidx$legacy_idx$routing" in
+      case "$name$scope$pool$pidx$legacy_idx$routing$started_at" in
         *$'\n'*|*$'\r'*|*$'\t'*) name="" ;;
       esac
       [ -n "$name" ] || continue
@@ -408,9 +465,9 @@ fleet_inventory_refresh() {
         esac
       fi
       # Fields sourced from Docker labels must not be able to add columns.
-      case "$gen$pool$scope$routing" in *'|'*) identity=invalid-managed; pool=invalid; scope=""; routing="" ;; esac
-      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" "${backend:-classic}" >> "$tmp"
+      case "$gen$pool$scope$routing$started_at" in *'|'*) identity=invalid-managed; pool=invalid; scope=""; routing=""; started_at="" ;; esac
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" "${backend:-classic}" "$started_at" >> "$tmp"
     done <<< "$raw"
   fi
   mv "$tmp" "$INVENTORY_FILE" || { rm -f "$tmp"; return 1; }
@@ -659,7 +716,11 @@ count_pool_desired_drift() {
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || { echo 0; return 1; }
   local rec pool current target drift=0 delta
   while IFS= read -r rec; do
-    pool="${rec%%|*}"; current="$(current_count "$pool")"; target="$(pool_effective_target "$pool")"
+    pool="${rec%%|*}"
+    # Autoscaled pools intentionally float above their configured floor. Only
+    # fixed pools can have durable desired-capacity drift to reconcile.
+    pool_autoscale_enabled "$pool" && continue
+    current="$(current_count "$pool")"; target="$(pool_effective_target "$pool")"
     delta=$((current-target)); [ "$delta" -lt 0 ] && delta=$((-delta))
     drift=$((drift+delta))
   done < <(pool_records)
@@ -855,6 +916,12 @@ _autoscale_tick() {
 
 pool_autoscale_tick() {
   local pool="$1" cur warm statef over=0 target floor max buffer before after delta remove_n removable_idle removable_floor
+  if ! pool_autoscale_enabled "$pool"; then
+    # A pool can switch from automatic to fixed while the daemon stays live.
+    # Discard its anti-flap counter so re-enabling starts from a clean state.
+    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
+    return 0
+  fi
   cur="$(current_count "$pool")"
   pool_phase_counts "$pool"
   warm=$((POOL_IDLE + POOL_STARTING))
@@ -1432,6 +1499,7 @@ gh_fetch_all() {
     printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
       | curl -s --max-time "$timeout" --config - \
         -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2026-03-10" \
         "https://api.github.com/repos/${r}${suffix}" > "$outdir/$n" 2>/dev/null &
     [ $((n % maxpar)) -eq 0 ] && wait
   done
@@ -2196,9 +2264,11 @@ reconcile_stale_runners() {
 
   # Pass 2: honor fixed-mode runtime targets persistently. Highest indexes drain
   # first; a busy excess runner remains until a later worker pass sees it idle.
-  if pool_mode_enabled && [ "$AUTOSCALE" != true ]; then
+  if pool_mode_enabled; then
     while IFS= read -r rec; do
-      pool="${rec%%|*}"; target="$(pool_effective_target "$pool")"
+      pool="${rec%%|*}"
+      pool_autoscale_enabled "$pool" && continue
+      target="$(pool_effective_target "$pool")"
       [ "$(current_count "$pool")" -gt "$target" ] || continue
       for c in $(managed_names "$pool" | sort -rV); do
         [ "$(current_count "$pool")" -gt "$target" ] || break
@@ -2403,7 +2473,7 @@ cmd_maintenance() {
 pool_effective_target() {
   local pool="$1" configured file value
   configured="$(pool_configured_target "$pool")"
-  [ "$AUTOSCALE" = true ] && { printf '%s\n' "$configured"; return; }
+  pool_autoscale_enabled "$pool" && { printf '%s\n' "$configured"; return; }
   file="$RUNDIR/scale-override.${pool}.$(pool_state_generation "$pool")"
   if [ -f "$file" ]; then
     value="$(cat "$file" 2>/dev/null)"
@@ -2707,7 +2777,7 @@ cmd_scale() {
   # during a burst, but never bypass its configured ceiling or remove runners
   # that the autoscaler is managing.
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  local pool="default" target
+  local pool="default" target autoscaled=false
   if pool_mode_enabled; then
     [ "$#" -eq 2 ] || { err "usage: scale <pool> <target>"; return 1; }
     pool="$1"; target="$2"
@@ -2718,7 +2788,8 @@ cmd_scale() {
   case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
   pool_mode_enabled && [ "$target" -eq 0 ] && { err "runner pools cannot scale to zero"; return 1; }
   [ "$target" -le 64 ] || { err "manual scale target ($target) exceeds the fleet hard maximum (64)"; return 1; }
-  if [ "$AUTOSCALE" = "true" ]; then
+  pool_autoscale_enabled "$pool" && autoscaled=true
+  if [ "$autoscaled" = true ]; then
     local current max
     if pool_mode_enabled; then max="$(pool_capacity_ceiling "$pool")"; else max="$AUTOSCALE_MAX"; fi
     case "$max" in ''|*[!0-9]*) max=16 ;; esac
@@ -2740,7 +2811,7 @@ cmd_scale() {
   local rc=0 actual
   if pool_mode_enabled; then cmd_scale_internal "$pool" "$target" || rc=$?
   else cmd_scale_internal "$target" || rc=$?; fi
-  if pool_mode_enabled && [ "$AUTOSCALE" != true ] && [ "$(current_count "$pool")" -ne "$target" ]; then
+  if pool_mode_enabled && [ "$autoscaled" != true ] && [ "$(current_count "$pool")" -ne "$target" ]; then
     log "scale: pool $pool has pending capacity work; reconciliation will continue as runners become idle"
     reconcile_start
   fi
@@ -2806,27 +2877,158 @@ to_mib() {
     printf "%d", v }'
 }
 
+github_api_token_load() {
+  local expires token
+  case "$AUTH_MODE" in
+    pat)
+      [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+      ;;
+    github_app)
+      [ -f "$GITHUB_APP_TOKEN_FILE" ] && [ ! -L "$GITHUB_APP_TOKEN_FILE" ] &&
+        [ "$(stat -c %a "$GITHUB_APP_TOKEN_FILE" 2>/dev/null)" = 600 ] || return 1
+      expires="$(sed -n 's/^expires=//p' "$GITHUB_APP_TOKEN_FILE" | head -1)"
+      token="$(sed -n 's/^token=//p' "$GITHUB_APP_TOKEN_FILE" | head -1)"
+      [[ "$expires" =~ ^[0-9]+$ ]] && [ "$expires" -gt $(( $(date +%s) + 60 )) ] && [ -n "$token" ] || return 1
+      ACCESS_TOKEN="$token"
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$ACCESS_TOKEN" ]
+}
+
+queued_snapshot_unavailable() {
+  local staged now="${1:-$(date +%s)}"
+  staged="$(mktemp "$RUNDIR/.queued.snapshot.XXXXXX" 2>/dev/null)" || return 1
+  ( umask 077; printf '{"timestamp":%s,"queued":-1,"known_queued":0,"workflow_runs":-1,"partial":false,"truncated":false,"detail_complete":false,"jobs":[]}\n' "$now" > "$staged" ) &&
+    chmod 0600 "$staged" && mv "$staged" "$RUNDIR/queued.snapshot.json"
+}
+
 cmd_queued_refresh() {
-  # Sum queued workflow runs across GH_REPOS into a cache file. Invoked in the
-  # background from cmd_queued_json so the UI poll never blocks on 20+ curls.
-  [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
-  local total=0 got=0 r n body tmpd i=0
-  tmpd="$(mktemp -d 2>/dev/null)"
-  [ -n "$tmpd" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
-  gh_fetch_all "/actions/runs?status=queued&per_page=1" "$tmpd"
+  # Snapshot queued workflow runs across GH_REPOS, then resolve their queued jobs
+  # (labels included) into a bounded detail cache for the Fleet queue drawer. This
+  # runs behind a detached flock from cmd_queued_json so the UI never waits on the
+  # GitHub fan-out. The PAT stays on curl's stdin, never in argv or the cache.
+  github_api_token_load || { queued_snapshot_unavailable; return 0; }
+  local total=0 got=0 requested=0 partial=false r n body tmpd i=0 maxpar=8
+  tmpd="$(mktemp -d "$RUNDIR/.queued.XXXXXX" 2>/dev/null)"
+  [ -n "$tmpd" ] || { queued_snapshot_unavailable; return 0; }
+  chmod 0700 "$tmpd"
+  mkdir -p "$tmpd/runs" "$tmpd/jobs"
+  gh_fetch_all "/actions/runs?status=queued&per_page=20" "$tmpd/runs"
+  : > "$tmpd/repos.tsv"
   for r in $GH_REPOS; do
     [ -n "$r" ] || continue
-    i=$((i+1)); body="$(cat "$tmpd/$i" 2>/dev/null)"
-    case "$body" in *'"total_count"'*) got=1 ;; esac
+    requested=$((requested+1))
+    i=$((i+1)); body="$(cat "$tmpd/runs/$i" 2>/dev/null)"
+    case "$body" in *'"total_count"'*) got=$((got+1)) ;; esac
     n="$(printf '%s' "$body" | grep -m1 -oE '"total_count":[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)"
     total=$(( total + ${n:-0} ))
+    printf '%s\t%s\n' "$r" "$tmpd/runs/$i" >> "$tmpd/repos.tsv"
   done
-  rm -rf "$tmpd"
+
+  # Produce a tab-safe, bounded run manifest. User-controlled workflow names are
+  # base64 encoded before crossing the shell boundary; repo + id are validated
+  # again before becoming an API path.
+  php -r '
+    $left=20;
+    foreach (file($argv[1], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+      [$repo,$file]=array_pad(explode("\t",$line,2),2,"");
+      if (!preg_match("~^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$~D",$repo)) continue;
+      $doc=json_decode((string)@file_get_contents($file),true);
+      foreach (($doc["workflow_runs"] ?? []) as $run) {
+        if ($left<=0) break 2;
+        $id=(string)($run["id"] ?? "");
+        if (!preg_match("~^[0-9]{1,20}$~D",$id)) continue;
+        $number=(string)($run["run_number"] ?? "");
+        $name=(string)($run["name"] ?? $run["display_title"] ?? "Workflow");
+        $created=(string)($run["created_at"] ?? "");
+        echo $repo,"\t",$id,"\t",preg_replace("~[^0-9]~","",$number),"\t",base64_encode($name),"\t",base64_encode($created),"\n";
+        --$left;
+      }
+    }
+  ' "$tmpd/repos.tsv" > "$tmpd/run-manifest.tsv" 2>/dev/null || :
+
+  i=0
+  while IFS=$'\t' read -r r run_id _run_number _run_name _created; do
+    [ -n "$r" ] && [[ "$r" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || continue
+    [[ "$run_id" =~ ^[0-9]{1,20}$ ]] || continue
+    i=$((i+1))
+    printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" \
+      | curl -s --max-time 10 --config - \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2026-03-10" \
+        "https://api.github.com/repos/${r}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" > "$tmpd/jobs/$i" 2>/dev/null &
+    [ $((i % maxpar)) -eq 0 ] && wait
+  done < "$tmpd/run-manifest.tsv"
+  wait
+
+  local pool_map="" rec pool route
+  if pool_mode_enabled; then
+    while IFS= read -r rec; do
+      pool="${rec%%|*}"; route="$(pool_routing_label "$pool" 2>/dev/null)"
+      [ -n "$pool" ] && [ -n "$route" ] && pool_map="${pool_map}${pool_map:+;}${pool}|${route}"
+    done < <(pool_records 2>/dev/null)
+  else
+    pool_map="default|${RUNNER_LABELS}"
+  fi
+
+  php -r '
+    $manifest=file($argv[1], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+    $jobDir=$argv[2]; $poolMap=[];
+    foreach (explode(";",$argv[3] ?? "") as $pair) {
+      [$pool,$route]=array_pad(explode("|",$pair,2),2,"");
+      if ($pool!=="" && $route!=="") foreach (explode(",",$route) as $label) if ($label!=="") $poolMap[$label]=$pool;
+    }
+    $rows=[]; $index=0; $detailComplete=true; $rowTruncated=false;
+    foreach ($manifest as $line) {
+      ++$index;
+      [$repo,$runId,$runNumber,$workflow64,$created64]=array_pad(explode("\t",$line),5,"");
+      $workflow=base64_decode($workflow64,true) ?: "Workflow";
+      $created=base64_decode($created64,true) ?: "";
+      $doc=json_decode((string)@file_get_contents($jobDir."/".$index),true);
+      $jobs=is_array($doc["jobs"] ?? null) ? $doc["jobs"] : [];
+      if (!is_array($doc["jobs"] ?? null)) $detailComplete=false;
+      foreach ($jobs as $job) {
+        $status=(string)($job["status"] ?? "");
+        if ($status!=="queued") continue;
+        $labels=array_values(array_filter(array_map("strval",is_array($job["labels"] ?? null)?$job["labels"]:[])));
+        $pool="";
+        foreach ($labels as $label) if (isset($poolMap[$label])) { $pool=$poolMap[$label]; break; }
+        if (!in_array("self-hosted",$labels,true) || $pool==="") continue;
+        if (count($rows)>=40) { $rowTruncated=true; break 2; }
+        $rows[]=[
+          "run_id"=>(int)$runId,
+          "job_id"=>(int)($job["id"] ?? 0),
+          "repo"=>$repo,
+          "workflow"=>"#".$runNumber." · ".(string)($job["name"] ?? $workflow),
+          "labels"=>implode(", ",$labels),
+          "pool"=>$pool,
+          "reason"=>$pool!==""?"waiting for runner":"checking labels",
+          "created_at"=>(string)($job["started_at"] ?? $job["created_at"] ?? $created),
+          "url"=>(string)($job["html_url"] ?? "")
+        ];
+      }
+    }
+    echo json_encode(["jobs"=>$rows,"detail_complete"=>$detailComplete,"row_truncated"=>$rowTruncated], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),"\n";
+  ' "$tmpd/run-manifest.tsv" "$tmpd/jobs" "$pool_map" > "$tmpd/queued-jobs.cache" 2>/dev/null || printf '[]\n' > "$tmpd/queued-jobs.cache"
+
   # total=-1 signals "unavailable" (no token / every repo query failed) so the UI
   # shows a dash instead of a confident "0 queued" — same sentinel as stats/usage.
-  [ "$got" = "1" ] || total=-1
-  echo "$(date +%s) $total" > "$RUNDIR/queued.cache"
+  if [ "$requested" -eq 0 ] || [ "$got" -ne "$requested" ]; then total=-1; partial=true; fi
+  php -r '
+    $now=(int)$argv[1]; $runs=(int)$argv[2]; $partial=$argv[3]==="true";
+    $detail=json_decode((string)@file_get_contents($argv[4]),true);
+    if (!is_array($detail) || !is_array($detail["jobs"] ?? null)) $detail=["jobs"=>[],"detail_complete"=>false,"row_truncated"=>false];
+    $known=count($detail["jobs"]); $manifestCount=count(file($argv[5], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []);
+    $truncated=($runs>=0 && $runs>$manifestCount) || !empty($detail["row_truncated"]);
+    $complete=!$partial && !$truncated && !empty($detail["detail_complete"]);
+    $snapshot=["timestamp"=>$now,"queued"=>$complete?$known:-1,"known_queued"=>$known,"workflow_runs"=>$runs,"partial"=>$partial,"truncated"=>$truncated,"detail_complete"=>$complete,"jobs"=>$detail["jobs"]];
+    echo json_encode($snapshot, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),"\n";
+  ' "$(date +%s)" "$total" "$partial" "$tmpd/queued-jobs.cache" "$tmpd/run-manifest.tsv" > "$tmpd/queued.snapshot.json" 2>/dev/null ||
+    printf '{"timestamp":%s,"queued":-1,"known_queued":0,"workflow_runs":-1,"partial":false,"truncated":false,"detail_complete":false,"jobs":[]}\n' "$(date +%s)" > "$tmpd/queued.snapshot.json"
+  chmod 0600 "$tmpd/queued.snapshot.json"
+  mv "$tmpd/queued.snapshot.json" "$RUNDIR/queued.snapshot.json"
+  rm -rf "$tmpd"
 }
 
 # Warm dependency caches under CACHE_ROOT — safe to clear even while runners are
@@ -2934,8 +3136,7 @@ cmd_cache_clear_pkg() {
 cmd_stats_refresh() {
   # Tally recent workflow-run conclusions across GH_REPOS. Detached + cached so
   # the per-repo API sweep never blocks the UI (see queued for the pattern).
-  [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
+  github_api_token_load || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
   local ok=0 fail=0 cancel=0 other=0 total got=0 r body c tmpd i=0
   tmpd="$(mktemp -d 2>/dev/null)"
   [ -n "$tmpd" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
@@ -2974,18 +3175,64 @@ cmd_stats_json() {
 }
 
 cmd_queued_json() {
-  local now ts count age=999999
+  local now ts=0 age=999999 parsed payload size
   now=$(date +%s)
-  if [ -f "$RUNDIR/queued.cache" ]; then
-    read -r ts count < "$RUNDIR/queued.cache"
-    age=$(( now - ${ts:-0} ))
+  size="$([ -f "$RUNDIR/queued.snapshot.json" ] && [ ! -L "$RUNDIR/queued.snapshot.json" ] && wc -c < "$RUNDIR/queued.snapshot.json" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le 262144 ]; then
+    parsed="$(php -r '
+      $d=json_decode((string)@file_get_contents($argv[1]),true);
+      if (!is_array($d) || !is_int($d["timestamp"]??null) || !is_array($d["jobs"]??null)) exit(1);
+      foreach (["queued","known_queued","workflow_runs"] as $k) if (!is_int($d[$k]??null)) exit(1);
+      foreach (["partial","truncated","detail_complete"] as $k) if (!is_bool($d[$k]??null)) exit(1);
+      $ts=$d["timestamp"];
+      if ($ts<=0 || $ts>time()+300) exit(1);
+      unset($d["timestamp"]); $d["age"]=max(0,time()-$ts);
+      echo $ts,"\n",json_encode($d,JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);
+    ' "$RUNDIR/queued.snapshot.json" 2>/dev/null)" || parsed=""
+    if [ -n "$parsed" ]; then
+      ts="${parsed%%$'\n'*}"; payload="${parsed#*$'\n'}"; age=$(( now - ts ))
+    fi
   fi
   # flock, not a plain lock file: the advisory lock is released by the kernel
   # even on SIGKILL/reboot, so a killed refresh can never wedge future refreshes.
   if [ "$age" -gt 60 ]; then
     ( flock -n 9 || exit 0; "$0" queued-refresh ) 9>"$RUNDIR/queued.lock" >/dev/null 2>&1 &
   fi
-  echo "{\"queued\":${count:--1},\"age\":$age}"
+  [ -n "${payload:-}" ] && printf '%s\n' "$payload" || printf '{"queued":-1,"known_queued":0,"workflow_runs":-1,"partial":false,"truncated":false,"detail_complete":false,"jobs":[],"age":%s}\n' "$age"
+}
+
+cmd_cancel_run() {
+  local repo="${1:-}" run_id="${2:-}" allowed=false queued=false r status size
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo '{"ok":false,"error":"invalid repository"}'; return 1; }
+  [[ "$run_id" =~ ^[0-9]{1,20}$ ]] || { echo '{"ok":false,"error":"invalid run id"}'; return 1; }
+  for r in $GH_REPOS; do [ "$r" = "$repo" ] && allowed=true; done
+  [ "$allowed" = true ] || { echo '{"ok":false,"error":"repository is not configured"}'; return 1; }
+  size="$([ -f "$RUNDIR/queued.snapshot.json" ] && [ ! -L "$RUNDIR/queued.snapshot.json" ] && wc -c < "$RUNDIR/queued.snapshot.json" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le 262144 ]; then
+    php -r '
+      $d=json_decode((string)@file_get_contents($argv[1]),true);
+      if (!is_array($d) || !is_int($d["timestamp"]??null) || $d["timestamp"]<time()-120 || $d["timestamp"]>time()+300) exit(1);
+      if (!is_array($d["jobs"]??null)) exit(1);
+      foreach (($d["jobs"]??[]) as $job) if ((string)($job["repo"]??"")===$argv[2] && (string)($job["run_id"]??"")===$argv[3]) exit(0);
+      exit(1);
+    ' "$RUNDIR/queued.snapshot.json" "$repo" "$run_id" 2>/dev/null && queued=true
+  fi
+  [ "$queued" = true ] || { echo '{"ok":false,"error":"run is not in the current farm queue"}'; return 1; }
+  github_api_token_load || { echo '{"ok":false,"error":"no GitHub API token available"}'; return 1; }
+  gh_api_request GET "/repos/${repo}/actions/runs/${run_id}" || {
+    echo "{\"ok\":false,\"error\":\"could not verify queued run (HTTP ${GH_STATUS:-000})\"}"; return 1;
+  }
+  [ "$GH_STATUS" = 200 ] || { echo '{"ok":false,"error":"queued run was not found"}'; return 1; }
+  status="$(printf '%s' "$GH_RESPONSE" | php -r '$d=json_decode(stream_get_contents(STDIN),true); echo is_array($d)?(string)($d["status"]??""):"";' 2>/dev/null)"
+  [ "$status" = queued ] || { echo '{"ok":false,"error":"run is no longer queued"}'; return 1; }
+  gh_api_request POST "/repos/${repo}/actions/runs/${run_id}/cancel" || {
+    echo "{\"ok\":false,\"error\":\"GitHub returned HTTP ${GH_STATUS:-000}\"}"; return 1;
+  }
+  case "$GH_STATUS" in
+    202|204) rm -f "$RUNDIR/queued.snapshot.json"; echo '{"ok":true,"action":"cancel-run"}' ;;
+    409) echo '{"ok":false,"error":"run is no longer cancellable"}'; return 1 ;;
+    *) echo "{\"ok\":false,\"error\":\"GitHub returned HTTP ${GH_STATUS:-000}\"}"; return 1 ;;
+  esac
 }
 
 recreate_runner() {
@@ -3210,8 +3457,8 @@ cmd_status_json() {
     recent_activity="$(cat "$recent_path" 2>/dev/null)"
   fi
   local out="["; local first=1
-  local c st _health cpus mem cgen pool scope pidx _routing identity backend
-  while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity backend; do
+  local c st _health cpus mem cgen pool scope pidx _routing identity backend started_at
+  while IFS='|' read -r c st _health cpus mem cgen pool scope pidx _routing identity backend started_at; do
     [ -z "$c" ] && continue
     local stale=false retiring=false completed=false
     pool="${pool:-default}"; pidx="${pidx:-${c##*-}}"
@@ -3279,12 +3526,12 @@ cmd_status_json() {
     if pool_mode_enabled; then routing_label="$(pool_label "$pool" 2>/dev/null || true)"
     else routing_label="$RUNNER_LABELS"; fi
     [ $first -eq 0 ] && out+=","
-    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"pool\":\"$(printf '%s' "$pool"|json_escape)\",\"routing_label\":\"$(printf '%s' "$routing_label"|json_escape)\",\"scope_target\":\"$(printf '%s' "$scope"|json_escape)\",\"pool_index\":${pidx:-0},\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"completed\":${completed},\"stale\":${stale},\"retiring\":${retiring}}"
+    out+="{\"name\":\"$(echo "$c"|json_escape)\",\"pool\":\"$(printf '%s' "$pool"|json_escape)\",\"routing_label\":\"$(printf '%s' "$routing_label"|json_escape)\",\"scope_target\":\"$(printf '%s' "$scope"|json_escape)\",\"pool_index\":${pidx:-0},\"state\":\"${st:-unknown}\",\"phase\":\"$phase\",\"job\":\"${job}\",\"job_started\":\"${jstarted}\",\"started_at\":\"$(printf '%s' "$started_at"|json_escape)\",\"repo\":\"${jrepo}\",\"pr\":\"${jpr}\",\"branch\":\"${jbranch}\",\"run_id\":\"${jrun}\",\"cpus\":$(( ${cpus:-0}/1000000000 )),\"mem_gb\":$(( ${mem:-0}/1024/1024/1024 )),\"cpu_pct\":${cpu_pct:-0},\"mem_used_mib\":${mem_used_mib:-0},\"completed\":${completed},\"stale\":${stale},\"retiring\":${retiring}}"
     first=0
   done < "$INVENTORY_FILE"
   out+="]"
   status_model_refresh
-  local pools="[" pfirst=1 rec pool min max max_json idle configured effective label additional labels cpu_claim memory_claim seen=" " pending=0 blocked_reason="" resource_ok=0
+  local pools="[" pfirst=1 rec pool min max max_json idle configured effective label additional labels cpu_claim memory_claim seen=" " pending=0 blocked_reason="" resource_ok=0 pool_auto=false
   local assigned_jobs=-1 advertised_capacity=0 session_healthy=false remote_scale_set_id=null
   local ownership_state=classic tombstone=false orphan=false ss_desired=0 ss_admitted=0 ss_blocked=0 scale_status
   resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1 && resource_ok=1
@@ -3299,8 +3546,9 @@ cmd_status_json() {
       labels="$(pool_effective_labels "$pool" 2>/dev/null || printf '%s' "$label")"
       cpu_claim="$(pool_cpu_milli "$pool" 2>/dev/null || echo 0)"
       memory_claim="$(pool_memory_bytes "$pool" 2>/dev/null || echo 0)"
+      if pool_autoscale_enabled "$pool"; then pool_auto=true; else pool_auto=false; fi
       pending=0
-      if pool_mode_enabled && [ "$AUTOSCALE" != true ] && [ "${pc["$pool"]:-0}" -gt "$effective" ]; then
+      if pool_mode_enabled && [ "$pool_auto" != true ] && [ "${pc["$pool"]:-0}" -gt "$effective" ]; then
         pending=$(( ${pc["$pool"]:-0} - effective ))
         blockedc=$((blockedc + pending))
       fi
@@ -3324,14 +3572,14 @@ cmd_status_json() {
           blocked_reason="resource_capacity"
       fi
       [ "$pfirst" -eq 0 ] && pools+=","
-      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max_json},\"idle_buffer\":${idle},\"assigned_jobs\":${assigned_jobs},\"demand_fresh\":$([ "$assigned_jobs" -ge 0 ] 2>/dev/null && printf true || printf false),\"desired\":${ss_desired},\"admitted\":${ss_admitted},\"advertised_capacity\":${advertised_capacity},\"lease_age_seconds\":null,\"session_healthy\":${session_healthy},\"ownership_state\":\"$(printf '%s' "$ownership_state"|json_escape)\",\"remote_scale_set_id\":${remote_scale_set_id},\"tombstone\":${tombstone},\"orphan\":${orphan}}"
+      pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"$(printf '%s' "$label"|json_escape)\",\"routing_label\":\"$(printf '%s' "$label"|json_escape)\",\"additional_labels\":\"$(printf '%s' "$additional"|json_escape)\",\"effective_labels\":\"$(printf '%s' "$labels"|json_escape)\",\"cpu_milli\":${cpu_claim},\"memory_bytes\":${memory_claim},\"blocked_reason\":\"$(printf '%s' "$blocked_reason"|json_escape)\",\"autoscale_enabled\":${pool_auto},\"configured\":${configured},\"effective_target\":${effective},\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":${pending},\"min\":${min},\"max\":${max_json},\"idle_buffer\":${idle},\"assigned_jobs\":${assigned_jobs},\"demand_fresh\":$([ "$assigned_jobs" -ge 0 ] 2>/dev/null && printf true || printf false),\"desired\":${ss_desired},\"admitted\":${ss_admitted},\"advertised_capacity\":${advertised_capacity},\"lease_age_seconds\":null,\"session_healthy\":${session_healthy},\"ownership_state\":\"$(printf '%s' "$ownership_state"|json_escape)\",\"remote_scale_set_id\":${remote_scale_set_id},\"tombstone\":${tombstone},\"orphan\":${orphan}}"
       pfirst=0; seen="${seen}${pool} "
     done < <(pool_records)
   fi
   for pool in "${!pc[@]}"; do
     case "$seen" in *" $pool "*) continue ;; esac
     [ "$pfirst" -eq 0 ] && pools+=","
-    pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"\",\"configured\":0,\"effective_target\":0,\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":0,\"min\":0,\"max\":0,\"idle_buffer\":0}"
+    pools+="{\"id\":\"$(printf '%s' "$pool"|json_escape)\",\"label\":\"\",\"autoscale_enabled\":false,\"configured\":0,\"effective_target\":0,\"count\":${pc["$pool"]:-0},\"up\":${pup["$pool"]:-0},\"busy\":${pbusy["$pool"]:-0},\"idle\":${pidle["$pool"]:-0},\"starting\":${pstarting["$pool"]:-0},\"error\":${perror["$pool"]:-0},\"completed\":${pcompleted["$pool"]:-0},\"stale\":${pstale["$pool"]:-0},\"retiring\":${pretiring["$pool"]:-0},\"pending\":0,\"min\":0,\"max\":0,\"idle_buffer\":0}"
     pfirst=0
   done
   pools+="]"
@@ -3351,7 +3599,11 @@ cmd_status_json() {
     autoscale_max=0; configured_total=0
     while IFS= read -r rec; do
       pool="${rec%%|*}"
-      autoscale_max=$((autoscale_max + $(pool_capacity_ceiling "$pool")))
+      if pool_autoscale_enabled "$pool"; then
+        autoscale_max=$((autoscale_max + $(pool_capacity_ceiling "$pool")))
+      else
+        autoscale_max=$((autoscale_max + $(pool_effective_target "$pool")))
+      fi
       configured_total=$((configured_total + $(pool_configured_target "$pool")))
     done < <(pool_records)
   elif [ "$AUTOSCALE" = true ]; then configured_total="$AUTOSCALE_MIN"; fi
@@ -3467,15 +3719,32 @@ cmd_build_async() {
   # Log + lock on tmpfs (RUNDIR), NOT flash: a docker build streams thousands of
   # lines and appending each to /boot would hammer the USB stick. The log is only
   # needed for the current session's build, so losing it on reboot is fine.
-  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner
+  local expected="${1:-}" log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner source snapshot actual
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo '{"ok":false,"error":"valid saved Dockerfile hash required"}'; return 0; }
+  umask 077
   mkdir -p "$RUNDIR" 2>/dev/null
   exec 9> "$lock" || { echo '{"ok":false,"error":"could not open the build lock (runtime dir not writable?)"}'; return 0; }
+  chmod 0600 "$lock" || { echo '{"ok":false,"error":"could not secure the build lock"}'; return 0; }
   flock -n 9; local rc=$?
   if [ "$rc" -eq 0 ]; then
-    : > "$log"
-    inner="'$0' build-image >> '$log' 2>&1; echo \"__BUILD_RC__=\$?\" >> '$log'"
+    source="$CFGDIR/Dockerfile"; [ -f "$source" ] || source="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
+    [ -f "$source" ] && [ ! -L "$source" ] || { echo '{"ok":false,"error":"no safe Dockerfile found"}'; return 0; }
+    snapshot="$(mktemp "$RUNDIR/build.Dockerfile.XXXXXX" 2>/dev/null)" || { echo '{"ok":false,"error":"could not snapshot Dockerfile"}'; return 0; }
+    if ! cp "$source" "$snapshot" || ! chmod 0600 "$snapshot"; then
+      rm -f "$snapshot"; echo '{"ok":false,"error":"could not snapshot Dockerfile"}'; return 0
+    fi
+    actual="$(sha256sum "$snapshot" 2>/dev/null | awk '{print $1}')"
+    if [ "$actual" != "$expected" ]; then
+      rm -f "$snapshot"
+      echo '{"ok":false,"code":"stale_dockerfile","error":"Dockerfile changed after it was saved; review and save again"}'
+      return 0
+    fi
+    if ! : > "$log" || ! chmod 0600 "$log"; then
+      rm -f "$snapshot"; echo '{"ok":false,"error":"could not secure the build log"}'; return 0
+    fi
+    inner="'$0' build-image '$snapshot' >> '$log' 2>&1; build_rc=\$?; rm -f '$snapshot'; echo \"__BUILD_RC__=\$build_rc\" >> '$log'"
     nohup sh -c "$inner" </dev/null >/dev/null 2>&1 &
-    echo '{"ok":true,"action":"build-image"}'
+    printf '{"ok":true,"action":"build-image","dockerfile_sha":"%s"}\n' "$actual"
   elif [ "$rc" -eq 1 ]; then
     echo '{"ok":false,"error":"a build is already running"}'
   else
@@ -3487,9 +3756,14 @@ cmd_build_async() {
 # live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
 # from the __BUILD_RC__ sentinel only once the build is no longer running.
 cmd_build_status() {
-  local log="$RUNDIR/build.log" txt running rc n disp
-  txt="$([ -f "$log" ] && tail -n 120 "$log")"
-  if pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1; then running=true; else running=false; fi
+  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" txt running rc n disp
+  umask 077
+  mkdir -p "$RUNDIR" 2>/dev/null
+  exec 7> "$lock" || { echo '{"ok":false,"running":false,"rc":null,"log":"build status unavailable"}'; return 0; }
+  chmod 0600 "$lock" || { echo '{"ok":false,"running":false,"rc":null,"log":"build status unavailable"}'; return 0; }
+  if flock -n 7; then running=false; flock -u 7; else running=true; fi
+  [ ! -e "$log" ] || chmod 0600 "$log" 2>/dev/null || true
+  txt="$([ -f "$log" ] && [ ! -L "$log" ] && tail -n 120 "$log")"
   rc=null
   if [ "$running" = false ]; then
     n="$(printf '%s' "$txt" | grep -oE '__BUILD_RC__=[0-9]+' | tail -1 | grep -oE '[0-9]+')"
@@ -3508,12 +3782,47 @@ cmd_farm_log() {
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
 }
 
+# {ok,log} — bounded, already-sanitized output retained for a completed one-shot
+# runner. The web history screen uses this after the ephemeral container itself
+# has gone away, when `docker logs` can no longer serve the row drawer.
+cmd_history_log() {
+  local name="${1:-}" root dir txt entry file i
+  local -a newest=()
+  jit_id_valid "$name" || { printf '{"ok":false,"error":"invalid runner name"}\n'; return 0; }
+  root="$JIT_LOG_ROOT"; dir="$root/$name"
+  [ -d "$root" ] && [ ! -L "$root" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || {
+    printf '{"ok":true,"log":""}\n'; return 0;
+  }
+  # Select at most the eight newest regular files. Tail each one before joining
+  # them, so a runner directory with hundreds of rotated logs cannot make this
+  # request concatenate hundreds of MiB just to return 150 lines.
+  while IFS= read -r -d '' entry; do
+    newest+=("${entry#* }")
+    [ "${#newest[@]}" -ge 8 ] && break
+  done < <(find "$dir" -maxdepth 1 -type f \( -name 'Runner_*' -o -name 'Worker_*' \) \
+    -size -16M -printf '%T@ %p\0' 2>/dev/null | sort -z -nr)
+  txt="$({
+    for ((i=${#newest[@]}-1; i>=0; i--)); do
+      file="${newest[$i]}"
+      [ -f "$file" ] && [ ! -L "$file" ] && tail -n 150 -- "$file" 2>/dev/null
+    done
+  } | tail -n 150 |
+    sed -E -e 's/(github_pat_|gh[pousr]_)[A-Za-z0-9_]{8,}/[REDACTED]/g' \
+      -e 's/(registrationToken|runnerRequestId|authorization)["=: ]+([Bb]earer[[:space:]]+)?[A-Za-z0-9._+\\/=:-]{8,}/\1=[REDACTED]/Ig')"
+  printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
+}
+
 cmd_build_image() {
   # Build the runner image from the editable Dockerfile. Uses a CLEAN temp
   # context (only the Dockerfile) so the token/config never enter the build.
-  local df="$CFGDIR/Dockerfile"
-  [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
-  [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
+  local df="${1:-$CFGDIR/Dockerfile}"
+  if [ -n "${1:-}" ]; then
+    case "$df" in "$RUNDIR"/build.Dockerfile.*) ;; *) err "invalid Dockerfile snapshot"; return 1 ;; esac
+    [ -f "$df" ] && [ ! -L "$df" ] || { err "Dockerfile snapshot is unavailable"; return 1; }
+  else
+    [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
+    [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
+  fi
   local ctx; ctx="$(mktemp -d)"
   cp "$df" "$ctx/Dockerfile"
   log "building image '$BUILTIN_IMAGE' from $df"
@@ -3556,12 +3865,16 @@ cmd_boot_autostart() {
 
 cmd_validate_pools() {
   local mode="${1:-$RUNNER_MODE}" pools="${2:-$RUNNER_POOLS}" scope="${3:-$GH_SCOPE}" owner="${4-$GH_OWNER}"
+  local pool_selection="${5-${POOL_AUTOSCALE-inherit}}" previous="${POOL_AUTOSCALE-inherit}" rc=0
+  POOL_AUTOSCALE="$pool_selection"
   if pool_config_validate "$mode" "$pools" "$scope" "$owner"; then
     printf '{"ok":true}\n'
   else
     printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
-    return 1
+    rc=1
   fi
+  POOL_AUTOSCALE="$previous"
+  return "$rc"
 }
 
 case "${1:-status}" in
@@ -3574,7 +3887,8 @@ case "${1:-status}" in
     if [ -n "${3:-}" ]; then with_fleet_lock wait cmd_scale "${2}" "${3}"
     else with_fleet_lock wait cmd_scale "${2:?usage: scale [pool] <N>}"; fi ;;
   validate-pools)
-    if [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
+    if [ "$#" -ge 6 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6"
+    elif [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
     else cmd_validate_pools "${2:-}" "${3:-}" "${4:-}"; fi ;;
   config-revision) config_revision ;;
   apply-config) with_fleet_lock wait cmd_apply_config "${2:-}" "${3:-}" ;;
@@ -3585,6 +3899,7 @@ case "${1:-status}" in
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
   queued-refresh) cmd_queued_refresh ;;
+  cancel-run) cmd_cancel_run "${2:-}" "${3:-}" ;;
   cache-usage-json) cmd_cache_usage_json ;;
   cache-usage-refresh) cmd_cache_usage_refresh ;;
   usage-refresh) cmd_usage_refresh ;;
@@ -3598,10 +3913,11 @@ case "${1:-status}" in
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         cmd_validate ;;
-  build-image)      cmd_build_image ;;
-  build-async)      cmd_build_async ;;
+  build-image)      cmd_build_image "${2:-}" ;;
+  build-async)      cmd_build_async "${2:-}" ;;
   build-status)     cmd_build_status ;;
   farm-log)         cmd_farm_log ;;
+  history-log)      cmd_history_log "${2:?usage: history-log <name>}" ;;
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;

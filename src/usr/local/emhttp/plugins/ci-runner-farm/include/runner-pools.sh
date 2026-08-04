@@ -24,6 +24,40 @@ pool_error() {
   return 1
 }
 
+# POOL_AUTOSCALE is an explicit comma-separated set of pool IDs.  The
+# "inherit" sentinel preserves pre-field configurations: the legacy global
+# AUTOSCALE switch then applies to every pool.  An empty explicit value means
+# every pool is fixed.
+pool_autoscale_validate() {
+  local raw="${POOL_AUTOSCALE-inherit}" ids="$1" id seen=" " oldifs
+  [ "$raw" = inherit ] && return 0
+  [ -z "$raw" ] && return 0
+  case "$raw" in
+    *[$'\r\n\t ']*|','*|*','|*',,'*)
+      pool_error "Per-pool autoscale IDs must be a canonical comma-separated list." "pool_autoscale"
+      return 1
+      ;;
+  esac
+  oldifs="$IFS"; IFS=','
+  # shellcheck disable=SC2206 # strict comma grammar validated above
+  local chosen_ids=($raw)
+  IFS="$oldifs"
+  for id in "${chosen_ids[@]}"; do
+    pool_id_valid "$id" || {
+      pool_error "Per-pool autoscale contains invalid pool id '$id'." "pool_autoscale"
+      return 1
+    }
+    case "$ids" in
+      *" $id "*) ;;
+      *) pool_error "Per-pool autoscale references unknown pool '$id'." "pool_autoscale"; return 1 ;;
+    esac
+    case "$seen" in
+      *" $id "*) pool_error "Per-pool autoscale repeats pool '$id'." "pool_autoscale"; return 1 ;;
+    esac
+    seen="${seen}${id} "
+  done
+}
+
 pool_id_valid() {
   [[ "$1" =~ ^[a-z]([a-z0-9-]{0,22}[a-z0-9])?$ ]]
 }
@@ -78,6 +112,9 @@ parse_cpu_milli() {
 
 parse_memory_bytes() {
   local value="${1,,}" number suffix multiplier
+  # Accept the human-readable values shown by the UI (for example `6 GiB`)
+  # while preserving the same canonical byte representation internally.
+  value="${value//[[:space:]]/}"
   [ "$value" = "inherit" ] && { printf 'inherit\n'; return 0; }
   [[ "$value" =~ ^([1-9][0-9]*)(b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib)?$ ]] || return 1
   number="${BASH_REMATCH[1]}"
@@ -278,8 +315,9 @@ pool_config_validate() {
       { pool_error "Runner pool maximum capacity ($sum_max) exceeds the fleet hard maximum ($POOL_HARD_MAX)." "max"; return 1; }
   fi
   POOL_CONFIG_VERSION="$version"
+  pool_autoscale_validate "$ids" || return 1
   pool_policy_validate "${POOL_BACKEND:-classic}" || return 1
-  POOL_CONFIG_REVISION="$(printf '%s' "${mode}|${version}|${POOL_RECORDS}|${AUTOSCALE:-false}" | sha256sum | cut -d' ' -f1)"
+  POOL_CONFIG_REVISION="$(printf '%s' "${mode}|${version}|${POOL_RECORDS}|${AUTOSCALE:-false}|${POOL_AUTOSCALE-inherit}" | sha256sum | cut -d' ' -f1)"
 }
 
 pool_policy_validate() {
@@ -302,7 +340,7 @@ pool_mode_enabled() {
 }
 
 pool_snapshot_load() {
-  local input="${RUNNER_MODE:-single}|${RUNNER_POOLS:-}|${GH_SCOPE:-repo}|${GH_OWNER:-}|${POOL_BACKEND:-classic}|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}|${AUTOSCALE:-false}"
+  local input="${RUNNER_MODE:-single}|${RUNNER_POOLS:-}|${GH_SCOPE:-repo}|${GH_OWNER:-}|${POOL_BACKEND:-classic}|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}|${AUTOSCALE:-false}|${POOL_AUTOSCALE-inherit}"
   [ "$input" = "$POOL_SNAPSHOT_INPUT" ] && [ -n "$POOL_CONFIG_REVISION" ] && return 0
   pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" "${GH_OWNER:-}" || return 1
   POOL_SNAPSHOT_INPUT="$input"
@@ -431,12 +469,23 @@ pool_config_revision() {
 pool_runner_spec_hash() {
   local id="$1" rec
   rec="$(pool_record "$id")" || return 1
-  printf '%s' "${RUNNER_MODE:-single}|${POOL_CONFIG_VERSION}|${POOL_BACKEND:-classic}|${AUTOSCALE:-false}|$rec|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}" |
+  printf '%s' "${RUNNER_MODE:-single}|${POOL_CONFIG_VERSION}|${POOL_BACKEND:-classic}|${AUTOSCALE:-false}|${POOL_AUTOSCALE-inherit}|$rec|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}" |
     sha256sum | cut -d' ' -f1
 }
 
+pool_autoscale_enabled() {
+  local pool="${1:-default}" pool_selection="${POOL_AUTOSCALE-inherit}"
+  [ "${AUTOSCALE:-false}" = true ] || return 1
+  pool_mode_enabled || return 0
+  [ "$pool_selection" = inherit ] && return 0
+  case ",$pool_selection," in
+    *",$pool,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 pool_configured_target() {
-  if [ "${AUTOSCALE:-false}" = "true" ]; then pool_min "$1"; else pool_fixed "$1"; fi
+  if pool_autoscale_enabled "$1"; then pool_min "$1"; else pool_fixed "$1"; fi
 }
 
 # Compatibility alias for existing tmpfs state names. New protocols must use

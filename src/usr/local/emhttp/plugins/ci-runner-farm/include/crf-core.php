@@ -1,7 +1,7 @@
 <?php
 /* Shared CI Runner Farm web core — the crf* JS helpers, the @unraid/ui force-loader,
-   and the shared .crf-* styles used by ALL four RunnerFarm tabs (Fleet/Pools/
-   Image/Settings). include_once'd from the top of each tab so the dependency is EXPLICIT
+   and the shared .crf-* styles used by every RunnerFarm screen. include_once'd from
+   the top of each page so the dependency is EXPLICIT
    and load-order-independent, instead of living inside the Fleet tab and being
    relied on by document order (renaming crfPost or reordering the tab ordinals used
    to silently break the other tabs). Emitted once per document via include_once.
@@ -13,9 +13,157 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   $crf_util_css = '/plugins/dynamix.my.servers/unraid-components/standalone/' . basename($f);
   break;
 }
+if (!function_exists('crf_render_shell')) {
+  /** Render the product-local navigation shared by every CI Runner Farm screen. */
+  function crf_render_shell(string $active = 'runners', string $settings_tab = ''): void {
+    $primary = [
+      'runners' => ['Runners', '/Utilities/RunnerFarm/RunnerFarmFleet', 'fa-server'],
+      'history' => ['History', '/Utilities/RunnerFarm/RunnerFarmHistory', 'fa-history'],
+      'logs' => ['Logs', '/Utilities/RunnerFarm/RunnerFarmLogs', 'fa-file-text-o'],
+      'settings' => ['Settings', '/Utilities/RunnerFarm/RunnerFarmSettings', 'fa-cog'],
+    ];
+    $secondary = [
+      'general' => ['General', '/Utilities/RunnerFarm/RunnerFarmSettings'],
+      'pools' => ['Pools', '/Utilities/RunnerFarm/RunnerFarmPools'],
+      'image' => ['Runner image', '/Utilities/RunnerFarm/RunnerFarmImage'],
+    ];
+    ?>
+    <header class="crf-app-header">
+      <div class="crf-app-brand-rail" aria-hidden="true"></div>
+      <div class="crf-app-header-inner">
+        <a class="crf-app-brand" href="/Utilities/RunnerFarm/RunnerFarmFleet" aria-label="CI Runner Farm runners">
+          <span class="crf-app-brand-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/brand-server.svg" alt=""></span>
+          <span class="crf-app-brand-copy"><strong>Runner Farm</strong><small>ci-runner-farm</small></span>
+        </a>
+        <span class="crf-app-status crf-app-status-neutral" id="crf-shell-status" role="status">
+          <span class="crf-app-status-dot" aria-hidden="true"></span>
+          <span id="crf-shell-status-label">Connecting&hellip;</span>
+        </span>
+        <nav class="crf-primary-nav" aria-label="CI Runner Farm">
+          <?php foreach ($primary as $key => [$label, $href, $icon]): ?>
+            <a class="crf-primary-tab<?= $active === $key ? ' is-active' : '' ?>"
+               href="<?=htmlspecialchars($href, ENT_QUOTES)?>"
+               <?= $active === $key ? 'aria-current="page"' : '' ?>
+               data-crf-primary-key="<?=htmlspecialchars($key, ENT_QUOTES)?>"
+               data-rf-tab-label>
+              <i class="fa <?=$icon?> crf-primary-icon" aria-hidden="true"></i>
+              <span class="crf-primary-label"><?=$label?></span>
+              <?php if ($key === 'runners'): ?><span class="crf-primary-count" id="crf-shell-count">&ndash;</span><?php endif; ?>
+            </a>
+          <?php endforeach; ?>
+        </nav>
+      </div>
+    </header>
+    <?php if ($active === 'settings'): ?>
+      <nav class="crf-settings-nav" aria-label="Settings sections">
+        <?php foreach ($secondary as $key => [$label, $href]): ?>
+          <a class="crf-settings-tab<?= $settings_tab === $key ? ' is-active' : '' ?>"
+             href="<?=htmlspecialchars($href, ENT_QUOTES)?>"
+             <?= $settings_tab === $key ? 'aria-current="page"' : '' ?>><?=$label?></a>
+        <?php endforeach; ?>
+      </nav>
+    <?php endif; ?>
+    <?php
+  }
+}
 ?>
 <style>
-  :root{--crf-ok:#4caf50;--crf-busy:var(--brand-orange,#ff8c2f);--crf-err:var(--brand-red,#e22828);--crf-info:var(--link-text-color,#29b6f6)}
+  :root{--crf-ok:#63a659;--crf-busy:#ff8c2f;--crf-err:#e22828;--crf-info:var(--link-text-color,#29b6f6);--crf-bg:#f2f2f2;--crf-panel:#fff;--crf-panel-soft:#fafafa;--crf-ink:#1c1b1b;--crf-ink-2:#525252;--crf-ink-3:#737373;--crf-ink-4:#a3a3a3;--crf-border:#e5e5e5;--crf-border-soft:#f0f0f0;--crf-orange-soft:#ffedd5;--crf-orange-ink:#9a3412;--crf-success-soft:#d0e6cc;--crf-success-ink:#314e2d;--crf-warning-soft:#fef9c3;--crf-warning-ink:#8a6914;--crf-error-soft:#ffe1e1;--crf-error-ink:#9c1818;--crf-shadow:0 4px 6px -1px rgba(0,0,0,.08)}
+  body:has(.crf-app-header){background:var(--crf-bg);color:var(--crf-ink);font-family:clear-sans,ui-sans-serif,system-ui,sans-serif}
+  body:has(.crf-app-header) #header,body:has(.crf-app-header) #menu,body:has(.crf-app-header) #footer{display:none!important}
+  body:has(.crf-app-header) #displaybox{width:100%!important;max-width:none!important;margin:0!important;padding:0!important}
+  body:has(.crf-app-header) #displaybox>.content{width:100%!important;margin:0!important;padding:0!important;overflow:visible!important}
+  body:has(.crf-app-header) #displaybox>.content>div.title{display:none!important;margin:0!important;padding:0!important}
+  .crf-app-header,.crf-app-header *,.crf-app-main,.crf-app-main *,.crf-settings-nav,.crf-settings-nav *{box-sizing:border-box}
+  .crf-app-header{position:relative;width:100vw;margin-left:calc(50% - 50vw);background:#fff;border-bottom:1px solid var(--crf-border);box-shadow:0 1px 2px rgba(0,0,0,.04);z-index:20}
+  .crf-app-brand-rail{height:3px;background:linear-gradient(90deg,#e22828,#ff8c2f)}
+  .crf-app-header-inner{height:60px;max-width:1440px;margin:0 auto;padding:0 20px;display:flex;align-items:center;gap:14px}
+  .crf-app-brand{display:flex;align-items:center;gap:10px;min-width:0;color:var(--crf-ink)!important;text-decoration:none!important}
+  .crf-app-brand-icon{width:32px;height:32px;border-radius:7px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);display:grid;place-items:center;flex:none;font-size:14px}
+  .crf-app-brand-icon img{display:block;width:16px;height:16px}
+  .crf-app-brand-copy{display:flex;flex-direction:column;min-width:0;line-height:1.15}
+  .crf-app-brand-copy strong{font-size:16px;font-weight:600;white-space:nowrap}
+  .crf-app-brand-copy small{font:10.5px/1.15 ui-monospace,Menlo,monospace;color:var(--crf-ink-4);white-space:nowrap}
+  .crf-app-status{display:inline-flex;align-items:center;gap:6px;border-radius:9999px;font-size:12px;font-weight:600;padding:4px 10px;white-space:nowrap}
+  .crf-app-status-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+  .crf-app-status-neutral{background:#e5e5e5;color:var(--crf-ink-2)}
+  .crf-app-status-idle{background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crf-app-status-busy{background:var(--crf-orange-soft);color:var(--crf-orange-ink)}
+  .crf-app-status-down{background:var(--crf-error-soft);color:var(--crf-error-ink)}
+  .crf-primary-nav{margin-left:auto;display:inline-flex;align-items:center;border-radius:6px;background:#e5e5e5;padding:5px;gap:2px;max-width:100%;overflow-x:auto}
+  .crf-primary-tab{position:relative;display:inline-flex;align-items:center;gap:6px;justify-content:center;border-radius:6px;padding:6px 14px;color:var(--crf-ink)!important;font-size:14px;font-weight:500;text-decoration:none!important;white-space:nowrap;transition:background .15s,color .15s}
+  .crf-primary-tab:hover{background:#f5f5f5;text-decoration:none!important}
+  .crf-primary-tab.is-active{background:#ff6600;color:#fff!important}
+  .crf-primary-tab.has-dirty::after{content:"";position:absolute;top:4px;right:5px;width:6px;height:6px;border-radius:50%;background:#e9bf41}
+  .crf-primary-count{font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;border-radius:9999px;padding:1px 7px;background:#d4d4d4;color:var(--crf-ink-2)}
+  .crf-primary-tab.is-active .crf-primary-count{background:rgba(255,255,255,.25);color:#fff}
+  .crf-settings-nav{width:max-content;max-width:calc(100vw - 40px);min-height:36px;margin:20px 0 0 max(20px,calc((100vw - 1440px)/2));display:flex;align-items:center;border-radius:6px;background:#e5e5e5;padding:4px;gap:2px}
+  .crf-settings-tab{display:inline-flex;align-items:center;justify-content:center;padding:5px 14px;border-radius:5px;color:var(--crf-ink-3)!important;font-size:13px;font-weight:600;text-decoration:none!important;white-space:nowrap}
+  .crf-settings-tab:hover{color:var(--crf-ink)!important;text-decoration:none!important}
+  .crf-settings-tab.is-active{background:#fff;color:var(--crf-ink)!important;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  .crf-app-main{width:calc(100vw - 40px);max-width:1440px;margin:0 auto;padding:20px 0;display:flex;flex-direction:column;gap:16px;color:var(--crf-ink)}
+  .crf-settings-nav + .crf-app-main{padding-top:16px}
+  .crf-surface{background:var(--crf-panel);border:2px solid #f5f5f5;border-radius:6px;box-shadow:var(--crf-shadow);overflow:hidden}
+  .crf-page-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:20px 24px 16px;min-height:99px;flex-wrap:wrap}
+  .crf-eyebrow{display:block;font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}
+  .crf-page-title{margin:6px 0 0;font-size:26px;line-height:normal;font-weight:600;letter-spacing:-.02em;color:var(--crf-ink)}
+  .crf-page-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .crf-button{height:34px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:6px;border:1px solid #d4d4d4;background:#fff;color:var(--crf-ink);font:600 13px/1 clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer;text-decoration:none!important;white-space:nowrap;transition:background .15s,border-color .15s,box-shadow .15s}
+  .crf-button:hover{background:#f5f5f5;text-decoration:none!important}
+  .crf-button-primary{background:#ff5a1f;border-color:#ff5a1f;color:#fff!important;box-shadow:0 2px 4px rgba(226,40,40,.18)}
+  .crf-button-primary:hover{background:#e94e17;border-color:#e94e17}
+  .crf-button-dark{background:#1c1b1b;border-color:#1c1b1b;color:#fff!important}
+  .crf-button-dark:hover{background:#383735;border-color:#383735}
+  .crf-button-compact{height:28px;padding:0 12px;font-size:12px}
+  .crf-icon-button{width:34px;padding:0}
+  .crf-filter-chip{height:25px;padding:0 13px;border-radius:9999px;border:1px solid var(--crf-border);background:#fff;color:var(--crf-ink-3);font:600 11.5px/1 clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
+  .crf-filter-chip.is-active{border-color:transparent;background:#e5e5e5;color:var(--crf-ink)}
+  .crf-input,.crf-select{height:36px;border:1px solid #d4d4d4;border-radius:6px;background:#fff;color:var(--crf-ink);padding:0 12px;font:13.5px clear-sans,ui-sans-serif,system-ui,sans-serif}
+  .crf-input::placeholder{color:var(--crf-ink-4)}
+  .crf-section-label{font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}
+  .crf-mono{font-family:ui-monospace,Menlo,monospace}
+  .crf-app-header :focus-visible,.crf-settings-nav :focus-visible,.crf-app-main button:focus-visible,.crf-app-main input:focus-visible,.crf-app-main select:focus-visible,.crf-app-main textarea:focus-visible,.crf-app-main [tabindex]:focus-visible{outline:2px solid #ff6600;outline-offset:2px}
+  .crf-primary-icon{display:none}
+  @media(max-width:760px){
+    body:has(.crf-app-header){padding-bottom:calc(74px + env(safe-area-inset-bottom,0px));overflow-x:hidden}
+    .crf-app-header{position:sticky;top:0;z-index:80;width:100%;margin-left:0}
+    .crf-app-brand-rail{height:2px}
+    .crf-app-header-inner{height:56px;padding:0 14px;gap:10px}
+    .crf-app-brand{flex:1;min-width:0;min-height:44px}
+    .crf-app-brand-icon{width:36px;height:36px;border-radius:10px}
+    .crf-app-brand-icon img{width:18px;height:18px}
+    .crf-app-brand-copy strong{font-size:17px}
+    .crf-app-brand-copy small{display:none}
+    .crf-app-status{max-width:42vw;padding:4px 9px;font-size:11px;overflow:hidden;text-overflow:ellipsis}
+    .crf-primary-nav{position:fixed;left:0;right:0;bottom:0;z-index:100;width:100%;height:calc(66px + env(safe-area-inset-bottom,0px));margin:0;padding:6px 8px calc(6px + env(safe-area-inset-bottom,0px));display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;border:1px solid rgba(0,0,0,.08);border-bottom:0;border-radius:18px 18px 0 0;background:rgba(255,255,255,.96);box-shadow:0 -8px 24px rgba(0,0,0,.12);overflow:visible;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+    .crf-primary-tab{min-width:0;height:52px;padding:5px 2px;display:flex;flex-direction:column;gap:3px;border-radius:11px;font-size:10.5px;font-weight:600;color:var(--crf-ink-2)!important}
+    .crf-primary-tab:hover{background:#fff7ed}
+    .crf-primary-tab.is-active{background:var(--crf-orange-soft);color:#e94e17!important}
+    .crf-primary-icon{display:block;font-size:18px;line-height:1}
+    .crf-primary-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .crf-primary-count{position:absolute;top:3px;left:calc(50% + 7px);min-width:17px;padding:1px 5px;background:#e5e5e5;color:var(--crf-ink-2);font-size:9px;text-align:center}
+    .crf-primary-tab.is-active .crf-primary-count{background:#fff;color:#e94e17}
+    .crf-app-main{width:calc(100vw - 24px);max-width:none;margin:0 auto;padding:12px 0 calc(18px + env(safe-area-inset-bottom,0px));gap:12px}
+    .crf-settings-nav{position:sticky;top:56px;z-index:70;width:calc(100vw - 24px);max-width:none;min-height:46px;margin:12px auto 0;padding:4px;display:grid;grid-template-columns:repeat(3,minmax(max-content,1fr));overflow-x:auto;box-shadow:0 4px 12px rgba(0,0,0,.08)}
+    .crf-settings-tab{min-height:44px;padding:8px 12px;font-size:12px}
+    .crf-settings-nav + .crf-app-main{padding-top:12px}
+    .crf-surface{border-width:1px;border-radius:12px;box-shadow:0 3px 10px rgba(0,0,0,.07)}
+    .crf-page-hero{min-height:0;padding:16px;align-items:center;gap:12px}
+    .crf-page-title{font-size:24px;line-height:1.15}
+    .crf-page-actions{gap:8px;flex-wrap:nowrap}
+    .crf-button{min-height:44px;height:44px;padding:0 14px;font-size:13px}
+    .crf-button-compact{min-height:40px;height:40px;padding:0 12px}
+    .crf-icon-button{width:44px;padding:0}
+    .crf-filter-chip{min-width:44px;height:38px;padding:0 13px;font-size:12px}
+    .crf-input,.crf-select{height:44px;font-size:16px}
+    .crf-banner{padding:12px 14px;font-size:13px}
+    .crf-toast{right:12px;bottom:calc(78px + env(safe-area-inset-bottom,0px));max-width:calc(100vw - 24px)}
+  }
+  @media(max-width:390px){
+    .crf-app-status{display:none}
+    .crf-app-brand-copy strong{font-size:16px}
+    .crf-primary-tab{font-size:10px}
+  }
   .crf-muted{color:var(--alt-text-color)}
   .crf-banner{margin:6px 0 8px;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.4}
   .crf-banner-sec{border:1px solid var(--crf-busy);background:color-mix(in srgb,var(--crf-busy) 12%,var(--background-color));color:var(--text-color);font-weight:bold}
@@ -99,6 +247,49 @@ function crfPost(p){
       try{ return JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); }
     }));
 }
+/* Keep the product-local shell live on every direct screen. Fleet already
+   refreshes this state as part of its five-second snapshot; the other direct
+   routes do not load Fleet's script, so they need this lightweight shared
+   read-only poll for the header status and runner count. */
+function crfSetShellState(up,busy){
+  const status=document.getElementById('crf-shell-status'), label=document.getElementById('crf-shell-status-label'), count=document.getElementById('crf-shell-count');
+  if(count) count.textContent=Number.isFinite(Number(up))?String(up):'\u2013';
+  if(!status||!label) return;
+  status.classList.remove('crf-app-status-neutral','crf-app-status-idle','crf-app-status-busy','crf-app-status-down');
+  if(!up){ status.classList.add('crf-app-status-down'); label.textContent='Stopped'; }
+  else if(busy){ status.classList.add('crf-app-status-busy'); label.textContent=busy+' busy'; }
+  else { status.classList.add('crf-app-status-idle'); label.textContent='All idle'; }
+}
+function crfShellRefresh(){
+  const screen=document.querySelector('.crf-app-main')?.dataset.screenLabel;
+  if(screen==='Runners') return; // Fleet's richer snapshot already owns this header.
+  crfPost({action:'status-json'}).then(d=>{
+    if(!d||d.schema_version!==2||!Array.isArray(d.runners)) throw new Error('malformed shell snapshot');
+    const running=d.runners.filter(r=>r&&r.state==='running');
+    crfSetShellState(running.length,running.filter(r=>r.phase==='busy').length);
+  }).catch(()=>{
+    const status=document.getElementById('crf-shell-status'), label=document.getElementById('crf-shell-status-label');
+    if(status){status.classList.remove('crf-app-status-idle','crf-app-status-busy');status.classList.add('crf-app-status-neutral');}
+    if(label) label.textContent='Unavailable';
+  });
+}
+document.addEventListener('DOMContentLoaded',()=>{crfShellRefresh();setInterval(crfShellRefresh,15000);},{once:true});
+document.addEventListener('DOMContentLoaded',()=>{
+  const settings=document.querySelector('[data-crf-primary-key="settings"]');
+  if(settings&&!settings.hasAttribute('aria-current')){
+    let dirty=false;try{dirty=!!(sessionStorage.getItem('ci-runner-farm:settings-draft:v1')||sessionStorage.getItem('ci-runner-farm:pools-draft:v1'));}catch(_error){}
+    settings.classList.toggle('has-dirty',dirty);
+  }
+},{once:true});
+const CRF_PRIMARY_ROUTES=['/Utilities/RunnerFarm/RunnerFarmFleet','/Utilities/RunnerFarm/RunnerFarmHistory','/Utilities/RunnerFarm/RunnerFarmLogs','/Utilities/RunnerFarm/RunnerFarmSettings'];
+document.addEventListener('keydown',event=>{
+  if(event.metaKey||event.ctrlKey||event.altKey||event.defaultPrevented)return;
+  const target=event.target;
+  if(target?.closest?.('input,textarea,select,button,a,[contenteditable="true"],[role="dialog"]'))return;
+  if([...document.querySelectorAll('dialog[open],[aria-modal="true"],.sweet-alert,.swal-modal,.modal.show,.modal.in')].some(modal=>modal.getAttribute('aria-hidden')!=='true'&&modal.getClientRects().length>0))return;
+  const key=Number(event.key);if(!Number.isInteger(key)||key<1||key>CRF_PRIMARY_ROUTES.length)return;
+  event.preventDefault();location.assign(CRF_PRIMARY_ROUTES[key-1]);
+});
 /* Copy text to the clipboard, feature-detecting the async Clipboard API (absent
    in insecure contexts — Unraid's LAN webGUI is often plain HTTP, where
    navigator.clipboard is undefined and .writeText would throw synchronously) and

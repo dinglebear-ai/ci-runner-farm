@@ -28,6 +28,16 @@ need "expected_config_revision"
 need "settings snapshot contains no allowed fields or includes an unknown field"
 need "tempnam(\$CFGDIR, '.apply.')"
 need "function_exists('fsync')"
+need 'function github_pat_validate($token)'
+need 'CURLOPT_CONNECTTIMEOUT_MS => 3000'
+need 'CURLOPT_TIMEOUT_MS => 8000'
+need 'CURLOPT_MAXFILESIZE => 65536'
+need 'CURLOPT_WRITEFUNCTION => function($handle, $chunk)'
+need 'github_pat_body_append($body, $tooLarge, $chunk)'
+need 'write_private_atomic("$CFGDIR/token", $tok)'
+need "'dockerfile_sha' => \$dockerfileSha"
+need "post_scalar('dockerfile_sha', 64, true, true)"
+need "build-async ' . escapeshellarg(\$dockerfileSha)"
 need '$_POST[$key]'
 if grep -Fq '$_REQUEST' "$EXEC"; then fail 'exec.php still reads the mixed GET/POST request bag'; fi
 grep -Fq 'json_encode($crf_csrf' "$CORE" || fail 'CSRF token is interpolated into JavaScript without JSON encoding'
@@ -53,5 +63,32 @@ php -r '
   if (bounded_request_string(["FROM scratch"], 1048576) !== false) exit(4);
   if (bounded_request_string(" value ", 4096, true) !== "value") exit(5);
 ' "$EXEC" || fail 'bounded request-string validator failed array-payload execution test'
+
+# Exercise the pure interpretation of GitHub's live validation response without
+# sending a credential or depending on the network in this test.
+php -r '
+  $src=file_get_contents($argv[1]);
+  if (!preg_match("/function github_pat_validation_result.*?(?=\\nfunction github_pat_validate)/s",$src,$m)) exit(2);
+  eval($m[0]);
+  $ok=github_pat_validation_result(200,"{\"login\":\"octocat\",\"id\":1}",0);
+  if (!($ok["ok"]??false) || ($ok["login"]??"")!=="octocat") exit(3);
+  $bad=github_pat_validation_result(401,"{}",0);
+  if (($bad["code"]??"")!=="invalid_github_token" || !str_contains($bad["error"]??"","existing token was kept")) exit(4);
+  $offline=github_pat_validation_result(0,false,28);
+  if (($offline["code"]??"")!=="github_unreachable") exit(5);
+' "$EXEC" || fail 'GitHub PAT validation response handling failed'
+
+# Content-Length is optional and compressed/chunked bodies can expand beyond
+# CURLOPT_MAXFILESIZE. Exercise the actual write callback helper to prove the
+# retained body aborts at 64 KiB without appending the overflowing chunk.
+php -r '
+  $src=file_get_contents($argv[1]);
+  if (!preg_match("/function github_pat_body_append.*?(?=\\nfunction github_pat_validation_result)/s",$src,$m)) exit(2);
+  eval($m[0]);
+  $body="";$tooLarge=false;
+  if (github_pat_body_append($body,$tooLarge,str_repeat("a",65535))!==65535) exit(3);
+  if (github_pat_body_append($body,$tooLarge,"b")!==1 || strlen($body)!==65536 || $tooLarge) exit(4);
+  if (github_pat_body_append($body,$tooLarge,"c")!==0 || !$tooLarge || strlen($body)!==65536) exit(5);
+' "$EXEC" || fail 'GitHub PAT validation response body is not hard-capped at 64 KiB'
 
 echo 'php-actions: OK'

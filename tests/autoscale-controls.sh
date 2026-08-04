@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENGINE="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"
+POOLS="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-pools.sh"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # The autoscaler must bypass the manual scale-up guard, while the public command
@@ -28,6 +29,7 @@ sed -n '/^cmd_scale()/,/^}/p' "$ENGINE" | grep -q 'exceeds autoscale max' || fai
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 sed -n '/^cmd_scale()/,/^}/p' "$ENGINE" > "$tmp"
+sed -n '/^pool_autoscale_enabled()/,/^}/p' "$POOLS" >> "$tmp"
 # shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
 . "$tmp"
 err() { :; }
@@ -40,6 +42,7 @@ cmd_scale_internal() { called="$1"; }
 RUNDIR="$(mktemp -d)"
 trap 'rm -f "$tmp"; rm -rf "$RUNDIR"' EXIT
 export AUTOSCALE=true
+export POOL_AUTOSCALE=inherit
 export AUTOSCALE_MAX=6
 cmd_scale 6 || fail 'autoscale manual scale-up rejected'
 [ "$called" = 6 ] || fail 'autoscale manual scale-up did not reach internal scaler'
@@ -59,19 +62,23 @@ cmd_scale python 6 || fail 'pool autoscale manual scale-up rejected'
 [ "$called" = python:6 ] || fail 'pool autoscale scale-up targeted the wrong pool'
 if cmd_scale python 9; then fail 'pool autoscale scale above pool max accepted'; fi
 
-# Fixed pool scaling persists an override and starts the drain worker when busy
+# A fixed peer remains bidirectional even while the global daemon is on for an
+# automatic pool. Its target persists and starts the drain worker when busy
 # excess capacity prevents the immediate target from being reached.
-AUTOSCALE=false
-pool_records() { echo 'python|3|1|8|1'; }
+AUTOSCALE=true
+POOL_AUTOSCALE=python
+pool_record() { [ "$1" = python ] || [ "$1" = rust ]; }
+pool_records() { printf 'python|3|1|8|1\nrust|3|1|8|1\n'; }
 pool_effective_target() { echo 3; }
 reconcile_called=0
 reconcile_start() { reconcile_called=1; }
 called=''
 cmd_scale_internal() { called="$1:$2"; }
-cmd_scale python 1 || fail 'fixed pool scale-down rejected'
-[ "$called" = python:1 ] || fail 'fixed scale targeted the wrong pool'
+cmd_scale rust 1 || fail 'fixed peer scale-down was rejected while the daemon was on'
+[ "$called" = rust:1 ] || fail 'fixed scale targeted the wrong pool'
 [ "$reconcile_called" = 1 ] || fail 'busy fixed scale-down did not start persistent reconciliation'
-[ "$(cat "$RUNDIR/scale-override.python.test")" = 1 ] || fail 'fixed runtime override was not persisted'
+[ "$(cat "$RUNDIR/scale-override.rust.test")" = 1 ] || fail 'fixed runtime override was not persisted'
+POOL_AUTOSCALE=inherit
 
 # Pool ticks are globally bounded and rotated so the first configured pool
 # cannot monopolize every cycle.
@@ -162,12 +169,15 @@ jit_paths_refresh() { :; }
 reload_cfg="$RUNDIR/reload.cfg"
 CFG="$reload_cfg"
 printf 'RUNNER_MODE="pools"\nRUNNER_POOLS="python|1|1|2|1"\n' > "$CFG"
+printf 'POOL_AUTOSCALE="python"\n' >> "$CFG"
 load_cfg
 [ "$RUNNER_MODE" = pools ] || fail 'pool config did not load for hot-reload regression'
+[ "$POOL_AUTOSCALE" = python ] || fail 'per-pool autoscale config did not load for hot-reload regression'
 printf 'RUNNER_COUNT="2"\n' > "$CFG"
 load_cfg
 [ "$RUNNER_MODE" = single ] || fail 'legacy config reload retained stale pool mode'
 [ "$RUNNER_POOLS" = default-pool-records ] || fail 'legacy config reload retained stale pool records'
+[ "$POOL_AUTOSCALE" = inherit ] || fail 'legacy config reload retained stale per-pool autoscale selection'
 rm -f "$reload_tmp"
 
 # Autoscale shutdown must identify the daemon by exact argv, never by a broad

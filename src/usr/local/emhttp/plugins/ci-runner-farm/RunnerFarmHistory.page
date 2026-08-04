@@ -1,0 +1,441 @@
+Menu="RunnerFarm:2"
+Title="History"
+Tag="history"
+---
+<?php
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
+crf_render_shell('history');
+?>
+
+<main class="crf-app-main" data-screen-label="History">
+  <section class="crf-surface crfh-activity" aria-labelledby="crfh-activity-title">
+    <header class="crfh-toolbar">
+      <div class="crfh-heading">
+        <span class="crf-section-label" id="crfh-activity-title">Recent one-shot activity</span>
+        <span class="crfh-subtitle">completed runners</span>
+      </div>
+      <div class="crfh-controls">
+        <div class="crfh-result-filters" role="group" aria-label="Filter activity by result">
+          <button type="button" class="crf-filter-chip is-active" data-crfh-result="all" aria-pressed="true">All</button>
+          <button type="button" class="crf-filter-chip crfh-chip-success" data-crfh-result="success" aria-pressed="false">Success</button>
+          <button type="button" class="crf-filter-chip crfh-chip-failure" data-crfh-result="failure" aria-pressed="false">Failure</button>
+        </div>
+        <label class="crfh-control-label">
+          <select class="crf-select" id="crfh-pool" aria-label="Filter activity by pool">
+            <option value="all">all pools</option>
+          </select>
+        </label>
+        <label class="crfh-search">
+          <i class="fa fa-search" aria-hidden="true"></i>
+          <input class="crf-input" id="crfh-query" type="search" aria-label="Filter jobs" placeholder="filter jobs…" autocomplete="off">
+        </label>
+      </div>
+    </header>
+
+    <div class="crfh-connection" id="crfh-connection" role="status" hidden></div>
+    <div class="crfh-list" id="crfh-list" aria-live="polite" aria-busy="true">
+      <div class="crfh-empty"><i class="fa fa-circle-o-notch fa-spin" aria-hidden="true"></i> Loading recent activity…</div>
+    </div>
+    <div class="crfh-more-row" id="crfh-more-row" hidden>
+      <button type="button" class="crf-button crf-button-compact" id="crfh-more">Load more</button>
+    </div>
+    <footer class="crfh-summary" aria-labelledby="crfh-summary-title">
+      <span class="crf-section-label" id="crfh-summary-title">Recent runs</span>
+      <span class="crfh-pass-group">
+        <span class="crfh-pass-bar" aria-hidden="true"><i id="crfh-bar-passed"></i><i id="crfh-bar-failed"></i><i id="crfh-bar-cancelled"></i></span>
+        <strong class="crfh-rate"><b id="crfh-rate">–</b><span>pass rate</span></strong>
+      </span>
+      <span class="crfh-count crfh-count-success"><i></i><span><b id="crfh-passed">–</b> passed</span></span>
+      <span class="crfh-count crfh-count-failure"><i></i><span><b id="crfh-failed">–</b> failed</span></span>
+      <span class="crfh-count"><i></i><span><b id="crfh-cancelled">–</b> cancelled</span></span>
+      <span id="crfh-total" hidden>–</span>
+      <span class="crfh-summary-divider" aria-hidden="true"></span>
+      <div class="crfh-pool-rates" id="crfh-pool-rates" aria-label="Recent one-shot success rates"></div>
+    </footer>
+  </section>
+</main>
+
+<style>
+  .crfh-activity{color:var(--crf-ink)}
+  .crfh-toolbar{height:48px;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);flex-wrap:wrap}
+  .crfh-heading{display:flex;align-items:baseline;gap:9px;white-space:nowrap}
+  .crfh-subtitle{font-size:11.5px;color:#737373}
+  .crfh-controls,.crfh-result-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .crfh-control-label{display:inline-flex}
+  .crfh-controls .crf-filter-chip{height:24px;padding:3px 11px;display:inline-flex;align-items:center;line-height:normal}
+  .crfh-controls .crf-filter-chip:nth-child(1){width:37.6875px}
+  .crfh-controls .crf-filter-chip:nth-child(2){width:67.578125px}
+  .crfh-controls .crf-filter-chip:nth-child(3){width:60.28125px}
+  .crfh-controls .crf-select{min-width:92px;height:27px;padding:0 8px;font-size:12px;border-color:#e5e5e5}
+  .crfh-search{position:relative;display:inline-flex;align-items:center}
+  .crfh-search .fa{display:none}
+  .crfh-search .crf-input{width:150px;height:27px;padding:0 9px;font-size:12px;border-color:#e5e5e5}
+  .crfh-chip-success.is-active{background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crfh-chip-failure.is-active{background:var(--crf-error-soft);color:var(--crf-error-ink)}
+  .crfh-connection{padding:8px 20px;border-bottom:1px solid #fde68a;background:var(--crf-warning-soft);color:var(--crf-warning-ink);font-size:12.5px;font-weight:600}
+  .crfh-list{min-height:216px;background:var(--crf-panel)}
+  .crfh-day{height:29px;padding:8px 20px 6px;box-sizing:border-box;background:var(--crf-panel-soft);border-top:1px solid var(--crf-border-soft);border-bottom:1px solid var(--crf-border-soft);font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--crf-ink-4)}
+  .crfh-day:first-child{border-top:0}
+  .crfh-row{display:grid;grid-template-columns:82px 110px minmax(180px,1fr) auto;gap:12px;align-items:center;padding:8px 20px;border-bottom:1px solid var(--crf-border-soft);height:47px;box-sizing:border-box;background:var(--crf-panel);cursor:pointer}
+  .crfh-row:hover{background:#fffdf9}
+  .crfh-row:focus-visible{outline:2px solid #ff6600;outline-offset:-2px}
+  .crfh-drawer{padding:11px 20px 12px 258px;border-bottom:1px solid var(--crf-border-soft);background:#fafafa;color:var(--crf-ink-2);font:11.5px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;max-height:190px;overflow:auto}
+  .crfh-time{display:flex;flex-direction:column;gap:1px;font-variant-numeric:tabular-nums}
+  .crfh-clock{font-size:11.5px;font-weight:400;color:#525252}
+  .crfh-relative{font-size:10px;color:#a3a3a3}
+  .crfh-pool{justify-self:start;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:9999px;background:#f0f0f0;padding:2px 9px;font:600 11px clear-sans,ui-sans-serif,system-ui,sans-serif;color:#525252}
+  .crfh-job{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--crf-ink)}
+  .crfh-result{justify-self:end;display:inline-flex;align-items:center;justify-content:center;border-radius:9999px;padding:2px 10px;font-size:11px;font-weight:600;text-transform:lowercase}
+  .crfh-result::before{content:'';width:5px;height:5px;margin-right:5px;border-radius:50%;background:currentColor}
+  .crfh-result-success{background:var(--crf-success-soft);color:var(--crf-success-ink)}
+  .crfh-result-failure{background:var(--crf-error-soft);color:var(--crf-error-ink)}
+  .crfh-result-cancelled,.crfh-result-unknown{background:#e5e5e5;color:var(--crf-ink-2)}
+  .crfh-empty{min-height:216px;display:flex;align-items:center;justify-content:center;gap:8px;padding:24px;color:var(--crf-ink-3);font-size:13px;text-align:center}
+  .crfh-more-row{height:53px;display:flex;justify-content:center;align-items:center;padding:10px 20px;background:var(--crf-panel);border-bottom:1px solid #f7f7f7}
+  #crfh-more{min-width:145px;height:32px;padding:0 16px;border-color:#d4d4d4;background:linear-gradient(180deg,#fff,#f7f7f7);color:#525252;font-size:12.5px;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  #crfh-more:hover{background:linear-gradient(180deg,#f7f7f7,#efefef);border-color:#b8b8b8;color:#1c1b1b}
+  .crfh-summary{min-height:70px;display:flex;align-items:center;gap:14px;padding:11px 20px;background:var(--crf-panel-soft);flex-wrap:wrap;font-variant-numeric:tabular-nums}
+  .crfh-pass-group{display:inline-flex;align-items:center;gap:10px}
+  .crfh-pass-bar{width:130px;height:6px;display:flex;border-radius:9999px;overflow:hidden;background:#d4d4d4}.crfh-pass-bar i{display:block;height:100%;width:0}.crfh-pass-bar i:first-child{background:var(--crf-ok)}.crfh-pass-bar i:nth-child(2){background:var(--crf-err)}.crfh-pass-bar i:nth-child(3){background:#c4c4c4}
+  .crfh-rate{width:86.390625px;display:inline-flex;gap:3.453125px;color:var(--crf-ink);font-size:13px;font-weight:600;white-space:nowrap}.crfh-rate b{font-weight:600}.crfh-rate span{font-weight:400;color:#737373}
+  .crfh-count{display:inline-flex;align-items:center;gap:5px;color:var(--crf-ink-2);font-size:12px;white-space:nowrap}.crfh-count i{width:7px;height:7px;border-radius:2px;background:#c4c4c4}.crfh-count-success i{background:var(--crf-ok)}.crfh-count-failure i{background:var(--crf-err)}.crfh-count b{color:inherit;font-weight:400}
+  .crfh-summary-divider{width:1px;height:16px;background:#e0e0e0}
+  .crfh-pool-rates{display:contents}
+  .crfh-pool-rate{display:inline-flex;align-items:center;gap:6px;color:var(--crf-ink-3)}
+  .crfh-pool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px ui-monospace,Menlo,monospace;color:var(--crf-ink-2)}
+  .crfh-pool-bar{width:44px;height:4px;border-radius:9999px;background:#e5e5e5;overflow:hidden}
+  .crfh-pool-bar span{display:block;height:100%;border-radius:inherit;background:var(--crf-ok)}
+  .crfh-pool-pct{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--crf-ink-3)}
+  @media(max-width:760px){
+    .crfh-activity{overflow:visible}
+    .crfh-toolbar{height:auto;padding:14px;display:block;background:#fff}
+    .crfh-heading{margin-bottom:12px;white-space:normal}
+    .crfh-heading .crf-section-label{font-size:13px}
+    .crfh-subtitle{display:block;font-size:12px}
+    .crfh-controls{width:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,.55fr);gap:10px}
+    .crfh-result-filters{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+    .crfh-controls .crf-filter-chip,.crfh-controls .crf-filter-chip:nth-child(n){width:100%;height:42px;padding:0 10px;font-size:12.5px}
+    .crfh-control-label{display:block;min-width:0}
+    .crfh-controls .crf-select{width:100%;min-width:0;height:44px;padding:0 10px;font-size:16px}
+    .crfh-search{display:flex;min-width:0}
+    .crfh-search .fa{display:block;position:absolute;left:13px;z-index:1;color:var(--crf-ink-4);pointer-events:none}
+    .crfh-search .crf-input{width:100%;height:44px;padding:0 12px 0 36px;font-size:16px}
+    .crfh-connection{padding:10px 14px;line-height:1.45}
+    .crfh-day{height:auto;min-height:34px;padding:10px 14px 8px}
+    .crfh-row{height:auto;min-height:76px;display:grid;grid-template-columns:72px minmax(0,1fr) auto;grid-template-areas:"time job result" "time pool result";gap:5px 10px;padding:12px 14px;align-items:center}
+    .crfh-time{grid-area:time;align-self:center}
+    .crfh-clock{font-size:12.5px}
+    .crfh-relative{font-size:10.5px}
+    .crfh-job{grid-area:job;font-size:13px;line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+    .crfh-pool{grid-area:pool;max-width:100%;padding:3px 9px;font-size:11px}
+    .crfh-result{grid-area:result;align-self:center;justify-self:end;min-height:30px;padding:5px 9px;font-size:11px}
+    .crfh-drawer{padding:12px 14px;border-left:3px solid #ff8c2f;font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+    .crfh-more-row{height:auto;padding:12px 14px}
+    #crfh-more{width:100%;min-height:44px;height:44px}
+    .crfh-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px;align-items:stretch}
+    .crfh-summary>.crf-section-label{grid-column:1/-1;font-size:12px}
+    .crfh-pass-group{grid-column:1/-1;width:100%;justify-content:space-between;padding-bottom:10px;border-bottom:1px solid var(--crf-border)}
+    .crfh-pass-bar{flex:1;max-width:none;height:8px}
+    .crfh-rate{width:auto;flex:none;font-size:13px}
+    .crfh-count{min-width:0;min-height:66px;padding:9px 6px;display:flex;flex-direction:column;justify-content:center;gap:5px;border:1px solid var(--crf-border);border-radius:9px;background:#fff;text-align:center;white-space:normal}
+    .crfh-count i{width:8px;height:8px}
+    .crfh-count span{display:flex;flex-direction:column;gap:1px;font-size:10.5px}
+    .crfh-count b{font-size:20px;font-weight:600}
+    .crfh-summary-divider{display:none}
+    .crfh-pool-rates{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 12px;min-width:0}
+    .crfh-pool-rate{min-width:0}
+    .crfh-pool-bar{flex:1;width:auto;min-width:30px}
+  }
+  @media(max-width:390px){
+    .crfh-controls{grid-template-columns:1fr}
+    .crfh-control-label,.crfh-search{grid-column:1}
+    .crfh-row{grid-template-columns:64px minmax(0,1fr);grid-template-areas:"time job" "time pool" "result result"}
+    .crfh-result{justify-self:start;margin-top:3px}
+  }
+</style>
+
+<script>
+(() => {
+  'use strict';
+  const state = { rows: [], poolRates: null, result: 'all', pool: 'all', query: '', limit: 8, statusPending: false, open: '', logs: new Map(), logPending: new Set() };
+  const list = document.getElementById('crfh-list');
+  const poolSelect = document.getElementById('crfh-pool');
+  const queryInput = document.getElementById('crfh-query');
+  const moreRow = document.getElementById('crfh-more-row');
+  const moreButton = document.getElementById('crfh-more');
+  const connection = document.getElementById('crfh-connection');
+
+  function active() {
+    const main = document.querySelector('[data-screen-label="History"]');
+    return !document.hidden && !!main && main.offsetParent !== null;
+  }
+
+  function conclusion(value) {
+    const normalized = String(value || 'unknown').toLowerCase();
+    return ['success', 'failure', 'cancelled'].includes(normalized) ? normalized : 'unknown';
+  }
+
+  function parsedTime(value) {
+    const time = Date.parse(String(value || ''));
+    return Number.isNaN(time) ? null : new Date(time);
+  }
+
+  function relativeTime(value) {
+    const date = parsedTime(value);
+    if (!date) return '—';
+    const age = Math.max(0, Date.now() - date.getTime());
+    if (age < 60000) return 'now';
+    if (age < 3600000) return Math.floor(age / 60000) + 'm ago';
+    if (age < 86400000) return Math.floor(age / 3600000) + 'h ago';
+    if (age < 604800000) return Math.floor(age / 86400000) + 'd ago';
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+
+  function groupLabel(value) {
+    const date = parsedTime(value);
+    if (!date) return 'Unknown date';
+    const now = new Date();
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const days = Math.round((startToday - startDate) / 86400000);
+    if (days === 0) return now.getHours() < 6 ? 'Tonight' : 'Today';
+    if (days === 1) return 'Yesterday';
+    return date.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+
+  function updatePoolOptions() {
+    const pools = [...new Set(state.rows.map(row => String(row.pool_id || 'unknown')))].sort();
+    const previous = state.pool;
+    poolSelect.replaceChildren();
+    const all = document.createElement('option');
+    all.value = 'all';
+    all.textContent = 'all pools';
+    poolSelect.appendChild(all);
+    pools.forEach(pool => {
+      const option = document.createElement('option');
+      option.value = pool;
+      option.textContent = pool;
+      poolSelect.appendChild(option);
+    });
+    state.pool = previous === 'all' || pools.includes(previous) ? previous : 'all';
+    poolSelect.value = state.pool;
+  }
+
+  function filteredRows() {
+    const query = state.query.trim().toLowerCase();
+    return state.rows.filter(row => {
+      const result = conclusion(row.conclusion);
+      if (state.result !== 'all' && result !== state.result) return false;
+      if (state.pool !== 'all' && String(row.pool_id || 'unknown') !== state.pool) return false;
+      if (!query) return true;
+      return [row.job, row.pool_id, row.runner_name].some(value => String(value || '').toLowerCase().includes(query));
+    });
+  }
+
+  function appendText(parent, className, text) {
+    const element = document.createElement('span');
+    element.className = className;
+    element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  }
+
+  function renderRows() {
+    const rows = filteredRows();
+    const visible = rows.slice(0, state.limit);
+    const fragment = document.createDocumentFragment();
+    let lastGroup = '';
+
+    if (!visible.length) {
+      const empty = document.createElement('div');
+      empty.className = 'crfh-empty';
+      const icon = document.createElement('i');
+      icon.className = 'fa fa-history';
+      icon.setAttribute('aria-hidden', 'true');
+      empty.append(icon, document.createTextNode(state.rows.length ? ' No activity matches these filters.' : ' No completed one-shot activity yet.'));
+      fragment.appendChild(empty);
+    } else {
+      visible.forEach(activity => {
+        const group = groupLabel(activity.completed_at);
+        if (group !== lastGroup) {
+          const heading = document.createElement('div');
+          heading.className = 'crfh-day';
+          heading.textContent = group;
+          fragment.appendChild(heading);
+          lastGroup = group;
+        }
+
+        const row = document.createElement('article');
+        const historyKey=String(activity.runner_name||'')+':'+String(activity.work_handle||'');
+        row.className = 'crfh-row';
+        row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-expanded',historyKey===state.open?'true':'false');row.dataset.historyKey=historyKey;row.dataset.runnerName=String(activity.runner_name||'');
+
+        const time = document.createElement('span');
+        time.className = 'crfh-time';
+        time.title = String(activity.completed_at || '');
+        const date = parsedTime(activity.completed_at);
+        appendText(time, 'crfh-clock', date ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
+        appendText(time, 'crfh-relative', relativeTime(activity.completed_at));
+        row.appendChild(time);
+
+        appendText(row, 'crfh-pool', String(activity.pool_id || 'unknown'));
+        const job = appendText(row, 'crfh-job', String(activity.job || 'unnamed job'));
+        job.title = String(activity.job || '');
+        const result = conclusion(activity.conclusion);
+        appendText(row, 'crfh-result crfh-result-' + result, result);
+        fragment.appendChild(row);
+        if(historyKey===state.open){
+          const drawer=document.createElement('div');drawer.className='crfh-drawer';drawer.dataset.historyDrawer=historyKey;
+          drawer.innerHTML=state.logs.get(historyKey)||'<span class="crf-muted">loading archived log…</span>';
+          fragment.appendChild(drawer);
+        }
+      });
+    }
+
+    list.replaceChildren(fragment);
+    list.setAttribute('aria-busy', 'false');
+    const remaining = Math.max(0, rows.length - visible.length);
+    moreRow.hidden = remaining === 0;
+    moreButton.textContent = remaining ? 'Load more · ' + remaining + ' older' : 'Load more';
+    renderPoolRates();
+    if(state.open&&!state.logs.has(state.open))fetchHistoryLog(state.open);
+  }
+
+  function fetchHistoryLog(key){
+    if(state.logPending.has(key))return;
+    const activity=state.rows.find(row=>String(row.runner_name||'')+':'+String(row.work_handle||'')===key);if(!activity)return;
+    state.logPending.add(key);
+    crfPost({action:'history-log',name:String(activity.runner_name||'')}).then(data=>{
+      state.logs.set(key,crfColorize(data.log||'(archived output unavailable)'));
+      const drawer=list.querySelector('[data-history-drawer="'+CSS.escape(key)+'"]');if(drawer)drawer.innerHTML=state.logs.get(key);
+    }).catch(error=>{
+      state.logs.set(key,'<span class="crf-muted">Archived log unavailable: '+crfEsc(error.message)+'</span>');
+      const drawer=list.querySelector('[data-history-drawer="'+CSS.escape(key)+'"]');if(drawer)drawer.innerHTML=state.logs.get(key);
+    }).finally(()=>state.logPending.delete(key));
+  }
+
+  function renderPoolRates() {
+    const target = document.getElementById('crfh-pool-rates');
+    const totals = new Map();
+    if(state.poolRates){
+      Object.entries(state.poolRates).forEach(([pool,percent])=>totals.set(pool,{success:Number(percent)||0,total:100}));
+    }else{
+      state.rows.forEach(row => {
+        const result = conclusion(row.conclusion);
+        if (result !== 'success' && result !== 'failure') return;
+        const pool = String(row.pool_id || 'unknown');
+        const current = totals.get(pool) || { success: 0, total: 0 };
+        current.total += 1;
+        if (result === 'success') current.success += 1;
+        totals.set(pool, current);
+      });
+    }
+
+    const fragment = document.createDocumentFragment();
+    const order=['rust','python','typescript','go','ops','system'];
+    [...totals.entries()].sort((a,b)=>{const ai=order.indexOf(a[0]),bi=order.indexOf(b[0]);return (ai<0?999:ai)-(bi<0?999:bi)||a[0].localeCompare(b[0]);}).forEach(([pool, counts]) => {
+      const percent = counts.total ? Math.round(100 * counts.success / counts.total) : 0;
+      const row = document.createElement('div');
+      row.className = 'crfh-pool-rate';
+      appendText(row, 'crfh-pool-name', pool);
+      const bar = document.createElement('span');
+      bar.className = 'crfh-pool-bar';
+      const fill = document.createElement('span');
+      fill.style.width = percent + '%';
+      if (percent < 55) fill.style.background = 'var(--crf-err)';
+      else if (percent < 85) fill.style.background = '#e9bf41';
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      appendText(row, 'crfh-pool-pct', percent + '%');
+      fragment.appendChild(row);
+    });
+    target.replaceChildren(fragment);
+    target.hidden = totals.size === 0;
+  }
+
+  function showConnection(message) {
+    connection.textContent = message;
+    connection.hidden = !message;
+  }
+
+  function refreshStatus() {
+    if (!active() || state.statusPending) return;
+    state.statusPending = true;
+    crfPost({ action: 'status-json' }).then(data => {
+      if (!data || data.schema_version !== 2 || !Array.isArray(data.recent_activity)) {
+        throw new Error('unsupported or malformed history snapshot');
+      }
+      state.rows = data.recent_activity.slice().sort((a, b) => {
+        const left = parsedTime(a.completed_at);
+        const right = parsedTime(b.completed_at);
+        return (right ? right.getTime() : 0) - (left ? left.getTime() : 0);
+      });
+      updatePoolOptions();
+      showConnection('');
+      renderRows();
+    }).catch(error => {
+      showConnection('History connection lost — retrying…');
+      console.error('ci-runner-farm history:', error);
+      if (!state.rows.length) renderRows();
+    }).finally(() => { state.statusPending = false; });
+  }
+
+  function setStat(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  }
+
+  function refreshStats() {
+    if (!active()) return;
+    crfPost({ action: 'stats-json' }).then(data => {
+      const available = data && Number.isInteger(data.total) && data.total >= 0;
+      if (!available) throw new Error('run statistics unavailable');
+      const passed = Number.isInteger(data.ok) ? data.ok : 0;
+      const failed = Number.isInteger(data.fail) ? data.fail : 0;
+      const cancelled = Number.isInteger(data.cancel) ? data.cancel : 0;
+      const settled = passed + failed + cancelled;
+      const rate = settled ? Math.round(100 * passed / settled) + '%' : '–';
+      setStat('crfh-passed', String(passed));
+      setStat('crfh-failed', String(failed));
+      setStat('crfh-cancelled', String(cancelled));
+      setStat('crfh-total', String(data.total));
+      setStat('crfh-rate', rate);
+      const denominator=Math.max(1,settled);
+      document.getElementById('crfh-bar-passed').style.width=(100*passed/denominator)+'%';
+      document.getElementById('crfh-bar-failed').style.width=(100*failed/denominator)+'%';
+      document.getElementById('crfh-bar-cancelled').style.width=(100*cancelled/denominator)+'%';
+      state.poolRates=data.pool_rates&&typeof data.pool_rates==='object'?data.pool_rates:null;
+      renderPoolRates();
+    }).catch(error => {
+      ['crfh-passed', 'crfh-failed', 'crfh-cancelled', 'crfh-total'].forEach(id => setStat(id, '–'));
+      setStat('crfh-rate', '–');
+      console.warn('ci-runner-farm run statistics:', error);
+    });
+  }
+
+  document.querySelectorAll('[data-crfh-result]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.result = button.dataset.crfhResult || 'all';
+      state.limit = 8;
+      document.querySelectorAll('[data-crfh-result]').forEach(candidate => {
+        const selected = candidate === button;
+        candidate.classList.toggle('is-active', selected);
+        candidate.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      renderRows();
+    });
+  });
+
+  poolSelect.addEventListener('change', () => { state.pool = poolSelect.value; state.limit = 8; renderRows(); });
+  queryInput.addEventListener('input', () => { state.query = queryInput.value; state.limit = 8; renderRows(); });
+  moreButton.addEventListener('click', () => { state.limit += 8; renderRows(); });
+  list.addEventListener('click',event=>{const row=event.target.closest('.crfh-row[data-history-key]');if(!row)return;state.open=state.open===row.dataset.historyKey?'':row.dataset.historyKey;renderRows();});
+  list.addEventListener('keydown',event=>{if(event.key!=='Enter'&&event.key!==' ')return;const row=event.target.closest('.crfh-row[data-history-key]');if(!row)return;event.preventDefault();state.open=state.open===row.dataset.historyKey?'':row.dataset.historyKey;renderRows();});
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshStatus(); refreshStats(); } });
+
+  refreshStatus();
+  refreshStats();
+  window.setInterval(refreshStatus, 10000);
+  window.setInterval(refreshStats, 60000);
+})();
+</script>

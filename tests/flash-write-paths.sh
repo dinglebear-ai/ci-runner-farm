@@ -44,7 +44,7 @@ grep -Fq 'slices.Equal(record.AppliedLabels, labels) && record.State == targetSt
 
 for runtime_file in \
   autoscale.log autoscale.pid autoscale.state imageupdate.log imageupdate.pid \
-  boot.log queued.cache cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log \
+  boot.log queued.snapshot.json queued.lock cache-usage.cache usage.cache stats.cache sec.cache warn.cache build.log build.lock \
   recent-jobs.jsonl recent-jobs.jsonl.lock; do
   if rg -F "/boot/config/plugins/ci-runner-farm/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
      rg -F "\$CFGDIR/$runtime_file" src/usr/local/emhttp/plugins/ci-runner-farm >/dev/null ||
