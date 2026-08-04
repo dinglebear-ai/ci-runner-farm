@@ -33,7 +33,7 @@ ENV CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 # ("apt-get is available but the runner is not root and sudo is missing").
 # Bake the toolchain in and give the runner user passwordless sudo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev cmake sudo clang lld mold \
+      build-essential pkg-config libssl-dev cmake sudo php-cli clang lld mold \
  && rm -rf /var/lib/apt/lists/* \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner

@@ -7,6 +7,7 @@ OVERLAY=deployments/tootie/kache-overlay.Dockerfile
 SUPERVISOR=deployments/tootie/kache-supervise.sh
 
 bash -n "$SUPERVISOR"
+grep -Eq 'apt-get install .*php-cli|php-cli .*clang' "$FULL"
 for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq 'ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=f9250450073dd48c23ee457093bb860a9acafc037608f11a1643471c0d00af6b' "$dockerfile"
