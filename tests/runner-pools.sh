@@ -60,11 +60,19 @@ accept pools "$RUNNER_POOLS" org
 POOL_BACKEND=classic
 reject pools "$RUNNER_POOLS" org
 
-RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true
+RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true POOL_AUTOSCALE=inherit
 [ "$(pool_label python)" = 'ci-pool-python' ] && ok || bad 'routing label was not derived'
 [ "$(pool_configured_target rust)" = 2 ] && ok || bad 'autoscale target is not pool min'
+[ "$(pool_autoscale_enabled rust; echo $?)" = 0 ] && ok || bad 'inherit did not enable every pool under the global master'
+POOL_AUTOSCALE=''
+if pool_autoscale_enabled rust || pool_autoscale_enabled python; then bad 'empty per-pool selection did not keep every pool fixed'; else ok; fi
+[ "$(pool_configured_target rust)" = 3 ] && ok || bad 'empty per-pool selection did not use fixed capacity'
+POOL_AUTOSCALE=rust
+if pool_autoscale_enabled rust && ! pool_autoscale_enabled python; then ok; else bad 'explicit mixed-pool selection was not isolated'; fi
+[ "$(pool_configured_target rust)" = 2 ] && [ "$(pool_configured_target python)" = 1 ] && ok || bad 'mixed auto/fixed targets are wrong'
 AUTOSCALE=false
 [ "$(pool_configured_target rust)" = 3 ] && ok || bad 'fixed target is not pool fixed count'
+POOL_AUTOSCALE=inherit
 
 RUNNER_MODE=single RUNNER_COUNT=4 RUNNER_LABELS='self-hosted,unraid,build'
 AUTOSCALE_MIN=2 AUTOSCALE_MAX=16 AUTOSCALE_MIN_IDLE=2 GH_SCOPE=repo

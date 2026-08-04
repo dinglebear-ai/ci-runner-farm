@@ -148,8 +148,10 @@ grep -Fq 'auth_credentials_configured' "$ENGINE" ||
   fail 'GitHub App credentials cannot pass Start or boot autostart'
 grep -Fq 'scaleset_snapshot_refresh >/dev/null 2>&1 || true' "$ENGINE" ||
   fail 'Fleet does not materialize the current in-memory scale-set heartbeat'
-grep -Fq 'pidx _routing identity backend;' "$ENGINE" ||
-  fail 'Fleet status does not parse the scale-set backend inventory column'
+grep -Fq 'pidx _routing identity backend started_at;' "$ENGINE" ||
+  fail 'Fleet status does not parse the scale-set backend and start-time inventory columns'
+grep -Fq '\"started_at\":\"$(printf' "$ENGINE" ||
+  fail 'Fleet status does not publish live runner start times for uptime display'
 
 # Strict isolation must verify every required rule, rather than accepting a
 # partially intact tagged ruleset. Exercise the live validator with one exact

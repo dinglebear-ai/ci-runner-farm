@@ -13,6 +13,13 @@ $plugin   = 'ci-runner-farm';
    the flash cfg only ever holds what the user actually changed. */
 $cfg      = parse_plugin_cfg($plugin);
 $has_token= file_exists("/boot/config/plugins/$plugin/token");
+$token_mtime = $has_token ? @filemtime("/boot/config/plugins/$plugin/token") : false;
+$token_saved_age = $token_mtime ? max(0, (int)floor((time() - $token_mtime) / 86400)) : null;
+$token_hint = '3f9c';
+if ($has_token) {
+  $token_value = trim((string)@file_get_contents("/boot/config/plugins/$plugin/token"));
+  if (strlen($token_value) >= 4) $token_hint = substr($token_value, -4);
+}
 $has_app_key= file_exists("/boot/config/plugins/$plugin/github-app-private-key.pem");
 $has_regtok = file_exists("/boot/config/plugins/$plugin/registry-token");
 $host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec("grep MemTotal /proc/meminfo"))) / 1048576);
@@ -51,18 +58,167 @@ if (!function_exists('crf_sel')) { function crf_sel($cfg,$k,$val,$d=''){ global 
 ?>
 <link type="text/css" rel="stylesheet" href="<?autov('/webGui/styles/jquery.filetree.css')?>">
 <script src="<?autov('/webGui/javascript/jquery.filetree.js')?>" charset="utf-8"></script>
+<?php crf_render_shell('settings','general'); ?>
+<main class="crf-app-main" data-screen-label="Settings">
+<section class="crf-surface crfs-hero">
+  <div class="crf-page-hero">
+    <div><span class="crf-eyebrow">CI Runner Farm</span><h1 class="crf-page-title">Settings</h1></div>
+    <div class="crf-page-actions">
+      <span class="crfs-dirty-pill" id="crfs-dirty-pill">Unsaved changes</span>
+      <button class="crf-button crfs-reset-button" type="button" onclick="crfsResetAll()">Reset to defaults</button>
+      <button class="crf-button crfs-gradient-button" type="button" onclick="crfsReviewApply()">Apply</button>
+    </div>
+  </div>
+</section>
+<div class="crfs-live-result" id="crfs-live-result" role="status" aria-live="polite" hidden></div>
+<div class="crfs-columns" id="crfs-live-config">
+  <section class="crfs-column" aria-labelledby="crfs-connection-label">
+    <h2 class="crfs-column-label" id="crfs-connection-label">Connection</h2>
+    <article class="crfs-live-card crfs-github-card">
+      <header class="crfs-live-card-head">
+        <span class="crfs-card-icon crfs-icon-github"><img src="/plugins/ci-runner-farm/assets/icons/settings-github.svg" alt=""></span>
+        <h3>GitHub</h3>
+        <button type="button" class="crfs-card-reset" aria-label="Reset GitHub settings" title="Reset this card to defaults" onclick="crfsResetGroup(['AUTH_MODE','GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID','GH_SCOPE','GH_OWNER','GH_REPOS','RUNNER_GROUP'])"><img src="/plugins/ci-runner-farm/assets/icons/reset.svg" alt="" aria-hidden="true"></button>
+      </header>
+      <p class="crfs-card-description">How the farm authenticates and which repositories can use it.</p>
+      <div id="crfs-token-slot"></div>
+      <div class="crfs-live-fields">
+        <label for="crfs-auth-mode">Authentication</label>
+        <select id="crfs-auth-mode" data-crfs-config="AUTH_MODE">
+          <option value="pat">Personal access token</option>
+          <option value="github_app">GitHub App</option>
+        </select>
+        <label class="crfs-live-app-auth" for="crfs-app-id">App ID</label>
+        <input class="crfs-live-app-auth crfs-mono-input crfs-short-input" id="crfs-app-id" data-crfs-config="GITHUB_APP_ID" type="text" inputmode="numeric">
+        <label class="crfs-live-app-auth" for="crfs-app-installation-id">Installation ID</label>
+        <input class="crfs-live-app-auth crfs-mono-input crfs-short-input" id="crfs-app-installation-id" data-crfs-config="GITHUB_APP_INSTALLATION_ID" type="text" inputmode="numeric">
+        <label class="crfs-live-app-auth" for="crfs-app-private-key-live">Private key</label>
+        <div class="crfs-live-app-auth crfs-key-row">
+          <textarea id="crfs-app-private-key-live" rows="3" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          <button type="button" onclick="crfsSaveAppKey()">Save key</button>
+          <button type="button" onclick="crfClearAppKey()">Clear</button>
+          <span id="crfs-app-key-state-live"><?= $has_app_key ? 'configured (mode 0600)' : 'not configured' ?></span>
+        </div>
+        <label for="crfs-gh-scope">Scope</label>
+        <select id="crfs-gh-scope" data-crfs-config="GH_SCOPE">
+          <option value="org">org (organization-wide)</option>
+          <option value="repo">repo (per-repository)</option>
+        </select>
+        <label for="crfs-gh-owner">Org owner</label>
+        <input class="crfs-mono-input crfs-owner-input" id="crfs-gh-owner" data-crfs-config="GH_OWNER" type="text">
+        <label for="crfs-gh-repos">Target repos</label>
+        <input class="crfs-mono-input" id="crfs-gh-repos" data-crfs-config="GH_REPOS" type="text">
+        <label for="crfs-runner-group">Runner group</label>
+        <input class="crfs-group-input" id="crfs-runner-group" data-crfs-config="RUNNER_GROUP" type="text">
+      </div>
+    </article>
+  </section>
+
+  <section class="crfs-column" aria-labelledby="crfs-runtime-label">
+    <h2 class="crfs-column-label" id="crfs-runtime-label">Runtime</h2>
+    <article class="crfs-live-card crfs-storage-card">
+      <header class="crfs-live-card-head">
+        <span class="crfs-card-icon crfs-icon-storage"><img src="/plugins/ci-runner-farm/assets/icons/settings-storage.svg" alt=""></span>
+        <h3>Storage &amp; caches</h3>
+        <button type="button" class="crfs-card-reset" aria-label="Reset storage settings" title="Reset this card to defaults" onclick="crfsResetGroup(['CACHE_ROOT','WORK_TMPFS_SIZE','CACHE_MOUNTS'])"><img src="/plugins/ci-runner-farm/assets/icons/reset.svg" alt="" aria-hidden="true"></button>
+      </header>
+      <div class="crfs-live-fields">
+        <label for="crfs-cache-root">Cache root</label>
+        <input class="crfs-mono-input" id="crfs-cache-root" data-crfs-config="CACHE_ROOT" type="text" autocomplete="off" spellcheck="false">
+        <label for="crfs-work-tmpfs">Workspace tmpfs</label>
+        <input class="crfs-mono-input crfs-tmpfs-input" id="crfs-work-tmpfs" data-crfs-config="WORK_TMPFS_SIZE" type="text" placeholder="blank = bind to pool">
+        <label for="crfs-cache-mounts">Cache mounts</label>
+        <input class="crfs-mono-input" id="crfs-cache-mounts" data-crfs-config="CACHE_MOUNTS" type="text">
+      </div>
+    </article>
+    <article class="crfs-live-card crfs-docker-card">
+      <header class="crfs-live-card-head">
+        <span class="crfs-card-icon crfs-icon-docker"><img src="/plugins/ci-runner-farm/assets/icons/settings-docker.svg" alt=""></span>
+        <h3>Docker</h3>
+        <button type="button" class="crfs-card-reset" aria-label="Reset Docker settings" title="Reset this card to defaults" onclick="crfsResetGroup(['DIND','SHARE_DOCKER_SOCK','SHARED_IMAGE_CACHE','NETWORK_ISOLATION'])"><img src="/plugins/ci-runner-farm/assets/icons/reset.svg" alt="" aria-hidden="true"></button>
+      </header>
+      <p class="crfs-card-description">Container runtime each runner gets — isolation level, socket access, and image caching.</p>
+      <div class="crfs-live-fields">
+        <label for="crfs-dind">Docker-in-docker</label>
+        <select id="crfs-dind" data-crfs-config="DIND"><option value="true">true (own daemon per runner, privileged)</option><option value="false">false (use host runtime)</option></select>
+        <label for="crfs-docker-sock">Host docker.sock</label>
+        <select id="crfs-docker-sock" data-crfs-config="SHARE_DOCKER_SOCK"><option value="false">false</option><option value="true">true (mount /var/run/docker.sock)</option></select>
+        <label for="crfs-image-cache">Shared image cache</label>
+        <select id="crfs-image-cache" data-crfs-config="SHARED_IMAGE_CACHE"><option value="true">true (pull-through registry mirror)</option><option value="false">false</option></select>
+        <label for="crfs-network-isolation">Network isolation</label>
+        <select id="crfs-network-isolation" data-crfs-config="NETWORK_ISOLATION"><option value="off">off (default docker bridge)</option><option value="isolate">isolate (dedicated bridge)</option><option value="strict">strict (dedicated bridge + block host/LAN)</option></select>
+      </div>
+    </article>
+    <article class="crfs-live-card crfs-plugin-card">
+      <header class="crfs-live-card-head">
+        <span class="crfs-card-icon crfs-icon-plugin"><i class="fa fa-th-large" aria-hidden="true"></i></span>
+        <h3>Plugin</h3>
+        <button type="button" class="crfs-card-reset" aria-label="Reset plugin settings" title="Reset this card to defaults" onclick="crfsResetGroup(['DASHBOARD_WIDGET_ENABLE'])"><img src="/plugins/ci-runner-farm/assets/icons/reset.svg" alt="" aria-hidden="true"></button>
+      </header>
+      <div class="crfs-live-fields">
+        <label>Main dashboard tile</label>
+        <div class="crfs-switch-row">
+          <button type="button" class="crfs-switch" id="crfs-dashboard-switch" role="switch" aria-label="Toggle main Dashboard tile" aria-checked="false" onclick="crfsToggleDashboard()"><span></span></button>
+          <span id="crfs-dashboard-label">hidden</span>
+        </div>
+      </div>
+    </article>
+  </section>
+</div>
+
+<section class="crfs-danger-wrap">
+  <button type="button" class="crfs-danger-toggle" aria-expanded="false" onclick="crfsToggleDanger(this)"><i class="fa fa-caret-right" aria-hidden="true"></i><span>Show danger zone</span></button>
+  <div class="crfs-danger-card" id="crfs-danger-card" hidden>
+    <header class="crfs-live-card-head"><span class="crfs-card-icon crfs-icon-danger"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i></span><h3>Danger zone</h3></header>
+    <p class="crfs-card-description">These actions take effect immediately and cannot be undone from this page.</p>
+    <div class="crfs-danger-action" data-crfs-danger="dereg">
+      <span><strong>Deregister all runners</strong><small>Remove every runner from GitHub and stop the farm.</small><span class="crfs-danger-meta"><em><i class="fa fa-minus" aria-hidden="true"></i><span id="crfs-danger-impact-dereg">all managed runners</span></em><span data-crfs-danger-last="dereg">never run</span></span></span>
+      <button type="button" data-crfs-danger-arm onclick="crfsArmDanger('dereg')">Deregister…</button>
+      <span class="crfs-danger-confirm" data-crfs-danger-confirm hidden><button type="button" class="is-confirm" onclick="crfsConfirmDanger('dereg')">Confirm</button><button type="button" class="is-cancel" onclick="crfsCancelDanger()">Cancel</button></span>
+    </div>
+    <div class="crfs-danger-action" data-crfs-danger="purge">
+      <span><strong>Purge package caches</strong><small>Delete only the configured warm package-cache directories. Workspaces and Docker data are preserved.</small><span class="crfs-danger-meta"><em><i class="fa fa-minus" aria-hidden="true"></i><span id="crfs-danger-impact-purge">all package caches</span></em><span data-crfs-danger-last="purge">never run</span></span></span>
+      <button type="button" data-crfs-danger-arm onclick="crfsArmDanger('purge')">Purge…</button>
+      <span class="crfs-danger-confirm" data-crfs-danger-confirm hidden><button type="button" class="is-confirm" onclick="crfsConfirmDanger('purge')">Confirm</button><button type="button" class="is-cancel" onclick="crfsCancelDanger()">Cancel</button></span>
+    </div>
+    <div class="crfs-danger-action" data-crfs-danger="uninstall">
+      <span><strong>Uninstall plugin</strong><small>Continue to Unraid's Plugins page to remove the plugin and managed runners. Unraid retains this plugin's configuration.</small><span class="crfs-danger-meta"><em><i class="fa fa-minus" aria-hidden="true"></i>plugin + managed containers</em><span data-crfs-danger-last="uninstall">never run</span></span></span>
+      <button type="button" data-crfs-danger-arm onclick="crfsArmDanger('uninstall')">Uninstall…</button>
+      <span class="crfs-danger-confirm crfs-danger-confirm-uninstall" data-crfs-danger-confirm hidden>
+        <label>Type <b>ci-runner-farm</b> to confirm<input type="text" id="crfs-uninstall-confirm" autocomplete="off" placeholder="ci-runner-farm" oninput="crfsSyncUninstallConfirm()"></label>
+        <label class="crfs-keep-config"><input type="checkbox" id="crfs-keep-config" checked disabled>Configuration files retained by Unraid</label>
+        <button type="button" class="is-confirm" id="crfs-uninstall-button" onclick="crfsConfirmDanger('uninstall')" disabled>Continue</button><button type="button" class="is-cancel" onclick="crfsCancelDanger()">Cancel</button>
+      </span>
+    </div>
+  </div>
+</section>
+<div class="crfs-sticky-dirty" id="crfs-sticky-dirty" hidden>
+  <span class="crfs-pulse"></span><strong>Unsaved changes</strong><span class="crfs-dirty-detail">Settings differ from the running config</span><span class="crfs-sticky-spacer"></span>
+  <button type="button" onclick="crfsDiscardChanges()">Discard</button><button type="button" class="crfs-gradient-button" onclick="crfsReviewApply()">Review &amp; Apply</button>
+</div>
+<div class="crfs-review-backdrop" id="crfs-review-backdrop" hidden onclick="crfsCloseReview()">
+  <section class="crfs-review-dialog" role="dialog" aria-modal="true" aria-labelledby="crfs-review-title" onclick="event.stopPropagation()">
+    <header><strong id="crfs-review-title">Apply settings?</strong><button type="button" aria-label="Close review" onclick="crfsCloseReview()"><img src="/plugins/ci-runner-farm/assets/icons/close.svg" alt=""></button></header>
+    <p>The farm reloads its config; runners are recycled one at a time onto the new settings.</p>
+    <div class="crfs-review-lines" id="crfs-review-lines"></div>
+    <footer><button type="button" onclick="crfsCloseReview()">Cancel</button><button type="button" class="crfs-gradient-button" onclick="crfsConfirmApply()">Apply changes</button></footer>
+  </section>
+</div>
 <div class="crfs-tokband<?= $has_token ? '' : ' crfs-tokband-missing' ?>" id="crf-tokband">
   <div class="crfs-tok-status">
     <span class="crf-ball <?= $has_token ? 'crf-ball-idle' : 'crf-ball-error' ?>" id="crf-tok-ball"></span>
     <span class="crfs-tok-text">
       <strong id="crf-tok"><?= $has_token ? 'GitHub token configured' : 'GitHub token not set' ?></strong>
-      <span class="crfs-tok-sub" id="crf-tok-sub"><?= $has_token ? 'Stored at /boot/config/plugins/ci-runner-farm/token (chmod 600), never in ci-runner-farm.cfg.' : 'The farm cannot register runners until a token is saved.' ?></span>
+      <span class="crfs-tok-sub" id="crf-tok-sub"><?= $has_token ? 'stored at /boot/config/plugins/ci-runner-farm/token (chmod 600) &mdash; never in ci-runner-farm.cfg' : 'The farm cannot register runners until a token is saved.' ?></span>
     </span>
   </div>
   <div class="crfs-tok-input">
-    <uui-button variant="outline" size="xs" onclick="window.open('<?=$patUrl?>','_blank','noopener')">Get a pre-scoped PAT &#8599;</uui-button>
-    <span class="crfs-field"><input type="password" id="crf-token" autocomplete="new-password" placeholder="ghp_... (scopes pre-filled)"><button type="button" class="crfs-fx" title="Clear saved token" aria-label="Clear saved token" onclick="crfClearToken()">&times;</button></span>
-    <uui-button size="xs" onclick="crfSetToken()">Save token</uui-button>
+    <span class="crfs-tok-actions">
+      <button type="button" class="crfs-link-button" onclick="document.getElementById('crf-token').focus()"><i class="fa fa-refresh" aria-hidden="true"></i> Rotate</button>
+      <a class="crfs-pat-link" href="<?=$patUrl?>" target="_blank" rel="noopener">Get a pre-scoped PAT <i class="fa fa-external-link" aria-hidden="true"></i></a>
+      <input type="password" id="crf-token" autocomplete="new-password" placeholder="ghp_... (scopes pre-filled)">
+    </span>
+    <button type="button" class="crfs-save-token" onclick="crfSetToken()">Save token</button>
   </div>
 </div>
 <div class="crfs-tokband crfs-regband" id="crf-remote-auth">
@@ -74,12 +230,12 @@ if (!function_exists('crf_sel')) { function crf_sel($cfg,$k,$val,$d=''){ global 
     </span>
   </div>
   <div class="crfs-tok-input">
-    <span class="crfs-field"><input type="password" id="crf-registry-token" autocomplete="new-password" placeholder="registry password / token"><button type="button" class="crfs-fx" title="Clear saved registry token" aria-label="Clear saved registry token" onclick="crfClearRegistryToken()">&times;</button></span>
+    <span class="crfs-field"><input type="password" id="crf-registry-token" autocomplete="new-password" placeholder="registry password / token"><button type="button" class="crfs-fx" title="Clear saved registry token" aria-label="Clear saved registry token" onclick="crfClearRegistryToken()"><img src="/plugins/ci-runner-farm/assets/icons/close.svg" alt=""></button></span>
     <uui-button size="xs" onclick="crfSetRegistryToken()">Save registry token</uui-button>
   </div>
 </div>
 
-<form markdown="1" name="ci_runner_farm" method="POST" action="">
+<form markdown="1" class="crfs-legacy-form" id="crf-settings-form" name="ci_runner_farm" method="POST" action="">
 <input type="hidden" name="RUNNER_NETWORK" value="<?=crf_g($cfg,'RUNNER_NETWORK','ci-runner-net')?>">
 <input type="hidden" name="MIRROR_PORT" value="<?=crf_g($cfg,'MIRROR_PORT','5000')?>">
 
@@ -110,6 +266,8 @@ _(GitHub App private key)_:
 :crf_app_key_plug:
 > The key is stored atomically at mode 0600 outside `ci-runner-farm.cfg`. It is never returned to the browser.
 :end
+
+<!-- A pool backend selection is requested intent only; activation remains a separately verified Fleet migration. -->
 
 _(GitHub scope)_:
 : <select name="GH_SCOPE" aria-describedby="crf-pools-errors">
@@ -306,6 +464,7 @@ _(Main Dashboard tile)_:
   <input type="button" value="_(Reset to defaults)_" onclick="crfResetDefaults()" style="width:auto">
 
 </form>
+</main>
 
 
 <script>
@@ -325,6 +484,7 @@ function crfResetDefaults(){
   for (const k of CRF_CONFIG_KEYS){ const el=document.getElementsByName(k)[0]; if(el) el.value=CRF_DEFAULTS[k]; }
   crfImgSrc();
   crfAuthMode();
+  if(typeof crfsSyncFromConfig==='function')crfsSyncFromConfig();
 }
 function crfTokState(ok){
   const band=document.getElementById('crf-tokband'), ball=document.getElementById('crf-tok-ball');
@@ -334,29 +494,31 @@ function crfTokState(ok){
   ball.className='crf-ball '+(ok?'crf-ball-idle':'crf-ball-error');
 }
 function crfSetToken(){ const t=document.getElementById('crf-token').value; if(!t)return;
-  crfPost({action:'set-token',token:t}).then(o=>{crfTokState(!!o.ok);document.getElementById('crf-token').value='';}).catch(e=>{ crfToast&&crfToast('Save failed'); console.error('ci-runner-farm set-token:',e); }); }
+  crfPost({action:'set-token',token:t}).then(o=>{if(!o.ok){crfToast(o.error||'Token was not saved');return;}crfTokState(true);document.getElementById('crf-token').value='';crfToast('GitHub token saved');}).catch(e=>{ crfToast('Token was not saved: '+e.message); console.error('ci-runner-farm set-token:',e); }); }
 function crfClearToken(){ crfPost({action:'clear-token'}).then(()=>crfTokState(false)).catch(e=>console.error('ci-runner-farm clear-token:',e)); }
 function crfAuthMode(userChanged=false){
   const app=(document.getElementById('crf-auth-mode')||{}).value==='github_app';
   const patBand=document.getElementById('crf-tokband');if(patBand)patBand.style.display=app?'none':'flex';
-  if(userChanged&&!app){['GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID'].forEach(n=>{const el=document.getElementsByName(n)[0];if(el)el.value='';});}
+  if(userChanged&&!app){['GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID'].forEach(n=>{const el=document.getElementsByName(n)[0];if(el)el.value='';const live=document.querySelector('[data-crfs-config="'+n+'"]');if(live)live.value='';});}
   ['GITHUB_APP_ID','GITHUB_APP_INSTALLATION_ID'].forEach(n=>{
     const el=document.getElementsByName(n)[0], dd=el&&el.closest('dd');
     if(dd){dd.style.display=app?'':'none';if(dd.previousElementSibling)dd.previousElementSibling.style.display=app?'':'none';}
   });
   const key=document.getElementById('crf-app-private-key'), dd=key&&key.closest('dd');
   if(dd){dd.style.display=app?'':'none';if(dd.previousElementSibling)dd.previousElementSibling.style.display=app?'':'none';}
+  document.querySelectorAll('.crfs-live-app-auth').forEach(el=>{el.style.display=app?'':'none';});
 }
 function crfSetAppKey(){
   const el=document.getElementById('crf-app-private-key'), key=el.value;
   if(!key)return;
   crfPost({action:'set-app-private-key',private_key:key}).then(o=>{
-    if(o.ok){el.value='';document.getElementById('crf-app-key-state').textContent='Private key configured (mode 0600)';crfToast('GitHub App key saved; sessions invalidated');}
+    if(o.ok){el.value='';document.getElementById('crf-app-key-state').textContent='Private key configured (mode 0600)';const live=document.getElementById('crfs-app-key-state-live');if(live)live.textContent='configured (mode 0600)';crfToast('GitHub App key saved; sessions invalidated');}
   }).catch(e=>{crfToast('Private key save failed');console.error(e);});
 }
 function crfClearAppKey(){
   crfPost({action:'clear-app-private-key'}).then(()=>{
     document.getElementById('crf-app-key-state').textContent='Private key not configured';
+    const live=document.getElementById('crfs-app-key-state-live');if(live)live.textContent='not configured';
     crfToast('GitHub App key cleared; sessions invalidated');
   }).catch(e=>console.error(e));
 }
@@ -394,6 +556,8 @@ if(crfSettingsForm){
   crfSettingsForm.addEventListener('submit',async e=>{
     e.preventDefault();
     if(crfSettingsForm.dataset.applying==='1') return;
+    if(!window.CRFS_APPLY_CONFIRMED){crfsReviewApply();return;}
+    window.CRFS_APPLY_CONFIRMED=false;
     const settings={};
     for(const key of CRF_CONFIG_KEYS){
       const el=document.getElementsByName(key)[0];
@@ -409,10 +573,13 @@ if(crfSettingsForm){
       if(!applied.ok)throw new Error(applied.error||'Apply failed');
       CRF_CONFIG_REVISION=applied.config_revision;
       const box=document.getElementById('crf-settings-result'); box.textContent='Settings saved.'; box.classList.add('on'); box.classList.add('crfs-saved');
+      crfsShowResult('Settings saved.',true);
       crfToast('Runner farm settings saved');
+      if(typeof crfsSetDirty==='function')crfsSetDirty(false,true);
     }catch(err){
       if(epoch!==applyEpoch)return;
       const box=document.getElementById('crf-settings-result'); box.textContent='Could not save settings: '+err.message; box.classList.add('on'); box.classList.remove('crfs-saved');
+      crfsShowResult('Could not save settings: '+err.message,false);crfToast('Could not save settings: '+err.message);
     }finally{
       if(epoch===applyEpoch){
         delete crfSettingsForm.dataset.applying; crfSettingsForm.removeAttribute('aria-busy');
@@ -473,6 +640,135 @@ if(crfSettingsForm){
   .crfs-invalid{border-color:var(--brand-red,#e22828)!important}
   .crfs-routing-warn{border:1px solid var(--brand-orange,#ff8c2f);background:color-mix(in srgb,var(--brand-orange,#ff8c2f) 9%,var(--background-color));border-radius:6px;padding:8px 10px;margin:4px 0 8px;font-size:12px}
   @media(max-width:900px){.crfs-pool-row{grid-template-columns:repeat(2,minmax(90px,1fr))}button.crfs-pool-label{grid-column:1/-1}}
+
+  .crfs-legacy-form,.crfs-regband{display:none!important}
+  .crfs-hero .crf-page-hero{min-height:99px}
+  .crfs-live-result{margin-top:-8px;border:1px solid #f0a8a8;border-radius:6px;background:#fff5f5;color:#9c1818;padding:9px 12px;font-size:12.5px;font-weight:600}
+  .crfs-live-result.is-ok{border-color:#b9d9b4;background:#f2f8f1;color:#314e2d}
+  .crfs-live-result[hidden]{display:none}
+  .crfs-dirty-pill{display:none;font-size:13px;color:var(--crf-warning-ink);background:var(--crf-warning-soft);border-radius:9999px;padding:4px 12px;font-weight:600}
+  .crfs-dirty-pill.is-visible{display:inline-flex}
+  .crfs-reset-button{padding-left:14px!important;padding-right:14px!important;line-height:normal!important;color:var(--crf-ink-3);background:linear-gradient(180deg,#fff,#f7f7f7);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .crfs-gradient-button{border:2px solid transparent!important;background:linear-gradient(90deg,#e22828,#ff8c2f) border-box!important;color:#fff!important;box-shadow:0 1px 3px rgba(226,40,40,.3)!important}
+  .crfs-hero .crfs-gradient-button{padding-left:18px!important;padding-right:18px!important}
+  .crfs-gradient-button:hover{background:linear-gradient(90deg,rgba(226,40,40,.85),rgba(255,140,47,.85)) border-box!important;box-shadow:0 3px 8px rgba(226,40,40,.35)!important}
+  .crfs-columns{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;align-items:start}
+  .crfs-column{display:flex;flex-direction:column;gap:10px;min-width:0}
+  .crfs-column-label{margin:0;padding-left:3px;border:0;font-size:10.5px;line-height:normal;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#8a8a8a}
+  .crfs-live-card{background:#fff;border:2px solid #f5f5f5;border-radius:6px;box-shadow:var(--crf-shadow);padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
+  .crfs-live-card-head{display:flex;align-items:center;gap:9px}
+  .crfs-live-card-head h3{margin:0;padding:0;border:0;font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}
+  .crfs-card-icon{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;flex:none;font-size:13px}
+  .crfs-card-icon img{display:block;width:13px;height:13px}
+  .crfs-icon-github{background:#e5e7eb;color:#374151}.crfs-icon-storage{background:var(--crf-orange-soft);color:var(--crf-orange-ink)}.crfs-icon-docker{background:#dbeafe;color:#1e40af}.crfs-icon-plugin{background:#f3e8ff;color:#6b21a8}.crfs-icon-danger{background:var(--crf-error-soft);color:#bd1818}
+  button.crfs-card-reset{margin:0 0 0 auto!important;padding:0!important;width:22px!important;min-width:22px!important;height:22px!important;border:0!important;border-radius:5px!important;background:transparent!important;color:#d4d4d4!important;font-size:11px!important;box-shadow:none!important;letter-spacing:0!important;text-transform:none!important;cursor:pointer}
+  button.crfs-card-reset:hover{background:#f5f5f5!important;color:var(--crf-ink)!important}
+  button.crfs-card-reset img{display:block;width:11px;height:11px;margin:auto}
+  .crfs-card-description{margin:-6px 0 0;font-size:12.5px;line-height:1.5;color:var(--crf-ink-3);max-width:46ch}
+  .crfs-live-fields{display:grid;grid-template-columns:132px minmax(0,1fr);align-items:center;column-gap:14px;row-gap:13px;min-width:0}
+  .crfs-live-fields>label{font-size:13px;font-weight:600;text-align:end;white-space:nowrap;color:#383735;letter-spacing:-.005em}
+  .crfs-live-fields input,.crfs-live-fields select,.crfs-live-fields textarea{box-sizing:border-box;border:1px solid #d4d4d4;border-radius:6px;background:#fff;color:var(--crf-ink);font:500 13.5px/1.2 clear-sans,ui-sans-serif,system-ui,sans-serif;outline:none;min-width:0;max-width:100%;transition:border-color .15s,box-shadow .15s}
+  .crfs-live-fields input,.crfs-live-fields select{height:36px;padding:0 11px}
+  .crfs-live-fields select{appearance:none;padding-right:11px;background-image:none;line-height:normal;cursor:pointer}
+  .crfs-live-fields input:focus,.crfs-live-fields select:focus,.crfs-live-fields textarea:focus{border-color:#ff8c2f;box-shadow:0 0 0 3px rgba(255,140,47,.18)}
+  .crfs-live-fields .crfs-mono-input{font-family:ui-monospace,Menlo,monospace;font-weight:400}
+  .crfs-short-input{width:130px}.crfs-owner-input{width:240px}.crfs-group-input{width:280px}.crfs-tmpfs-input{width:200px}
+  #crfs-auth-mode,#crfs-gh-scope,#crfs-dind,#crfs-docker-sock,#crfs-image-cache,#crfs-network-isolation{width:290px}
+  .crfs-github-card .crfs-live-fields>label[for="crfs-auth-mode"],.crfs-github-card #crfs-auth-mode{margin-bottom:1px}
+  .crfs-key-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.crfs-key-row textarea{width:100%;padding:8px 10px}.crfs-key-row button{height:28px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;padding:0 12px;font:600 12px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}.crfs-key-row span{font-size:11.5px;color:var(--crf-ink-3)}
+  .crfs-tokband{display:flex;align-items:center!important;gap:12px!important;flex-wrap:wrap!important;border:0!important;border-radius:0!important;background:transparent!important;padding:0 0 2px!important;margin:0!important;min-width:0}
+  .crfs-tokband.crfs-tokband-missing{border:0!important;background:transparent!important}
+  .crfs-tok-status{display:flex;flex-direction:column;align-items:flex-start;gap:12px;min-width:0;flex:1 1 100%}
+  .crfs-tok-status .crf-ball{width:9px;height:9px}
+  .crfs-tok-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .crfs-tok-text strong{font-size:13.5px;color:var(--crf-ink);font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .crfs-tok-text strong code{font:600 12px ui-monospace,Menlo,monospace;background:#f5f5f5;border-radius:4px;padding:1px 7px;color:var(--crf-ink-2)}
+  .crfs-token-age{color:var(--crf-ink-4);font-size:11px;font-weight:500}
+  .crfs-tok-sub{font:11.5px/normal ui-monospace,Menlo,monospace;color:var(--crf-ink-3);overflow-wrap:anywhere}
+  .crfs-tok-input{display:flex;flex-direction:column;align-items:flex-start;gap:12px;width:100%}
+  .crfs-tok-actions{display:flex;align-items:center;gap:12px;width:100%;min-width:0}
+  .crfs-tok-input input[type=password]{width:220px;height:36px;box-sizing:border-box;border:1px solid #d4d4d4;border-radius:6px;background:#fff;padding:0 11px;font:13.5px ui-monospace,Menlo,monospace;color:var(--crf-ink);outline:none}
+  .crfs-tok-input input[type=password]:focus{border-color:#ff8c2f;box-shadow:0 0 0 3px rgba(255,140,47,.18)}
+  .crfs-link-button,.crfs-save-token{border:0!important;box-shadow:none!important;margin:0!important;letter-spacing:0!important;text-transform:none!important;font-family:clear-sans,ui-sans-serif,system-ui,sans-serif!important;cursor:pointer!important}
+  .crfs-link-button{margin-left:auto!important;width:53.94px!important;min-width:53.94px!important;background:transparent!important;color:var(--crf-ink-3)!important;padding:0!important;height:30px!important;font-size:12.5px!important;font-weight:600!important}.crfs-link-button:hover{color:var(--crf-ink)!important}
+  .crfs-pat-link{display:inline-block;width:134.17px;font-size:12.5px;line-height:18px;font-weight:600;color:#ff8c2f!important;white-space:nowrap}.crfs-pat-link i{margin-left:2px;font-size:10px}.crfs-pat-link:hover{color:#f15a2c!important}
+  .crfs-save-token{height:30px!important;padding:0 14px!important;border:2px solid transparent!important;border-radius:6px!important;background:linear-gradient(90deg,#e22828,#ff8c2f) border-box!important;color:#fff!important;font-size:12.5px!important;line-height:12.5px!important;font-weight:600!important}
+  .crfs-switch-row{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--crf-ink-3)}
+  .crfs-fx img{display:block;width:10px;height:10px;margin:auto}
+  button.crfs-switch{display:inline-flex!important;align-items:center!important;width:44px!important;min-width:44px!important;height:24px!important;margin:0!important;padding:0!important;border:2px solid transparent!important;border-radius:9999px!important;background:#e5e5e5!important;box-shadow:none!important;cursor:pointer!important;letter-spacing:0!important}
+  button.crfs-switch span{display:block;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.25);transition:transform .15s}
+  button.crfs-switch[aria-checked=true]{background:#ff6600!important}button.crfs-switch[aria-checked=true] span{transform:translateX(20px)}
+  .crfs-danger-wrap{display:flex;flex-direction:column;gap:10px}
+  button.crfs-danger-toggle{align-self:flex-start!important;display:inline-flex!important;align-items:center!important;gap:8px!important;width:auto!important;height:29px!important;margin:0!important;padding:0 10px!important;border:1px solid var(--crf-error-soft)!important;border-radius:6px!important;background:transparent!important;color:#bd1818!important;font:600 12px clear-sans,ui-sans-serif,system-ui,sans-serif!important;letter-spacing:0!important;text-transform:none!important;cursor:pointer!important;box-shadow:none!important}
+  button.crfs-danger-toggle i{font-size:10px;transition:transform .15s}button.crfs-danger-toggle[aria-expanded=true] i{transform:rotate(90deg)}
+  .crfs-danger-card{background:#fff;border:2px solid var(--crf-error-soft);border-radius:6px;box-shadow:var(--crf-shadow);padding:18px;display:flex;flex-direction:column;gap:14px}
+  @keyframes rfExpand{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+  .crfs-danger-card[hidden]{display:none}.crfs-danger-action{display:flex;align-items:center;gap:14px;padding:13px 2px;border-top:1px solid #f5f5f5;flex-wrap:wrap}.crfs-danger-action>span:first-child{display:flex;flex:1;min-width:260px;flex-direction:column;gap:3px}.crfs-danger-action strong{font-size:13.5px}.crfs-danger-action small{font-size:12px;color:#8a8a8a}.crfs-danger-action button{height:34px;border:1px solid #f0a8a8;border-radius:6px;background:linear-gradient(180deg,#fff,#fff5f5);color:#bd1818;padding:0 16px;font:600 12.5px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}.crfs-danger-action button:disabled{cursor:not-allowed;opacity:.45}
+  .crfs-danger-meta{display:inline-flex!important;flex-direction:row!important;align-items:center;gap:8px!important;margin-top:2px;color:var(--crf-ink-4);font-size:11px}.crfs-danger-meta em{display:inline-flex;align-items:center;gap:5px;border-radius:9999px;padding:2px 9px;background:#fef2f2;color:#9c1818;font-style:normal;font-weight:600}.crfs-danger-meta em i{font-size:9px}.crfs-danger-confirm{display:inline-flex!important;flex:0 1 auto!important;min-width:0!important;flex-direction:row!important;align-items:center;gap:8px!important;flex-wrap:wrap;animation:rfExpand .12s ease-out}.crfs-danger-confirm[hidden]{display:none!important}.crfs-danger-confirm .is-confirm{border-color:#bd1818;background:linear-gradient(180deg,#e94040,#e22828);color:#fff}.crfs-danger-confirm .is-cancel{border-color:#d4d4d4;background:linear-gradient(180deg,#fff,#f3f3f3);color:var(--crf-ink-3)}.crfs-danger-confirm-uninstall label{display:flex;flex-direction:column;gap:4px;color:var(--crf-ink-3);font-size:11px}.crfs-danger-confirm-uninstall label b{font-family:ui-monospace,Menlo,monospace;color:var(--crf-ink)}.crfs-danger-confirm-uninstall input[type=text]{width:190px;height:32px;box-sizing:border-box;border:1px solid #d4d4d4;border-radius:6px;padding:0 10px;font:12.5px ui-monospace,Menlo,monospace}.crfs-danger-confirm-uninstall input[type=text].is-invalid{border-color:#e22828}.crfs-danger-confirm-uninstall label.crfs-keep-config{flex-direction:row;align-items:center;gap:7px}.crfs-keep-config input{accent-color:#e22828}
+  .crfs-sticky-dirty{position:sticky;bottom:12px;z-index:40;display:flex;align-items:center;gap:12px;background:var(--crf-ink);color:#fff;border-radius:8px;box-shadow:0 10px 24px rgba(0,0,0,.28);padding:10px 16px}.crfs-sticky-dirty[hidden]{display:none}.crfs-sticky-dirty>span{font-size:12px;color:#999}.crfs-sticky-dirty strong{font-size:13px}.crfs-pulse{width:7px;height:7px;border-radius:50%;background:#e9bf41!important;animation:crf-pulse 1.4s ease-in-out infinite}.crfs-sticky-spacer{flex:1}.crfs-sticky-dirty button{height:30px;border:1px solid rgba(255,255,255,.25);border-radius:6px;background:transparent;color:#e0e0e0;padding:0 12px;font:500 12.5px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}.crfs-sticky-dirty .crfs-gradient-button{padding:0 16px}
+  .crfs-review-backdrop{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.5)}.crfs-review-backdrop[hidden]{display:none}.crfs-review-dialog{width:100%;max-width:460px;overflow:hidden;border:1px solid var(--crf-border);border-radius:8px;background:#fff;box-shadow:0 10px 15px -3px rgba(0,0,0,.2);animation:rfExpand .15s ease-out}.crfs-review-dialog header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 0}.crfs-review-dialog header strong{font-size:17px;font-weight:600}.crfs-review-dialog header button{width:26px;height:26px;margin:0;padding:0;border:0;border-radius:4px;background:transparent;color:var(--crf-ink-4);display:grid;place-items:center;cursor:pointer}.crfs-review-dialog header button:hover{background:#f5f5f5;color:var(--crf-ink)}.crfs-review-dialog header img{width:12px;height:12px}.crfs-review-dialog>p{margin:6px 20px 12px;color:var(--crf-ink-3);font-size:13px;line-height:1.5}.crfs-review-lines{max-height:240px;overflow-y:auto;padding:0 20px 16px;display:flex;flex-direction:column;gap:6px}.crfs-review-line{display:flex;align-items:baseline;gap:9px;color:var(--crf-ink-2);font-size:13px;line-height:1.45}.crfs-review-line i{width:16px;height:16px;border-radius:4px;background:#f5f5f5;color:#ff8c2f;display:grid;place-items:center;font-size:9px;flex:none}.crfs-review-line code{color:var(--crf-ink-3);font:11.5px ui-monospace,Menlo,monospace}.crfs-review-dialog footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--crf-border-soft);background:var(--crf-panel-soft)}.crfs-review-dialog footer button{height:34px;margin:0;padding:0 14px;border:1px solid var(--crf-border);border-radius:6px;background:#fff;color:var(--crf-ink-3);font:500 13px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}.crfs-review-dialog footer .crfs-gradient-button{padding:0 18px}
+  @media(min-width:1220px){.crfs-tok-input{flex-direction:row;align-items:center;gap:12px}.crfs-tok-actions{flex:1}}
+  @media(max-width:900px){.crfs-columns{grid-template-columns:1fr}.crfs-live-fields{grid-template-columns:minmax(110px,132px) minmax(0,1fr)}}
+  @media(max-width:560px){.crfs-live-card{padding:14px}.crfs-live-fields{grid-template-columns:1fr;row-gap:7px}.crfs-live-fields>label{text-align:left;margin-top:6px}.crfs-tok-input .crfs-link-button{margin-left:0!important}.crfs-sticky-dirty>span:not(.crfs-pulse),.crfs-sticky-dirty>strong{display:none}}
+  @media(max-width:760px){
+    .crfs-hero{border-radius:12px}
+    .crfs-hero .crf-page-hero{min-height:0;padding:16px 14px;align-items:flex-start}
+    .crfs-hero .crf-page-actions{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .crfs-hero .crf-page-actions .crf-button{width:100%;min-width:0;white-space:normal}
+    .crfs-dirty-pill{grid-column:1/-1;width:max-content;max-width:100%}
+    .crfs-live-result{margin-top:0;padding:11px 13px;line-height:1.45;border-radius:10px}
+    .crfs-columns{grid-template-columns:1fr;gap:12px}
+    .crfs-column{gap:8px}
+    .crfs-column-label{padding-left:4px;font-size:11px}
+    .crfs-live-card,.crfs-danger-card{padding:14px;border-width:1px;border-radius:12px;gap:12px}
+    .crfs-live-card-head{min-height:44px}
+    .crfs-card-icon{width:36px;height:36px;border-radius:10px}
+    .crfs-card-icon img{width:16px;height:16px}
+    .crfs-live-card-head h3{font-size:11.5px}
+    button.crfs-card-reset{width:44px!important;min-width:44px!important;height:44px!important;border:1px solid var(--crf-border)!important;border-radius:9px!important}
+    button.crfs-card-reset img{width:14px;height:14px}
+    .crfs-card-description{max-width:none;margin:-2px 0 0}
+    .crfs-live-fields{grid-template-columns:1fr;row-gap:7px}
+    .crfs-live-fields>label{text-align:left;margin-top:7px;white-space:normal}
+    .crfs-live-fields input,.crfs-live-fields select{width:100%!important;max-width:none;height:44px;font-size:16px}
+    .crfs-live-fields textarea{width:100%;min-height:110px;font-size:16px}
+    .crfs-short-input,.crfs-owner-input,.crfs-group-input,.crfs-tmpfs-input,#crfs-auth-mode,#crfs-gh-scope,#crfs-dind,#crfs-docker-sock,#crfs-image-cache,#crfs-network-isolation{width:100%!important}
+    .crfs-key-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .crfs-key-row textarea,.crfs-key-row span{grid-column:1/-1}
+    .crfs-key-row button{height:44px}
+    .crfs-tok-input{gap:10px}
+    .crfs-tok-actions{display:grid;grid-template-columns:1fr auto;gap:8px}
+    .crfs-tok-input input[type=password]{grid-column:1/-1;width:100%;height:44px;font-size:16px}
+    .crfs-save-token{height:44px!important}
+    .crfs-link-button{width:auto!important;min-width:70px!important;height:44px!important;margin-left:0!important;padding:0 10px!important}
+    .crfs-pat-link{width:auto;min-height:44px;display:flex;align-items:center;white-space:normal}
+    button.crfs-switch{width:56px!important;min-width:56px!important;height:44px!important;padding:0 2px!important}
+    button.crfs-switch span{width:26px;height:26px}
+    button.crfs-switch[aria-checked=true] span{transform:translateX(24px)}
+    button.crfs-danger-toggle{min-height:44px!important;height:auto!important;padding:8px 12px!important}
+    .crfs-danger-action{align-items:stretch;gap:10px}
+    .crfs-danger-action>span:first-child{min-width:0;width:100%;flex-basis:100%}
+    .crfs-danger-action>button{width:100%;height:44px}
+    .crfs-danger-confirm{width:100%!important;display:grid!important;grid-template-columns:1fr 1fr!important}
+    .crfs-danger-confirm label{grid-column:1/-1}
+    .crfs-danger-confirm input[type=text]{width:100%!important;height:44px!important;font-size:16px!important}
+    .crfs-danger-confirm button{height:44px!important}
+    .crfs-sticky-dirty{position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom,0px));z-index:95;min-height:58px;padding:8px 10px;border-radius:12px;gap:8px}
+    .crfs-sticky-dirty button{min-width:88px;height:42px;padding:0 10px}
+    .crfs-review-backdrop{padding:12px;align-items:flex-end}
+    .crfs-review-dialog{max-width:none;border-radius:14px 14px 0 0;max-height:calc(100dvh - 24px)}
+    .crfs-review-dialog header{padding:16px 16px 0}
+    .crfs-review-dialog header button{width:44px;height:44px}
+    .crfs-review-dialog>p{margin:4px 16px 12px}
+    .crfs-review-lines{max-height:45dvh;padding:0 16px 14px}
+    .crfs-review-line{align-items:flex-start;overflow-wrap:anywhere}
+    .crfs-review-dialog footer{display:grid;grid-template-columns:1fr 1fr;padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px))}
+    .crfs-review-dialog footer button{height:44px}
+  }
+  @media(max-width:390px){
+    .crfs-hero .crf-page-actions,.crfs-tok-actions,.crfs-danger-confirm,.crfs-review-dialog footer{grid-template-columns:1fr!important}
+    .crfs-sticky-dirty button{min-width:74px}
+  }
 </style>
 <script>
 /* Regroup the rendered markdown form (h3 + dl runs) into section cards laid out
@@ -505,4 +801,118 @@ if(crfSettingsForm){
     form.appendChild(bar);
   }
 })();
+</script>
+<script>
+let CRFS_APPLIED={};
+let CRFS_RESULT_TIMER=0;
+let CRFS_DANGER_ARM='';
+const CRFS_DRAFT_KEY='ci-runner-farm:settings-draft:v1';
+window.CRFS_APPLY_CONFIRMED=false;
+const CRFS_LABELS={
+  AUTH_MODE:'Authentication',GITHUB_APP_ID:'GitHub App ID',GITHUB_APP_INSTALLATION_ID:'GitHub App installation ID',GH_SCOPE:'GitHub scope',GH_OWNER:'GitHub owner',GH_REPOS:'Target repositories',RUNNER_GROUP:'Runner group',
+  CACHE_ROOT:'Cache root',WORK_TMPFS_SIZE:'Workspace tmpfs',CACHE_MOUNTS:'Cache mounts',DIND:'Docker-in-Docker',SHARE_DOCKER_SOCK:'Host docker.sock',SHARED_IMAGE_CACHE:'Shared image cache',NETWORK_ISOLATION:'Network isolation',DASHBOARD_WIDGET_ENABLE:'Main dashboard tile'
+};
+function crfsShowResult(message,ok){
+  const result=document.getElementById('crfs-live-result');if(!result)return;
+  result.textContent=message;result.classList.toggle('is-ok',!!ok);result.hidden=false;
+  clearTimeout(CRFS_RESULT_TIMER);CRFS_RESULT_TIMER=setTimeout(()=>{result.hidden=true;},5000);
+}
+function crfsHiddenField(key){return document.forms['ci_runner_farm']?.elements.namedItem(key)||null;}
+function crfsLiveField(key){return document.querySelector('[data-crfs-config="'+CSS.escape(key)+'"]');}
+function crfsSyncFromConfig(keys=CRF_CONFIG_KEYS){
+  for(const key of keys){
+    const source=crfsHiddenField(key),target=crfsLiveField(key);
+    if(source&&target)target.value=source.value;
+  }
+  const dashboard=crfsHiddenField('DASHBOARD_WIDGET_ENABLE');
+  const sw=document.getElementById('crfs-dashboard-switch'),label=document.getElementById('crfs-dashboard-label');
+  if(dashboard&&sw&&label){const on=dashboard.value==='true';sw.setAttribute('aria-checked',String(on));label.textContent=on?'shown on the main Dashboard':'hidden';}
+  crfAuthMode();
+}
+function crfsCaptureApplied(){
+  CRFS_APPLIED={};
+  for(const key of CRF_CONFIG_KEYS){const el=crfsHiddenField(key);if(el)CRFS_APPLIED[key]=String(el.value);}
+}
+function crfsSetDirty(dirty,capture=false){
+  if(capture)crfsCaptureApplied();
+  const changes=Object.keys(CRFS_APPLIED).filter(key=>String(crfsHiddenField(key)?.value??'')!==String(CRFS_APPLIED[key]??''));
+  dirty=!!dirty&&changes.length>0;
+  const pill=document.getElementById('crfs-dirty-pill'),bar=document.getElementById('crfs-sticky-dirty');
+  if(pill)pill.classList.toggle('is-visible',dirty);
+  if(bar){bar.hidden=!dirty;const detail=bar.querySelector('.crfs-dirty-detail');if(detail)detail.textContent=changes.length+' setting(s) differ from the running config';}
+  try{if(dirty)sessionStorage.setItem(CRFS_DRAFT_KEY,JSON.stringify({config_revision:CRF_CONFIG_REVISION,settings:Object.fromEntries(CRF_CONFIG_KEYS.map(key=>[key,String(crfsHiddenField(key)?.value??'')]))}));else sessionStorage.removeItem(CRFS_DRAFT_KEY);}catch(_error){}
+  return dirty;
+}
+function crfsRestoreDraft(){
+  let draft=null;try{draft=JSON.parse(sessionStorage.getItem(CRFS_DRAFT_KEY)||'null');}catch(_error){}
+  if(!draft||draft.config_revision!==CRF_CONFIG_REVISION||!draft.settings)return false;
+  for(const key of CRF_CONFIG_KEYS){if(draft.settings[key]==null)continue;const el=crfsHiddenField(key);if(el)el.value=String(draft.settings[key]);}
+  crfsSyncFromConfig();return true;
+}
+function crfsResetGroup(keys){
+  for(const key of keys){const el=crfsHiddenField(key);if(el&&Object.hasOwn(CRF_DEFAULTS,key))el.value=CRF_DEFAULTS[key];}
+  crfsSyncFromConfig(keys);crfsSetDirty(true);
+}
+function crfsResetAll(){crfResetDefaults();crfsSetDirty(true);}
+function crfsDiscardChanges(){
+  for(const [key,value] of Object.entries(CRFS_APPLIED)){const el=crfsHiddenField(key);if(el)el.value=value;}
+  crfsSyncFromConfig();crfsSetDirty(false);
+}
+function crfsToggleDashboard(){
+  const value=crfsHiddenField('DASHBOARD_WIDGET_ENABLE');if(!value)return;
+  value.value=value.value==='true'?'false':'true';crfsSyncFromConfig(['DASHBOARD_WIDGET_ENABLE']);crfsSetDirty(true);
+}
+function crfsSaveAppKey(){
+  const live=document.getElementById('crfs-app-private-key-live'),legacy=document.getElementById('crf-app-private-key');
+  if(!live||!legacy||!live.value.trim())return;legacy.value=live.value;crfSetAppKey();live.value='';
+}
+function crfsConfigDiff(){
+  return Object.keys(CRFS_APPLIED).filter(key=>String(crfsHiddenField(key)?.value??'')!==String(CRFS_APPLIED[key]??'')).map(key=>({key,label:CRFS_LABELS[key]||key.toLowerCase().replaceAll('_',' '),before:String(CRFS_APPLIED[key]??''),after:String(crfsHiddenField(key)?.value??'')}));
+}
+function crfsReviewApply(){
+  const changes=crfsConfigDiff();if(!changes.length){crfsShowResult('No changes to apply.',true);return;}
+  const lines=document.getElementById('crfs-review-lines'),backdrop=document.getElementById('crfs-review-backdrop');if(!lines||!backdrop)return;
+  lines.replaceChildren(...changes.map(change=>{const row=document.createElement('div');row.className='crfs-review-line';const icon=document.createElement('i');icon.className='fa fa-pencil';icon.setAttribute('aria-hidden','true');const text=document.createElement('span');text.append(document.createTextNode(change.label+' from '));const before=document.createElement('code'),after=document.createElement('code');before.textContent=change.before||'(blank)';after.textContent=change.after||'(blank)';text.append(before,document.createTextNode(' to '),after);row.append(icon,text);return row;}));
+  backdrop.hidden=false;backdrop.querySelector('footer .crfs-gradient-button')?.focus();
+}
+function crfsCloseReview(){const backdrop=document.getElementById('crfs-review-backdrop');if(backdrop)backdrop.hidden=true;}
+function crfsConfirmApply(){window.CRFS_APPLY_CONFIRMED=true;crfsCloseReview();document.forms['ci_runner_farm']?.requestSubmit();}
+function crfsToggleDanger(button){
+  const card=document.getElementById('crfs-danger-card'),open=button.getAttribute('aria-expanded')!=='true';
+  button.setAttribute('aria-expanded',String(open));button.querySelector('span').textContent=open?'Hide danger zone':'Show danger zone';card.hidden=!open;if(!open)crfsCancelDanger();else crfsRefreshDangerImpact();
+}
+function crfsArmDanger(key){
+  crfsCancelDanger();CRFS_DANGER_ARM=key;const row=document.querySelector('[data-crfs-danger="'+CSS.escape(key)+'"]');if(!row)return;row.querySelector('[data-crfs-danger-arm]').hidden=true;row.querySelector('[data-crfs-danger-confirm]').hidden=false;row.querySelector('input')?.focus();
+}
+function crfsCancelDanger(){
+  CRFS_DANGER_ARM='';document.querySelectorAll('[data-crfs-danger]').forEach(row=>{const arm=row.querySelector('[data-crfs-danger-arm]'),confirm=row.querySelector('[data-crfs-danger-confirm]');if(arm)arm.hidden=false;if(confirm)confirm.hidden=true;});const typed=document.getElementById('crfs-uninstall-confirm');if(typed){typed.value='';typed.classList.remove('is-invalid');}crfsSyncUninstallConfirm();
+}
+function crfsSyncUninstallConfirm(){const typed=document.getElementById('crfs-uninstall-confirm'),button=document.getElementById('crfs-uninstall-button');if(!typed||!button)return;const ok=typed.value==='ci-runner-farm';button.disabled=!ok;typed.classList.toggle('is-invalid',typed.value.length>0&&!ok);}
+function crfsDangerLast(key){try{return JSON.parse(localStorage.getItem('ci-runner-farm:danger-last')||'{}')[key]||'';}catch(_error){return '';}}
+function crfsSetDangerLast(key){try{const all=JSON.parse(localStorage.getItem('ci-runner-farm:danger-last')||'{}');all[key]=new Date().toISOString();localStorage.setItem('ci-runner-farm:danger-last',JSON.stringify(all));}catch(_error){}crfsRenderDangerLast();}
+function crfsRelativeAge(stamp){const age=Math.max(0,Date.now()-Date.parse(stamp));if(age<60000)return 'just now';if(age<3600000)return Math.floor(age/60000)+'m ago';if(age<86400000)return Math.floor(age/3600000)+'h ago';return Math.floor(age/86400000)+'d ago';}
+function crfsBytes(bytes){if(!Number.isFinite(bytes)||bytes<0)return 'unavailable';const units=['B','KB','MB','GB','TB'];let value=bytes,index=0;while(value>=1024&&index<units.length-1){value/=1024;++index;}return (index===0?value:(value>=10?Math.round(value):value.toFixed(1)))+' '+units[index];}
+function crfsRenderDangerLast(){document.querySelectorAll('[data-crfs-danger-last]').forEach(label=>{const stamp=crfsDangerLast(label.dataset.crfsDangerLast),time=Date.parse(stamp);label.textContent=Number.isFinite(time)?'last run '+crfsRelativeAge(stamp):'never run';});}
+function crfsRefreshDangerImpact(){
+  Promise.allSettled([crfPost({action:'status-json'}),crfPost({action:'cache-usage'})]).then(results=>{const status=results[0].status==='fulfilled'?results[0].value:null,cache=results[1].status==='fulfilled'?results[1].value:null;const runners=document.getElementById('crfs-danger-impact-dereg'),purge=document.getElementById('crfs-danger-impact-purge');if(runners&&status&&Number.isFinite(status.count))runners.textContent=status.count+' runner'+(status.count===1?'':'s');if(purge&&cache&&Number.isFinite(cache.pkg))purge.textContent=crfsBytes(cache.pkg)+' package caches';});
+}
+async function crfsConfirmDanger(key){
+  if(CRFS_DANGER_ARM!==key)return;if(key==='uninstall'&&document.getElementById('crfs-uninstall-confirm')?.value!=='ci-runner-farm')return;
+  const row=document.querySelector('[data-crfs-danger="'+CSS.escape(key)+'"]'),button=row?.querySelector('.is-confirm');if(button)button.disabled=true;
+  if(key==='uninstall'){crfsSetDangerLast(key);location.assign('/Plugins');return;}
+  const action=key==='dereg'?'stop':'cache-clear';
+  try{const result=await crfPost({action});if(!result.ok)throw new Error(result.error||action+' failed');crfsSetDangerLast(key);crfToast(key==='dereg'?'Runners deregistered':'Package caches purged');crfsCancelDanger();crfsRefreshDangerImpact();}
+  catch(err){crfToast(String(err&&err.message||err));if(button)button.disabled=false;}
+}
+(function crfsInitLiveSettings(){
+  const slot=document.getElementById('crfs-token-slot'),band=document.getElementById('crf-tokband');
+  if(slot&&band){slot.appendChild(band);const strong=band.querySelector('.crfs-tok-text strong');if(strong&&<?= $has_token ? 'true' : 'false' ?>){const code=document.createElement('code');code.textContent='ghp_••••'+<?=json_encode($token_hint)?>;strong.appendChild(code);const days=<?=json_encode($token_saved_age)?>;if(days!==null){const age=document.createElement('span');age.className='crfs-token-age';age.textContent='saved '+days+'d ago';strong.appendChild(age);}}}
+  crfsSyncFromConfig();crfsCaptureApplied();const restored=crfsRestoreDraft();crfsSetDirty(restored);
+  crfsRenderDangerLast();
+  document.querySelectorAll('[data-crfs-config]').forEach(control=>{
+    const sync=()=>{const hidden=crfsHiddenField(control.dataset.crfsConfig);if(!hidden)return;hidden.value=control.value;if(control.dataset.crfsConfig==='AUTH_MODE')crfAuthMode(true);crfsSetDirty(true);};
+    control.addEventListener('input',sync);control.addEventListener('change',sync);
+  });
+})();
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){crfsCloseReview();crfsCancelDanger();}});
 </script>

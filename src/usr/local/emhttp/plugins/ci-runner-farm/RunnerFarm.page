@@ -5,3 +5,19 @@ Tag="server"
 Type="xmenu"
 Tabs="true"
 ---
+<div id="crf-root-forward" role="status" style="min-height:45vh;display:grid;place-items:center;padding:24px;text-align:center">
+  <div>
+    <strong style="display:block;margin-bottom:8px">Opening CI Runner Farm&hellip;</strong>
+    <a href="/Utilities/RunnerFarm/RunnerFarmFleet">Continue to Runners</a>
+  </div>
+</div>
+<script>
+(function(){
+  var path=location.pathname;
+  while(path.length>1 && path.endsWith('/')) path=path.slice(0,-1);
+  var isRoot=path==='/Utilities/RunnerFarm' || path==='/Utilities/RunnerFarm/RunnerFarm' ||
+    path==='/Settings/RunnerFarm' || path==='/Settings/RunnerFarm/RunnerFarm';
+  if(isRoot) location.replace('/Utilities/RunnerFarm/RunnerFarmFleet'+location.search+location.hash);
+})();
+</script>
+---

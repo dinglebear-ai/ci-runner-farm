@@ -43,7 +43,7 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
   </div>
   <div class="crfw-foot" style="display:flex">
     <span id="crfw-meta">&nbsp;</span>
-    <a href="/Utilities/RunnerFarm">Manage ›</a>
+    <a href="/Utilities/RunnerFarm/RunnerFarmFleet">Manage ›</a>
   </div>
 </div>
 

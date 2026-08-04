@@ -23,12 +23,40 @@ must(page.includes("r.completed?'completed':'exited'"), 'completed one-shot runn
 must(page.includes("d.schema_version!==2"), 'Fleet accepts unknown snapshot schemas');
 must(page.includes('unsupported or malformed Fleet snapshot'), 'malformed snapshots do not preserve last-good UI');
 must(page.includes("Scale up to':'Scale to"), 'scale controls do not distinguish autoscale');
+must(page.includes('auto=!!p.autoscale_enabled'), 'mixed-pool controls still inherit the global daemon flag');
+must(!page.includes('auto=!!d.autoscale_enabled'), 'per-pool controls still use the global daemon flag');
 must(page.includes('class="orange"'), 'primary scaling control is not visibly orange');
 must(page.includes("if(!fleet){") && page.includes("const body=fleet.querySelector('.crf-pool-bays-body')"),
   'pool refresh does not reuse stable pool sections and runner bodies');
 must(page.includes('document.activeElement!==scale'), 'scale input is overwritten while typing');
 must(page.includes('grid-template-columns:58px minmax(54px,.7fr) minmax(0,1.5fr)'),
   'recent activity has no narrow-view layout');
+must(!page.includes('const CRF_LOAD_CPU=[') && !page.includes('const CRF_LOAD_BUSY=['),
+  'Fleet bundles fabricated load history');
+must(page.includes('snapshot.load_history') && page.includes('else if(known){CRF_LOAD_POINTS.push'),
+  'load chart does not accept authoritative history and live measurements');
+must(page.includes('if(q!==null){CRF_QUEUE_DEPTH.push(q)'),
+  'unavailable queue polls are recorded as false zero-depth samples');
+must(page.includes('CRF_QUEUE_CANCEL_PENDING.has(key)'),
+  'queue cancellation has no duplicate-submit guard');
+must(page.includes('Partial GitHub result') && page.includes('known_queued'),
+  'partial queue results are presented as complete');
+must(page.includes('if(q!==null&&q>=3&&!CRF_QUEUE_OPEN)crfToggleQueue(true,false)'),
+  'queue does not auto-open at the reference threshold');
+must(page.includes('if(tb)crfCollectPoolRows(tb);CRF_BUSY_POOLS.has(pool)'),
+  'busy filtering loses runner rows before placement');
+must(page.includes("'No busy runners':'No runners up'"),
+  'busy-only empty state is indistinguishable from an empty pool');
+must(!page.includes("fleet.querySelector('.crf-pool-metrics').innerHTML"),
+  'pool metrics are replaced on every poll and lose focus');
+must(page.includes('crfKeyboardInteractive(event.target)') && page.includes('target.isContentEditable'),
+  'Fleet shortcuts are active inside interactive editors');
+must(page.includes('crfCloseDrawer();crfCloseRunnerMenu(true);crfToggleHeroMenu(false);crfToggleQueue(false)'),
+  'Escape does not close all Fleet overlays');
+must(page.includes('function crfPositionRunnerMenu()') && page.includes('crfSyncRunnerMenu();'),
+  'runner menu is not reconciled after row replacement');
+must(page.includes('id="crf-strip-start" data-crf-mutation') && page.includes('data-crf-mutation onclick="crfAction(\'start\')">Start Farm'),
+  'secondary Start controls remain enabled with invalid config');
 must(engine.includes('"schema_version":2'), 'engine does not emit typed Fleet schema');
 must(engine.includes('"operation":null,"maintenance":%s'), 'inventory fallback omits maintenance state');
 must(engine.includes('recent_activity') && engine.includes('STATUS_RECENT_ACTIVITY_JSON'), 'engine omits recent one-shot activity');
@@ -47,10 +75,15 @@ must(usage[1].includes('if [ "$phase" = busy ]') && usage[1].includes('docker lo
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext([
+  functionSource('crfLoadPoint'),
   functionSource('crfDemandValue'),
   functionSource('crfAssignedDemand'),
   functionSource('crfActivityWhen')
 ].join('\n'), ctx);
+const normalized = ctx.crfLoadPoint({cpu:50,busy:2,total:8});
+must(normalized.cpu === 50 && normalized.busy === 25, 'load history busy count is not normalized by runner total');
+must(ctx.crfLoadPoint({cpu_pct:12,busy_pct:33}).busy === 33, 'typed load percentages are not accepted');
+must(ctx.crfLoadPoint({cpu:-1,busy:0}) === null, 'unavailable load sample is rendered as zero');
 const fresh = {pools:[
   {demand_fresh:true, assigned_jobs:2, advertised_capacity:3},
   {demand_fresh:true, assigned_jobs:1, advertised_capacity:2}

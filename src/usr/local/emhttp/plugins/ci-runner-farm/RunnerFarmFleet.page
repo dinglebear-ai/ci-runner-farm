@@ -1,76 +1,109 @@
 Menu="RunnerFarm:1"
-Title="Fleet"
+Title="Runners"
 Tag="server"
 ---
 <?php
 /* Fleet hub tab: live stats, actions, runner bays with usage, and the fleet log.
    The shared crf* JS core, the @unraid/ui force-loader, and the shared .crf-*
    styles are included from include/crf-core.php (below, via include_once) so all
-   four RunnerFarm tabs share one declared dependency regardless of tab load
+   RunnerFarm screens share one declared dependency regardless of tab load
    order. Only Fleet-specific pollers, rendering, and styles live in this file. */
 ?>
 <?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
-<div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
-<div id="crf-warn" class="crf-banner crf-banner-warn" style="display:none"></div>
-<div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
-
-<div class="crf-stats" id="crf-stats">
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Assigned jobs</span><span class="crf-stat-value crf-c-busy" id="crf-s-assigned">&ndash;</span><span class="crf-stat-note">scale-set demand</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Tracked repository run queue</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span><span class="crf-stat-note">not pool demand</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runner backend</span><span class="crf-stat-small" id="crf-s-backend">&ndash;</span><span class="crf-stat-note" id="crf-s-transition">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Image update</span><span class="crf-stat-small" id="crf-s-iu">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Cache</span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></div></uui-card-wrapper>
-</div>
-<div class="crf-toolbar" id="crf-backend-controls">
-  <uui-button class="orange" size="xs" id="crf-begin-migration" onclick="crfBackendAction('begin-migration')" disabled>Begin fleet migration</uui-button>
-  <uui-button class="orange" size="xs" id="crf-rollback-backend" onclick="crfBackendAction('rollback-backend')" disabled>Roll back to classic</uui-button>
-  <span class="crf-pool-state" id="crf-backend-reason"></span>
-</div>
-
-<div class="crf-toolbar">
-  <uui-button size="xs" data-crf-mutation onclick="crfAction('start')">Start</uui-button>
-  <uui-button variant="secondary" size="xs" onclick="crfAction('stop')">Stop</uui-button>
-  <uui-button variant="secondary" size="xs" data-crf-mutation onclick="crfAction('restart')">Restart</uui-button>
-  <uui-button variant="outline" size="xs" data-crf-mutation onclick="crfAction('validate')">Validate (no token)</uui-button>
-  <span class="crf-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span> <input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled>
-  <uui-button id="crf-scale-button" class="orange" size="xs" onclick="crfScale()" disabled>Scale to</uui-button></span>
-</div>
-
-<div id="crf-runner-tables">
-  <div id="crf-pools-section" class="crf-pools-section" style="display:none"></div>
-  <div id="crf-single-fleet" class="crf-bays">
-    <div class="crf-bay crf-bay-head">
-      <span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>
+<?php crf_render_shell('runners'); ?>
+<main class="crf-app-main" data-screen-label="Runners">
+  <div class="crf-fleet-strip" id="crf-fleet-strip" hidden>
+    <span class="crf-strip-status" id="crf-strip-status"><i></i><span id="crf-strip-status-label">Connecting&hellip;</span></span>
+    <span>up <b id="crf-strip-up">&ndash;</b></span>
+    <span>busy <b class="crf-c-busy" id="crf-strip-busy">&ndash;</b></span>
+    <span>queue <b class="crf-strip-queue" id="crf-strip-queue">&ndash;</b></span>
+    <span class="crf-strip-spacer"></span>
+    <button type="button" class="crf-button crf-button-dark crf-button-compact" id="crf-strip-stop" onclick="crfAction('stop')">Stop</button>
+    <button type="button" class="crf-button crf-button-primary crf-button-compact" id="crf-strip-start" data-crf-mutation onclick="crfAction('start')" hidden>Start</button>
+  </div>
+  <section class="crf-surface crf-fleet-hero">
+    <div class="crf-page-hero">
+      <div>
+        <span class="crf-eyebrow">CI Runner Farm</span>
+        <h1 class="crf-page-title">Runners</h1>
+      </div>
+      <div class="crf-page-actions">
+        <button class="crf-button crf-button-primary" id="crf-start-action" data-crf-mutation onclick="crfAction('start')" style="display:none"><i class="fa fa-play" aria-hidden="true"></i>Start</button>
+        <button class="crf-button crf-button-dark" id="crf-stop-action" onclick="crfAction('stop')"><img class="crf-button-source-icon" src="/plugins/ci-runner-farm/assets/icons/stop.svg" alt="">Stop</button>
+        <span class="crf-hero-menu-wrap">
+          <button class="crf-button crf-icon-button" id="crf-hero-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More actions" onclick="crfToggleHeroMenu()"><img class="crf-hero-ellipsis" src="/plugins/ci-runner-farm/assets/icons/ellipsis.svg" alt=""></button>
+          <span class="crf-hero-menu" id="crf-hero-menu" role="menu" hidden>
+            <button type="button" role="menuitem" data-crf-mutation onclick="crfAction('restart');crfToggleHeroMenu(false)"><i class="fa fa-refresh" aria-hidden="true"></i>Restart farm</button>
+            <button type="button" role="menuitem" data-crf-mutation onclick="crfAction('validate');crfToggleHeroMenu(false)"><i class="fa fa-check" aria-hidden="true"></i>Validate config</button>
+            <span class="crf-hero-menu-separator"></span>
+            <span id="crf-backend-controls" class="crf-backend-controls">
+              <button type="button" role="menuitem" id="crf-begin-migration" onclick="crfBackendAction('begin-migration')" disabled>Begin fleet migration</button>
+              <button type="button" role="menuitem" id="crf-rollback-backend" onclick="crfBackendAction('rollback-backend')" disabled>Roll back to classic</button>
+              <small id="crf-backend-reason"></small>
+            </span>
+          </span>
+        </span>
+      </div>
     </div>
-    <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div></div>
+    <div class="crf-fleet-stats" id="crf-stats">
+      <div class="crf-stat crf-load-stat" title="Average live CPU load across running runners">
+        <div class="crf-stat-head"><span class="crf-stat-label">Load</span><span class="crf-load-legend"><i class="crf-load-key crf-load-key-cpu"></i>cpu <i class="crf-load-key crf-load-key-busy"></i>busy <b id="crf-load-now">&ndash;</b></span></div>
+        <canvas id="crf-load-chart" height="34" aria-label="Recent runner CPU load"></canvas>
+      </div>
+      <div class="crf-stat"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div>
+      <div class="crf-stat" title="Assigned jobs are scale-set demand"><span class="crf-stat-label">Assigned</span><span class="crf-stat-value crf-c-busy" id="crf-s-assigned">&ndash;</span></div>
+      <div class="crf-stat crf-queue-stat" role="button" tabindex="0" aria-controls="crf-run-queue" aria-expanded="false" title="Tracked repository run queue; not pool demand. Open queued workflow runs." onclick="crfToggleQueue()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();crfToggleQueue()}"><span class="crf-stat-label">Run queue</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span></div>
+      <div class="crf-stat"><span class="crf-stat-head"><span class="crf-stat-label">Cache</span><button class="crf-cache-clear" id="crf-cache-clear" type="button" onclick="crfCacheClear()">Clear</button></span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div>
+      <div class="crf-stat crf-hidden-stat" aria-hidden="true"><span id="crf-s-backend">&ndash;</span><span id="crf-s-transition">&ndash;</span><span id="crf-s-iu">&ndash;</span></div>
+    </div>
+    <div id="crf-warn" class="crf-fleet-warning" style="display:none"></div>
+    <div id="crf-farm-stopped" class="crf-farm-stopped" hidden>
+      <span class="crf-stopped-dot" aria-hidden="true"></span><strong>Farm stopped</strong><span>&mdash; all runners are down; jobs queue on GitHub until the farm starts.</span><span class="crf-stopped-spacer"></span>
+      <button type="button" class="crf-button crf-button-primary crf-button-compact" data-crf-mutation onclick="crfAction('start')">Start Farm</button>
+    </div>
+  </section>
+
+  <section class="crf-queue-panel crf-surface" id="crf-run-queue" aria-label="Run queue" hidden>
+    <header class="crf-queue-head">
+      <span class="crf-queue-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/clock.svg" alt=""></span>
+      <span class="crf-queue-title">Run queue</span>
+      <span class="crf-queue-subtitle">jobs waiting for a runner</span>
+      <span class="crf-queue-spacer"></span>
+      <canvas id="crf-queue-depth" width="80" height="18" title="Queue depth, last 2 minutes" aria-label="Recent queue depth"></canvas>
+      <button type="button" class="crf-queue-close" aria-label="Close run queue" onclick="crfToggleQueue(false)"><img src="/plugins/ci-runner-farm/assets/icons/close.svg" alt=""></button>
+    </header>
+    <div class="crf-queue-pressure" id="crf-queue-pressure" hidden></div>
+    <div class="crf-queue-grid crf-queue-grid-head" data-rf-head>
+      <span>Workflow</span><span>Labels</span><span>Pool</span><span>Blocked by</span><span>Waiting</span><span></span>
+    </div>
+    <div id="crf-queue-body"><div class="crf-queue-empty"><i class="fa fa-spinner fa-spin" aria-hidden="true"></i>Loading queue&hellip;</div></div>
+  </section>
+
+  <div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
+  <div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
+
+  <div class="crf-single-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span><input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled><button id="crf-scale-button" class="crf-button crf-button-primary crf-button-compact" onclick="crfScale()" disabled>Scale to</button></div>
+
+  <section id="crf-runner-tables">
+    <div id="crf-pools-section" class="crf-pools-section" style="display:none"></div>
+    <div id="crf-single-fleet" class="crf-bays crf-surface">
+      <div class="crf-bay crf-bay-head">
+        <span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>
+      </div>
+      <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading&hellip;</span><span></span><span></span><span></span><span></span><span></span></div></div>
+    </div>
+  </section>
+  <aside class="crf-key-legend" aria-label="Keyboard shortcuts"><kbd>j</kbd><kbd>k</kbd><span>move</span><kbd>e</kbd><span>logs</span><kbd>Esc</kbd><span>close</span></aside>
+
+  <div class="crf-fleet-legacy" hidden aria-hidden="true">
+    <div class="crf-activity" id="crf-activity" style="display:none"><div class="crf-activity-head">Recent one-shot activity <span class="crf-muted">completed runners</span></div><div id="crf-activity-body"></div></div>
+    <div class="crf-runstats" id="crf-runstats"><span class="crf-rs-title">Recent runs</span><span class="crf-rs-seg"><b class="crf-c-ok" id="crf-rs-ok">&ndash;</b> passed</span><span class="crf-rs-seg"><b id="crf-rs-fail">&ndash;</b> failed</span><span class="crf-rs-seg"><b id="crf-rs-cancel">&ndash;</b> cancelled</span><span class="crf-rs-seg"><b id="crf-rs-rate">&ndash;</b> pass rate</span><span id="crf-rs-total">&ndash;</span></div>
+    <div id="crf-log"></div>
   </div>
-</div>
-
-<div class="crf-activity" id="crf-activity" style="display:none">
-  <div class="crf-activity-head">Recent one-shot activity <span class="crf-muted">completed runners</span></div>
-  <div id="crf-activity-body"></div>
-</div>
-
-<div class="crf-runstats" id="crf-runstats">
-  <span class="crf-rs-title">Recent runs</span>
-  <span class="crf-rs-seg"><b class="crf-c-ok" id="crf-rs-ok">&ndash;</b> passed</span>
-  <span class="crf-rs-seg"><b id="crf-rs-fail" style="color:var(--crf-err)">&ndash;</b> failed</span>
-  <span class="crf-rs-seg"><b class="crf-muted" id="crf-rs-cancel">&ndash;</b> cancelled</span>
-  <span class="crf-rs-seg"><b id="crf-rs-rate">&ndash;</b> pass rate</span>
-  <span class="crf-rs-seg crf-muted" id="crf-rs-total">&ndash; total across your repos</span>
-</div>
-
-<div class="crf-console">
-  <div class="crf-console-head">
-    <span>Fleet log</span>
-    <uui-button variant="outline" size="xs" onclick="crfCopyFrom('crf-log',this)">Copy</uui-button>
-  </div>
-  <div id="crf-log" class="crf-console-body"><span class="crf-muted">Output from fleet actions and image builds appears here.</span></div>
-</div>
+ </main>
 
 <style>
   /* Shared .crf-* tokens/rules (:root vars, .crf-muted, banners, balls, toast,
@@ -143,7 +176,7 @@ Tag="server"
   .crf-el-warn{color:var(--crf-busy)}
   .crf-el-hot{color:var(--crf-err);font-weight:bold}
   #crf-runner-tables .crf-bay[data-name]{cursor:pointer}
-  .crf-recycle{cursor:pointer;color:var(--alt-text-color);font-size:15px;line-height:1;text-align:center;border-radius:4px;padding:1px 2px}
+  .crf-recycle{width:26px;height:26px;justify-self:center;display:grid;place-items:center;cursor:pointer;color:var(--alt-text-color);font-size:15px;line-height:1;text-align:center;border-radius:4px;padding:0}
   .crf-recycle:hover{color:var(--crf-busy)}
   #crf-runner-tables .crf-bay[data-name]:focus-visible,.crf-recycle:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px;border-radius:4px}
   @media (max-width:860px){
@@ -158,6 +191,206 @@ Tag="server"
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
   .crf-empty strong{font-size:13px;color:var(--text-color)}
   .crf-stat-note{font-size:10px;color:var(--alt-text-color)}
+
+  /* Reference-matched Runners screen. The live data/interaction contract above
+     stays intact; these selectors only project it into the supplied mock. */
+  .crf-fleet-hero{overflow:visible}
+  .crf-fleet-strip{position:sticky;top:8px;z-index:15;display:flex;align-items:center;gap:14px;background:#fff;border:1px solid #ececec;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.1);padding:8px 14px;font-size:12.5px;color:var(--crf-ink-2)}
+  .crf-fleet-strip[hidden]{display:none}.crf-strip-status{display:inline-flex;align-items:center;gap:6px;border-radius:9999px;font-size:11.5px;font-weight:600;padding:3px 9px;background:var(--crf-success-soft);color:var(--crf-success-ink)}.crf-strip-status i{width:6px;height:6px;border-radius:50%;background:currentColor}.crf-fleet-strip b{font-variant-numeric:tabular-nums;color:var(--crf-ink)}.crf-fleet-strip .crf-strip-queue{color:var(--crf-warning-ink)}.crf-strip-spacer{flex:1}
+  .crf-farm-stopped{display:flex;align-items:center;gap:10px;padding:10px 24px;background:#f5f5f5;border-top:1px solid var(--crf-border);font-size:12.5px;color:var(--crf-ink-3);flex-wrap:wrap}.crf-farm-stopped[hidden]{display:none}.crf-farm-stopped strong{font-size:13px;color:var(--crf-ink-2)}.crf-stopped-dot{width:9px;height:9px;border-radius:50%;background:#c4c4c4;flex:none}.crf-stopped-spacer{flex:1}
+  .crf-button-source-icon{display:block;width:10px;height:10px}.crf-hero-ellipsis{display:block;width:14px;height:14px}
+  .crf-hero-menu-wrap{position:relative;display:inline-flex}
+  .crf-hero-menu{position:absolute;top:40px;right:0;z-index:40;width:210px;padding:4px;display:flex;flex-direction:column;background:#fff;border:1px solid var(--crf-border-soft);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.12)}
+  .crf-hero-menu[hidden]{display:none}
+  .crf-hero-menu button{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;padding:7px 9px;border:0;border-radius:4px;background:transparent;color:var(--crf-ink);font:500 13px clear-sans,ui-sans-serif,system-ui,sans-serif;text-align:left;cursor:pointer}
+  .crf-hero-menu button:hover{background:#f5f5f5}
+  .crf-hero-menu button:disabled{opacity:.42;cursor:not-allowed}
+  .crf-hero-menu button i{width:13px;color:var(--crf-ink-3);text-align:center}
+  .crf-hero-menu-separator{height:1px;margin:4px;background:var(--crf-border-soft)}
+  .crf-backend-controls{display:flex;flex-direction:column}
+  .crf-backend-controls small{padding:4px 9px;color:var(--crf-warning-ink);font-size:10.5px;line-height:1.35}
+  .crf-fleet-stats{border-top:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);padding:14px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px}
+  .crf-fleet-stats .crf-stat{min-width:0;min-height:75px;background:#fff;border:1px solid #ececec;border-radius:6px;padding:10px 13px;display:flex;flex-direction:column;gap:5px;transition:border-color .15s,box-shadow .15s}
+  .crf-fleet-stats .crf-stat:hover{border-color:#fed7aa;box-shadow:0 2px 8px rgba(255,140,47,.12)}
+  .crf-queue-stat{cursor:pointer}.crf-queue-stat:focus-visible{outline:2px solid #ff6600;outline-offset:2px}
+  .crf-fleet-stats .crf-load-stat{grid-column:span 2}
+  .crf-stat-head{display:flex;align-items:center;gap:6px;min-width:0}
+  .crf-fleet-stats .crf-stat-label{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crf-fleet-stats .crf-stat-value{font-size:22px;line-height:1.2;font-weight:600;font-variant-numeric:tabular-nums;color:var(--crf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crf-fleet-stats .crf-stat-small{font-size:22px;line-height:1.2;font-weight:600;color:var(--crf-ink-3)}
+  .crf-fleet-stats>.crf-stat:nth-child(8){min-height:66px}
+  .crf-fleet-stats .crf-c-ok{color:#3f7d38}.crf-fleet-stats .crf-c-busy{color:#9a3412}
+  #crf-s-busy{color:var(--crf-ink)}
+  #crf-s-assigned{color:var(--crf-ink-3)}
+  .crf-hidden-stat{display:none!important}
+  .crf-load-legend{margin-left:auto;display:inline-flex;align-items:center;gap:4px;color:#8a8a8a;font-size:10px;white-space:nowrap}
+  .crf-load-legend b{margin-left:4px;color:var(--crf-ink-2);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .crf-load-key{display:inline-block;width:8px;height:3px;border-radius:2px}.crf-load-key-cpu{background:#ff8c2f}.crf-load-key-busy{background:#c4c4c4;margin-left:4px}
+  #crf-load-chart{display:block;width:100%;height:34px}
+  .crf-cache-clear{margin-left:auto;border:0;border-radius:9999px;background:var(--crf-orange-soft);color:#ff8c2f;padding:1px 8px;font:600 10.5px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
+  .crf-cache-clear:hover{background:#fed7aa;text-decoration:none}
+  .crf-fleet-warning{min-height:34px;display:flex;align-items:center;gap:8px;padding:8px 24px;background:var(--crf-warning-soft);border-top:1px solid #fde68a;color:var(--crf-warning-ink);font-size:12.5px}
+  .crf-fleet-warning>img{display:block;width:12px;height:12px;flex:none}.crf-fleet-warning strong{font-weight:600}.crf-fleet-warning .crf-warning-detail{font-weight:400}
+  .crf-fleet-warning-dismiss{margin-left:auto;padding:0;border:0;background:transparent;color:inherit;font:600 11px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
+  .crf-fleet-warning-dismiss:hover{text-decoration:underline}
+  .crf-single-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--crf-ink-3);font-size:12px}
+  .crf-single-scale input{width:54px!important;height:28px!important;margin:0!important;padding:0 8px!important;border:1px solid #d4d4d4!important;border-radius:6px!important;background:#fff!important;color:var(--crf-ink)!important;font-size:12px!important}
+  .crf-pools-section{display:flex;flex-direction:column;gap:16px;margin:0}
+  .crf-pool-fleet{margin:0;background:#fff;border:2px solid #f5f5f5;border-radius:6px;box-shadow:var(--crf-shadow);overflow:hidden}
+  .crf-pool-fleet-meta{height:59px;min-height:59px;box-sizing:border-box;padding:12px 20px;display:flex;align-items:center;gap:10px;border:0;border-bottom:1px solid var(--crf-border-soft);border-radius:0;background:var(--crf-panel-soft);color:var(--crf-ink-3);font-size:11px}
+  .crf-pool-toggle{width:22px;height:22px;display:grid;place-items:center;flex:none;border:0;border-radius:6px;background:transparent;color:var(--crf-ink-3);font-size:9px;cursor:pointer}
+  .crf-pool-toggle:hover{background:#f0f0f0}.crf-pool-toggle i{transition:transform .15s}.crf-pool-fleet.is-collapsed .crf-pool-toggle i{transform:rotate(-90deg)}.crf-pool-fleet.is-collapsed .crf-bays{display:none}
+  .crf-pool-icon{width:30px;height:30px;display:grid;place-items:center;flex:none;border-radius:7px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:14px;overflow:hidden}
+  .crf-pool-icon img{display:block;max-width:22px;max-height:22px}
+  .crf-pool-fleet[data-pool="python"] .crf-pool-icon{background:#dbeafe;color:#1e40af}.crf-pool-fleet[data-pool="typescript"] .crf-pool-icon{background:#e3ecf8;color:#2f6bb0}.crf-pool-fleet[data-pool="go"] .crf-pool-icon{background:#daf1f7;color:#0d7fa5}.crf-pool-fleet[data-pool="ops"] .crf-pool-icon,.crf-pool-fleet[data-pool="system"] .crf-pool-icon{background:#ececec;color:#525252}
+  .crf-pool-heading{display:flex;flex-direction:column;gap:0;min-width:0}
+  .crf-pool-title{font-size:14.5px;font-weight:600;color:var(--crf-ink);text-transform:lowercase}
+  .crf-pool-route{min-width:0}
+  button.crf-pool-selector{color:var(--crf-ink-4)!important;font:11px ui-monospace,Menlo,monospace!important;line-height:normal!important;height:13px!important}
+  .crf-pool-fleet-meta .crf-pool-metrics{margin-left:2px}
+  .crf-pool-metrics{height:24px;box-sizing:border-box;display:flex;align-items:center;gap:0;border:1px solid var(--crf-border);border-radius:9999px;overflow:hidden;color:var(--crf-ink-3);font-size:11px;line-height:normal;white-space:nowrap}
+  .crf-pool-metrics strong{width:45.63px;box-sizing:border-box;padding:3px 11px;background:#fff;color:var(--crf-ink);font-weight:600}
+  .crf-pool-metrics>span{padding:3px 11px;border-left:1px solid var(--crf-border-soft)}
+  .crf-pool-metrics>.crf-pool-busy-filter{width:80.72px;box-sizing:border-box;display:inline-flex;align-items:center;gap:5px;padding:3px 9px;cursor:pointer;user-select:none}.crf-pool-busy-filter:hover,.crf-pool-busy-filter.is-active{background:var(--crf-orange-soft);color:var(--crf-orange-ink)}
+  .crf-pool-metrics>[data-pool-metric="idle"]{width:52.38px;box-sizing:border-box}
+  .crf-pool-busy-dot{width:5px;font-size:5px;line-height:1}
+  .crf-pool-state-wrap{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-pool-resources{margin-left:2px;display:flex;align-items:center;gap:12px;white-space:nowrap;color:var(--crf-ink-4);font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .crf-pool-resource{display:inline-flex;align-items:center;gap:6px}
+  .crf-pool-resource-bar{width:44px;height:4px;border-radius:9999px;background:#ececec;overflow:hidden}.crf-pool-resource-bar i{display:block;height:100%;border-radius:inherit;background:var(--crf-ok)}
+  .crf-pool-resource-memory .crf-pool-resource-bar i{background:var(--crf-busy)}
+  .crf-pool-resource b{color:var(--crf-ink-3);font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}
+  .crf-pool-resource-cpu b{min-width:26px}.crf-pool-resource-memory b{min-width:32px}
+  .crf-pool-state-wrap{margin-left:2px}
+  .crf-pool-health{width:22px;height:22px;border-radius:9999px;background:var(--crf-warning-soft);color:var(--crf-warning-ink);display:none;place-items:center;font-size:11px}.crf-pool-health img{display:block;width:12px;height:12px}
+  .crf-pool-health.is-visible{display:grid}
+  .crf-pool-fleet-meta .crf-pool-control{margin-left:auto}
+  .crf-pool-control{gap:6px;color:var(--crf-ink-3)}
+  .crf-pool-scale-trigger{height:28px;padding:0 12px;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--crf-border);border-radius:6px;background:#fff;color:var(--crf-ink-3);font:600 12px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer;white-space:nowrap}.crf-pool-scale-trigger img{display:block;width:10px;height:10px}
+  .crf-pool-scale-trigger:hover{background:#f5f5f5;color:var(--crf-ink)}
+  .crf-pool-scale-editor{display:flex;align-items:center;gap:6px}.crf-pool-scale-editor[hidden]{display:none}
+  .crf-pool-control input{width:48px!important;height:28px!important;margin:0!important;border:1px solid #d4d4d4!important;border-radius:6px!important;padding:0 7px!important}
+  .crf-pool-control uui-button:not(:defined){height:28px;padding:0 12px;background:#fff;border:1px solid var(--crf-border);color:var(--crf-ink-3);font-size:12px;font-weight:600}
+  .crf-pool-fleet .crf-bays{margin:0;border:0;border-radius:0;box-shadow:none}
+  .crf-bays{border:0;border-radius:6px;overflow:hidden;margin:0;background:#fff}
+  .crf-bay{position:relative;display:grid;grid-template-columns:minmax(220px,1.4fr) 110px minmax(140px,1fr) minmax(180px,1fr) minmax(200px,1fr) 36px;gap:0;align-items:center;min-height:43px;padding:8px 20px;border-top:0;border-bottom:1px solid #f7f7f7;background:#fff;color:var(--crf-ink)}
+  .crf-bay[data-name]::before{content:'';position:absolute;inset:0 auto 0 0;width:3px;background:var(--crf-ok)}
+  .crf-bay-head{position:sticky;top:0;z-index:5;min-height:34px;height:34px;padding:0 20px;background:#fff;border-bottom:1px solid var(--crf-border-soft);color:var(--crf-ink-2);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase}
+  #crf-runner-tables .crf-bay[data-name]:hover{background:#fffdf9}
+  .crf-ball{width:8px;height:8px}
+  .crf-bay[data-name]>.crf-ball{position:absolute;left:20px;top:50%;transform:translateY(-50%)}
+  .crf-bay-head>span:first-child{display:none}
+  .crf-name{padding-left:17px;box-sizing:border-box;font:600 13.5px ui-monospace,Menlo,monospace;color:var(--crf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crf-runner-age{margin-left:8px;color:var(--crf-ink-4);font:400 10.5px/normal clear-sans,ui-sans-serif,system-ui,sans-serif}
+  .crf-pool-badge{display:none}
+  .crf-phase uui-badge:not(:defined){display:inline-flex;align-items:center;border:0;border-radius:9999px;padding:3px 10px;background:var(--crf-success-soft);color:var(--crf-success-ink);font-size:12px;font-weight:600}
+  .crf-phase uui-badge[variant="orange"]:not(:defined){background:var(--crf-orange-soft);color:var(--crf-orange-ink)}
+  .crf-job{font-size:13px;color:var(--crf-ink-3)}.crf-job a{color:var(--crf-ink-3)}.crf-repo{color:var(--crf-ink)}
+  .crf-ref{border-color:var(--crf-border);color:var(--crf-ink-3)}
+  .crf-usage{gap:8px;padding-right:18px}
+  .crf-ubar{height:4px;min-width:48px;background:#f0f0f0}
+  .crf-uval{width:58px;text-align:right;font:600 12.5px clear-sans,ui-sans-serif,system-ui,sans-serif;color:var(--crf-ink-3)}
+  .crf-usage:nth-last-child(2) .crf-uval{width:106px}
+  .crf-usage:nth-last-child(2) .crf-ubar>span{background:var(--crf-busy)}
+  .crf-mem-value strong{font-weight:600;color:var(--crf-ink-3)}.crf-mem-value span{font-weight:400;color:var(--crf-ink-4)}
+  .crf-recycle{color:#c4c4c4;font-size:15px}.crf-recycle img{display:block;width:14px;height:14px;margin:auto}
+  .crf-runner-menu{position:absolute;z-index:70;width:150px;padding:4px;background:#fff;border:1px solid var(--crf-border);border-radius:7px;box-shadow:0 6px 18px rgba(0,0,0,.14)}.crf-runner-menu[hidden]{display:none}.crf-runner-menu button{display:flex;align-items:center;gap:8px;width:100%;height:30px;margin:0;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--crf-ink-2);font:500 12px clear-sans,ui-sans-serif,system-ui,sans-serif;text-align:left;cursor:pointer}.crf-runner-menu button:hover{background:#f5f5f5;color:var(--crf-ink)}.crf-runner-menu button:disabled{opacity:.4;cursor:not-allowed}.crf-runner-menu button i{width:12px;text-align:center;color:var(--crf-ink-3)}
+  .crf-bay.crf-kb-active{background:#fff7ed!important;box-shadow:inset 3px 0 #ff8c2f}
+  .crf-key-legend{margin:-4px 0 0 auto;display:flex;align-items:center;gap:6px;color:var(--crf-ink-4);font-size:10.5px}.crf-key-legend kbd{min-width:17px;height:18px;padding:0 5px;border:1px solid var(--crf-border);border-radius:4px;background:#fff;color:var(--crf-ink-3);font:10.5px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;text-align:center;box-shadow:0 1px 1px rgba(0,0,0,.04)}
+  .crf-bay-drawer{padding:10px 20px 12px 48px;border-top:0;border-bottom:1px solid #f7f7f7;background:#fffdf9;color:var(--crf-ink);font:11.5px/1.55 ui-monospace,Menlo,monospace}
+  @keyframes rfExpand{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+  .crf-queue-panel{overflow:hidden;animation:rfExpand .15s ease-out}.crf-queue-panel[hidden]{display:none}
+  .crf-queue-head{display:flex;align-items:center;gap:10px;min-height:49px;padding:0 20px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);flex-wrap:wrap}
+  .crf-queue-icon{width:26px;height:26px;border-radius:7px;background:var(--crf-warning-soft);color:var(--crf-warning-ink);display:grid;place-items:center;flex:none}.crf-queue-icon img{display:block;width:13px;height:13px}
+  .crf-queue-title{font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}.crf-queue-subtitle{font-size:12.5px;color:var(--crf-ink-3)}.crf-queue-spacer{flex:1}
+  #crf-queue-depth{display:block;width:80px;height:18px;flex:none}.crf-queue-close{width:27px;height:27px;margin:0;padding:0;border:0;border-radius:5px;background:transparent;color:var(--crf-ink-4);display:grid;place-items:center;cursor:pointer}.crf-queue-close img{display:block;width:12px;height:12px}.crf-queue-close:hover{background:#f0f0f0;color:var(--crf-ink)}
+  .crf-queue-pressure{display:flex;align-items:center;gap:8px;min-height:33px;padding:0 20px;border-bottom:1px solid #f7f7f7;flex-wrap:wrap}.crf-queue-pressure[hidden]{display:none}.crf-queue-pressure-label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--crf-ink-4)}.crf-queue-pressure-chip{display:inline-flex;align-items:center;border-radius:9999px;padding:2px 9px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:11px;font-weight:600}.crf-queue-pressure-partial{margin-left:auto;color:var(--crf-warning-ink);font-size:11px;font-weight:600}
+  .crf-queue-grid{position:relative;display:grid;grid-template-columns:minmax(220px,1.5fr) minmax(150px,1fr) 110px minmax(150px,1fr) 80px 34px;align-items:center;padding:9px 20px;border-bottom:1px solid #f7f7f7;gap:0}.crf-queue-grid:hover{background:#fff7ed}
+  .crf-queue-grid-head{height:32px;box-sizing:border-box;padding-top:0;padding-bottom:0;border-bottom-color:var(--crf-border-soft)}.crf-queue-grid-head:hover{background:#fff}.crf-queue-grid-head>span{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--crf-ink-2)}.crf-queue-grid-head>span:nth-child(5){text-align:right}
+  .crf-queue-rail{position:absolute;inset:0 auto 0 0;width:3px;background:#e9bf41}.crf-queue-workflow{display:flex;flex-direction:column;gap:1px;min-width:0}.crf-queue-workflow strong{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-workflow small{font:11.5px ui-monospace,Menlo,monospace;color:var(--crf-ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crf-queue-labels{font:11.5px ui-monospace,Menlo,monospace;color:var(--crf-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-pool{justify-self:start;display:inline-flex;align-items:center;border-radius:9999px;padding:2px 9px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:11px;font-weight:600}.crf-queue-pool.is-unknown{background:#e5e7eb;color:#4b5563}.crf-queue-reason{font-size:12px;color:var(--crf-warning-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-wait{font-size:12.5px;font-weight:600;color:var(--crf-warning-ink);font-variant-numeric:tabular-nums;text-align:right}
+  .crf-queue-cancel{justify-self:end;width:26px;height:26px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;color:#d4d4d4;display:grid;place-items:center;cursor:pointer;transition:all .15s}.crf-queue-cancel img{display:block;width:12px;height:12px}.crf-queue-cancel:hover{background:#fef2f2;color:#bd1818;transform:scale(1.1)}.crf-queue-cancel:disabled{opacity:.45;cursor:wait;transform:none}.crf-queue-empty{padding:18px 20px;display:flex;align-items:center;gap:8px;color:var(--crf-ink-4);font-size:12.5px}
+  .crf-banner{width:100%;margin:0}
+  @media(max-width:980px){.crf-bay-head,.crf-queue-grid-head{display:none}.crf-bay,.crf-queue-grid{display:flex;flex-wrap:wrap;gap:6px 16px}.crf-bay>.crf-usage{flex:1 1 180px}.crf-queue-workflow{flex:1 1 260px}.crf-queue-labels{flex:1 1 220px}.crf-pool-fleet-meta{flex-wrap:wrap}.crf-pool-fleet-meta .crf-pool-control{margin-left:0}.crf-fleet-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.crf-load-stat{grid-column:span 2!important}}
+  @media(max-width:760px){
+    .crf-fleet-strip{top:64px;gap:10px;padding:8px 10px;border-radius:10px;overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:none;white-space:nowrap}
+    .crf-fleet-strip::-webkit-scrollbar{display:none}
+    .crf-fleet-strip .crf-strip-spacer{display:none}
+    .crf-fleet-strip .crf-button{min-height:36px;height:36px;margin-left:auto}
+    .crf-fleet-hero{border-radius:12px}
+    .crf-fleet-hero .crf-page-hero{padding:16px 14px 14px;flex-wrap:nowrap}
+    .crf-fleet-hero .crf-page-actions{margin-left:auto;flex:none}
+    .crf-fleet-hero .crf-page-actions .crf-button:not(.crf-icon-button){min-width:88px}
+    .crf-hero-menu{position:fixed;top:auto;right:12px;bottom:calc(78px + env(safe-area-inset-bottom,0px));width:min(280px,calc(100vw - 24px));padding:8px;border-radius:12px}
+    .crf-hero-menu button{min-height:44px;padding:10px 12px;font-size:14px}
+    .crf-fleet-stats{padding:12px;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .crf-fleet-stats .crf-load-stat{grid-column:1/-1!important;min-height:112px;order:-1;padding:12px 14px}
+    .crf-fleet-stats .crf-stat{min-height:88px;padding:12px;gap:7px;border-radius:10px}
+    .crf-fleet-stats .crf-stat-label{font-size:10px;white-space:normal}
+    .crf-fleet-stats .crf-stat-value,.crf-fleet-stats .crf-stat-small{font-size:24px}
+    #crf-load-chart{height:58px!important}
+    .crf-load-legend{font-size:10.5px}
+    .crf-cache-clear{min-width:56px;min-height:40px;padding:7px 10px}
+    .crf-fleet-warning,.crf-farm-stopped{padding:13px 14px;align-items:flex-start;gap:9px;line-height:1.4}
+    .crf-fleet-warning>img{width:15px;height:15px;margin-top:1px}
+    .crf-fleet-warning strong{flex:1 1 calc(100% - 28px);font-size:13px}
+    .crf-fleet-warning .crf-warning-detail{display:block;flex:1 1 100%;margin-left:24px}
+    .crf-fleet-warning-dismiss{min-height:44px;margin:0 0 0 auto;padding:0 12px;font-size:12px}
+    .crf-farm-stopped .crf-stopped-spacer{display:none}
+    .crf-farm-stopped .crf-button{width:100%;margin-top:4px}
+    .crf-single-scale{width:100%;margin:0;padding:2px 0;justify-content:flex-end}
+    .crf-single-scale input{width:64px!important;height:40px!important;font-size:16px!important}
+    .crf-pools-section{gap:12px}
+    .crf-pool-fleet{border-width:1px;border-radius:12px}
+    .crf-pool-fleet-meta{height:auto;min-height:0;padding:12px;display:grid;grid-template-columns:44px 36px minmax(0,1fr) auto;grid-template-areas:"toggle icon heading control" ". . metrics metrics" ". . state state";gap:6px 9px;align-items:center}
+    .crf-pool-toggle{grid-area:toggle;width:44px;height:44px;border:1px solid var(--crf-border);border-radius:9px;background:#fff}
+    .crf-pool-icon{grid-area:icon;width:36px;height:36px;border-radius:10px}
+    .crf-pool-heading{grid-area:heading}
+    .crf-pool-title{font-size:16px}
+    button.crf-pool-selector{min-height:40px!important;height:auto!important;padding:7px 10px!important;font-size:10.5px!important;overflow:hidden;text-overflow:ellipsis;white-space:normal;max-width:100%}
+    .crf-pool-metrics{grid-area:metrics;width:max-content;max-width:100%;min-height:40px;height:auto;margin:0!important;overflow-x:auto;scrollbar-width:none;font-size:11.5px}
+    .crf-pool-metrics::-webkit-scrollbar{display:none}
+    .crf-pool-metrics strong,.crf-pool-metrics>span{width:auto!important;min-height:40px;padding:9px 10px!important;align-items:center}
+    .crf-pool-state-wrap{grid-area:state;margin:0;white-space:normal;font-size:11px;line-height:1.35}
+    .crf-pool-resources{display:none}
+    .crf-pool-fleet-meta .crf-pool-control{grid-area:control;margin:0!important}
+    .crf-pool-scale-trigger{width:44px;height:40px;padding:0;justify-content:center;font-size:0}
+    .crf-pool-scale-trigger img{width:15px;height:15px}
+    .crf-pool-scale-editor{position:absolute;right:12px;z-index:20;padding:8px;border:1px solid var(--crf-border);border-radius:10px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.14)}
+    .crf-bay-head{display:none!important}
+    .crf-bay{display:grid!important;grid-template-columns:minmax(0,1fr) auto 44px;grid-template-areas:"name phase menu" "job job menu";gap:6px 8px;min-height:78px;padding:12px 10px 12px 18px;border-bottom:1px solid var(--crf-border-soft)}
+    .crf-bay[data-name]>.crf-ball{left:10px;top:21px;transform:none;width:7px;height:7px}
+    .crf-name{grid-area:name;padding-left:4px;font-size:13px;line-height:1.25;white-space:normal;overflow:visible}
+    .crf-runner-age{display:block;margin:3px 0 0;font-size:10px;line-height:1.2}
+    .crf-phase{grid-area:phase;align-self:start;justify-self:end}
+    .crf-phase uui-badge:not(:defined){min-height:28px;padding:5px 10px;font-size:11.5px}
+    .crf-job{grid-area:job;min-width:0;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+    .crf-job>a{display:inline-flex;min-height:44px;padding-block:6px;align-items:center}.crf-ref{display:inline-flex;min-height:44px;margin:4px 0 0 0;padding:8px;align-items:center}
+    .crf-bay>.crf-usage{display:none!important}
+    .crf-recycle{grid-area:menu;width:44px;height:44px;align-self:center;justify-self:end;border-radius:10px}
+    .crf-recycle img{width:16px;height:16px}
+    .crf-bay-drawer{padding:12px 14px;border-left:3px solid #ff8c2f;font-size:11px;line-height:1.6;max-height:260px;overflow-wrap:anywhere}
+    .crf-key-legend{display:none}
+    .crf-queue-head{padding:10px 12px;gap:8px}
+    .crf-queue-subtitle{flex:1 1 100%;margin-left:36px}
+    #crf-queue-depth{margin-left:auto}
+    .crf-queue-grid{display:grid!important;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow wait" "labels cancel" "pool cancel" "reason reason";gap:6px 10px;padding:12px 14px}
+    .crf-queue-workflow{grid-area:workflow;min-width:0}
+    .crf-queue-labels{grid-area:labels;min-width:0;white-space:normal;overflow-wrap:anywhere}
+    .crf-queue-pool{grid-area:pool}
+    .crf-queue-reason{grid-area:reason;white-space:normal}
+    .crf-queue-wait{grid-area:wait}
+    .crf-queue-cancel{grid-area:cancel;width:44px;height:44px}
+    .crf-queue-pressure{padding:8px 12px}
+    .crf-queue-pressure-partial{width:100%;margin-left:0}
+    .crf-queue-empty{padding:18px 14px;line-height:1.45}
+  }
+  @media(max-width:390px){
+    .crf-fleet-hero .crf-page-hero{flex-wrap:wrap}
+    .crf-fleet-hero .crf-page-actions{width:100%;justify-content:flex-end}
+    .crf-pool-fleet-meta{grid-template-columns:44px 34px minmax(0,1fr) auto;padding:10px}
+    .crf-fleet-stats{gap:8px;padding:10px}
+  }
 </style>
 
 <script>
@@ -166,8 +399,70 @@ Tag="server"
    (all tabs share one document, so document.hidden stays false on Settings/Image
    while Fleet's pollers would otherwise keep hitting docker on the NAS). */
 function crfFleetActive(){ const b=document.getElementById('crf-runner-tables'); return !document.hidden && !!b && b.offsetParent!==null; }
+function crfToggleHeroMenu(force){
+  const menu=document.getElementById('crf-hero-menu'),button=document.getElementById('crf-hero-menu-button');
+  if(!menu||!button)return;
+  const open=typeof force==='boolean'?force:menu.hidden;
+  menu.hidden=!open;button.setAttribute('aria-expanded',open?'true':'false');
+}
+document.addEventListener('click',e=>{if(!e.target.closest('.crf-hero-menu-wrap'))crfToggleHeroMenu(false);});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!crfModalActive())crfToggleHeroMenu(false);});
+const CRF_BUSY_POOLS=new Set();
+let CRF_PINNED_RUNNERS=new Set();
+try{CRF_PINNED_RUNNERS=new Set(JSON.parse(localStorage.getItem('ci-runner-farm:pinned-runners')||'[]'));}catch(_error){}
+let CRF_RUNNER_MENU='';
+let CRF_KB_INDEX=-1;
+let CRF_QUEUE_OPEN=false;
+let CRF_QUEUE_SNAPSHOT={queued:-1,jobs:[],loading:true};
+const CRF_QUEUE_DEPTH=[];
+const CRF_QUEUE_CANCEL_PENDING=new Set();
+const CRF_LOAD_POINTS=[];
+function crfLoadPoint(point){
+  if(!point||typeof point!=='object')return null;
+  const cpu=Number(point.cpu_pct??point.cpu),total=Number(point.total),busyCount=Number(point.busy),busyPctValue=Number(point.busy_pct);
+  if(!Number.isFinite(cpu)||cpu<0)return null;
+  const busy=Number.isFinite(busyPctValue)?busyPctValue:(Number.isFinite(total)&&total>0&&Number.isFinite(busyCount)?100*busyCount/total:busyCount);
+  if(!Number.isFinite(busy)||busy<0)return null;
+  return {cpu:Math.max(0,Math.min(100,cpu)),busy:Math.max(0,Math.min(100,busy))};
+}
+function crfRenderLoad(snapshot,runners,busy){
+  const supplied=Array.isArray(snapshot&&snapshot.load_history)?snapshot.load_history.map(crfLoadPoint).filter(Boolean).slice(-40):[];
+  const running=(runners||[]).filter(r=>r.state==='running');
+  const live=running.filter(r=>Number.isFinite(Number(r.cpu_pct))&&Number(r.cpu_pct)>=0);
+  const known=running.length===0||live.length===running.length;
+  const cpu=live.length?Math.max(0,Math.min(100,live.reduce((n,r)=>n+Number(r.cpu_pct),0)/live.length)):0;
+  const busyPct=running.length?Math.max(0,Math.min(100,100*busy/running.length)):0;
+  // A supplied history is authoritative (the visual fixture uses this hook and a
+  // future server-side sampler can too). Otherwise retain only measurements made
+  // from the live runner snapshot; missing CPU data must not fabricate a zero.
+  if(supplied.length){CRF_LOAD_POINTS.splice(0,CRF_LOAD_POINTS.length,...supplied);}
+  else if(known){CRF_LOAD_POINTS.push({cpu,busy:busyPct});while(CRF_LOAD_POINTS.length>40)CRF_LOAD_POINTS.shift();}
+  const now=document.getElementById('crf-load-now');if(now)now.textContent=known?Math.round(cpu)+'%':'\u2013';
+  const canvas=document.getElementById('crf-load-chart');if(!canvas)return;
+  const width=Math.max(1,Math.round(canvas.clientWidth)),height=34,dpr=window.devicePixelRatio||1;
+  canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);
+  const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,width,height);
+  const empty={cpu:0,busy:0};
+  const points=CRF_LOAD_POINTS.length>1?CRF_LOAD_POINTS:CRF_LOAD_POINTS.length===1?[CRF_LOAD_POINTS[0],CRF_LOAD_POINTS[0]]:[empty,empty];
+  const xy=(p,i,key)=>[i*(width/(points.length-1)),32-30*(p[key]/100)];
+  ctx.beginPath();points.forEach((p,i)=>{const [x,y]=xy(p,i,'busy');i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle='#c4c4c4';ctx.lineWidth=1.6;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+  ctx.beginPath();points.forEach((p,i)=>{const [x,y]=xy(p,i,'cpu');i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.lineTo(width,34);ctx.lineTo(0,34);ctx.closePath();ctx.fillStyle='rgba(255,140,47,.14)';ctx.fill();
+  ctx.beginPath();points.forEach((p,i)=>{const [x,y]=xy(p,i,'cpu');i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle='#ff8c2f';ctx.lineWidth=1.8;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+  const [nowX,nowY]=xy(points[points.length-1],points.length-1,'cpu');ctx.beginPath();ctx.arc(nowX,nowY,2.6,0,Math.PI*2);ctx.fillStyle='#ff8c2f';ctx.fill();
+}
+function crfSetShellState(up,busy){
+  const shell=document.getElementById('crf-shell-status'),label=document.getElementById('crf-shell-status-label'),count=document.getElementById('crf-shell-count');
+  if(count)count.textContent=String(up);
+  if(shell&&label){shell.className='crf-app-status '+(up===0?'crf-app-status-down':busy>0?'crf-app-status-busy':'crf-app-status-idle');label.textContent=up===0?'Farm stopped':busy>0?(busy+' busy'):'All idle';}
+  const start=document.getElementById('crf-start-action'),stop=document.getElementById('crf-stop-action');
+  if(start)start.style.display=up===0?'inline-flex':'none';if(stop)stop.style.display=up>0?'inline-flex':'none';
+  const stopped=document.getElementById('crf-farm-stopped');if(stopped)stopped.hidden=up!==0;
+  const stripStatus=document.getElementById('crf-strip-status'),stripLabel=document.getElementById('crf-strip-status-label');
+  if(stripStatus&&stripLabel){stripStatus.style.background=up===0?'var(--crf-error-soft)':busy>0?'var(--crf-orange-soft)':'var(--crf-success-soft)';stripStatus.style.color=up===0?'var(--crf-error-ink)':busy>0?'var(--crf-orange-ink)':'var(--crf-success-ink)';stripLabel.textContent=up===0?'Farm stopped':busy>0?(busy+' busy'):'All idle';}
+  const stripStart=document.getElementById('crf-strip-start'),stripStop=document.getElementById('crf-strip-stop');if(stripStart)stripStart.hidden=up!==0;if(stripStop)stripStop.hidden=up===0;
+}
 let crfUserLog=false;
-function crfLog(o){ crfUserLog=true; document.getElementById('crf-log').innerHTML = crfColorize(o.log||JSON.stringify(o)); }
+function crfLog(o){ crfUserLog=true; const el=document.getElementById('crf-log');if(el)el.innerHTML=crfColorize(o.log||JSON.stringify(o)); }
 /* Until the user triggers an action, the Fleet log shows live farm activity
    (autoscale daemon log) instead of sitting on a placeholder. */
 function crfFarmLog(){
@@ -175,7 +470,7 @@ function crfFarmLog(){
   crfPost({action:'farm-log'}).then(d=>{
     if(crfUserLog||!d.log) return;
     const el=document.getElementById('crf-log');
-    el.innerHTML=crfColorize(d.log); el.scrollTop=el.scrollHeight;
+    if(el){el.innerHTML=crfColorize(d.log); el.scrollTop=el.scrollHeight;}
   }).catch(()=>{});
 }
 crfFarmLog(); setInterval(crfFarmLog,10000);
@@ -205,7 +500,7 @@ function crfSelectorValue(value){ return window.CSS&&CSS.escape?CSS.escape(value
 function crfScalePool(pool){
   if(window.CRF_CONFIG_INVALID||CRF_POOL_PENDING.has(pool))return;
   const input=document.querySelector('.crf-pool-scale[data-pool="'+crfSelectorValue(pool)+'"]'); if(!input)return;
-  const n=input.value; CRF_POOL_PENDING.add(pool); crfRenderPools(window.CRF_LAST||{});
+  const n=input.value,control=input.closest('.crf-pool-control');if(control)control.dataset.editing='false'; CRF_POOL_PENDING.add(pool); crfRenderPools(window.CRF_LAST||{});
   const d=window.CRF_LAST||{}, scaleSet=d.backend&&d.backend.effective==='scaleset';
   const request=scaleSet?{action:'prewarm',pool,n,expected_config_revision:d.config_revision}:{action:'scale',pool,n};
   crfPost(request).then(o=>{
@@ -214,6 +509,19 @@ function crfScalePool(pool){
     else crfToast((scaleSet?'Prewarm target set for ':'Scale target set for ')+pool+' at '+n);
   }).catch(e=>{crfToast('Scale failed');console.error('ci-runner-farm pool scale:',e);})
     .finally(()=>{CRF_POOL_PENDING.delete(pool);crfRefresh();});
+}
+function crfUpdatePoolMetrics(fleet,p,id,scaleSet){
+  const metrics=fleet.querySelector('.crf-pool-metrics');if(!metrics)return;
+  if(!metrics.querySelector('[data-pool-metric="up"]')){
+    metrics.innerHTML='<strong data-pool-metric="up"></strong><span class="crf-pool-busy-filter" data-pool-metric="busy" role="button" tabindex="0" title="Show only busy runners"><i class="fa fa-circle crf-pool-busy-dot" aria-hidden="true"></i><span></span><i class="fa fa-filter" aria-hidden="true"></i></span><span data-pool-metric="idle"></span><span data-pool-metric="assigned" hidden></span><span data-pool-metric="capacity" hidden></span><span data-pool-metric="starting" hidden></span><span data-pool-metric="completed" hidden></span><span data-pool-metric="error" hidden></span>';
+  }
+  const put=(key,text,visible=true)=>{const el=metrics.querySelector('[data-pool-metric="'+key+'"]');if(!el)return;el.hidden=!visible;if(key==='busy'){const value=el.querySelector('span');if(value)value.textContent=text;}else el.textContent=text;};
+  const busyFilter=metrics.querySelector('[data-pool-metric="busy"]');
+  busyFilter.dataset.busyPool=id;busyFilter.classList.toggle('is-active',CRF_BUSY_POOLS.has(id));busyFilter.setAttribute('aria-pressed',CRF_BUSY_POOLS.has(id)?'true':'false');
+  put('up','up '+p.up);put('busy','busy '+p.busy);put('idle','idle '+p.idle);
+  put('assigned','assigned '+crfDemandValue(p,'assigned_jobs'),scaleSet);
+  put('capacity','capacity '+crfDemandValue(p,'advertised_capacity'),scaleSet);
+  put('starting','starting '+p.starting,!!p.starting);put('completed','completed '+p.completed,!!p.completed);put('error','error '+p.error,!!p.error);
 }
 function crfRenderPools(d){
   const section=document.getElementById('crf-pools-section'); if(!section)return;
@@ -231,7 +539,10 @@ function crfRenderPools(d){
   const wanted=new Set();
   pools.forEach((p,poolIndex)=>{
     const id=String(p.id);wanted.add(id);
-    const scaleSet=d.backend&&d.backend.effective==='scaleset', auto=!!d.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), retiring=!p.label||Number(p.configured)===0;
+    // The top-level flag owns the daemon; each pool owns its scaling policy.
+    // Mixed fleets therefore keep fixed controls bidirectional while automatic
+    // peers remain scale-up-only under the same running daemon.
+    const scaleSet=d.backend&&d.backend.effective==='scaleset', auto=!!p.autoscale_enabled, pending=CRF_POOL_PENDING.has(p.id), retiring=!p.label||Number(p.configured)===0;
     const numericMax=String(p.max)==='auto'?64:Number(p.max), atMax=!scaleSet&&auto&&Number(p.count)>=numericMax;
     const controlLabel=scaleSet?'Prewarm to':(auto?'Scale up to':'Scale to');
     const state=(p.retiring?'<span class="crf-pool-state">retiring '+crfEsc(p.retiring)+'</span>':'')+
@@ -242,8 +553,8 @@ function crfRenderPools(d){
     let fleet=section.querySelector('.crf-pool-fleet[data-pool="'+crfSelectorValue(id)+'"]');
     if(!fleet){
       fleet=document.createElement('section');fleet.className='crf-pool-fleet';fleet.dataset.pool=id;
-      fleet.innerHTML='<div class="crf-pool-fleet-meta"><span class="crf-pool-route"></span><span class="crf-pool-metrics"></span><span class="crf-pool-state-wrap"></span><span class="crf-pool-control" style="display:none"><span class="crf-pool-control-label"></span><input class="crf-pool-scale" type="number"><uui-button class="orange" size="xs"></uui-button></span></div>'+
-        '<div class="crf-bays"><div class="crf-bay crf-bay-head"><span></span><span class="crf-pool-title"></span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span></div><div class="crf-pool-bays-body"></div></div>';
+      fleet.innerHTML='<div class="crf-pool-fleet-meta"><button class="crf-pool-toggle" type="button" data-toggle-pool aria-expanded="true" aria-label="Collapse pool"><i class="fa fa-caret-down" aria-hidden="true"></i></button><span class="crf-pool-icon" aria-hidden="true"><img alt=""></span><span class="crf-pool-heading"><span class="crf-pool-title"></span><span class="crf-pool-route"></span></span><span class="crf-pool-metrics"></span><span class="crf-pool-resources"><span class="crf-pool-resource crf-pool-resource-cpu">CPU <span class="crf-pool-resource-bar"><i></i></span><b></b></span><span class="crf-pool-resource crf-pool-resource-memory">MEM <span class="crf-pool-resource-bar"><i></i></span><b></b></span><span class="crf-pool-health" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/gauge.svg" alt=""></span></span><span class="crf-pool-state-wrap"></span><span class="crf-pool-control" style="display:none"><button type="button" class="crf-pool-scale-trigger"><img src="/plugins/ci-runner-farm/assets/icons/scale-bars.svg" alt=""> Scale&hellip;</button><span class="crf-pool-scale-editor" hidden><span class="crf-pool-control-label"></span><input class="crf-pool-scale" type="number"><uui-button class="orange" size="xs"></uui-button></span></span></div>'+
+        '<div class="crf-bays"><div class="crf-bay crf-bay-head"><span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span></div><div class="crf-pool-bays-body"></div></div>';
     }
     // REVIEW(crf-v3q.13.9): Reconcile stable pool sections and controls instead
     // of replacing their subtree every poll. Focus, caret, runner rows, open
@@ -256,16 +567,25 @@ function crfRenderPools(d){
     }else if(route.textContent!=='classic runners draining'){
       route.innerHTML='<span class="crf-pool-state">classic runners draining</span>';
     }
-    fleet.querySelector('.crf-pool-metrics').innerHTML='<strong>up '+crfEsc(p.up)+'</strong> · busy '+crfEsc(p.busy)+' · idle '+crfEsc(p.idle)+
-      (scaleSet?' · assigned '+crfEsc(crfDemandValue(p,'assigned_jobs'))+' · capacity '+crfEsc(crfDemandValue(p,'advertised_capacity')):'')+
-      (p.starting?' · starting '+crfEsc(p.starting):'')+(p.completed?' · completed '+crfEsc(p.completed):'')+(p.error?' · error '+crfEsc(p.error):'');
-    fleet.querySelector('.crf-pool-state-wrap').innerHTML=state;
+    const poolIcon=fleet.querySelector('.crf-pool-icon img'),poolIconName=['rust','python','typescript','go'].includes(id)?id:'rust';
+    poolIcon.src='/plugins/ci-runner-farm/assets/icons/pool-'+poolIconName+'.svg';
+    crfUpdatePoolMetrics(fleet,p,id,scaleSet);
+    fleet.querySelector('.crf-pool-state-wrap').innerHTML=state.replace(/<span class="crf-pool-state"> blocked:[\s\S]*?<\/span>/,'');
     fleet.querySelector('.crf-pool-title').textContent=title;
+    const livePool=(d.runners||[]).filter(r=>r&&r.pool===id&&r.state==='running');
+    const cpuAvg=livePool.length?livePool.reduce((sum,r)=>sum+Math.max(0,Number(r.cpu_pct)||0),0)/livePool.length:0;
+    const memMib=livePool.reduce((sum,r)=>sum+Math.max(0,Number(r.mem_used_mib)||0),0);
+    const memCap=livePool.reduce((sum,r)=>sum+Math.max(0,Number(r.mem_gb)||0)*1024,0);
+    const cpuResource=fleet.querySelector('.crf-pool-resource-cpu'),memResource=fleet.querySelector('.crf-pool-resource-memory'),health=fleet.querySelector('.crf-pool-health');
+    cpuResource.querySelector('i').style.width=Math.min(100,Math.round(cpuAvg))+'%';cpuResource.querySelector('b').textContent=Math.round(cpuAvg)+'%';
+    memResource.querySelector('i').style.width=(memCap?Math.min(100,Math.round(100*memMib/memCap)):0)+'%';memResource.querySelector('b').textContent=memMib>=1024?(Math.ceil(memMib/102.4)/10)+'G':Math.round(memMib)+'M';
+    health.classList.toggle('is-visible',!!p.blocked_reason);health.title=p.blocked_reason?('Scaling blocked: '+p.blocked_reason):'';
     const body=fleet.querySelector('.crf-pool-bays-body');body.dataset.poolBody=id;
     const control=fleet.querySelector('.crf-pool-control');
     control.style.display=retiring?'none':'flex';
     if(!retiring){
-      const input=control.querySelector('input'),button=control.querySelector('uui-button');
+      const input=control.querySelector('input'),button=control.querySelector('uui-button'),trigger=control.querySelector('.crf-pool-scale-trigger'),editor=control.querySelector('.crf-pool-scale-editor'),editing=control.dataset.editing==='true';
+      trigger.hidden=editing;editor.hidden=!editing;
       control.querySelector('.crf-pool-control-label').textContent=controlLabel;
       input.dataset.pool=id;input.min=String(scaleSet?0:(auto?Number(p.count)+1:1));input.max=String(auto?numericMax:64);
       input.setAttribute('aria-label',controlLabel+' '+id+' pool');
@@ -296,23 +616,30 @@ function crfPlacePoolRows(d,tb){
   Array.from(tb.querySelectorAll('.crf-bay[data-name]')).forEach(row=>{
     const runner=(d.runners||[]).find(r=>String(r.name)===String(row.dataset.name));
     const pool=runner&&runner.pool&&configured.has(String(runner.pool))?String(runner.pool):'default';
+    row.hidden=CRF_BUSY_POOLS.has(pool)&&!(runner&&runner.state==='running'&&runner.phase==='busy');
     const body=section.querySelector('[data-pool-body="'+crfSelectorValue(pool)+'"]');
     if(body){
       body.appendChild(row);
       const drawer=tb.querySelector('.crf-bay-drawer[data-for="'+crfSelectorValue(row.dataset.name)+'"]');
-      if(drawer)body.appendChild(drawer);
+      if(drawer){drawer.hidden=row.hidden;body.appendChild(drawer);}
     }
   });
   section.querySelectorAll('.crf-pool-bays-body').forEach(body=>{
-    if(!body.querySelector('.crf-bay[data-name]')) body.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">No runners up</span><span></span><span></span><span></span><span></span><span></span></div>';
+    const visible=[...body.querySelectorAll('.crf-bay[data-name]')].some(row=>!row.hidden);
+    body.querySelectorAll('.crf-pool-empty').forEach(empty=>empty.remove());
+    if(!visible){const empty=document.createElement('div');empty.className='crf-bay crf-pool-empty';empty.innerHTML='<span></span><span class="crf-muted"></span><span></span><span></span><span></span><span></span><span></span>';empty.querySelector('.crf-muted').textContent=CRF_BUSY_POOLS.has(String(body.dataset.poolBody))?'No busy runners':'No runners up';body.appendChild(empty);}
   });
 }
 document.getElementById('crf-pools-section').addEventListener('click',e=>{
+  const busyFilter=e.target.closest('[data-busy-pool]');if(busyFilter){const pool=busyFilter.dataset.busyPool,tb=document.getElementById('crf-bays-body');if(tb)crfCollectPoolRows(tb);CRF_BUSY_POOLS.has(pool)?CRF_BUSY_POOLS.delete(pool):CRF_BUSY_POOLS.add(pool);crfRenderPools(window.CRF_LAST||{});if(tb)crfPlacePoolRows(window.CRF_LAST||{},tb);return;}
+  const toggle=e.target.closest('[data-toggle-pool]');if(toggle){const fleet=toggle.closest('.crf-pool-fleet'),open=!fleet.classList.toggle('is-collapsed');toggle.setAttribute('aria-expanded',open?'true':'false');toggle.setAttribute('aria-label',open?'Collapse pool':'Expand pool');return;}
+  const trigger=e.target.closest('.crf-pool-scale-trigger');if(trigger){const control=trigger.closest('.crf-pool-control');control.dataset.editing='true';trigger.hidden=true;control.querySelector('.crf-pool-scale-editor').hidden=false;control.querySelector('input').focus();return;}
   const scale=e.target.closest('[data-scale-pool]'); if(scale){crfScalePool(scale.dataset.scalePool);return;}
   const copy=e.target.closest('[data-copy]'); if(copy&&copy.dataset.copy){
     crfCopyText('runs-on: '+copy.dataset.copy).then(()=>crfToast('Selector copied')).catch(()=>crfToast('Copy failed'));
   }
 });
+document.getElementById('crf-pools-section').addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const busyFilter=e.target.closest('[data-busy-pool]');if(!busyFilter)return;e.preventDefault();busyFilter.click();});
 
 function crfDemandValue(pool,key){
   const value=Number(pool&&pool[key]);
@@ -351,6 +678,14 @@ function crfElapsed(iso){
   const m=Math.floor((Date.now()-t)/60000);
   return {m, txt: m<1?'<1m': m<60? m+'m' : Math.floor(m/60)+'h'+String(m%60).padStart(2,'0')};
 }
+function crfUptime(iso){
+  const t=Date.parse(iso||''); if(isNaN(t)) return '';
+  const minutes=Math.max(0,Math.floor((Date.now()-t)/60000));
+  if(minutes<1)return '<1m';
+  if(minutes<60)return minutes+'m';
+  const hours=Math.floor(minutes/60);
+  return hours<24?hours+'h':Math.floor(hours/24)+'d '+(hours%24)+'h';
+}
 function crfBar(pct){
   const p=Math.max(0,Math.min(100,Math.round(pct)));
   const cls=p>90?' crf-hot':p>60?' crf-mid':'';
@@ -366,13 +701,13 @@ function crfVolatile(r){
     const e=crfElapsed(r.job_started);
     if(e) elapsedHtml=' <span class="crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':'')+'" title="running for '+e.txt+'">'+e.txt+'</span>';
   }
-  const cpuMax=(r.cpus&&r.cpus>0)?r.cpus*100:100;
   const cpuKnown=running&&r.cpu_pct>=0, memKnown=running&&r.mem_used_mib>=0&&r.mem_gb;
-  const cpuPct=cpuKnown?(100*r.cpu_pct/cpuMax):0;
+  const cpuPct=cpuKnown?r.cpu_pct:0;
   const memPct=memKnown?100*r.mem_used_mib/(r.mem_gb*1024):0;
   const cpuTxt=cpuKnown?Math.round(r.cpu_pct)+'%':(running?'…':'&ndash;');
-  const memTxt=memKnown?((r.mem_used_mib>=1024?( (r.mem_used_mib/1024).toFixed(1)+'g'):(r.mem_used_mib+'m'))+'/'+r.mem_gb+'g'):(running?'…':'&ndash;');
-  return {elapsedHtml,cpuPct,cpuTxt,memPct,memTxt};
+  const memUsed=memKnown?(r.mem_used_mib>=1024?((r.mem_used_mib/1024).toFixed(2)+' GiB'):(Math.round(r.mem_used_mib)+' MiB')):'';
+  const memHtml=memKnown?'<strong>'+crfEsc(memUsed)+'</strong><span> / '+crfEsc(r.mem_gb)+' GiB</span>':(running?'…':'&ndash;');
+  return {elapsedHtml,cpuPct,cpuTxt,memPct,memHtml};
 }
 function crfEmptyFleetHtml(d){
   return '<div class="crf-empty"><span class="crf-ball"></span>'+
@@ -405,6 +740,14 @@ function crfRenderActivity(d){
   }).join('');
 }
 
+window.CRF_DISMISSED_WARNING='';
+function crfDismissWarning(){
+  const warn=document.getElementById('crf-warn');
+  if(!warn)return;
+  window.CRF_DISMISSED_WARNING=warn.dataset.warningKey||'';
+  warn.style.display='none';
+}
+
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
   // outstanding, so a slow backend can't spiral into overlapping polls.
@@ -416,26 +759,39 @@ function crfRefresh(){
     window.CRF_LAST=d;
     window.CRF_CONFIG_INVALID=!!d.config_error;
     const warn=document.getElementById('crf-warn');
-    const warnText=d.config_error?('Configuration error: '+d.config_error):d.warning;
-    if(warn){ if(warnText){ warn.textContent='⚠ '+warnText; warn.style.display='block'; } else { warn.textContent=''; warn.style.display='none'; } }
+    const blocked=(d.pools||[]).find(p=>p&&p.blocked_reason);
+    const warnText=d.config_error?('Configuration error: '+d.config_error):(d.warning||(blocked&&('Scaling blocked: '+blocked.blocked_reason)));
+    if(warn){
+      if(warnText&&window.CRF_DISMISSED_WARNING!==warnText){
+        const detail=blocked&&blocked.blocked_reason==='cpu_exhausted'?'host CPU is saturated; scale requests are queued until load drops.':
+          blocked&&blocked.blocked_reason==='memory_exhausted'?'host memory is saturated; scale requests are queued until capacity is available.':'';
+        warn.dataset.warningKey=warnText;
+        warn.innerHTML='<img src="/plugins/ci-runner-farm/assets/icons/warning.svg" alt=""><strong>'+crfEsc(warnText)+'</strong>'+
+          (detail?'<span class="crf-warning-detail">&mdash; '+crfEsc(detail)+'</span>':'')+
+          '<button type="button" class="crf-fleet-warning-dismiss" onclick="crfDismissWarning()">Dismiss</button>';
+        warn.style.display='flex';
+      } else if(!warnText||window.CRF_DISMISSED_WARNING===warnText){ warn.textContent=''; warn.style.display='none'; }
+    }
     document.querySelectorAll('[data-crf-mutation]').forEach(b=>b.disabled=!!d.config_error);
     const sec=document.getElementById('crf-sec');
-    if(sec){ if(d.security){ sec.textContent='🔒 '+d.security; sec.style.display='block'; } else { sec.textContent=''; sec.style.display='none'; } }
+    if(sec){ if(d.security){ sec.innerHTML='<i class="fa fa-lock" aria-hidden="true"></i> '+crfEsc(d.security); sec.style.display='block'; } else { sec.textContent=''; sec.style.display='none'; } }
     // Runners still on a previous baked config after a settings change — the reconciler
     // recycles them onto the new config as they go idle (busy jobs finish first).
     const mig=document.getElementById('crf-migrate');
-    if(mig){ if(d.stale>0){ mig.textContent='⟳ '+d.stale+' runner'+(d.stale>1?'s':'')+' updating or retiring — recycling as they go idle, so running jobs finish first.'+(d.blocked_capacity>0?' '+d.blocked_capacity+' currently blocked by active or starting work.':''); mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
-    const rs=d.runners||[];
+    if(mig){ if(d.stale>0){ mig.innerHTML='<i class="fa fa-refresh" aria-hidden="true"></i> '+crfEsc(d.stale+' runner'+(d.stale>1?'s':'')+' updating or retiring — recycling as they go idle, so running jobs finish first.'+(d.blocked_capacity>0?' '+d.blocked_capacity+' currently blocked by active or starting work.':'')); mig.style.display='block'; } else { mig.textContent=''; mig.style.display='none'; } }
+    const rs=(d.runners||[]).slice().sort((a,b)=>Number(CRF_PINNED_RUNNERS.has(String(b.name)))-Number(CRF_PINNED_RUNNERS.has(String(a.name))));
     crfRenderPools(d);
     crfRenderActivity(d);
     const up=rs.filter(r=>r.state==='running').length;
     const busy=rs.filter(r=>r.state==='running'&&r.phase==='busy').length;
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
+    crfSetShellState(up,busy);crfRenderLoad(d,rs,busy);
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
+    put('crf-strip-up',up);put('crf-strip-busy',busy);
     const backend=d.backend||{}, compatibility=d.compatibility||{};
     const assigned=crfAssignedDemand(d);
-    put('crf-s-assigned',backend.effective==='scaleset'?(assigned===null?'—':assigned):'—');
+    put('crf-s-assigned',backend.effective==='scaleset'?(assigned===null?'—':assigned):busy);
     put('crf-s-backend',(backend.requested||'?')+' → '+(backend.effective||'?'));
     put('crf-s-transition',backend.transition_phase||'?');
     const begin=document.getElementById('crf-begin-migration'), rollback=document.getElementById('crf-rollback-backend'), backendReason=document.getElementById('crf-backend-reason');
@@ -470,11 +826,12 @@ function crfRefresh(){
     if(d.mode==='pools')crfCollectPoolRows(tb);
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the
     // node, so crfDrawerMount can restore the user's position (not snap to tail).
-    const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]');
+    const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+crfSelectorValue(window.CRF_DRAWER)+'"]');
     if(odr){ window.CRF_DRAWER_PINNED=crfDrawerPinned(odr); window.CRF_DRAWER_SCROLL=odr.scrollTop; }
     if(!rs.length){
       tb.innerHTML=crfEmptyFleetHtml(d);
       crfPlacePoolRows(d,tb);
+      crfCloseRunnerMenu();
       return;
     }
     const dark=crfDark()?' class="dark"':'';
@@ -487,19 +844,20 @@ function crfRefresh(){
     // and falls through to the full rebuild below. busy-with-job_started is in the
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
-    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.completed,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
+    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.pool,r.retiring,r.completed,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.started_at,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
     if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
         const v=crfVolatile(r);
         const u=row.querySelectorAll('.crf-usage');
         if(u[0]) u[0].innerHTML=crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span>';
-        if(u[1]) u[1].innerHTML=crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span>';
+        if(u[1]) u[1].innerHTML=crfBar(v.memPct)+'<span class="crf-uval crf-mem-value">'+v.memHtml+'</span>';
         const el=row.querySelector('.crf-elapsed');
         if(el&&r.job_started){ const e=crfElapsed(r.job_started); if(e){ el.textContent=e.txt; el.title='running for '+e.txt; el.className='crf-elapsed'+(e.m>=120?' crf-el-hot':e.m>=30?' crf-el-warn':''); } }
       });
       crfPlacePoolRows(d,tb);
       crfDrawerMount();
+      crfSyncRunnerMenu();
       return;
     }
     tb.__crfSig=sig;
@@ -520,43 +878,94 @@ function crfRefresh(){
         else if(r.branch) jobHtml+='<span class="crf-ref">'+crfEsc(r.branch)+'</span>';
         jobHtml+=v.elapsedHtml;
       } else {
-        jobHtml=crfEsc(r.completed?'one-shot job completed':(running?'waiting for jobs':r.state));
+        jobHtml=crfEsc(r.completed?'one-shot job completed':(running?'— waiting':r.state));
       }
       const jobCls=(running&&r.phase==='busy'&&r.job)||r.completed?'crf-job':'crf-job crf-muted';
       return '<div class="crf-bay" data-name="'+crfEsc(r.name)+'" tabindex="0" role="button" aria-expanded="'+(window.CRF_DRAWER===r.name?'true':'false')+'" aria-label="Runner '+crfEsc(r.name)+', toggle log">'+
         '<span class="crf-ball '+ball+'"></span>'+
-        '<span class="crf-name">'+crfEsc(r.name)+(r.pool?'<span class="crf-pool-badge">'+crfEsc(r.pool)+'</span>':'')+'</span>'+
+        '<span class="crf-name">'+crfEsc(r.name)+(r.started_at?'<span class="crf-runner-age">up '+crfEsc(crfUptime(r.started_at))+'</span>':'')+(r.pool?'<span class="crf-pool-badge">'+crfEsc(r.pool)+'</span>':'')+'</span>'+
         '<span class="crf-phase"><uui-badge variant="'+bvar+'" size="xs"'+dark+'>'+crfEsc(ph)+'</uui-badge></span>'+
         '<span class="'+jobCls+'" title="'+crfEsc(r.job||'')+'">'+jobHtml+'</span>'+
         '<span class="crf-usage">'+crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span></span>'+
-        '<span class="crf-usage">'+crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span></span>'+
-        '<span class="crf-recycle" tabindex="'+(d.config_error?'-1':'0')+'" role="button" aria-disabled="'+(d.config_error?'true':'false')+'" aria-label="Recycle '+crfEsc(r.name)+'" title="'+(d.config_error?'Fix the configuration before recycling':'Recycle this runner')+'">&#10227;</span>'+
+        '<span class="crf-usage">'+crfBar(v.memPct)+'<span class="crf-uval crf-mem-value">'+v.memHtml+'</span></span>'+
+        '<span class="crf-recycle crf-runner-menu-button" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="'+(CRF_RUNNER_MENU===r.name?'true':'false')+'" aria-label="Actions for '+crfEsc(r.name)+'" title="Runner actions"><img src="/plugins/ci-runner-farm/assets/icons/ellipsis.svg" alt="" aria-hidden="true"></span>'+
       '</div>';
     }).join('');
     crfPlacePoolRows(d,tb);
     crfDrawerMount();
+    crfSyncRunnerMenu();
   }).catch(e=>{
     // A rejected status poll (network down, or a 403 from a CSRF token that expired
     // on a reboot/array restart) must NOT look like an empty fleet — surface it in
     // the warning banner and keep the last-rendered bays in place. Cleared by the
     // next successful poll (the d.warning handling above overwrites/hides it).
     const warn=document.getElementById('crf-warn');
-    if(warn){ warn.textContent='⚠ '+(String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…'); warn.style.display='block'; }
+    if(warn){ const message=String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…';warn.innerHTML='<i class="fa fa-exclamation-triangle" aria-hidden="true"></i><strong>'+crfEsc(message)+'</strong>'; warn.style.display='flex'; }
     console.error('ci-runner-farm status:',e);
   }).finally(()=>{ window.__crfBusyStatus=false; if(window.__crfRefreshAgain){window.__crfRefreshAgain=false;setTimeout(crfRefresh,0);} });
 }
 crfRefresh(); setInterval(crfRefresh,5000);
+function crfToggleQueue(force,refresh=true){
+  const panel=document.getElementById('crf-run-queue'),stat=document.querySelector('.crf-queue-stat');if(!panel)return;
+  CRF_QUEUE_OPEN=typeof force==='boolean'?force:panel.hidden;
+  panel.hidden=!CRF_QUEUE_OPEN;if(stat)stat.setAttribute('aria-expanded',CRF_QUEUE_OPEN?'true':'false');
+  if(CRF_QUEUE_OPEN){crfRenderQueue(CRF_QUEUE_SNAPSHOT);if(refresh)crfQueued();panel.scrollIntoView({block:'nearest'});}
+}
+function crfQueueWait(value){
+  const stamp=Date.parse(value||'');if(!Number.isFinite(stamp))return '\u2013';
+  const seconds=Math.max(0,Math.floor((Date.now()-stamp)/1000));
+  if(seconds<60)return seconds+'s';const minutes=Math.floor(seconds/60);return minutes<60?minutes+'m':Math.floor(minutes/60)+'h '+String(minutes%60).padStart(2,'0')+'m';
+}
+function crfDrawQueueDepth(){
+  const canvas=document.getElementById('crf-queue-depth');if(!canvas)return;const width=80,height=18,dpr=window.devicePixelRatio||1;
+  canvas.width=width*dpr;canvas.height=height*dpr;const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,width,height);
+  const points=CRF_QUEUE_DEPTH.length?CRF_QUEUE_DEPTH:[0],max=Math.max(1,...points);ctx.strokeStyle='#e9bf41';ctx.lineWidth=1.6;ctx.lineJoin='round';ctx.lineCap='round';ctx.beginPath();
+  points.forEach((value,index)=>{const x=points.length===1?width:width*index/(points.length-1),y=height-2-(height-4)*value/max;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();
+}
+function crfRenderQueue(snapshot){
+  const body=document.getElementById('crf-queue-body'),pressure=document.getElementById('crf-queue-pressure');if(!body||!pressure)return;
+  const jobs=Array.isArray(snapshot&&snapshot.jobs)?snapshot.jobs:[],known=Number(snapshot&&snapshot.known_queued);
+  const incomplete=!!(snapshot&&!snapshot.loading&&Number(snapshot.queued)<0&&(snapshot.partial||snapshot.truncated||jobs.length>0||(Number.isFinite(known)&&known>0)));
+  const counts={};jobs.forEach(job=>{const pool=String(job.pool||'').trim();if(pool)counts[pool]=(counts[pool]||0)+1;});
+  const pools=Object.entries(counts),partialText=incomplete?('Partial GitHub result \u00b7 showing '+(Number.isFinite(known)&&known>=0?known:jobs.length)+' known'):'';
+  pressure.hidden=!pools.length&&!partialText;pressure.innerHTML=(pools.length?'<span class="crf-queue-pressure-label">Pressure</span>'+pools.map(([pool,count])=>'<span class="crf-queue-pressure-chip">'+crfEsc(pool)+' '+count+'</span>').join(''):'')+(partialText?'<span class="crf-queue-pressure-partial">'+crfEsc(partialText)+'</span>':'');
+  if(!jobs.length){
+    const loading=snapshot&&snapshot.loading,unavailable=snapshot&&Number(snapshot.queued)<0&&!incomplete;
+    const message=loading?'Loading queue\u2026':incomplete?'Queue data is incomplete \u2014 no known jobs were returned.':unavailable?'Queue is unavailable \u2014 check GitHub authentication.':'Queue is empty \u2014 every job has a runner.';
+    body.innerHTML='<div class="crf-queue-empty"><i class="fa '+(loading?'fa-spinner fa-spin':incomplete||unavailable?'fa-exclamation-triangle':'fa-check')+'" aria-hidden="true"></i>'+message+'</div>';crfDrawQueueDepth();return;
+  }
+  body.innerHTML=jobs.map(job=>{
+    const pool=String(job.pool||''),repo=String(job.repo||''),runId=String(job.run_id||''),key=repo+'\n'+runId,pending=CRF_QUEUE_CANCEL_PENDING.has(key),cancellable=!!repo&&/^\d+$/.test(runId);
+    return '<div class="crf-queue-grid" data-run-id="'+crfEsc(runId)+'" data-repo="'+crfEsc(repo)+'">'+
+      '<span class="crf-queue-rail" aria-hidden="true"></span><span class="crf-queue-workflow"><strong title="'+crfEsc(job.workflow||'Queued workflow')+'">'+crfEsc(job.workflow||'Queued workflow')+'</strong><small>'+crfEsc(repo)+'</small></span>'+
+      '<span class="crf-queue-labels" title="'+crfEsc(job.labels||'Labels pending')+'">'+crfEsc(job.labels||'labels pending')+'</span><span class="crf-queue-pool'+(pool?'':' is-unknown')+'">'+crfEsc(pool||'pending')+'</span>'+
+      '<span class="crf-queue-reason" title="'+crfEsc(job.reason||'waiting for runner')+'">'+crfEsc(job.reason||'waiting for runner')+'</span><span class="crf-queue-wait">'+crfEsc(crfQueueWait(job.created_at))+'</span>'+
+      '<button type="button" class="crf-queue-cancel" data-queue-cancel aria-label="Cancel queued run" title="'+(cancellable?'Cancel this queued workflow':'Cancellation unavailable for this row')+'"'+(pending||!cancellable?' disabled':'')+(pending?' aria-busy="true"':'')+'><img src="/plugins/ci-runner-farm/assets/icons/close.svg" alt=""></button></div>';
+  }).join('');crfDrawQueueDepth();
+}
+function crfCancelQueued(repo,runId,label){
+  const key=repo+'\n'+runId;if(!repo||!/^\d+$/.test(runId)||CRF_QUEUE_CANCEL_PENDING.has(key))return;
+  CRF_QUEUE_CANCEL_PENDING.add(key);crfRenderQueue(CRF_QUEUE_SNAPSHOT);
+  const release=()=>{CRF_QUEUE_CANCEL_PENDING.delete(key);if(CRF_QUEUE_OPEN)crfRenderQueue(CRF_QUEUE_SNAPSHOT);};
+  const run=()=>crfPost({action:'cancel-run',repo,run_id:runId}).then(result=>{if(!result.ok)throw new Error(result.error||'Cancel failed');crfToast('Queued workflow cancelled');CRF_QUEUE_SNAPSHOT.jobs=(CRF_QUEUE_SNAPSHOT.jobs||[]).filter(job=>String(job.repo||'')!==repo||String(job.run_id)!==String(runId));setTimeout(crfQueued,1200);}).catch(error=>{crfToast('Cancel failed: '+String(error&&error.message||error));}).finally(release);
+  const text='Cancel '+label+'? GitHub stops every queued job in this workflow run.';
+  if(window.swal)swal({title:'Cancel queued workflow?',text,type:'warning',showCancelButton:true,confirmButtonText:'Cancel run',cancelButtonText:'Keep queued'},ok=>{if(ok)run();else release();});else if(confirm(text))run();else release();
+}
+document.getElementById('crf-run-queue')?.addEventListener('click',event=>{const button=event.target.closest('[data-queue-cancel]');if(!button||button.disabled)return;const row=button.closest('[data-run-id][data-repo]');if(row)crfCancelQueued(row.dataset.repo,row.dataset.runId,row.querySelector('.crf-queue-workflow strong')?.textContent||'this workflow');});
 function crfQueued(){
   if(!crfFleetActive()) return;
   crfPost({action:'queued-json'}).then(d=>{
     const el=document.getElementById('crf-s-q'); if(!el) return;
     const q=(typeof d.queued==='number'&&d.queued>=0)?d.queued:null;
-    el.textContent=q===null?'\u2013':q;
-    el.classList.toggle('crf-c-busy',!!q);
+    const known=Number(d.known_queued),display=q===null?(Number.isFinite(known)&&known>0?'\u2265'+known:'\u2013'):String(q);
+    el.textContent=display;el.classList.toggle('crf-c-busy',q!==null?q>0:known>0);
+    const strip=document.getElementById('crf-strip-queue');if(strip)strip.textContent=display;
+    CRF_QUEUE_SNAPSHOT=d;if(q!==null){CRF_QUEUE_DEPTH.push(q);while(CRF_QUEUE_DEPTH.length>40)CRF_QUEUE_DEPTH.shift();}
+    if(q!==null&&q>=3&&!CRF_QUEUE_OPEN)crfToggleQueue(true,false);else if(CRF_QUEUE_OPEN)crfRenderQueue(d);
   }).catch(()=>{});
 }
 crfQueued(); setInterval(crfQueued,30000);
-function crfBytes(b){ if(typeof b!=='number'||b<0) return '\u2013'; const u=['B','K','M','G','T']; let i=0,v=b; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i===0?v:(v>=10?Math.round(v):v.toFixed(1)))+u[i]; }
+function crfBytes(b){ if(typeof b!=='number'||b<0) return '\u2013'; const u=['B','KB','MB','GB','TB']; let i=0,v=b; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i===0?v:(v>=10?Math.round(v):v.toFixed(1)))+' '+u[i]; }
 function crfCacheUsage(){
   if(!crfFleetActive()) return;
   crfPost({action:'cache-usage'}).then(d=>{
@@ -601,6 +1010,47 @@ function crfRecycle(name){
     swal({title:'Recycle '+name+'?',text:'It is mid-job'+(r.job?': '+r.job:'')+'.\nThe job will fail and re-queue.',type:'warning',showCancelButton:true,confirmButtonText:'Recycle',cancelButtonText:'Cancel'},ok=>{ if(ok) go(); });
   } else go();
 }
+function crfRunnerMenuTrigger(name){
+  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+crfSelectorValue(name)+'"]');return row&&row.querySelector('.crf-runner-menu-button');
+}
+function crfPositionRunnerMenu(){
+  const menu=document.getElementById('crf-runner-menu');if(!menu||!CRF_RUNNER_MENU)return false;
+  const trigger=crfRunnerMenuTrigger(CRF_RUNNER_MENU);if(!trigger||!trigger.isConnected||trigger.offsetParent===null){crfCloseRunnerMenu();return false;}
+  const rect=trigger.getBoundingClientRect(),width=150;
+  menu.style.left=Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width+window.scrollX))+'px';menu.style.top=(rect.bottom+4+window.scrollY)+'px';return true;
+}
+function crfSyncRunnerMenu(){
+  if(!CRF_RUNNER_MENU)return;
+  const trigger=crfRunnerMenuTrigger(CRF_RUNNER_MENU);if(!trigger){crfCloseRunnerMenu();return;}
+  trigger.setAttribute('aria-expanded','true');crfPositionRunnerMenu();
+}
+function crfCloseRunnerMenu(restoreFocus=false){
+  const name=CRF_RUNNER_MENU;CRF_RUNNER_MENU='';const menu=document.getElementById('crf-runner-menu');if(menu)menu.remove();
+  document.querySelectorAll('.crf-runner-menu-button[aria-expanded=true]').forEach(button=>button.setAttribute('aria-expanded','false'));
+  if(restoreFocus&&name){const trigger=crfRunnerMenuTrigger(name);if(trigger)trigger.focus({preventScroll:true});}
+}
+function crfOpenRunnerMenu(name,trigger){
+  if(CRF_RUNNER_MENU===name){crfCloseRunnerMenu();return;}
+  crfCloseRunnerMenu();CRF_RUNNER_MENU=name;trigger.setAttribute('aria-expanded','true');
+  const pinned=CRF_PINNED_RUNNERS.has(name),menu=document.createElement('div');menu.id='crf-runner-menu';menu.className='crf-runner-menu';menu.role='menu';menu.dataset.name=name;
+  menu.innerHTML='<button type="button" role="menuitem" data-runner-menu-action="logs"><i class="fa fa-file-text-o" aria-hidden="true"></i>View logs</button>'+
+    '<button type="button" role="menuitem" data-runner-menu-action="pin"><i class="fa fa-thumb-tack" aria-hidden="true"></i>'+(pinned?'Unpin':'Pin')+'</button>'+
+    '<button type="button" role="menuitem" data-runner-menu-action="recycle"'+(window.CRF_CONFIG_INVALID?' disabled':'')+'><i class="fa fa-refresh" aria-hidden="true"></i>Recycle</button>';
+  document.body.appendChild(menu);crfPositionRunnerMenu();
+  menu.querySelector('button:not(:disabled)')?.focus();
+}
+document.addEventListener('click',event=>{
+  const action=event.target.closest('[data-runner-menu-action]');
+  if(action){const menu=action.closest('.crf-runner-menu'),name=menu&&menu.dataset.name,kind=action.dataset.runnerMenuAction;if(!name)return;
+    if(kind==='logs'){crfCloseRunnerMenu();crfToggleDrawer(name);}
+    else if(kind==='recycle'){crfCloseRunnerMenu();crfRecycle(name);}
+    else if(kind==='pin'){CRF_PINNED_RUNNERS.has(name)?CRF_PINNED_RUNNERS.delete(name):CRF_PINNED_RUNNERS.add(name);try{localStorage.setItem('ci-runner-farm:pinned-runners',JSON.stringify([...CRF_PINNED_RUNNERS]));}catch(_error){}crfCloseRunnerMenu();crfRefresh();}
+    return;
+  }
+  if(!event.target.closest('.crf-runner-menu,.crf-runner-menu-button'))crfCloseRunnerMenu();
+});
+window.addEventListener('resize',crfPositionRunnerMenu,{passive:true});
+window.addEventListener('scroll',crfPositionRunnerMenu,{passive:true,capture:true});
 /* Click a bay to open a live log drawer for that runner. It persists across the
    5s re-render: crfRefresh rebuilds crf-bays-body's innerHTML (destroying this
    node), so we cache the last log + scroll position and restore them on re-mount
@@ -610,7 +1060,7 @@ window.CRF_DRAWER=null; window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; w
 function crfDrawerPinned(el){ return el.scrollHeight-el.scrollTop-el.clientHeight < 24; }
 function crfDrawerFill(name){
   crfPost({action:'runner-log',name}).then(d=>{
-    const el=document.querySelector('.crf-bay-drawer[data-for="'+name+'"]');
+    const el=document.querySelector('.crf-bay-drawer[data-for="'+crfSelectorValue(name)+'"]');
     if(el&&window.CRF_DRAWER===name){
       const pinned=crfDrawerPinned(el), prev=el.scrollTop;
       window.CRF_DRAWER_HTML=crfColorize(d.log||'(no output)');
@@ -625,11 +1075,11 @@ function crfDrawerFill(name){
 function crfDrawerMount(){
   document.querySelectorAll('.crf-bay-drawer').forEach(e=>{ if(e.dataset.for!==window.CRF_DRAWER) e.remove(); });
   if(!window.CRF_DRAWER) return;
-  if(document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]')){
+  if(document.querySelector('.crf-bay-drawer[data-for="'+crfSelectorValue(window.CRF_DRAWER)+'"]')){
     crfDrawerFill(window.CRF_DRAWER);
     return;
   }
-  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+window.CRF_DRAWER+'"]');
+  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+crfSelectorValue(window.CRF_DRAWER)+'"]');
   if(!row) return;
   const d=document.createElement('div'); d.className='crf-bay-drawer'; d.dataset.for=window.CRF_DRAWER;
   // Re-seed with the last log so a 5s re-render doesn't flash "loading…"; only the
@@ -639,17 +1089,23 @@ function crfDrawerMount(){
   if(window.CRF_DRAWER_HTML) d.scrollTop = window.CRF_DRAWER_PINNED ? d.scrollHeight : window.CRF_DRAWER_SCROLL;
   crfDrawerFill(window.CRF_DRAWER);
 }
+function crfCloseDrawer(){
+  window.CRF_DRAWER=null;window.CRF_DRAWER_HTML='';window.CRF_DRAWER_SCROLL=0;window.CRF_DRAWER_PINNED=true;
+  document.querySelectorAll('#crf-runner-tables .crf-bay[data-name][aria-expanded="true"]').forEach(row=>row.setAttribute('aria-expanded','false'));
+  crfDrawerMount();
+}
 function crfToggleDrawer(name){
   const opening = window.CRF_DRAWER!==name;
+  document.querySelectorAll('#crf-runner-tables .crf-bay[data-name][aria-expanded="true"]').forEach(row=>row.setAttribute('aria-expanded','false'));
   window.CRF_DRAWER = opening ? name : null;
   window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true; // fresh cache per open
-  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+name+'"]');
+  const row=document.querySelector('#crf-runner-tables .crf-bay[data-name="'+crfSelectorValue(name)+'"]');
   if(row) row.setAttribute('aria-expanded', opening?'true':'false');
   crfDrawerMount();
 }
 document.getElementById('crf-runner-tables').addEventListener('click',e=>{
   const rc=e.target.closest('.crf-recycle');
-  if(rc){ const b=rc.closest('.crf-bay[data-name]'); if(b) crfRecycle(b.dataset.name); return; }
+  if(rc){ const b=rc.closest('.crf-bay[data-name]'); if(b) crfOpenRunnerMenu(b.dataset.name,rc); return; }
   if(e.target.closest('a,uui-button,.crf-bay-drawer')) return;
   const row=e.target.closest('.crf-bay[data-name]'); if(!row) return;
   crfToggleDrawer(row.dataset.name);
@@ -657,10 +1113,32 @@ document.getElementById('crf-runner-tables').addEventListener('click',e=>{
 document.getElementById('crf-runner-tables').addEventListener('keydown',e=>{
   if(e.key!=='Enter'&&e.key!==' ') return;
   const rc=e.target.closest('.crf-recycle');
-  if(rc){ e.preventDefault(); const b=rc.closest('.crf-bay[data-name]'); if(b) crfRecycle(b.dataset.name); return; }
+  if(rc){ e.preventDefault(); const b=rc.closest('.crf-bay[data-name]'); if(b) crfOpenRunnerMenu(b.dataset.name,rc); return; }
   const row=e.target.closest('.crf-bay[data-name]');
   if(row&&e.target===row){ e.preventDefault(); crfToggleDrawer(row.dataset.name); }
 });
+function crfKeyboardRows(){return [...document.querySelectorAll('#crf-runner-tables .crf-bay[data-name]')].filter(row=>!row.hidden&&row.offsetParent!==null);}
+function crfModalActive(){
+  return [...document.querySelectorAll('dialog[open],[aria-modal="true"],.sweet-alert,.swal-modal,.modal.show,.modal.in')].some(modal=>!modal.hidden&&modal.getAttribute('aria-hidden')!=='true'&&window.getComputedStyle(modal).display!=='none');
+}
+function crfKeyboardInteractive(target){
+  if(!target||typeof target.closest!=='function')return false;
+  if(target.isContentEditable||target.closest('input,textarea,select,button,a,uui-button,[contenteditable]:not([contenteditable="false"]),[role="menuitem"],[role="textbox"],[role="dialog"],dialog,[aria-modal="true"],.modal'))return true;
+  const roleButton=target.closest('[role="button"]');return !!(roleButton&&!roleButton.matches('.crf-bay[data-name]'));
+}
+document.addEventListener('keydown',event=>{
+  if(crfModalActive()||!crfFleetActive())return;
+  const rows=crfKeyboardRows();
+  if(event.key==='Escape'){
+    const hero=document.getElementById('crf-hero-menu'),hadOpen=CRF_QUEUE_OPEN||!!CRF_RUNNER_MENU||!!window.CRF_DRAWER||(hero&&!hero.hidden)||CRF_KB_INDEX>=0;
+    if(hadOpen)event.preventDefault();CRF_KB_INDEX=-1;rows.forEach(row=>row.classList.remove('crf-kb-active'));crfCloseDrawer();crfCloseRunnerMenu(true);crfToggleHeroMenu(false);crfToggleQueue(false);return;
+  }
+  if(event.metaKey||event.ctrlKey||event.altKey||crfKeyboardInteractive(event.target))return;
+  if((event.key==='j'||event.key==='k')&&rows.length){event.preventDefault();CRF_KB_INDEX=CRF_KB_INDEX<0?(event.key==='j'?0:rows.length-1):Math.max(0,Math.min(rows.length-1,CRF_KB_INDEX+(event.key==='j'?1:-1)));rows.forEach((row,index)=>row.classList.toggle('crf-kb-active',index===CRF_KB_INDEX));rows[CRF_KB_INDEX].focus({preventScroll:true});rows[CRF_KB_INDEX].scrollIntoView({block:'nearest'});}
+  else if(event.key==='e'&&CRF_KB_INDEX>=0&&rows[CRF_KB_INDEX]){event.preventDefault();crfToggleDrawer(rows[CRF_KB_INDEX].dataset.name);}
+});
+function crfSyncFleetStrip(){const strip=document.getElementById('crf-fleet-strip');if(strip)strip.hidden=window.scrollY<=260;}
+window.addEventListener('scroll',crfSyncFleetStrip,{passive:true});crfSyncFleetStrip();
 /* No separate drawer-refresh timer: crfRefresh() rebuilds the bays and calls
    crfDrawerMount() every cycle (and is itself gated by crfFleetActive()), which
    re-fills the open drawer. A second interval here double-fetched runner-log and

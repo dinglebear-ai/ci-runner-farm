@@ -1,0 +1,283 @@
+Menu="RunnerFarm:3"
+Title="Logs"
+Tag="file-text"
+---
+<?php
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
+crf_render_shell('logs');
+?>
+
+<main class="crf-app-main" data-screen-label="Logs">
+  <section class="crf-surface crfl-surface" aria-labelledby="crfl-title">
+    <header class="crfl-toolbar">
+      <div class="crfl-title-wrap">
+        <span class="crf-section-label" id="crfl-title">Farm log</span>
+        <span class="crfl-meta" id="crfl-meta">Connecting…</span>
+      </div>
+      <div class="crfl-actions">
+        <div class="crfl-levels" role="group" aria-label="Filter farm log by level">
+          <button type="button" class="crf-filter-chip is-active" data-crfl-level="all" aria-pressed="true">All</button>
+          <button type="button" class="crf-filter-chip crfl-chip-error" data-crfl-level="error" aria-pressed="false">Errors</button>
+          <button type="button" class="crf-filter-chip crfl-chip-warning" data-crfl-level="warning" aria-pressed="false">Warnings</button>
+          <button type="button" class="crf-filter-chip" data-crfl-level="info" aria-pressed="false">Info</button>
+        </div>
+        <label class="crfl-search">
+          <i class="fa fa-search" aria-hidden="true"></i>
+          <input class="crf-input" id="crfl-query" type="search" aria-label="Filter farm log" placeholder="filter…" autocomplete="off">
+        </label>
+        <button type="button" class="crf-button crf-button-compact crfl-follow is-active" id="crfl-follow" aria-pressed="true" title="Keep the newest log line in view">
+          <span>follow</span>
+        </button>
+        <button type="button" class="crf-button crf-button-compact" id="crfl-export">
+          <span>export</span>
+        </button>
+        <button type="button" class="crf-button crf-button-compact" id="crfl-copy">
+          <span>Copy</span>
+        </button>
+      </div>
+    </header>
+    <div class="crfl-connection" id="crfl-connection" role="status" hidden></div>
+    <div class="crfl-log" id="crfl-log" role="log" aria-live="polite" aria-busy="true" tabindex="0">
+      <div class="crfl-empty"><i class="fa fa-circle-o-notch fa-spin" aria-hidden="true"></i> Loading farm log…</div>
+    </div>
+  </section>
+</main>
+
+<style>
+  .crfl-surface{color:var(--crf-ink)}
+  .crfl-toolbar{height:48px;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);flex-wrap:wrap}
+  .crfl-title-wrap{display:flex;align-items:baseline;gap:9px;white-space:nowrap}
+  .crfl-meta{display:none;font-size:11px;color:var(--crf-ink-4);font-variant-numeric:tabular-nums}
+  .crfl-actions,.crfl-levels{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .crfl-search{position:relative;display:inline-flex;align-items:center}
+  .crfl-search .fa{display:none}
+  .crfl-search .crf-input{width:170px;height:27px;padding:0 9px;font-size:12px;border-color:#e5e5e5}
+  .crfl-actions .crf-filter-chip{height:24px;padding:3px 11px;display:inline-flex;align-items:center;line-height:normal}
+  .crfl-actions .crf-filter-chip:nth-child(1){width:37.6875px}
+  .crfl-actions .crf-filter-chip:nth-child(2){width:56.703125px}
+  .crfl-actions .crf-filter-chip:nth-child(3){width:74.421875px}
+  .crfl-actions .crf-filter-chip:nth-child(4){width:46.125px}
+  .crfl-actions .crf-button{height:26px;padding:4px 10px;border-color:#e5e5e5;color:#737373;font-size:11px;font-weight:600;line-height:normal}
+  #crfl-follow{width:52.640625px}
+  #crfl-export{width:55.34375px}
+  .crfl-chip-error.is-active{background:var(--crf-error-soft);color:var(--crf-error-ink)}
+  .crfl-chip-warning.is-active{background:var(--crf-warning-soft);color:var(--crf-warning-ink)}
+  .crfl-follow.is-active{border-color:#ff8c2f;background:var(--crf-orange-soft);color:var(--crf-orange-ink)}
+  .crfl-connection{padding:8px 20px;border-bottom:1px solid #fde68a;background:var(--crf-warning-soft);color:var(--crf-warning-ink);font-size:12.5px;font-weight:600}
+  #crfl-copy{width:27.046875px;height:16px;padding:0;border:0;background:transparent;color:#ff8c2f;font:600 11.5px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;gap:0}
+  #crfl-copy:hover{background:transparent;color:#f15a2c}
+  .crfl-log{height:358px;min-height:358px;max-height:calc(100vh - 134px);overflow-y:auto;padding:10px 0;background:#fff;color:#383735;font:12px/1.65 ui-monospace,Menlo,Consolas,monospace;scrollbar-gutter:stable}
+  .crfl-line{display:flex;align-items:baseline;gap:8px;min-width:max-content;padding:0 20px;white-space:pre-wrap}
+  .crfl-line:hover{background:#fff7ed}
+  .crfl-prefix{color:#f15a2c;flex:none}
+  .crfl-message{color:#383735}
+  .crfl-error .crfl-message{color:var(--crf-error-ink)}
+  .crfl-warning .crfl-message{color:var(--crf-warning-ink)}
+  .crfl-log mark{border-radius:2px;padding:0 1px;background:#fef08a;color:var(--crf-ink)}
+  .crfl-empty{min-height:300px;display:flex;align-items:center;justify-content:center;gap:8px;padding:24px;color:var(--crf-ink-3);font-family:clear-sans,ui-sans-serif,system-ui,sans-serif;font-size:13px;text-align:center}
+  @media(max-width:850px){
+    .crfl-surface{overflow:visible}
+    .crfl-toolbar{height:auto;padding:14px;display:block;background:#fff}
+    .crfl-title-wrap{margin-bottom:12px;white-space:normal}
+    .crfl-title-wrap .crf-section-label{font-size:13px}
+    .crfl-meta{display:inline;font-size:11px}
+    .crfl-actions{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+    .crfl-levels{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+    .crfl-actions .crf-filter-chip,.crfl-actions .crf-filter-chip:nth-child(n){width:100%;height:40px;padding:0 8px;font-size:11.5px}
+    .crfl-search{grid-column:1/-1;order:0;display:flex;min-width:0}
+    .crfl-search .fa{display:block;position:absolute;left:13px;z-index:1;color:var(--crf-ink-4);pointer-events:none}
+    .crfl-search .crf-input{width:100%;height:44px;padding:0 12px 0 36px;font-size:16px}
+    .crfl-actions .crf-button,#crfl-follow,#crfl-export,#crfl-copy{width:100%;min-width:0;height:44px;min-height:44px;padding:0 8px;border:1px solid var(--crf-border);border-radius:8px;background:#fff;color:var(--crf-ink-2);font-size:12px;justify-content:center}
+    #crfl-follow.is-active{border-color:#ff8c2f;background:var(--crf-orange-soft);color:var(--crf-orange-ink)}
+    #crfl-copy:hover{background:#f5f5f5;color:var(--crf-ink)}
+    .crfl-connection{padding:10px 14px;line-height:1.45}
+    .crfl-log{height:max(420px,calc(100dvh - 320px));min-height:420px;max-height:none;padding:0;background:#fff;overflow-x:hidden;scrollbar-gutter:auto}
+    .crfl-line{min-width:0;width:100%;box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:10px 14px;border-bottom:1px solid var(--crf-border-soft);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.55}
+    .crfl-line:hover{background:#fffaf5}
+    .crfl-prefix{display:block;max-width:100%;font-size:11px;line-height:1.3;white-space:normal;overflow-wrap:anywhere}
+    .crfl-message{display:block;min-width:0;font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+    .crfl-empty{min-height:360px;padding:20px 14px}
+  }
+  @media(max-width:390px){
+    .crfl-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .crfl-levels{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .crfl-search{grid-column:1/-1}
+    #crfl-copy{grid-column:1/-1}
+  }
+</style>
+
+<script>
+(() => {
+  'use strict';
+  const state = { raw: '', lines: [], level: 'all', query: '', follow: true, pending: false, updatedAt: null };
+  const log = document.getElementById('crfl-log');
+  const queryInput = document.getElementById('crfl-query');
+  const followButton = document.getElementById('crfl-follow');
+  const connection = document.getElementById('crfl-connection');
+  const meta = document.getElementById('crfl-meta');
+
+  function active() {
+    const main = document.querySelector('[data-screen-label="Logs"]');
+    return !document.hidden && !!main && main.offsetParent !== null;
+  }
+
+  function severity(line) {
+    if (/\b(error|fatal|failed|failure|panic|denied)\b/i.test(line)) return 'error';
+    if (/\b(warn(?:ing)?|blocked|retry(?:ing)?|stale|timeout)\b/i.test(line)) return 'warning';
+    return 'info';
+  }
+
+  function splitPrefix(line) {
+    const match = String(line).match(/^(\[ci-runner-farm\]|\d{4}-\d{2}-\d{2}[T ][\d:.+-]+Z?)\s*/);
+    return match ? { prefix: match[1], message: line.slice(match[0].length) } : { prefix: '[ci-runner-farm]', message: line };
+  }
+
+  function parseLines(raw) {
+    return String(raw || '').split(/\r?\n/).filter(line => line.length > 0).map(line => ({ raw: line, level: severity(line) }));
+  }
+
+  function visibleLines() {
+    const query = state.query.trim().toLowerCase();
+    return state.lines.filter(line => {
+      if (state.level !== 'all' && line.level !== state.level) return false;
+      return !query || line.raw.toLowerCase().includes(query);
+    });
+  }
+
+  function appendHighlighted(parent, text, query) {
+    if (!query) { parent.textContent = text; return; }
+    const source = String(text);
+    const lower = source.toLowerCase();
+    const needle = query.toLowerCase();
+    let cursor = 0;
+    let index = lower.indexOf(needle);
+    while (index !== -1) {
+      if (index > cursor) parent.appendChild(document.createTextNode(source.slice(cursor, index)));
+      const mark = document.createElement('mark');
+      mark.textContent = source.slice(index, index + needle.length);
+      parent.appendChild(mark);
+      cursor = index + needle.length;
+      index = lower.indexOf(needle, cursor);
+    }
+    if (cursor < source.length) parent.appendChild(document.createTextNode(source.slice(cursor)));
+  }
+
+  function render() {
+    const lines = visibleLines();
+    const fragment = document.createDocumentFragment();
+    const query = state.query.trim();
+    if (!lines.length) {
+      const empty = document.createElement('div');
+      empty.className = 'crfl-empty';
+      const icon = document.createElement('i');
+      icon.className = 'fa fa-file-text-o';
+      icon.setAttribute('aria-hidden', 'true');
+      empty.append(icon, document.createTextNode(state.lines.length ? ' No log lines match these filters.' : ' No farm activity has been logged yet.'));
+      fragment.appendChild(empty);
+    } else {
+      lines.forEach(line => {
+        const parts = splitPrefix(line.raw);
+        const row = document.createElement('div');
+        row.className = 'crfl-line crfl-' + line.level;
+        const prefix = document.createElement('span');
+        prefix.className = 'crfl-prefix';
+        appendHighlighted(prefix, parts.prefix, query);
+        const message = document.createElement('span');
+        message.className = 'crfl-message';
+        appendHighlighted(message, parts.message, query);
+        row.append(prefix, message);
+        fragment.appendChild(row);
+      });
+    }
+    log.replaceChildren(fragment);
+    log.setAttribute('aria-busy', 'false');
+    if (state.follow) log.scrollTop = log.scrollHeight;
+    const suffix = state.updatedAt ? ' · updated ' + state.updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+    meta.textContent = lines.length + ' of ' + state.lines.length + ' lines' + suffix;
+  }
+
+  function setConnection(message) {
+    connection.textContent = message;
+    connection.hidden = !message;
+  }
+
+  function refresh() {
+    if (!active() || state.pending) return;
+    state.pending = true;
+    crfPost({ action: 'farm-log' }).then(data => {
+      if (!data || typeof data.log !== 'string') throw new Error('malformed farm log response');
+      state.raw = data.log;
+      state.lines = parseLines(data.log);
+      state.updatedAt = new Date();
+      setConnection('');
+      render();
+    }).catch(error => {
+      setConnection('Farm log connection lost — retrying…');
+      console.error('ci-runner-farm farm log:', error);
+      if (!state.lines.length) render();
+      meta.textContent = state.lines.length ? state.lines.length + ' cached lines' : 'Unavailable';
+    }).finally(() => { state.pending = false; });
+  }
+
+  function setFollow(enabled) {
+    state.follow = enabled;
+    followButton.classList.toggle('is-active', enabled);
+    followButton.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    if (enabled) log.scrollTop = log.scrollHeight;
+  }
+
+  function filteredText() {
+    return visibleLines().map(line => line.raw).join('\n');
+  }
+
+  document.querySelectorAll('[data-crfl-level]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.level = button.dataset.crflLevel || 'all';
+      document.querySelectorAll('[data-crfl-level]').forEach(candidate => {
+        const selected = candidate === button;
+        candidate.classList.toggle('is-active', selected);
+        candidate.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      render();
+    });
+  });
+
+  queryInput.addEventListener('input', () => { state.query = queryInput.value; render(); });
+  followButton.addEventListener('click', () => setFollow(!state.follow));
+  log.addEventListener('scroll', () => {
+    const pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    if (pinned !== state.follow) setFollow(pinned);
+  }, { passive: true });
+
+  document.getElementById('crfl-copy').addEventListener('click', event => {
+    const button = event.currentTarget;
+    const label = button.querySelector('span');
+    const previous = label.textContent;
+    crfCopyText(filteredText()).then(() => {
+      label.textContent = 'Copied';
+      crfToast('Farm log copied');
+    }).catch(error => {
+      label.textContent = 'Copy failed';
+      console.error('ci-runner-farm log copy:', error);
+    }).finally(() => window.setTimeout(() => { label.textContent = previous; }, 1500));
+  });
+
+  document.getElementById('crfl-export').addEventListener('click', () => {
+    const blob = new Blob([filteredText() + '\n'], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'ci-runner-farm-' + new Date().toISOString().slice(0, 10) + '.txt';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    crfToast('Farm log exported');
+  });
+
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  refresh();
+  window.setInterval(refresh, 10000);
+})();
+</script>
