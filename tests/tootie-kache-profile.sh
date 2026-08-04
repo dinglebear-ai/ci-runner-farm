@@ -9,9 +9,9 @@ SUPERVISOR=deployments/tootie/kache-supervise.sh
 bash -n "$SUPERVISOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq 'php-cli ripgrep file' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_TAG=fleet-v0.13.0-prefetch-controls.1' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=f9250450073dd48c23ee457093bb860a9acafc037608f11a1643471c0d00af6b' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=87cddc742db80394a77e3c9e9cd53fb280bf2b3da2b2fd4c344d70820df46b06' "$dockerfile"
+  grep -Fq 'ARG KACHE_FLEET_TAG=v0.13.0' "$dockerfile"
+  grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0' "$dockerfile"
+  grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972' "$dockerfile"
   grep -Fq '/opt/hostedtoolcache/kache/0.13.0/x64/kache' "$dockerfile"
   grep -Fq 'ln -sfn /opt/hostedtoolcache/kache/0.13.0/x64/kache /usr/local/bin/kache' "$dockerfile"
   grep -Fq 'ENV KACHE_VERIFY_RESTORES=sampled' "$dockerfile"
