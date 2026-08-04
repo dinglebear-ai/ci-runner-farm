@@ -44,7 +44,7 @@ docker() {
         printf '%s /bin/bash /usr/local/bin/kache-supervise.sh   \n' "$((base + i))"
       done
       [ "${daemon_state[$c]}" = 1 ] &&
-        printf '900 /opt/hostedtoolcache/kache/0.12.0/x64/kache daemon run   \n'
+        printf '900 /opt/hostedtoolcache/kache/0.13.0/x64/kache daemon run   \n'
       ;;
     inspect) printf 'true\n' ;;
     exec)
