@@ -28,10 +28,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 
 # --- Add your packages / tools here ---
-# Rust/C CI prerequisites: the workflows' "Setup Rust with kache" step needs
-# a C toolchain and falls back to apt via sudo, which this image lacked
-# ("apt-get is available but the runner is not root and sudo is missing").
-# Bake the toolchain in and give the runner user passwordless sudo.
+# Rust/C CI prerequisites: the workflows' "Setup Rust with kache" step needs a C
+# toolchain and falls back to apt via sudo. The missing piece was build-essential,
+# not sudo - upstream's build/install_base.sh has installed sudo, granted
+# "%sudo ALL=(ALL) NOPASSWD: ALL", and put runner in the sudo group since 2024,
+# so the sudoers file below is belt-and-braces over what the base already gives.
+# Do not delete it casually: /usr/local/bin/wait-docker.sh now depends on the
+# runner user being able to sudo, and degrades loudly if it cannot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev cmake sudo php-cli ripgrep file clang lld mold \
  && rm -rf /var/lib/apt/lists/* \
@@ -144,24 +147,68 @@ RUN chmod 0755 /usr/local/bin/kache-supervise.sh
 # NOT wait for it to be ready. Wrap the runner CMD so it waits for docker before
 # the runner accepts jobs — otherwise 'Checking docker version'/services: race a
 # cold daemon.
+# The dockerd recovery body lives in its own root-only script rather than inline
+# in the supervisor: it keeps the restart out of two nested levels of quoting,
+# gives the pidfile guard and log cap somewhere to live, and lets a sudoers
+# grant be scoped to this one command instead of relying on NOPASSWD:ALL.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# supervise dockerd: it can die under the services: workload (nested overlay).' \
-  '# Restarting it needs root, and this wrapper runs as the runner user (the base' \
-  '# entrypoint drops privileges before exec-ing the CMD). /var/run and /var/log' \
-  '# are both root-owned, so an unprivileged restart dies on the >> redirect' \
-  '# before service start is ever reached - go through passwordless sudo.' \
-  '( while true; do docker info >/dev/null 2>&1 || sudo -n sh -c "rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1"; sleep 3; done ) &' \
+  '# Recover a dead dockerd. Root only - invoked by the wait-docker.sh supervisor.' \
+  '# Prefer the per-runner dind bind mount so the log lands on the cache pool and' \
+  '# is swept by prune-cache, not on the container writable layer.' \
+  'log=/var/log/dockerd.log' \
+  '[ -d /var/log/dind ] && log=/var/log/dind/dockerd.log' \
+  '# Cap the log. This runs on every failed probe, and /var/log is the container' \
+  '# writable layer when the dind bind mount is absent - on Unraid that is the' \
+  '# shared docker.img, so an unrotated crashloop log is a host-wide disk vector.' \
+  '[ "$(stat -c%s "$log" 2>/dev/null || echo 0)" -gt 33554432 ] && : > "$log"' \
+  '# Never delete a LIVE daemon pidfile. dockerd refuses to start when this file' \
+  '# names a running process, so removing it disarms the duplicate-instance guard' \
+  '# and a later start can bring a second daemon up on the same data root -' \
+  '# concurrent boltdb writers, which corrupts it unrecoverably.' \
+  'pid=$(cat /var/run/docker.pid 2>/dev/null || true)' \
+  'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi' \
+  'rm -f /var/run/docker.pid' \
+  'logger -t crf-docker-supervise "restarting dockerd" 2>/dev/null || true' \
+  'service docker start >>"$log" 2>&1' \
+  > /usr/local/bin/crf-dockerd-restart \
+ && chmod +x /usr/local/bin/crf-dockerd-restart
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  '# Reach root at runtime rather than assuming a shape: the base image grants the' \
+  '# runner user passwordless sudo, RUN_AS_ROOT=true runs this as root already,' \
+  '# and a custom FROM may have neither. Say so instead of failing silently.' \
+  'crf_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi; }' \
+  'crf_can_root() { [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; }' \
   '# supervise the kache daemon for the container lifetime: it is the only' \
   '# path that uploads dependency artifacts and serves remote lookups. A' \
   '# container-level daemon is outside job process groups, so the runner' \
   "# post-job orphan reaper cannot kill it and the upload queue survives" \
   '# job end (the per-job daemon lost ~half of each seeding run).' \
-  '# (this wrapper already runs as the runner user - the base entrypoint' \
-  '# drops privileges before exec-ing the CMD, so no gosu here)' \
+  '# Launched before the readiness gate on purpose: kache-supervise.sh runs its' \
+  '# own docker wait, and it drops to the runner user itself where needed.' \
   '/usr/local/bin/kache-supervise.sh &' \
-  '# wait for first readiness before the runner accepts jobs' \
-  'for i in $(seq 1 90); do docker info >/dev/null 2>&1 && break; sleep 1; done' \
+  '# Wait for first readiness before the runner accepts jobs. timeout guards a' \
+  '# daemon that accepts the connection but never answers - an untimed docker' \
+  '# info blocks this loop forever.' \
+  'for _ in $(seq 1 90); do timeout 10 docker info >/dev/null 2>&1 && break; sleep 1; done' \
+  '# Supervise dockerd for the container lifetime: it can die under the services:' \
+  '# workload (nested overlay). Start supervising only AFTER readiness resolves -' \
+  '# the entrypoint launches dockerd asynchronously just before this script runs,' \
+  '# so a supervisor started earlier fires a restart at a live, still-initialising' \
+  '# daemon on every single boot. Back off on repeated failure so a dockerd that' \
+  '# cannot start (ENOSPC, corrupt overlay) does not hot-loop forever.' \
+  'if crf_can_root; then' \
+  '  ( delay=3' \
+  '    while true; do' \
+  '      sleep "$delay"' \
+  '      if timeout 10 docker info >/dev/null 2>&1; then delay=3; continue; fi' \
+  '      crf_root /usr/local/bin/crf-dockerd-restart || true' \
+  '      [ "$delay" -lt 60 ] && delay=$(( delay * 2 ))' \
+  '    done ) &' \
+  'else' \
+  '  echo "crf: dockerd supervisor disabled (not root, no passwordless sudo)" >&2' \
+  'fi' \
   'exec "$@"' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh
