@@ -123,6 +123,7 @@ bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
 bash tests/readiness-json.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
+bash tests/stalled-credential-handoff.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null

@@ -116,6 +116,7 @@ sed -n '/^reconcile_stale_runners()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-stale
   runner_pool() { echo removed-pool; }
   pool_record() { return 1; }
   inventory_field() { echo running; }
+  runner_credential_handoff_stalled() { return 1; }
   runner_state() {
     case "$1" in
       ci-runner-old-busy) echo busy ;;
@@ -154,6 +155,7 @@ echo 'reconcile-retiring-fairness: OK'
   pool_record() { return 0; }
   pool_records() { :; }
   inventory_field() { echo running; }
+  runner_credential_handoff_stalled() { return 1; }
   runner_state() { echo idle; }
   crf_confgen() { echo current; }
   runner_confgen() { echo stale; }

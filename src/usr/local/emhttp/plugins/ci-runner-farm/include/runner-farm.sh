@@ -494,7 +494,8 @@ inventory_field() {
   case "$field" in
     state) col=2 ;; health) col=3 ;; cpus) col=4 ;; memory) col=5 ;;
     confgen) col=6 ;; pool) col=7 ;; scope) col=8 ;; index) col=9 ;;
-    routing_label) col=10 ;; identity) col=11 ;; backend) col=12 ;; *) return 1 ;;
+    routing_label) col=10 ;; identity) col=11 ;; backend) col=12 ;;
+    started_at) col=13 ;; *) return 1 ;;
   esac
   awk -F'|' -v n="$name" -v c="$col" '$1 == n { print $c; exit }' "$INVENTORY_FILE"
 }
@@ -626,6 +627,7 @@ runner_authoritatively_failed() {
     *) return 1 ;;
   esac
 }
+
 busy_count() {
   local pool="${1:-}" b=0 c
   for c in $(managed_names "$pool"); do [ -n "$c" ] && runner_busy "$c" && b=$((b+1)); done
@@ -1075,31 +1077,99 @@ kache_daemon_running() {
          $4 == "run" && NF == 4 { found=1 } END { exit !found }'
 }
 
+kache_daemon_miss_file() {
+  local c="$1" dir="${KACHE_WATCHDOG_MISS_DIR:-${RUNDIR}/kache-daemon-misses}"
+  runner_identity_validate "$c" || return 1
+  mkdir -p "$dir" 2>/dev/null || return 1
+  printf '%s/%s\n' "$dir" "$c"
+}
+
+kache_daemon_miss_reset() {
+  local path
+  path="$(kache_daemon_miss_file "$1")" || return 1
+  rm -f "$path"
+}
+
+kache_daemon_miss_increment() {
+  local path count=0 tmp
+  path="$(kache_daemon_miss_file "$1")" || return 1
+  if [ -f "$path" ]; then
+    count="$(cat "$path" 2>/dev/null)"
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  fi
+  count=$((count + 1))
+  tmp="${path}.tmp.$$"
+  printf '%s\n' "$count" >"$tmp" || return 1
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+  printf '%s\n' "$count"
+}
+
 kache_supervisor_reconcile() {
-  local c pid
+  local c pid processes daemon_running=false misses threshold
   local -a supervisors=()
+  threshold="${KACHE_WATCHDOG_DAEMON_MISS_THRESHOLD:-3}"
+  case "$threshold" in ''|*[!0-9]*) threshold=3 ;; esac
+  [ "$threshold" -ge 1 ] || threshold=3
   fleet_inventory_refresh || return 1
   for c in $(managed_names); do
     [ -n "$c" ] || continue
     runner_identity_validate "$c" || continue
-    [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || continue
-    docker exec "$c" test -x /usr/local/bin/kache-supervise.sh >/dev/null 2>&1 || continue
+    if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != true ]; then
+      kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
+      continue
+    fi
+    if ! docker exec "$c" test -x /usr/local/bin/kache-supervise.sh >/dev/null 2>&1; then
+      kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
+      continue
+    fi
 
+    # One process snapshot prevents a supervisor/daemon transition between two
+    # docker-top calls from looking like an unhealthy split-brain. Inspection
+    # failure is ambiguous and therefore preserves the runner.
+    processes="$(docker top "$c" -eo pid,args 2>/dev/null)" || {
+      log "kache-watchdog: process inspection failed for $c; preserving it"
+      continue
+    }
     supervisors=()
-    mapfile -t supervisors < <(kache_supervisor_pids "$c")
+    mapfile -t supervisors < <(
+      awk 'NR > 1 && ($2 == "bash" || $2 == "/bin/bash") &&
+           $3 == "/usr/local/bin/kache-supervise.sh" && NF == 3 { print $1 }' \
+        <<<"$processes"
+    )
+    if awk 'NR > 1 && $2 ~ /(^|\/)kache$/ && $3 == "daemon" &&
+            $4 == "run" && NF == 4 { found=1 } END { exit !found }' \
+      <<<"$processes"; then
+      daemon_running=true
+    else
+      daemon_running=false
+    fi
+
     if [ "${#supervisors[@]}" -gt 1 ]; then
       for pid in "${supervisors[@]:1}"; do kill "$pid" 2>/dev/null || true; done
       log "kache-watchdog: removed $((${#supervisors[@]} - 1)) duplicate supervisor(s) from $c"
       supervisors=("${supervisors[0]}")
     fi
 
-    if [ "${#supervisors[@]}" -eq 1 ] && kache_daemon_running "$c"; then
+    if [ "${#supervisors[@]}" -eq 1 ] && [ "$daemon_running" = true ]; then
+      kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
       continue
     fi
     if [ "${#supervisors[@]}" -eq 1 ]; then
+      misses="$(kache_daemon_miss_increment "$c")" || {
+        log "kache-watchdog: could not persist daemon health for $c; preserving it"
+        continue
+      }
+      if [ "$misses" -lt "$threshold" ]; then
+        [ "$misses" -ne 1 ] ||
+          log "kache-watchdog: daemon missing in $c; waiting for $threshold consecutive samples"
+        continue
+      fi
+      kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
       kill "${supervisors[0]}" 2>/dev/null || true
-      log "kache-watchdog: restarting unhealthy supervisor in $c (daemon missing)"
+      log "kache-watchdog: restarting unhealthy supervisor in $c after $misses daemon misses"
       sleep 1
+    else
+      kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
     fi
 
     if docker exec -d -u runner "$c" env -i       HOME=/home/runner PATH=/usr/local/bin:/usr/bin:/bin       KACHE_CACHE_DIR=/_work/.kache       /bin/bash /usr/local/bin/kache-supervise.sh >/dev/null 2>&1; then
@@ -1117,7 +1187,12 @@ kache_watchdog_daemon() {
   log "kache-watchdog: daemon started"
   while true; do
     load_cfg
-    kache_supervisor_reconcile || log "kache-watchdog: inventory/reconcile failed; retrying"
+    if kache_supervisor_reconcile; then
+      with_fleet_lock try recover_stalled_credential_handoffs reuse ||
+        log "kache-watchdog: credential recovery failed; retrying"
+    else
+      log "kache-watchdog: inventory/reconcile failed; retrying"
+    fi
     sleep "${KACHE_WATCHDOG_INTERVAL:-10}"
   done
 }
@@ -2274,6 +2349,74 @@ start_stopped_managed() {
   return "$rc"
 }
 
+# Detect a running container whose entrypoint is still blocked on the protected
+# credential FIFO after the complete handoff window. This is deliberately much
+# narrower than GitHub busy/idle state: a plain Docker restart can retain a stale
+# busy lease even though no Runner.Listener process exists. Any missing or
+# ambiguous evidence preserves the container.
+runner_credential_handoff_stalled() {
+  local c="$1" started_at started_epoch now age processes
+  local threshold="${RUNNER_CREDENTIAL_HANDOFF_STALL_SECONDS:-240}"
+  [ "$(inventory_field "$c" state)" = running ] || return 1
+  case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
+  started_at="$(inventory_field "$c" started_at)"
+  [ -n "$started_at" ] || return 1
+  started_epoch="$(date -d "$started_at" +%s 2>/dev/null)" || return 1
+  now="$(date +%s)" || return 1
+  [ "$now" -ge "$started_epoch" ] || return 1
+  age=$((now - started_epoch))
+  [ "$age" -ge "$threshold" ] || return 1
+  processes="$(docker top "$c" -eo args 2>/dev/null)" || return 1
+  if awk 'NR > 1 && /(^|[[:space:]\/])Runner\.Listener([[:space:]]|$)/ { found=1 } END { exit !found }' \
+    <<<"$processes"; then
+    return 1
+  fi
+  docker exec "$c" test -f /run/crf/ready >/dev/null 2>&1 || return 1
+  docker exec "$c" test ! -e /run/crf/consumed >/dev/null 2>&1 || return 1
+}
+
+# Repair every classic runner that is conclusively stalled at credential handoff.
+# The caller holds the fleet lock; recreate_runner temporarily releases it only
+# for the bounded protected handoff, then verifies the exact replacement identity.
+recover_stalled_credential_handoffs() {
+  local inventory_mode="${1:-refresh}" c rc=0 recovered=0
+  load_cfg
+  validate_runtime_config || { err "credential recovery: $POOL_CONFIG_ERROR"; return 1; }
+  [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] ||
+    { log "credential recovery: maintenance mode preserves the current fleet"; return 0; }
+  if declare -F backend_effective >/dev/null &&
+     [ "$(backend_effective 2>/dev/null)" = scaleset ]; then
+    return 0
+  fi
+  github_api_token_load || { err "credential recovery: no usable GitHub API token"; return 1; }
+  case "$inventory_mode" in
+    refresh)
+      fleet_inventory_refresh || { err "credential recovery: could not inventory managed runners"; return 1; }
+      ;;
+    reuse)
+      [ "${INVENTORY_ACTIVE:-0}" = 1 ] && [ -n "${INVENTORY_FILE:-}" ] && [ -f "$INVENTORY_FILE" ] ||
+        { err "credential recovery: reusable inventory is unavailable"; return 1; }
+      ;;
+    *) err "credential recovery: invalid inventory mode"; return 1 ;;
+  esac
+  for c in $(inventory_names); do
+    [ -n "$c" ] || continue
+    runner_identity_validate "$c" || continue
+    runner_credential_handoff_stalled "$c" || continue
+    log "credential recovery: recycling $c after protected handoff stalled"
+    if recreate_runner "$c" force >/dev/null; then
+      recovered=$((recovered + 1))
+      fleet_inventory_refresh || { err "credential recovery: inventory refresh failed after $c"; return 1; }
+    else
+      err "credential recovery: $c could not consume a fresh protected credential"
+      rc=1
+      fleet_inventory_refresh || return 1
+    fi
+  done
+  [ "$recovered" -eq 0 ] || log "credential recovery: restored $recovered runner(s)"
+  return "$rc"
+}
+
 # Cache/network provisioning shared by cmd_start and the Fleet recycle path before
 # they run start_one: validate the cache root (hard guard — aborts on FUSE for
 # DIND, etc.), create the cache dirs / isolated network / image-cache mirror, and
@@ -2400,6 +2543,16 @@ reconcile_stale_runners() {
           continue
           ;;
       esac
+    fi
+    if [ "$desired" = true ] && [ "$docker_state" = running ] &&
+       runner_credential_handoff_stalled "$c"; then
+      log "reconcile: recycling $c after protected credential handoff stalled"
+      if recreate_runner "$c" force >/dev/null; then
+        log "reconcile: $c consumed a fresh protected registration credential"
+      else
+        err "reconcile: $c could not be recovered from a stalled credential handoff"
+      fi
+      return 0
     fi
     if [ "$docker_state" != running ]; then
       log "reconcile: recreating stopped desired runner $c"
@@ -4002,9 +4155,9 @@ cmd_build_image() {
 # reboot). It may fire before the array/dockerd are up, so wait for both, then
 # bring the fleet up idempotently. The caller detaches it so it never blocks
 # install/boot/the event sequence. No-op until a token is configured (a fresh
-# install waits for the user); cmd_start restarts exited runners, skips running
-# ones, and (re)starts the autoscale daemon, so the fleet self-heals after a
-# reboot OR a Docker restart.
+# install waits for the user); cmd_start recreates exited runners and skips
+# running ones. A delayed, fail-closed sweep then repairs any running classic
+# container whose protected credential handoff never completed.
 cmd_boot_autostart() {
   auth_credentials_configured ||
     { log "boot-autostart: no valid GitHub credentials configured yet — skipping"; return 0; }
@@ -4020,7 +4173,16 @@ cmd_boot_autostart() {
   # uses: on a Docker-service restart (no reboot) the autoscale/image daemons may
   # still be alive and ticking, so an unlocked cmd_start here would race them into
   # duplicate 'docker run's. The long readiness wait above stays OUTSIDE the lock.
-  with_fleet_lock wait cmd_start
+  with_fleet_lock wait cmd_start || return 1
+
+  # Docker may have already restarted an existing classic container before this
+  # hook ran. Its entrypoint then waits on a fresh credential FIFO that cmd_start
+  # deliberately skips because the container is already running. Wait beyond the
+  # complete handoff window, then perform one locked, fail-closed recovery sweep.
+  local handoff_wait="${RUNNER_CREDENTIAL_HANDOFF_STALL_SECONDS:-240}"
+  case "$handoff_wait" in ''|*[!0-9]*) handoff_wait=240 ;; esac
+  sleep "$handoff_wait"
+  with_fleet_lock wait recover_stalled_credential_handoffs
 }
 
 cmd_validate_pools() {
