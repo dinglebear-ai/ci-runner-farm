@@ -39,6 +39,12 @@ grep -Fq 'SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-838860
   "$scalesets" || crf_fail "eight MiB helper-log cap drifted"
 grep -Fq 'SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"' \
   "$scalesets" || crf_fail "operation-record cap drifted"
+grep -Fq 'OPERATION_MAX_FILES=64' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh ||
+  crf_fail "generic operation-record cap drifted"
+grep -Fq 'OPERATION_MAX_AGE_SECONDS=2592000' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh ||
+  crf_fail "generic operation retention age drifted"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -130,6 +136,7 @@ bash tests/graphql-status-api.sh >/dev/null
 bash tests/graphql-auxiliary-api.sh >/dev/null
 php tests/api-log.php >/dev/null
 bash tests/graphql-log-api.sh >/dev/null
+bash tests/operations.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

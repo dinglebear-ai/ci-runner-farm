@@ -136,6 +136,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-scheduler.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 . "$SCRIPT_DIR/runner-jit.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh
+. "$SCRIPT_DIR/runner-operations.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh
@@ -4025,6 +4027,10 @@ cmd_build_image() {
 # ones, and (re)starts the autoscale daemon, so the fleet self-heals after a
 # reboot OR a Docker restart.
 cmd_boot_autostart() {
+  operation_reconcile_interrupted || {
+    err "boot-autostart: durable operation reconciliation failed"
+    return 1
+  }
   auth_credentials_configured ||
     { log "boot-autostart: no valid GitHub credentials configured yet — skipping"; return 0; }
   local i
