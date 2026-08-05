@@ -3951,9 +3951,11 @@ cmd_build_status() {
 # {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
 # (tmpfs) or boot.log before the daemon ran, minus docker's noisy swap-limit warning.
 cmd_farm_log() {
-  local as="$RUNDIR/autoscale.log" bt="$RUNDIR/boot.log" src txt
+  local lines="${1:-60}" as="$RUNDIR/autoscale.log" bt="$RUNDIR/boot.log" src txt
+  case "$lines" in ''|*[!0-9]*) printf '{"ok":false,"error":"invalid line count"}\n'; return 1 ;; esac
+  [ "$lines" -ge 1 ] && [ "$lines" -le 500 ] || { printf '{"ok":false,"error":"invalid line count"}\n'; return 1; }
   src="$as"; [ -f "$as" ] || src="$bt"
-  txt="$([ -f "$src" ] && tail -n 150 "$src" | grep -v 'swap limit capabilities' | tail -n 60)"
+  txt="$([ -f "$src" ] && [ ! -L "$src" ] && tail -n 500 -- "$src" 2>/dev/null | grep -v 'swap limit capabilities' | tail -n "$lines")"
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
 }
 
@@ -3961,9 +3963,11 @@ cmd_farm_log() {
 # runner. The web history screen uses this after the ephemeral container itself
 # has gone away, when `docker logs` can no longer serve the row drawer.
 cmd_history_log() {
-  local name="${1:-}" root dir txt entry file i
+  local name="${1:-}" lines="${2:-150}" root dir txt entry file i
   local -a newest=()
-  jit_id_valid "$name" || { printf '{"ok":false,"error":"invalid runner name"}\n'; return 0; }
+  jit_id_valid "$name" || { printf '{"ok":false,"error":"invalid runner name"}\n'; return 1; }
+  case "$lines" in ''|*[!0-9]*) printf '{"ok":false,"error":"invalid line count"}\n'; return 1 ;; esac
+  [ "$lines" -ge 1 ] && [ "$lines" -le 500 ] || { printf '{"ok":false,"error":"invalid line count"}\n'; return 1; }
   root="$JIT_LOG_ROOT"; dir="$root/$name"
   [ -d "$root" ] && [ ! -L "$root" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || {
     printf '{"ok":true,"log":""}\n'; return 0;
@@ -3979,9 +3983,9 @@ cmd_history_log() {
   txt="$({
     for ((i=${#newest[@]}-1; i>=0; i--)); do
       file="${newest[$i]}"
-      [ -f "$file" ] && [ ! -L "$file" ] && tail -n 150 -- "$file" 2>/dev/null
+      [ -f "$file" ] && [ ! -L "$file" ] && tail -n "$lines" -- "$file" 2>/dev/null
     done
-  } | tail -n 150 |
+  } | tail -n "$lines" |
     sed -E -e 's/(github_pat_|gh[pousr]_)[A-Za-z0-9_]{8,}/[REDACTED]/g' \
       -e 's/(registrationToken|runnerRequestId|authorization)["=: ]+([Bb]earer[[:space:]]+)?[A-Za-z0-9._+\\/=:-]{8,}/\1=[REDACTED]/Ig')"
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
@@ -4100,8 +4104,8 @@ case "${1:-status}" in
   build-image)      cmd_build_image "${2:-}" ;;
   build-async)      cmd_build_async "${2:-}" ;;
   build-status)     cmd_build_status ;;
-  farm-log)         cmd_farm_log ;;
-  history-log)      cmd_history_log "${2:?usage: history-log <name>}" ;;
+  farm-log)         cmd_farm_log "${2:-60}" ;;
+  history-log)      cmd_history_log "${2:?usage: history-log <name> [lines]}" "${3:-150}" ;;
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;

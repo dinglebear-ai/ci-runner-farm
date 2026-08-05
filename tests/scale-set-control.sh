@@ -81,6 +81,9 @@ EOF
 chmod 0755 "$fake_helper"
 SCALESET_HELPER="$fake_helper"
 SCALESET_SOCKET="$RUNDIR/scalesets/test.sock"
+# The concurrency phase launches twelve shell helpers. Preserve the production
+# timeout path, but allow process startup on a deliberately saturated dev host.
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=60
 python3 - "$SCALESET_SOCKET" <<'PY' &
 import socket
 import sys
@@ -129,18 +132,28 @@ diff -u "$root/sequences.expected" "$root/sequences.actual"
 # lock so a later controller request can recover.
 CRF_FAKE_CHILD_PID="$root/helper-child.pid"
 export CRF_FAKE_CHILD_PID
+# Record the child before consuming the request, not after: everything this
+# helper does before the printf has to finish inside the I/O deadline below, or
+# it is killed with the pidfile still empty and the assertion fails for reasons
+# that have nothing to do with the behaviour under test.
 cat >"$fake_helper" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 [ "$1" = request ] || exit 2
-cat >/dev/null
 sleep 30 &
 child=$!
 printf '%s\n' "$child" >"$CRF_FAKE_CHILD_PID"
+cat >/dev/null
 wait "$child"
 EOF
 chmod 0755 "$fake_helper"
-SCALESET_REQUEST_IO_TIMEOUT_SECONDS=1
+# 5s, not 1s. The deadline has to cover bash startup for the helper process, and
+# on a loaded host (this repo's own runner fleet saturates the box it is
+# developed on) that alone can exceed a second -- the helper was being killed
+# before it ever ran, which made this test fail intermittently at ~40% under
+# load. The property under test is that a hung helper is terminated and its
+# child reaped, which the exact deadline value does not affect.
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=5
 started="$(date +%s)"
 set +e
 scaleset_request read_snapshot '{}' >/dev/null 2>&1
@@ -148,7 +161,12 @@ timeout_rc=$?
 set -e
 elapsed=$(( $(date +%s) - started ))
 [ "$timeout_rc" -eq 124 ] || { echo "scale-set helper timeout returned $timeout_rc, expected 124" >&2; exit 1; }
-[ "$elapsed" -le 10 ] || { echo "scale-set helper timeout took ${elapsed}s" >&2; exit 1; }
+[ "$elapsed" -le 20 ] || { echo "scale-set helper timeout took ${elapsed}s" >&2; exit 1; }
+# Tolerate the write landing slightly after the helper is signalled.
+for _ in $(seq 1 50); do
+  [ -s "$CRF_FAKE_CHILD_PID" ] && break
+  sleep 0.1
+done
 [ -s "$CRF_FAKE_CHILD_PID" ] || { echo "timed-out helper did not record its child" >&2; exit 1; }
 child_pid="$(cat "$CRF_FAKE_CHILD_PID")"
 for _ in $(seq 1 50); do

@@ -24,7 +24,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target cmd_build_async cmd_build_status cmd_history_log cmd_farm_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -145,12 +145,31 @@ history="$(cmd_history_log "$runner")"
 history_log="$(printf '%s' "$history" | php -r '$d=json_decode(stream_get_contents(STDIN),true); if(!is_array($d)||!($d["ok"]??false)) exit(1); echo $d["log"]??"";')"
 lines="$(printf '%s\n' "$history_log" | wc -l)"
 crf_assert_eq 150 "$lines" 'history log is not capped to 150 lines'
-case "$history_log" in *abcdefghijklmnopqrstuvwxyz*) crf_fail 'history returned an unredacted credential' ;; esac
+history="$(cmd_history_log "$runner" 7)"
+history_log="$(printf '%s' "$history" | php -r '$d=json_decode(stream_get_contents(STDIN),true); if(!is_array($d)||!($d["ok"]??false)) exit(1); echo $d["log"]??"";')"
+lines="$(printf '%s\n' "$history_log" | wc -l)"
+crf_assert_eq 7 "$lines" 'history log did not honor an explicit line bound'
+crf_assert_contains "$history_log" '[REDACTED]' 'bounded history did not retain credential redaction'
+case "$history_log" in *abcdefghijklmnopqrstuvwxyz*) crf_fail 'bounded history returned an unredacted credential' ;; esac
+if cmd_history_log "$runner" 501 >/dev/null 2>&1; then crf_fail 'history accepted an over-bound line count'; fi
 crf_assert_contains "$history_log" '[REDACTED]' 'history credential redaction did not run'
 mv "$JIT_LOG_ROOT/$runner" "$JIT_LOG_ROOT/real-runner"
 ln -s real-runner "$JIT_LOG_ROOT/$runner"
 history="$(cmd_history_log "$runner")"
 crf_assert_contains "$history" '"log":""' 'history followed a symlinked runner directory'
+
+RUNDIR="$tmp/farm-log"
+mkdir -p "$RUNDIR"
+for i in $(seq 1 10); do printf 'farm-%02d\n' "$i"; done >"$RUNDIR/autoscale.log"
+farm="$(cmd_farm_log 3)"
+farm_log="$(printf '%s' "$farm" | php -r '$d=json_decode(stream_get_contents(STDIN),true); if(!is_array($d)||!($d["ok"]??false)) exit(1); echo $d["log"]??"";')"
+crf_assert_eq 3 "$(printf '%s\n' "$farm_log" | wc -l)" 'farm log did not honor an explicit line bound'
+crf_assert_contains "$farm_log" 'farm-10' 'farm log omitted the newest line'
+if cmd_farm_log 501 >/dev/null 2>&1; then crf_fail 'farm log accepted an over-bound line count'; fi
+mv "$RUNDIR/autoscale.log" "$RUNDIR/real.log"
+ln -s real.log "$RUNDIR/autoscale.log"
+farm="$(cmd_farm_log 3)"
+crf_assert_contains "$farm" '"log":""' 'farm log followed a symlinked source'
 
 # Cancellation requires a configured repo, a small/fresh snapshot membership,
 # and a second live GitHub status check before the POST. Stale snapshots and

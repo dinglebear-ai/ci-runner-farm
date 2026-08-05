@@ -237,6 +237,7 @@ runner_api_fail_compatibility_changed() { runner_api_fail compatibility_changed 
 runner_api_fail_backend_unavailable() { runner_api_fail backend_unavailable "${1:-backend unavailable}" 5 "${2:-}"; }
 runner_api_fail_output_too_large() { runner_api_fail output_too_large "${1:-output too large}" 5 "${2:-}"; }
 runner_api_fail_unsupported_schema() { runner_api_fail unsupported_schema "${1:-unsupported schema}" 2 "${2:-}"; }
+runner_api_fail_invalid_runner() { runner_api_fail invalid_runner "${1:-invalid runner}" 4 "${2:-}"; }
 
 runner_api_result_file_create() {
   local prefix="$1" dir="$RUNDIR/api-results" path
@@ -401,6 +402,100 @@ runner_api_auxiliary() {
   return "$emit_rc"
 }
 
+runner_api_prepare_request() {
+  local operation="$1" rc
+  if runner_api_capture_request; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      runner_api_fail_invalid_request 'request is too large' ''
+    else
+      runner_api_fail_backend_unavailable 'could not capture request' ''
+    fi
+    return
+  fi
+  if runner_api_parse_fields "$operation"; then
+    return 0
+  fi
+  runner_api_fail_invalid_request 'request fields are invalid' ''
+}
+
+runner_api_log() {
+  local operation="$1" request_id="${RUNNER_API_FIELDS[0]}" name="" lines mode source message
+  local raw strict helper normalize_rc emit_rc command_ok=0 size
+  case "$operation" in
+    runner-log)
+      name="${RUNNER_API_FIELDS[1]}"; lines="${RUNNER_API_FIELDS[2]}"
+      mode=plain; source="runner:$name"; message='runner log'
+      ;;
+    history-log)
+      name="${RUNNER_API_FIELDS[1]}"; lines="${RUNNER_API_FIELDS[2]}"
+      mode=json; source="history:$name"; message='runner history log'
+      ;;
+    controller-log)
+      lines="${RUNNER_API_FIELDS[1]}"
+      mode=json; source=controller; message='controller log'
+      ;;
+    *) runner_api_fail_invalid_request 'unsupported log operation' "$request_id"; return ;;
+  esac
+  raw="$(runner_api_result_file_create "$operation.raw")" || {
+    runner_api_fail_backend_unavailable 'could not create log buffer' "$request_id"
+    return
+  }
+  strict="$(runner_api_result_file_create "$operation.strict")" || {
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_fail_backend_unavailable 'could not create log buffer' "$request_id"
+    return
+  }
+  case "$operation" in
+    runner-log) if cmd_logs_tail "$name" "$lines" >"$raw"; then command_ok=1; fi ;;
+    history-log) if cmd_history_log "$name" "$lines" >"$raw"; then command_ok=1; fi ;;
+    controller-log) if cmd_farm_log "$lines" >"$raw"; then command_ok=1; fi ;;
+  esac
+  if [ "$command_ok" -ne 1 ]; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    if [ "$operation" = controller-log ]; then
+      runner_api_fail_backend_unavailable "$message is unavailable" "$request_id"
+    else
+      runner_api_fail_invalid_runner "$message is unavailable" "$request_id"
+    fi
+    return
+  fi
+  if ! runner_api_private_file_valid "$raw" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    size="$(stat -c %s "$raw" 2>/dev/null || echo 0)"
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt "$RUNNER_API_MAX_RESPONSE_BYTES" ]; then
+      runner_api_fail_output_too_large "$message input is too large" "$request_id"
+    else
+      runner_api_fail_backend_unavailable "$message input is unsafe" "$request_id"
+    fi
+    return
+  fi
+  helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-log.php"
+  if /usr/bin/php "$helper" "$mode" "$raw" "$lines" "$source" >"$strict"; then
+    :
+  else
+    normalize_rc=$?
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_normalizer_failure "$normalize_rc" "$request_id"
+    return
+  fi
+  if ! runner_api_private_file_valid "$strict" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_output_too_large "$message output is too large" "$request_id"
+    return
+  fi
+  if runner_api_emit "$request_id" true ok "$message" "$strict"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$raw" || true
+  runner_api_result_file_cleanup "$strict" || true
+  return "$emit_rc"
+}
+
 runner_api_reject() {
   runner_api_fail_invalid_request 'unsupported API operation' ''
 }
@@ -415,6 +510,10 @@ runner_api_dispatch() {
     statistics) runner_api_auxiliary statistics ;;
     cache-usage) runner_api_auxiliary cache ;;
     image) runner_api_auxiliary image ;;
+    runner-log|history-log|controller-log)
+      runner_api_prepare_request "$operation" || return $?
+      runner_api_log "$operation"
+      ;;
     *) runner_api_reject ;;
   esac
 }

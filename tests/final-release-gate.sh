@@ -128,6 +128,8 @@ php tests/api-auxiliary.php >/dev/null
 bash tests/graphql-controller-api.sh >/dev/null
 bash tests/graphql-status-api.sh >/dev/null
 bash tests/graphql-auxiliary-api.sh >/dev/null
+php tests/api-log.php >/dev/null
+bash tests/graphql-log-api.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
