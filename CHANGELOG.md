@@ -9,6 +9,7 @@
 * Include PHP CLI, ripgrep, and file inspection tools in the Tootie runner image so the repository's syntax, behavioral, and release gates run on the farm.
 * Make the watchdog process-enumeration regression test independent of host PID ordering.
 * Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
+* Document the feasible 16-runner Tootie pool envelope and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
 
 ## [1.8.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.0...v1.8.1) (2026-08-05)
