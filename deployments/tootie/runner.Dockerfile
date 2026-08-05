@@ -146,8 +146,12 @@ RUN chmod 0755 /usr/local/bin/kache-supervise.sh
 # cold daemon.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# supervise dockerd: it can die under the services: workload (nested overlay)' \
-  '( while true; do docker info >/dev/null 2>&1 || { rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1; }; sleep 3; done ) &' \
+  '# supervise dockerd: it can die under the services: workload (nested overlay).' \
+  '# Restarting it needs root, and this wrapper runs as the runner user (the base' \
+  '# entrypoint drops privileges before exec-ing the CMD). /var/run and /var/log' \
+  '# are both root-owned, so an unprivileged restart dies on the >> redirect' \
+  '# before service start is ever reached - go through passwordless sudo.' \
+  '( while true; do docker info >/dev/null 2>&1 || sudo -n sh -c "rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1"; sleep 3; done ) &' \
   '# supervise the kache daemon for the container lifetime: it is the only' \
   '# path that uploads dependency artifacts and serves remote lookups. A' \
   '# container-level daemon is outside job process groups, so the runner' \

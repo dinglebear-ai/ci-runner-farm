@@ -30,8 +30,12 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
 # cold daemon.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# supervise dockerd: it can die under the services: workload (nested overlay)' \
-  '( while true; do docker info >/dev/null 2>&1 || { rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1; }; sleep 3; done ) &' \
+  '# supervise dockerd: it can die under the services: workload (nested overlay).' \
+  '# Restarting it needs root, and this wrapper runs as the runner user (the base' \
+  '# entrypoint drops privileges before exec-ing the CMD). /var/run and /var/log' \
+  '# are both root-owned, so an unprivileged restart dies on the >> redirect' \
+  '# before service start is ever reached - go through passwordless sudo.' \
+  '( while true; do docker info >/dev/null 2>&1 || sudo -n sh -c "rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1"; sleep 3; done ) &' \
   '# wait for first readiness before the runner accepts jobs' \
   'for i in $(seq 1 90); do docker info >/dev/null 2>&1 && break; sleep 1; done' \
   'exec "$@"' \
