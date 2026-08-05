@@ -136,4 +136,82 @@ chmod 0600 "$malicious_scale"
   [ ! -e "$marker" ] || crf_fail 'shell metacharacters were executed'
 )
 
+response_result="$tmp/response-result.json"
+printf '%s\n' '{"value":"ok","count":3}' >"$response_result"
+chmod 0600 "$response_result"
+
+(
+  # shellcheck disable=SC1090
+  . "$API_MODULE"
+  RUNDIR="$tmp/response-run"
+  mkdir -p "$RUNDIR"
+  INVENTORY_FILE="$tmp/response-inventory.tsv"
+  printf '%s\n' 'runner-a|running' >"$INVENTORY_FILE"
+  chmod 0600 "$INVENTORY_FILE"
+  config_revision(){ printf 'a%.0s' {1..64}; }
+  migration_load(){
+    MIGRATION_REVISION="$(printf 'b%.0s' {1..64})"
+    MIGRATION_OWNERSHIP_REVISION="$(printf 'c%.0s' {1..64})"
+    MIGRATION_COMPATIBILITY_RECORD_ID="$(printf 'd%.0s' {1..64})"
+    return 0
+  }
+  request_id='7bb90867-3378-4ae3-81bb-74ce20fd3274'
+  emit_err="$tmp/emit.stderr"
+  output="$(runner_api_emit "$request_id" true ok 'test response' "$response_result" 2>"$emit_err")"
+  [ ! -s "$emit_err" ] || crf_fail 'valid response wrote diagnostics to stderr'
+  assert_single_json_object_or_empty "$output"
+  inventory_revision="$(sha256sum "$INVENTORY_FILE" | cut -d' ' -f1)"
+  printf '%s' "$output" | php -r '
+    $j=json_decode(stream_get_contents(STDIN),true);
+    $ok=is_array($j)&&($j["request_id"]??"")===$argv[1]&&($j["ok"]??false)===true&&
+      ($j["code"]??"")==="ok"&&($j["result"]["value"]??"")==="ok"&&
+      ($j["observed"]["config_revision"]??"")===str_repeat("a",64)&&
+      ($j["observed"]["inventory_revision"]??"")===$argv[2]&&
+      ($j["observed"]["transition_revision"]??"")===str_repeat("b",64)&&
+      ($j["observed"]["ownership_revision"]??"")===str_repeat("c",64)&&
+      ($j["observed"]["compatibility_record_id"]??"")===str_repeat("d",64)&&
+      array_key_exists("credential_revision",$j["observed"])&&$j["observed"]["credential_revision"]===null;
+    exit($ok?0:1);
+  ' "$request_id" "$inventory_revision" || crf_fail 'valid file response envelope was incorrect'
+
+  stream_output="$(printf '%s' '{"stream":true}' | runner_api_emit "$request_id" true ok 'stream response' -)"
+  printf '%s' "$stream_output" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["result"]["stream"]??false)===true?0:1);' ||
+    crf_fail 'stdin response source was not preserved'
+
+  bad_result="$tmp/bad-result.json"
+  printf '%s' '{bad json' >"$bad_result"
+  chmod 0600 "$bad_result"
+  set +e
+  bad_output="$(runner_api_emit "$request_id" true ok 'bad response' "$bad_result" 2>"$tmp/bad-result.stderr")"
+  bad_rc=$?
+  set -e
+  crf_assert_eq 5 "$bad_rc" 'malformed result exit code'
+  [ -s "$tmp/bad-result.stderr" ] || crf_fail 'malformed result did not emit bounded diagnostics'
+  assert_single_json_object_or_empty "$bad_output"
+  printf '%s' "$bad_output" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(is_array($j)&&($j["ok"]??true)===false&&($j["code"]??"")==="backend_unavailable"&&array_key_exists("result",$j)&&$j["result"]===null?0:1);' ||
+    crf_fail 'malformed result did not fall back to backend_unavailable'
+
+  error_specs=(
+    'runner_api_fail_invalid_request invalid_request 2'
+    'runner_api_fail_invalid_revision invalid_revision 2'
+    'runner_api_fail_stale_config stale_config 3'
+    'runner_api_fail_stale_inventory stale_inventory 3'
+    'runner_api_fail_stale_transition stale_transition 3'
+    'runner_api_fail_ownership_changed ownership_changed 3'
+    'runner_api_fail_compatibility_changed compatibility_changed 3'
+    'runner_api_fail_backend_unavailable backend_unavailable 5'
+    'runner_api_fail_output_too_large output_too_large 5'
+  )
+  for spec in "${error_specs[@]}"; do
+    read -r helper expected_code expected_rc <<<"$spec"
+    set +e
+    error_output="$("$helper" 'test failure' "$request_id" 2>"$tmp/error-helper.stderr")"
+    actual_rc=$?
+    set -e
+    crf_assert_eq "$expected_rc" "$actual_rc" "$helper exit code"
+    printf '%s' "$error_output" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(is_array($j)&&($j["ok"]??true)===false&&($j["code"]??"")===$argv[1]&&($j["request_id"]??"")===$argv[2]?0:1);' "$expected_code" "$request_id" ||
+      crf_fail "$helper envelope was incorrect"
+  done
+)
+
 printf 'graphql-controller-api: OK\n'

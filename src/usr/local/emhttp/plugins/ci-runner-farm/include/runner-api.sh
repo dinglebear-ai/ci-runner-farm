@@ -156,9 +156,89 @@ runner_api_parse_fields() {
   runner_api_validate_decoded_fields "$operation"
 }
 
+runner_api_private_file_valid() {
+  local path="$1" maximum="$2" size mode
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  size="$(stat -c %s "$path" 2>/dev/null || echo invalid)"
+  mode="$(stat -c %a "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le "$maximum" ] && [ "$mode" = 600 ]
+}
+
+runner_api_revision_or_empty() {
+  local value="$1"
+  if runner_api_sha256_valid "$value"; then printf '%s' "$value"; fi
+  return 0
+}
+
+runner_api_observed_refresh() {
+  local value compatibility_file
+  RUNNER_API_OBSERVED_CONFIG_REVISION=""
+  RUNNER_API_OBSERVED_INVENTORY_REVISION=""
+  RUNNER_API_OBSERVED_TRANSITION_REVISION=""
+  RUNNER_API_OBSERVED_OWNERSHIP_REVISION=""
+  RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID=""
+  RUNNER_API_OBSERVED_CREDENTIAL_REVISION=null
+
+  if declare -F config_revision >/dev/null; then
+    value="$(config_revision 2>/dev/null || true)"
+    RUNNER_API_OBSERVED_CONFIG_REVISION="$(runner_api_revision_or_empty "$value")"
+  fi
+  if [ -n "${INVENTORY_FILE:-}" ] && runner_api_private_file_valid "$INVENTORY_FILE" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    value="$(sha256sum "$INVENTORY_FILE" 2>/dev/null | cut -d' ' -f1)"
+    RUNNER_API_OBSERVED_INVENTORY_REVISION="$(runner_api_revision_or_empty "$value")"
+  fi
+  if declare -F migration_load >/dev/null && migration_load >/dev/null 2>&1; then
+    RUNNER_API_OBSERVED_TRANSITION_REVISION="$(runner_api_revision_or_empty "${MIGRATION_REVISION:-}")"
+    RUNNER_API_OBSERVED_OWNERSHIP_REVISION="$(runner_api_revision_or_empty "${MIGRATION_OWNERSHIP_REVISION:-}")"
+    RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID="$(runner_api_revision_or_empty "${MIGRATION_COMPATIBILITY_RECORD_ID:-}")"
+  fi
+  if [ -z "$RUNNER_API_OBSERVED_OWNERSHIP_REVISION" ] && declare -F scaleset_ownership_revision >/dev/null; then
+    value="$(scaleset_ownership_revision 2>/dev/null || true)"
+    RUNNER_API_OBSERVED_OWNERSHIP_REVISION="$(runner_api_revision_or_empty "$value")"
+  fi
+  compatibility_file="${SCALESET_COMPAT:-}"
+  if [ -z "$RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID" ] && [ -n "$compatibility_file" ] && runner_api_private_file_valid "$compatibility_file" 262144; then
+    value="$(/usr/bin/php -r '$j=json_decode(file_get_contents($argv[1]),true);$v=$j["compatibility_record_id"]??"";if(is_string($v))echo $v;' "$compatibility_file" 2>/dev/null || true)"
+    RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID="$(runner_api_revision_or_empty "$value")"
+  fi
+}
+
+runner_api_emit() {
+  local request_id="$1" ok="$2" code="$3" message="$4" source="${5:-@null}" helper rc
+  helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-response.php"
+  runner_api_observed_refresh
+  if /usr/bin/php "$helper" "$source" "$request_id" "$ok" "$code" "$message" \
+    "$RUNNER_API_OBSERVED_CONFIG_REVISION" "$RUNNER_API_OBSERVED_INVENTORY_REVISION" \
+    "$RUNNER_API_OBSERVED_TRANSITION_REVISION" "$RUNNER_API_OBSERVED_OWNERSHIP_REVISION" \
+    "$RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID" "$RUNNER_API_OBSERVED_CREDENTIAL_REVISION"; then
+    return 0
+  fi
+  /usr/bin/php "$helper" @null "$request_id" false backend_unavailable \
+    'controller produced an invalid response' "$RUNNER_API_OBSERVED_CONFIG_REVISION" \
+    "$RUNNER_API_OBSERVED_INVENTORY_REVISION" "$RUNNER_API_OBSERVED_TRANSITION_REVISION" \
+    "$RUNNER_API_OBSERVED_OWNERSHIP_REVISION" "$RUNNER_API_OBSERVED_COMPATIBILITY_RECORD_ID" \
+    "$RUNNER_API_OBSERVED_CREDENTIAL_REVISION" || return 5
+  return 5
+}
+
+runner_api_fail() {
+  local code="$1" message="$2" exit_code="$3" request_id="${4:-${RUNNER_API_FIELDS[0]:-}}"
+  runner_api_emit "$request_id" false "$code" "$message" @null || true
+  return "$exit_code"
+}
+
+runner_api_fail_invalid_request() { runner_api_fail invalid_request "${1:-invalid request}" 2 "${2:-}"; }
+runner_api_fail_invalid_revision() { runner_api_fail invalid_revision "${1:-invalid revision}" 2 "${2:-}"; }
+runner_api_fail_stale_config() { runner_api_fail stale_config "${1:-configuration changed}" 3 "${2:-}"; }
+runner_api_fail_stale_inventory() { runner_api_fail stale_inventory "${1:-inventory changed}" 3 "${2:-}"; }
+runner_api_fail_stale_transition() { runner_api_fail stale_transition "${1:-transition changed}" 3 "${2:-}"; }
+runner_api_fail_ownership_changed() { runner_api_fail ownership_changed "${1:-ownership changed}" 3 "${2:-}"; }
+runner_api_fail_compatibility_changed() { runner_api_fail compatibility_changed "${1:-compatibility changed}" 3 "${2:-}"; }
+runner_api_fail_backend_unavailable() { runner_api_fail backend_unavailable "${1:-backend unavailable}" 5 "${2:-}"; }
+runner_api_fail_output_too_large() { runner_api_fail output_too_large "${1:-output too large}" 5 "${2:-}"; }
+
 runner_api_reject() {
-  printf '%s\n' '{"schema_version":1,"request_id":"","ok":false,"code":"invalid_request","message":"unsupported API operation","result":null,"observed":{"config_revision":"","inventory_revision":"","transition_revision":"","ownership_revision":"","compatibility_record_id":"","credential_revision":null}}'
-  return 2
+  runner_api_fail_invalid_request 'unsupported API operation' ''
 }
 
 runner_api_dispatch() {
