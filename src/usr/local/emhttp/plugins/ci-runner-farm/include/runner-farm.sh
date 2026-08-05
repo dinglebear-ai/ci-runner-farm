@@ -20,11 +20,20 @@
 set -uo pipefail
 
 PLUGIN="ci-runner-farm"
-CFGDIR="/boot/config/plugins/${PLUGIN}"
-# Ephemeral runtime caches/locks live on tmpfs, not the USB flash (they are
-# rewritten every 60-300s while a settings tab is open — a flash-wear antipattern).
-RUNDIR="/var/local/emhttp/${PLUGIN}"
-mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
+if [ "${CRF_TEST_MODE:-}" = 1 ]; then
+  case "${CRF_TEST_ROOT:-}" in /tmp/*) ;; *) printf "invalid CRF_TEST_ROOT\n" >&2; exit 2 ;; esac
+  [ -d "$CRF_TEST_ROOT" ] && [ ! -L "$CRF_TEST_ROOT" ] ||
+    { printf "invalid CRF_TEST_ROOT\n" >&2; exit 2; }
+  CFGDIR="$CRF_TEST_ROOT/config"
+  RUNDIR="$CRF_TEST_ROOT/run"
+  mkdir -p "$CFGDIR" "$RUNDIR" || exit 2
+else
+  CFGDIR="/boot/config/plugins/${PLUGIN}"
+  # Ephemeral runtime caches/locks live on tmpfs, not the USB flash (they are
+  # rewritten every 60-300s while a settings tab is open — a flash-wear antipattern).
+  RUNDIR="/var/local/emhttp/${PLUGIN}"
+  mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
+fi
 CFG="${CFGDIR}/${PLUGIN}.cfg"
 TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
@@ -129,6 +138,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-jit.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh
+. "$SCRIPT_DIR/runner-api.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
 CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP AUTH_MODE GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
@@ -4044,6 +4055,7 @@ cmd_validate_pools() {
 }
 
 case "${1:-status}" in
+  api)          runner_api_dispatch "${2:-}" ;;
   start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   cmd_boot_autostart ;;
   stop)         with_fleet_lock wait cmd_stop ;;
