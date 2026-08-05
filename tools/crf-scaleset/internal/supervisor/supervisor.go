@@ -48,6 +48,7 @@ type Supervisor struct {
 	leases   map[string]int
 	snapshot atomic.Pointer[protocol.Snapshot]
 	sequence atomic.Uint64
+	running  atomic.Bool
 }
 
 func New(cfg Config, poller Poller) (*Supervisor, error) {
@@ -137,6 +138,13 @@ func (s *Supervisor) Snapshot() protocol.Snapshot {
 }
 
 func (s *Supervisor) Run(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("supervisor_context_required")
+	}
+	if !s.running.CompareAndSwap(false, true) {
+		return errors.New("supervisor_already_running")
+	}
+	defer s.running.Store(false)
 	var wg sync.WaitGroup
 	results := make(chan protocol.PoolSnapshot, len(s.cfg.Pools))
 	for _, pool := range s.cfg.Pools {

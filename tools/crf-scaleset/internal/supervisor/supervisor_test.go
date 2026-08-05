@@ -34,6 +34,36 @@ func (p *barrierPoller) Poll(ctx context.Context, pool Pool, capacity int) (Poll
 	return PollResult{AssignedJobs: capacity, MessageID: 1}, ctx.Err()
 }
 
+func TestSupervisorRejectsConcurrentRun(t *testing.T) {
+	p := &barrierPoller{started: make(chan Pool, 1), active: map[string]int{}}
+	cfg := validSupervisorConfig()
+	s, err := New(cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	select {
+	case <-p.started:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("first supervisor run did not start")
+	}
+	if err := s.Run(context.Background()); err == nil || err.Error() != "supervisor_already_running" {
+		cancel()
+		t.Fatalf("concurrent run was not rejected: %v", err)
+	}
+	if err := s.Run(nil); err == nil || err.Error() != "supervisor_context_required" {
+		cancel()
+		t.Fatalf("nil context was not rejected: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOneLongPollPerPool(t *testing.T) {
 	p := &barrierPoller{started: make(chan Pool, 8), active: map[string]int{}}
 	cfg := Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
@@ -221,31 +251,46 @@ func TestSnapshotHeartbeatContinuesWhileLongPollsWait(t *testing.T) {
 			t.Fatalf("pool %s never became healthy", pool.PoolID)
 		}
 	}
-	time.Sleep(3 * cfg.Heartbeat)
-	second := s.Snapshot()
+	heartbeatDeadline := time.Now().Add(time.Second)
+	second := first
+	for second.Sequence <= first.Sequence && time.Now().Before(heartbeatDeadline) {
+		time.Sleep(time.Millisecond)
+		second = s.Snapshot()
+	}
 	if second.Sequence <= first.Sequence {
 		cancel()
 		t.Fatalf("snapshot heartbeat stalled during long polls: first=%d second=%d", first.Sequence, second.Sequence)
 	}
-	if !second.ValidUntil.After(time.Now().UTC()) {
+	if got := second.ValidUntil.Sub(second.ObservedAt); got != 2*cfg.Heartbeat {
 		cancel()
-		t.Fatalf("snapshot expired during healthy long polls: valid_until=%s", second.ValidUntil)
+		t.Fatalf("snapshot validity drifted: got=%s want=%s", got, 2*cfg.Heartbeat)
 	}
-	now := time.Now().UTC()
+	var expiresAt time.Time
 	for i, pool := range second.Pools {
-		if !pool.ValidUntil.After(now) {
+		if got := pool.ValidUntil.Sub(pool.ObservedAt); got != cfg.DemandTTL {
 			cancel()
-			t.Fatalf("pool %s expired inside the bounded long-poll window", pool.PoolID)
+			t.Fatalf("pool %s validity drifted: got=%s want=%s", pool.PoolID, got, cfg.DemandTTL)
 		}
 		if !pool.ObservedAt.Equal(first.Pools[i].ObservedAt) {
 			cancel()
 			t.Fatalf("pool %s heartbeat fabricated a completed observation", pool.PoolID)
 		}
+		if expiresAt.IsZero() || pool.ValidUntil.Before(expiresAt) {
+			expiresAt = pool.ValidUntil
+		}
 	}
-	time.Sleep(6 * cfg.Heartbeat)
+	if wait := time.Until(expiresAt) + cfg.Heartbeat; wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+		}
+	}
 	third := s.Snapshot()
+	now := time.Now().UTC()
 	for _, pool := range third.Pools {
-		if pool.ValidUntil.After(time.Now().UTC()) {
+		if pool.ValidUntil.After(now) {
 			cancel()
 			t.Fatalf("pool %s stayed fresh beyond the bounded long-poll window", pool.PoolID)
 		}

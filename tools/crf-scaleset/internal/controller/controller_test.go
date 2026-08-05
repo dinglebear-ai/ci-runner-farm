@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -111,6 +112,17 @@ func validRuntimeConfig(root string) RuntimeConfig {
 		StateDir: filepath.Join(root, "state"), OwnershipPath: filepath.Join(root, "ownership.json"),
 		HeartbeatSeconds: 1, Pools: []PoolConfig{{ID: "python", RoutingLabel: "ci-pool-python",
 			Labels: []string{"self-hosted", "linux", "x64", "ci-pool-python"}}}}
+}
+
+type closeTrackingPoller struct {
+	consumeFailPoller
+	closed int
+	err    error
+}
+
+func (p *closeTrackingPoller) Close(context.Context) error {
+	p.closed++
+	return p.err
 }
 
 type consumeFailPoller struct{}
@@ -268,6 +280,33 @@ func TestApplySessionsRestoresEffectiveEligibilityAfterRestart(t *testing.T) {
 		if !slices.Contains(set.Labels, "python") {
 			t.Fatalf("restart silently made the effective backend ineligible: %#v", set.Labels)
 		}
+	}
+}
+
+func TestStopSessionsClosesPollerAfterSupervisorError(t *testing.T) {
+	poller := &closeTrackingPoller{}
+	done := make(chan error, 1)
+	done <- errors.New("supervisor failed")
+	control := &Control{poller: poller, superDone: done}
+	err := control.stopSessions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "join_previous_supervisor") {
+		t.Fatalf("supervisor error was lost: %v", err)
+	}
+	if poller.closed != 1 || control.poller != nil || control.superDone != nil {
+		t.Fatalf("completed supervisor did not release sessions: closed=%d poller=%#v done=%#v",
+			poller.closed, control.poller, control.superDone)
+	}
+}
+
+func TestStopSessionsRetainsPollerWhenCloseFails(t *testing.T) {
+	poller := &closeTrackingPoller{err: errors.New("close failed")}
+	control := &Control{poller: poller}
+	err := control.stopSessions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "close_previous_sessions") {
+		t.Fatalf("close error was lost: %v", err)
+	}
+	if poller.closed != 1 || control.poller != poller {
+		t.Fatalf("failed close was not retryable: closed=%d poller=%#v", poller.closed, control.poller)
 	}
 }
 

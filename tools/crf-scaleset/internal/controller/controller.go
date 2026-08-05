@@ -260,12 +260,14 @@ func (c *Control) stopSessions(ctx context.Context) error {
 		c.cancel()
 		c.cancel = nil
 	}
+	var joinErr error
 	if c.superDone != nil {
 		select {
 		case err := <-c.superDone:
 			c.superDone = nil
+			c.super = nil
 			if err != nil {
-				return fmt.Errorf("join_previous_supervisor: %w", err)
+				joinErr = fmt.Errorf("join_previous_supervisor: %w", err)
 			}
 		case <-ctx.Done():
 			return fmt.Errorf("join_previous_supervisor: %w", ctx.Err())
@@ -273,11 +275,12 @@ func (c *Control) stopSessions(ctx context.Context) error {
 	}
 	if c.poller != nil {
 		if err := c.poller.Close(ctx); err != nil {
-			return fmt.Errorf("close_previous_sessions: %w", err)
+			return errors.Join(joinErr, fmt.Errorf("close_previous_sessions: %w", err))
 		}
+		c.poller = nil
 	}
-	c.poller, c.super = nil, nil
-	return nil
+	c.super = nil
+	return joinErr
 }
 
 func decodePayload(data []byte, target any) error {

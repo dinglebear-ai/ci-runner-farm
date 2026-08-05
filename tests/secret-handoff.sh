@@ -161,4 +161,27 @@ fi
 [ ! -e "$task_tmp/jit-config/.foreign" ] ||
   crf_fail "JIT entrypoint wrote an unknown descriptor key"
 
+# A rename failure after the first credential file must roll the whole set back.
+mkdir -p "$task_tmp/fail-bin"
+cat > "$task_tmp/fail-bin/mv" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${*: -1}" in */.credentials) exit 1 ;; esac
+exec /bin/mv "$@"
+SCRIPT
+chmod 0755 "$task_tmp/fail-bin/mv"
+rm -rf "$CRF_SECRET_DIR" "$task_tmp/jit-config"; mkdir -p "$task_tmp/jit-config"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
+  CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" START_DOCKER_SERVICE=false \
+  PATH="$task_tmp/fail-bin:$PATH" \
+  "$entrypoint" >"$task_tmp/rename-jit-stdout" 2>"$task_tmp/rename-jit-stderr" &
+entry_pid=$!
+for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
+if wait "$entry_pid"; then
+  crf_fail "JIT entrypoint ignored a credential rename failure"
+fi
+[ -z "$(find "$task_tmp/jit-config" -mindepth 1 -maxdepth 1 -print -quit)" ] ||
+  crf_fail "JIT entrypoint left a partial credential set after rename failure"
+
 echo "secret-handoff: OK"

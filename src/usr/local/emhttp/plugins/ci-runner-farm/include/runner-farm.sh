@@ -414,13 +414,16 @@ fleet_inventory_invalidate() {
 
 fleet_inventory_refresh() {
   local names raw tmp row name state health cpus mem gen pool scope pidx legacy_idx managed version routing backend started_at identity expected
-  names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V)"
+  if ! names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V)"; then
+    return 1
+  fi
   tmp="${INVENTORY_FILE}.tmp.$$"
-  : > "$tmp" || return 1
+  [ ! -L "$tmp" ] || return 1
+  { umask 077; : > "$tmp"; } || return 1
   if [ -n "$names" ]; then
     # shellcheck disable=SC2086 # one Docker argument per newline-delimited managed name
     if ! raw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{with index .State "Health"}}{{.Status}}{{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.scope-target"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool-index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.managed"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.identity-version"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.routing-label"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.backend"}}|{{.State.StartedAt}}' $names 2>/dev/null)"; then
-      rm -f "$tmp"; return 1
+      rm -f -- "$tmp"; return 1
     fi
     while IFS= read -r row; do
       [ -n "$row" ] || continue
@@ -471,7 +474,10 @@ fleet_inventory_refresh() {
         "$name" "$state" "$health" "$cpus" "$mem" "$gen" "${pool:-invalid}" "$scope" "${pidx:-0}" "$routing" "$identity" "${backend:-classic}" "$started_at" >> "$tmp"
     done <<< "$raw"
   fi
-  mv "$tmp" "$INVENTORY_FILE" || { rm -f "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$INVENTORY_FILE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   INVENTORY_ACTIVE=1
   reservation_reconcile "$INVENTORY_FILE" >/dev/null 2>&1 || true
 }
@@ -3759,10 +3765,17 @@ cmd_status_json() {
 }
 
 cmd_readiness_json() {
+  local cached_count=null
   migration_load >/dev/null 2>&1 || true
   status_backend_refresh
-  printf '{"schema_version":2,"backend":%s,"compatibility":%s,"operation":%s}\n' \
-    "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON"
+  # Settings needs only an impact count. Read the bounded private inventory
+  # cache without refreshing Docker; missing or unsafe cache remains unknown.
+  if status_state_file_valid "$INVENTORY_FILE" 1048576; then
+    cached_count="$(awk 'NF { count++ } END { print count+0 }' "$INVENTORY_FILE" 2>/dev/null)" || cached_count=null
+    [[ "$cached_count" =~ ^[0-9]+$ ]] || cached_count=null
+  fi
+  printf '{"schema_version":2,"backend":%s,"compatibility":%s,"operation":%s,"count":%s}\n' \
+    "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON" "$cached_count"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
