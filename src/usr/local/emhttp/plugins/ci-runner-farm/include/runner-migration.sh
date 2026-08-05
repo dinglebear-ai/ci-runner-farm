@@ -14,7 +14,6 @@ MIGRATION_TARGET_CONFIG_REVISION=""
 MIGRATION_OWNERSHIP_REVISION=""
 MIGRATION_COMPATIBILITY_RECORD_ID=""
 MIGRATION_LAST_BARRIER=classic_only
-MIGRATION_UPDATED_AT=""
 MIGRATION_REVISION=""
 MIGRATION_QUARANTINE_OWNER=""
 MIGRATION_QUARANTINE_INSTALLATION_ID=""
@@ -33,12 +32,12 @@ migration_revision_compute() {
 }
 
 migration_load() {
-  local values
+  local values _updated_at
   MIGRATION_REQUESTED_BACKEND="${POOL_BACKEND:-classic}"
   MIGRATION_EFFECTIVE_BACKEND=classic; MIGRATION_PHASE=classic_active
   MIGRATION_TRANSITION_ID=""; MIGRATION_TARGET_CONFIG_REVISION=""
   MIGRATION_OWNERSHIP_REVISION=""; MIGRATION_COMPATIBILITY_RECORD_ID=""
-  MIGRATION_LAST_BARRIER=classic_only; MIGRATION_UPDATED_AT=""
+  MIGRATION_LAST_BARRIER=classic_only
   if [ -f "$MIGRATION_STATE" ]; then
     [ ! -L "$MIGRATION_STATE" ] &&
       [ "$(stat -c %a "$MIGRATION_STATE" 2>/dev/null)" = 600 ] &&
@@ -53,7 +52,7 @@ migration_load() {
     ' "$MIGRATION_STATE" 2>/dev/null)" || return 1
     IFS='|' read -r MIGRATION_REQUESTED_BACKEND MIGRATION_EFFECTIVE_BACKEND MIGRATION_PHASE \
       MIGRATION_TRANSITION_ID MIGRATION_TARGET_CONFIG_REVISION MIGRATION_OWNERSHIP_REVISION \
-      MIGRATION_COMPATIBILITY_RECORD_ID MIGRATION_LAST_BARRIER MIGRATION_UPDATED_AT _ <<<"$values"
+      MIGRATION_COMPATIBILITY_RECORD_ID MIGRATION_LAST_BARRIER _updated_at _ <<<"$values"
   fi
   case "$MIGRATION_REQUESTED_BACKEND" in classic|scaleset) ;; *) return 1 ;; esac
   case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE" in
@@ -90,7 +89,10 @@ migration_write() {
   ' "$tmp" "${POOL_BACKEND:-classic}" "$effective" "$phase" "$MIGRATION_TRANSITION_ID" \
     "$MIGRATION_TARGET_CONFIG_REVISION" "$MIGRATION_OWNERSHIP_REVISION" \
     "$MIGRATION_COMPATIBILITY_RECORD_ID" "$barrier" || { rm -f "$tmp"; return 1; }
-  chmod 0600 "$tmp" && mv -f "$tmp" "$MIGRATION_STATE" || { rm -f "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$MIGRATION_STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   migration_load
 }
 
@@ -129,9 +131,11 @@ migration_record_matches() {
 
 migration_start() {
   local expected_config="$1" ownership="$2" compatibility="$3" expected_transition="$4"
-  migration_revision_valid "$expected_config" && migration_revision_valid "$ownership" &&
-    migration_revision_valid "$compatibility" && migration_revision_valid "$expected_transition" ||
-    { err "invalid migration revision"; return 2; }
+  if ! migration_revision_valid "$expected_config" || ! migration_revision_valid "$ownership" ||
+     ! migration_revision_valid "$compatibility" || ! migration_revision_valid "$expected_transition"; then
+    err "invalid migration revision"
+    return 2
+  fi
   migration_load || { err "backend transition state is invalid"; return 2; }
   [ "$MIGRATION_REVISION" = "$expected_transition" ] ||
     { err "backend transition changed in another session"; return 3; }
@@ -277,8 +281,10 @@ migration_quarantine_state_write() {
   ' "$tmp" "$MIGRATION_QUARANTINE_OWNER" "$MIGRATION_QUARANTINE_INSTALLATION_ID" \
     "$MIGRATION_QUARANTINE_GROUP_NAME" "$group_id" "$phase" \
     "$MIGRATION_TRANSITION_ID" || { rm -f "$tmp"; return 1; }
-  chmod 0600 "$tmp" && mv -f "$tmp" "$MIGRATION_CLASSIC_QUARANTINE_STATE" ||
-    { rm -f "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$MIGRATION_CLASSIC_QUARANTINE_STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   migration_quarantine_state_load
 }
 

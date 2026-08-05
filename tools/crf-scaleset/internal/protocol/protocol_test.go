@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +17,13 @@ func validRequest() Request {
 func TestDecodeBoundsAndUnknownFields(t *testing.T) {
 	req := validRequest()
 	data, _ := json.Marshal(req)
-	if _, err := Decode(bytes.NewReader(data)); err != nil {
-		t.Fatal(err)
+	if _, err := Decode(bytes.NewReader(append(data, []byte(" \n\t")...))); err != nil {
+		t.Fatalf("rejected trailing whitespace: %v", err)
+	}
+	for _, suffix := range []string{"{}", "garbage", "["} {
+		if _, err := Decode(bytes.NewReader(append(slices.Clone(data), suffix...))); err == nil {
+			t.Fatalf("accepted trailing payload %q", suffix)
+		}
 	}
 	if _, err := Decode(strings.NewReader(strings.Repeat("x", MaxFrameBytes+1))); err == nil {
 		t.Fatal("accepted oversized frame")

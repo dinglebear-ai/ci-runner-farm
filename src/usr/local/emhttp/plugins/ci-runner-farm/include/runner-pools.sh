@@ -99,6 +99,9 @@ parse_cpu_milli() {
   [ "$value" = "inherit" ] && { printf 'inherit\n'; return 0; }
   [[ "$value" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,3})?$ ]] || return 1
   whole="${value%%.*}"
+  # The deployed ceiling is 256 CPUs. Reject overlong whole parts before
+  # arithmetic so hostile or corrupt input cannot wrap Bash's signed integer.
+  [ "${#whole}" -le 3 ] || return 1
   if [ "${value#*.}" = "$value" ]; then
     fraction=0
   else
@@ -128,8 +131,12 @@ parse_memory_bytes() {
     *) return 1 ;;
   esac
   [ "${#number}" -le 12 ] || return 1
-  value=$((10#$number * multiplier))
-  [ "$value" -ge 6291456 ] && [ "$value" -le 1099511627776 ] || return 1
+  number=$((10#$number))
+  # Check the quotient before multiplication. A value such as 999999999999t
+  # otherwise overflows Bash before the 1 TiB ceiling can reject it.
+  [ "$number" -le $((1099511627776 / multiplier)) ] || return 1
+  value=$((number * multiplier))
+  [ "$value" -ge 6291456 ] || return 1
   printf '%s\n' "$value"
 }
 
@@ -259,7 +266,7 @@ pool_config_validate() {
   [ -n "$raw" ] || { pool_error "Runner pools mode requires at least one pool." "pools"; return 1; }
   [ "${#raw}" -le "$POOL_CONFIG_MAX_BYTES" ] || { pool_error "Runner pool configuration is too large." "pools"; return 1; }
   case "$raw" in
-    *[$'\r\n\t ']*|*\'*|*\"*|*\\*|*/*) pool_error "Runner pools contain unsupported whitespace or characters." "pools"; return 1 ;;
+    *[$'\r\n\t']*|*\'*|*\"*|*\\*|*/*) pool_error "Runner pools contain unsupported control whitespace or characters." "pools"; return 1 ;;
     ';'*|*';'|*';;'*) pool_error "Runner pool entries cannot be empty." "pools"; return 1 ;;
   esac
 
@@ -321,13 +328,23 @@ pool_config_validate() {
 }
 
 pool_policy_validate() {
-  local backend="${1:-classic}" rec id min max
+  local backend="${1:-classic}" rec id min max cpu memory
   case "$backend" in classic|scaleset) ;; *) pool_error "Pool backend must be classic or scaleset." "backend"; return 1 ;; esac
   [ "$POOL_CONFIG_VERSION" != "v2" ] && return 0
   while IFS= read -r rec; do
     id="${rec%%|*}"
     min="$(pool_record_field "$rec" 5)"
     max="$(pool_record_field "$rec" 6)"
+    cpu="$(pool_record_field "$rec" 8)"
+    memory="$(pool_record_field "$rec" 9)"
+    if [ "$cpu" = inherit ] && ! parse_cpu_milli "${RUNNER_CPUS:-1}" >/dev/null; then
+      pool_error "Pool '$id' inherits an invalid default CPU claim." "cpus"
+      return 1
+    fi
+    if [ "$memory" = inherit ] && ! parse_memory_bytes "${RUNNER_MEMORY:-16g}" >/dev/null; then
+      pool_error "Pool '$id' inherits an invalid default memory claim." "memory"
+      return 1
+    fi
     if [ "$backend" = "classic" ]; then
       [ "$min" -ge 1 ] || { pool_error "Classic pool '$id' minimum must be at least 1." "min"; return 1; }
       [ "$max" != "auto" ] || { pool_error "Classic pool '$id' cannot use max=auto." "max"; return 1; }
@@ -340,7 +357,7 @@ pool_mode_enabled() {
 }
 
 pool_snapshot_load() {
-  local input="${RUNNER_MODE:-single}|${RUNNER_POOLS:-}|${GH_SCOPE:-repo}|${GH_OWNER:-}|${POOL_BACKEND:-classic}|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}|${AUTOSCALE:-false}|${POOL_AUTOSCALE-inherit}"
+  local input="${RUNNER_MODE:-single}|${RUNNER_POOLS:-}|${GH_SCOPE:-repo}|${GH_OWNER:-}|${POOL_BACKEND:-classic}|${RUNNER_COUNT:-4}|${RUNNER_LABELS:-}|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}|${AUTOSCALE:-false}|${AUTOSCALE_MIN:-2}|${AUTOSCALE_MAX:-16}|${AUTOSCALE_MIN_IDLE:-2}|${POOL_AUTOSCALE-inherit}"
   [ "$input" = "$POOL_SNAPSHOT_INPUT" ] && [ -n "$POOL_CONFIG_REVISION" ] && return 0
   pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" "${GH_OWNER:-}" || return 1
   POOL_SNAPSHOT_INPUT="$input"
@@ -392,7 +409,7 @@ pool_label() { pool_routing_label "$@"; }
 
 pool_additional_labels() {
   pool_snapshot_load || return 1
-  pool_is_v2 && pool_field "$1" 3
+  if pool_is_v2; then pool_field "$1" 3; else printf '\n'; fi
 }
 
 pool_effective_labels() {
@@ -428,8 +445,10 @@ pool_cpu_milli() {
   pool_snapshot_load || return 1
   if pool_is_v2; then
     local value
-    value="$(pool_field "$1" 8)"
-    [ "$value" != "inherit" ] || value="$(parse_cpu_milli "${RUNNER_CPUS:-}")" || return 1
+    value="$(pool_field "$1" 8)" || return 1
+    if [ "$value" = "inherit" ]; then
+      value="$(parse_cpu_milli "${RUNNER_CPUS:-1}")" || return 1
+    fi
     printf '%s\n' "$value"
   else
     parse_cpu_milli "${RUNNER_CPUS:-1}"
@@ -439,8 +458,10 @@ pool_memory_bytes() {
   pool_snapshot_load || return 1
   if pool_is_v2; then
     local value
-    value="$(pool_field "$1" 9)"
-    [ "$value" != "inherit" ] || value="$(parse_memory_bytes "${RUNNER_MEMORY:-16g}")"
+    value="$(pool_field "$1" 9)" || return 1
+    if [ "$value" = "inherit" ]; then
+      value="$(parse_memory_bytes "${RUNNER_MEMORY:-16g}")" || return 1
+    fi
     printf '%s\n' "$value"
   else
     parse_memory_bytes "${RUNNER_MEMORY:-16g}"

@@ -171,6 +171,8 @@ const CRF_POOL_OWNER=<?=json_encode($gh_owner)?>;
 const CRF_POOL_HOST_CPUS=<?=json_encode($host_cpus)?>;
 let CRF_POOL_CONFIG_REVISION=<?=json_encode($config_revision)?>;
 const CRF_POOL_ID=/^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/;
+const CRF_POOL_LABEL=/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/;
+const CRF_POOL_ROUTING_RESERVED=new Set(['self-hosted','linux','windows','macos','x64','x86','arm','arm64','default','invalid','ci-runner-farm']);
 const CRF_POOL_FIELDS=Object.freeze(['id','routing_label','additional_labels','fixed','min','max','idle','cpus','memory']);
 const CRF_POOL_TITLES={id:'Pool ID',routing_label:'Routing label',additional_labels:'Additional labels',fixed:'Fixed',min:'Min',max:'Max',idle:'Idle',cpus:'CPUs',memory:'Memory'};
 const CRF_POOL_DRAFT_KEY='ci-runner-farm:pools-draft:v1';
@@ -180,6 +182,22 @@ let CRF_POOL_BASELINE='';
 let CRF_POOL_DRAG_ROW=null;
 function crfPoolRows(){return [...document.querySelectorAll('#crf-pools-editor .crfp-pool-row')];}
 function crfPoolInput(row,field){return row.querySelector('[data-pool-field="'+field+'"]');}
+function crfPoolRoutingReserved(label){return CRF_POOL_ROUTING_RESERVED.has(label);}
+function crfPoolAdditionalReserved(label){return crfPoolRoutingReserved(label)||label.startsWith('ci-pool-');}
+function crfPoolCpuMilli(value){
+  value=String(value).trim().toLowerCase();
+  if(value==='inherit')return null;
+  const match=value.match(/^(0|[1-9][0-9]*)(?:\.([0-9]{1,3}))?$/);if(!match)return NaN;
+  const milli=Number(match[1])*1000+Number((match[2]||'').padEnd(3,'0'));
+  return Number.isSafeInteger(milli)&&milli>0&&milli<=256000?milli:NaN;
+}
+function crfPoolMemoryBytes(value){
+  value=String(value).toLowerCase().replace(/\s+/g,'');
+  if(value==='inherit')return null;
+  const match=value.match(/^([1-9][0-9]*)(b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib)?$/);if(!match)return null;
+  const powers={b:1n,k:1024n,kb:1024n,ki:1024n,kib:1024n,m:1048576n,mb:1048576n,mi:1048576n,mib:1048576n,g:1073741824n,gb:1073741824n,gi:1073741824n,gib:1073741824n,t:1099511627776n,tb:1099511627776n,ti:1099511627776n,tib:1099511627776n};
+  try{const bytes=BigInt(match[1])*(powers[match[2]||'b']||1n);return bytes>=6291456n&&bytes<=1099511627776n?bytes:null;}catch(_error){return null;}
+}
 function crfPoolValue(row,field){
   let value=crfPoolInput(row,field).value.trim();
   if(['id','routing_label','additional_labels','cpus'].includes(field))value=value.toLowerCase();
@@ -215,8 +233,9 @@ function crfPoolCapacity(){
   return Math.max(1,Math.round(((budget==='auto'?CRF_POOL_HOST_CPUS:Number(budget)||CRF_POOL_HOST_CPUS)-reserve)*overcommit));
 }
 function crfPoolCpu(row){
-  const value=crfPoolValue(row,'cpus'),fallback=Number(document.getElementsByName('RUNNER_CPUS')[0].value);
-  return value==='inherit'?(fallback||0):(Number(value)||0);
+  const value=crfPoolValue(row,'cpus');
+  const milli=crfPoolCpuMilli(value==='inherit'?(document.getElementsByName('RUNNER_CPUS')[0].value||'1'):value);
+  return Number.isFinite(milli)?milli/1000:0;
 }
 function crfPoolTarget(row){
   const auto=row.dataset.capacityMode==='auto';
@@ -267,8 +286,9 @@ function crfSetCapacityMode(row,auto){
 }
 function crfAddPool(rec='',notify=true,saved=false,capacityMode=''){
   const original=String(rec).split('|'), v2=original[0]==='v2';
-  const parts=v2?original.slice(1):rec?[original[0],original[0],'',original[1],original[2],original[3],original[4],'inherit','inherit']:
-    ['pool','','','1','1','auto','1','inherit','inherit'];
+  const defaultMax=document.getElementById('crf-pool-backend').value==='scaleset'?'auto':'16';
+  const parts=v2?original.slice(1):rec?[original[0],'ci-pool-'+original[0],'',original[1],original[2],original[3],original[4],'inherit','inherit']:
+    ['pool','','','1','1',defaultMax,'1','inherit','inherit'];
   while(parts.length<CRF_POOL_FIELDS.length)parts.push('');
   const row=document.createElement('fieldset');row.className='crfp-pool-row';
   row.dataset.rowNumber=String(++CRF_POOL_ROW_SEQ);
@@ -338,10 +358,14 @@ function crfBuildPoolEditor(raw,autoscaleSource=CRF_POOL_AUTOSCALE_INITIAL){
   });
 }
 function crfValidatePools(focus=true){
-  const mode=document.getElementById('crf-runner-mode').value, rows=crfPoolRows();
-  const result=document.getElementById('crf-pools-errors'), errors=[], seen=new Set();
-  let firstBad=null,fixedTotal=0,maxTotal=0;
-  rows.forEach(row=>row.querySelectorAll('input').forEach(input=>{input.classList.remove('crfp-invalid');input.removeAttribute('aria-invalid');}));
+  const mode=document.getElementById('crf-runner-mode').value,backend=document.getElementById('crf-pool-backend').value,rows=crfPoolRows();
+  const result=document.getElementById('crf-pools-errors'),errors=[],seenIds=new Set(),routeCounts=new Map();
+  let firstBad=null;
+  rows.forEach(row=>{
+    row.querySelectorAll('input').forEach(input=>{input.classList.remove('crfp-invalid');input.removeAttribute('aria-invalid');});
+    const route=crfPoolValue(row,'routing_label');if(route)routeCounts.set(route,(routeCounts.get(route)||0)+1);
+  });
+  const routes=new Set(routeCounts.keys());
   const bad=(input,message)=>{errors.push(message);input.classList.add('crfp-invalid');input.setAttribute('aria-invalid','true');firstBad=firstBad||input;};
   if(mode==='pools'&&CRF_POOL_SCOPE!=='org')errors.push('Runner pools require Organization scope; change it under Settings.');
   if(mode==='pools'&&!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(CRF_POOL_OWNER))errors.push('The configured organization owner is invalid.');
@@ -349,29 +373,30 @@ function crfValidatePools(focus=true){
   if(rows.length>8)errors.push('At most eight pools are supported.');
   rows.forEach((row,index)=>{
     const input=Object.fromEntries(CRF_POOL_FIELDS.map(field=>[field,crfPoolInput(row,field)]));
-    const id=input.id.value.trim().toLowerCase(), route=input.routing_label.value.trim().toLowerCase();
+    const id=crfPoolValue(row,'id'),route=crfPoolValue(row,'routing_label');
     if(!CRF_POOL_ID.test(id)||['default','invalid'].includes(id))bad(input.id,'Pool '+(index+1)+' has an invalid or reserved ID.');
-    if(seen.has(id))bad(input.id,'Pool ID '+id+' is duplicated.');seen.add(id);
-    if(!/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/.test(route)||
-      ['self-hosted','linux','windows','macos','x64','x86','arm','arm64','default','invalid','ci-runner-farm'].includes(route))
-      bad(input.routing_label,'Routing label for '+id+' is invalid or reserved.');
-    const labels=input.additional_labels.value.trim();
-    if(labels&&labels.split(',').some(label=>!/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/.test(label)||label===route))
-      bad(input.additional_labels,'Additional labels for '+id+' are invalid or duplicate its routing label.');
-    const fixed=input.fixed.value,min=input.min.value,max=input.max.value.toLowerCase(),idle=input.idle.value;
+    if(seenIds.has(id))bad(input.id,'Pool ID '+id+' is duplicated.');seenIds.add(id);
+    if(!CRF_POOL_LABEL.test(route)||crfPoolRoutingReserved(route))bad(input.routing_label,'Routing label for '+id+' is invalid or reserved.');
+    else if((routeCounts.get(route)||0)>1)bad(input.routing_label,'Routing label '+route+' is duplicated.');
+    const rawLabels=crfPoolValue(row,'additional_labels'),labels=rawLabels?rawLabels.split(','):[],labelSeen=new Set();
+    if(labels.some(label=>{const duplicate=labelSeen.has(label);labelSeen.add(label);return !label||!CRF_POOL_LABEL.test(label)||crfPoolAdditionalReserved(label)||duplicate||routes.has(label);})){
+      bad(input.additional_labels,'Additional labels for '+id+' are invalid, reserved, duplicated, or collide with a routing label.');
+    }
+    labels.forEach(label=>labelSeen.add(label));
+    const fixed=input.fixed.value,min=input.min.value,max=input.max.value.trim().toLowerCase(),idle=input.idle.value;
     if(!/^[1-9][0-9]?$/.test(fixed)||+fixed>64)bad(input.fixed,'Fixed for '+id+' must be 1-64.');
     if(!/^(?:0|[1-9][0-9]?)$/.test(min)||+min>64)bad(input.min,'Min for '+id+' must be 0-64.');
     if(max!=='auto'&&(!/^[1-9][0-9]?$/.test(max)||+max>64))bad(input.max,'Max for '+id+' must be 1-64 or auto.');
     if(!/^(?:0|[1-9][0-9]?)$/.test(idle)||+idle>64)bad(input.idle,'Idle for '+id+' must be 0-64.');
+    if(backend==='classic'&&+min<1)bad(input.min,'Classic pool '+id+' must keep at least one runner.');
+    if(backend==='classic'&&max==='auto')bad(input.max,'Classic pool '+id+' requires a numeric maximum.');
     if(max!=='auto'&&(+min>+max||+idle>+max))bad(input.max,'Min and Idle cannot exceed Max for '+id+'.');
     const cpus=crfPoolValue(row,'cpus'),memory=crfPoolValue(row,'memory');
-    if(!/^(?:inherit|(?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)$/.test(cpus))bad(input.cpus,'CPUs for '+id+' must be inherit or a positive value.');
-    if(!/^(?:inherit|[1-9][0-9]*(?:\s*(?:b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib))?)$/i.test(memory))
-      bad(input.memory,'Memory for '+id+' is invalid.');
-    fixedTotal+=+fixed||0;if(max!=='auto')maxTotal+=+max||0;
+    const effectiveCpu=cpus==='inherit'?(document.getElementsByName('RUNNER_CPUS')[0].value||'1'):cpus;
+    const effectiveMemory=memory==='inherit'?(document.getElementsByName('RUNNER_MEMORY')[0].value||'16g'):memory;
+    if(!Number.isFinite(crfPoolCpuMilli(effectiveCpu)))bad(input.cpus,'CPUs for '+id+' must resolve to 0.001-256 with at most three decimals.');
+    if(crfPoolMemoryBytes(effectiveMemory)===null)bad(input.memory,'Memory for '+id+' must resolve to 6 MiB-1 TiB.');
   });
-  if(fixedTotal>64)errors.push('Combined fixed capacity exceeds the 64-runner emergency fuse.');
-  if(maxTotal>64)errors.push('Combined numeric maximums exceed the 64-runner emergency fuse; use auto for resource-based admission.');
   crfSerializePools();crfRefreshPoolPresentation();result.textContent=errors.join(' ');result.classList.toggle('on',errors.length>0);
   document.dispatchEvent(new Event('crf-pools-change'));
   if(errors.length&&focus&&firstBad)firstBad.focus();
@@ -400,6 +425,9 @@ document.getElementById('crf-autoscale-mode').addEventListener('change',event=>{
   const auto=event.currentTarget.value==='true';
   crfPoolRows().forEach(row=>{row.dataset.capacityMode=auto?'auto':'fixed';});
   crfRefreshPoolPresentation();crfValidatePools(false);
+});
+document.getElementById('crf-pool-backend').addEventListener('change',()=>{
+  crfSyncPoolAutoscale();crfRefreshPoolPresentation();crfValidatePools(false);
 });
 ['RUNNER_CPUS','RUNNER_MEMORY','RESOURCE_CPU_BUDGET','RESOURCE_CPU_RESERVE','RESOURCE_CPU_OVERCOMMIT'].forEach(name=>{
   document.getElementsByName(name)[0].addEventListener('input',()=>{crfRefreshPoolPresentation();crfValidatePools(false);});
@@ -534,14 +562,17 @@ document.getElementById('tab2')&&document.getElementById('tab2').addEventListene
   if(!host||!memory)return;
   const warning=document.createElement('div');warning.className='crfp-inline-warning';
   document.getElementById('crfp-advanced').appendChild(warning);
-  const parse=value=>{const match=String(value).trim().match(/^([0-9]*\.?[0-9]+)\\s*([kmgt]?)b?$/i);if(!match)return 0;
-    return parseFloat(match[1])*({k:1/1048576,m:1/1024,g:1,t:1024}[(match[2]||'g').toLowerCase()]||1);};
-  const check=()=>{const gb=parse(memory.value),records=crfPoolRows(),auto=document.getElementsByName('AUTOSCALE')[0].value==='true';
-    const count=document.getElementById('crf-runner-mode').value==='pools'?
-      records.reduce((sum,row)=>sum+(+(crfPoolInput(row,auto?'min':'fixed').value)||0),0):
-      +(document.getElementsByName(auto?'AUTOSCALE_MIN':'RUNNER_COUNT')[0].value||0);
-    warning.textContent='Warm floor '+count+' × '+gb+'g = '+(count*gb).toFixed(1)+'g of '+host+'g host memory.';
-    warning.classList.toggle('on',count*gb>host*.8);
+  const toGiB=value=>{const bytes=crfPoolMemoryBytes(value);return bytes===null?0:Number(bytes)/1073741824;};
+  const check=()=>{const records=crfPoolRows(),auto=document.getElementsByName('AUTOSCALE')[0].value==='true';
+    let count=0,total=0;
+    if(document.getElementById('crf-runner-mode').value==='pools'){
+      records.forEach(row=>{const target=+(crfPoolInput(row,row.dataset.capacityMode==='auto'?'min':'fixed').value)||0;
+        const value=crfPoolValue(row,'memory'),gb=toGiB(value==='inherit'?memory.value:value);count+=target;total+=target*gb;});
+    }else{
+      count=+(document.getElementsByName(auto?'AUTOSCALE_MIN':'RUNNER_COUNT')[0].value||0);total=count*toGiB(memory.value);
+    }
+    warning.textContent='Warm floor '+count+' runners reserve about '+total.toFixed(1)+'g of '+host+'g host memory.';
+    warning.classList.toggle('on',total>host*.8);
   };
   document.addEventListener('crf-pools-change',check);memory.addEventListener('input',check);check();
 })();
@@ -554,7 +585,7 @@ async function crfConfirmPoolApply(){
   const submit=crfPoolsForm.querySelector('input[type=submit]'),result=document.getElementById('crf-pools-result');
   const confirm=document.getElementById('crfp-confirm-apply');crfPoolsForm.dataset.applying='1';submit.disabled=true;confirm.disabled=true;
   try{
-    const validated=await crfPost({action:'validate-pools',mode:settings.RUNNER_MODE,pools:settings.RUNNER_POOLS,scope:CRF_POOL_SCOPE,owner:CRF_POOL_OWNER,pool_autoscale:settings.POOL_AUTOSCALE});
+    const validated=await crfPost({action:'validate-pools',mode:settings.RUNNER_MODE,pools:settings.RUNNER_POOLS,scope:CRF_POOL_SCOPE,owner:CRF_POOL_OWNER,pool_autoscale:settings.POOL_AUTOSCALE,backend:settings.POOL_BACKEND,runner_cpus:settings.RUNNER_CPUS,runner_memory:settings.RUNNER_MEMORY});
     if(!validated.ok)throw new Error(validated.error||'Pool validation failed');
     const applied=await crfPost({action:'apply-config',expected_config_revision:CRF_POOL_CONFIG_REVISION,settings:JSON.stringify(settings)});
     if(!applied.ok)throw new Error(applied.error||'Apply failed');

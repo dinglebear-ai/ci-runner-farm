@@ -135,5 +135,6 @@ if(!valid.includes('data-crf-mutation')||valid.includes(' disabled')) throw new 
 NODE
 
 node tests/fleet-behavior.js
+node tests/pool-ui-behavior.js "$pools"
 
 echo 'ui-js: OK'

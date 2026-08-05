@@ -14,7 +14,10 @@ import (
 	"github.com/actions/scaleset"
 )
 
-var ErrNotFound = errors.New("scale_set_not_found")
+var (
+	ErrNotFound        = errors.New("scale_set_not_found")
+	ErrInvalidResponse = errors.New("invalid_scale_set_response")
+)
 
 const maxJSONSafeInteger int64 = 1<<53 - 1
 
@@ -91,14 +94,28 @@ func NewAdapterWithScaleSetClientFactory(client *scaleset.Client, owner string, 
 		sessions: make(map[int64]*scaleset.MessageSessionClient)}
 }
 
+func (a *Adapter) adminClient() (*scaleset.Client, error) {
+	if a == nil || a.client == nil {
+		return nil, errors.New("scale_set_client_required")
+	}
+	return a.client, nil
+}
+
 func (a *Adapter) clientForScaleSet(id int64) (*scaleset.Client, error) {
-	if id <= 0 {
+	if a == nil || id <= 0 {
 		return nil, fmt.Errorf("invalid scale set id")
 	}
 	if a.clientFactory == nil {
-		return a.client, nil
+		return a.adminClient()
 	}
-	return a.clientFactory(id)
+	client, err := a.clientFactory(id)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, errors.New("scale_set_client_required")
+	}
+	return client, nil
 }
 
 func labels(name string, in []string) []scaleset.Label {
@@ -115,12 +132,18 @@ func labels(name string, in []string) []scaleset.Label {
 	}
 	return out
 }
-func fromScaleSet(in *scaleset.RunnerScaleSet) ScaleSet {
+func fromScaleSet(in *scaleset.RunnerScaleSet) (ScaleSet, error) {
+	if in == nil || in.ID <= 0 || strings.TrimSpace(in.Name) == "" || in.RunnerGroupID <= 0 {
+		return ScaleSet{}, ErrInvalidResponse
+	}
 	out := ScaleSet{ID: int64(in.ID), Name: in.Name, RunnerGroupID: int64(in.RunnerGroupID)}
 	for _, label := range in.Labels {
+		if strings.TrimSpace(label.Name) == "" {
+			return ScaleSet{}, ErrInvalidResponse
+		}
 		out.Labels = append(out.Labels, label.Name)
 	}
-	return out
+	return out, nil
 }
 
 // LabelsForComparison removes GitHub's implicit canonical name label only when
@@ -141,48 +164,75 @@ func LabelsForComparison(actual ScaleSet, expected []string) []string {
 	return out
 }
 func (a *Adapter) CreateRunnerScaleSet(ctx context.Context, spec CreateSpec) (ScaleSet, error) {
-	v, err := a.client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID), Labels: labels(spec.Name, spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
+	client, err := a.adminClient()
 	if err != nil {
 		return ScaleSet{}, err
 	}
-	return fromScaleSet(v), nil
+	v, err := client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID), Labels: labels(spec.Name, spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	return fromScaleSet(v)
 }
 func (a *Adapter) GetRunnerScaleSet(ctx context.Context, id int64) (ScaleSet, error) {
-	v, err := a.client.GetRunnerScaleSetByID(ctx, int(id))
+	client, err := a.adminClient()
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	v, err := client.GetRunnerScaleSetByID(ctx, int(id))
 	if err != nil {
 		if strings.Contains(err.Error(), `status="404`) || strings.Contains(err.Error(), "status code: 404") {
 			return ScaleSet{}, ErrNotFound
 		}
 		return ScaleSet{}, err
 	}
-	return fromScaleSet(v), nil
+	return fromScaleSet(v)
 }
 func (a *Adapter) GetRunnerScaleSetByName(ctx context.Context, groupID int64, name string) (ScaleSet, error) {
-	v, err := a.client.GetRunnerScaleSet(ctx, int(groupID), name)
-	if err != nil || v == nil {
+	client, err := a.adminClient()
+	if err != nil {
 		return ScaleSet{}, err
 	}
-	return fromScaleSet(v), nil
+	v, err := client.GetRunnerScaleSet(ctx, int(groupID), name)
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	if v == nil {
+		return ScaleSet{}, ErrNotFound
+	}
+	return fromScaleSet(v)
 }
 func (a *Adapter) UpdateRunnerScaleSet(ctx context.Context, id int64, spec UpdateSpec) (ScaleSet, error) {
-	v, err := a.client.UpdateRunnerScaleSet(ctx, int(id), &scaleset.RunnerScaleSet{
+	client, err := a.adminClient()
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	v, err := client.UpdateRunnerScaleSet(ctx, int(id), &scaleset.RunnerScaleSet{
 		ID: int(id), Name: spec.Name, RunnerGroupID: int(spec.RunnerGroupID),
 		Labels: labels(spec.Name, spec.Labels), RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
 	})
 	if err != nil {
 		return ScaleSet{}, err
 	}
-	return fromScaleSet(v), nil
+	return fromScaleSet(v)
 }
 func (a *Adapter) DeleteRunnerScaleSet(ctx context.Context, id int64) error {
-	err := a.client.DeleteRunnerScaleSet(ctx, int(id))
+	client, err := a.adminClient()
+	if err != nil {
+		return err
+	}
+	err = client.DeleteRunnerScaleSet(ctx, int(id))
 	if err != nil && (strings.Contains(err.Error(), `status="404`) || strings.Contains(err.Error(), "status code: 404")) {
 		return ErrNotFound
 	}
 	return err
 }
 func (a *Adapter) GetRunnerGroupByName(ctx context.Context, name string) (RunnerGroup, error) {
-	v, err := a.client.GetRunnerGroupByName(ctx, name)
+	client, err := a.adminClient()
+	if err != nil {
+		return RunnerGroup{}, err
+	}
+	v, err := client.GetRunnerGroupByName(ctx, name)
 	if err != nil {
 		return RunnerGroup{}, err
 	}

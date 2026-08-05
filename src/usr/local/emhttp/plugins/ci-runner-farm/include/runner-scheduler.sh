@@ -6,26 +6,33 @@
 # `max` is a positive integer or auto. The caller supplies the currently
 # admissible CPU/memory budget; charged runners, pending starts, and leases must
 # already be reflected in that budget. Output rows:
-# pool|desired|admitted|blocked|start_order|safe_removals|advertised|new_leases
+# pool|desired|admitted|blocked_reason|start_order|safe_removals|advertised|new_leases|blocked_count
 
 SCHEDULER_CURSOR=0
 SCHEDULER_STARTS=0
 SCHEDULER_ERROR=""
 
-scheduler_uint() { [[ "${1:-}" =~ ^(0|[1-9][0-9]*)$ ]]; }
+scheduler_uint() {
+  local value="${1:-}" max="${2:-9000000000000000000}"
+  [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  [ "${#value}" -lt "${#max}" ] && return 0
+  [ "${#value}" -eq "${#max}" ] && [[ ! "$value" > "$max" ]]
+}
 
 scheduler_plan() {
   local input="$1" available_cpu="$2" available_memory="$3" cursor="${4:-0}" snapshot_fresh="${5:-1}"
   local soft_limit="${SCHEDULER_START_LIMIT:-2}" hard_limit=4
-  local line pool assigned warm service charged pending leases max cpu memory healthy pool_fresh extra
+  local line pool assigned warm service charged pending leases max cpu memory healthy pool_fresh
   local i n round progress order=0 last_cursor
   local -a ids=() desired=() admitted=() blocked=() removals=() advertised=() start_order=()
-  local -a new_leases=() cpus=() memories=() needs=() health=()
+  local -a new_leases=() cpus=() memories=() needs=() blocked_count=()
 
   SCHEDULER_ERROR=""; SCHEDULER_STARTS=0
-  scheduler_uint "$available_cpu" && scheduler_uint "$available_memory" &&
-    scheduler_uint "$cursor" && scheduler_uint "$soft_limit" ||
-    { SCHEDULER_ERROR=invalid_scheduler_argument; return 1; }
+  if ! scheduler_uint "$available_cpu" || ! scheduler_uint "$available_memory" ||
+     ! scheduler_uint "$cursor" || ! scheduler_uint "$soft_limit"; then
+    SCHEDULER_ERROR=invalid_scheduler_argument
+    return 1
+  fi
   [ "$soft_limit" -ge 1 ] || soft_limit=1
   [ "$soft_limit" -le "$hard_limit" ] || soft_limit="$hard_limit"
   case "$snapshot_fresh" in 0|1) ;; *) SCHEDULER_ERROR=invalid_freshness; return 1 ;; esac
@@ -34,29 +41,40 @@ scheduler_plan() {
     [ -n "$line" ] || continue
     [ "${line//[^|]/}" = "|||||||||||" ] ||
       { SCHEDULER_ERROR=invalid_scheduler_row; return 1; }
-    IFS='|' read -r pool assigned warm service charged pending leases max cpu memory healthy pool_fresh extra <<<"$line"
+    IFS='|' read -r pool assigned warm service charged pending leases max cpu memory healthy pool_fresh <<<"$line"
     pool_id_valid "$pool" || { SCHEDULER_ERROR=invalid_pool_id; return 1; }
-    for i in "$assigned" "$warm" "$service" "$charged" "$pending" "$leases" "$cpu" "$memory"; do
-      scheduler_uint "$i" || { SCHEDULER_ERROR=invalid_scheduler_count; return 1; }
-    done
-    [ "$cpu" -gt 0 ] && [ "$memory" -gt 0 ] ||
-      { SCHEDULER_ERROR=invalid_resource_claim; return 1; }
+    if ! scheduler_uint "$assigned" 1000000000 || ! scheduler_uint "$warm" "$POOL_HARD_MAX" ||
+       ! scheduler_uint "$service" "$POOL_HARD_MAX" || ! scheduler_uint "$charged" "$POOL_HARD_MAX" ||
+       ! scheduler_uint "$pending" "$POOL_HARD_MAX" || ! scheduler_uint "$leases" "$POOL_HARD_MAX"; then
+      SCHEDULER_ERROR=invalid_scheduler_count
+      return 1
+    fi
+    if ! scheduler_uint "$cpu" 256000 || [ "$cpu" -eq 0 ] ||
+       ! scheduler_uint "$memory" 1099511627776 || [ "$memory" -eq 0 ]; then
+      SCHEDULER_ERROR=invalid_resource_claim
+      return 1
+    fi
     case "$healthy:$pool_fresh" in 0:0|0:1|1:0|1:1) ;;
       *) SCHEDULER_ERROR=invalid_health_or_freshness; return 1 ;;
     esac
     if [ "$max" = auto ]; then
       max="$POOL_HARD_MAX"
     else
-      scheduler_uint "$max" && [ "$max" -gt 0 ] && [ "$max" -le "$POOL_HARD_MAX" ] ||
-        { SCHEDULER_ERROR=invalid_pool_max; return 1; }
+      if ! scheduler_uint "$max" "$POOL_HARD_MAX" || [ "$max" -eq 0 ]; then
+        SCHEDULER_ERROR=invalid_pool_max
+        return 1
+      fi
     fi
     for i in "${ids[@]-}"; do
       [ "$i" != "$pool" ] || { SCHEDULER_ERROR=duplicate_pool; return 1; }
     done
     i="${#ids[@]}"
-    ids[i]="$pool"; cpus[i]="$cpu"; memories[i]="$memory"; health[i]="$healthy"
-    desired[i]=$((assigned + warm))
-    [ "${desired[i]}" -le "$max" ] || desired[i]="$max"
+    ids[i]="$pool"; cpus[i]="$cpu"; memories[i]="$memory"
+    if [ "$assigned" -ge "$max" ] || [ "$warm" -ge $((max - assigned)) ]; then
+      desired[i]="$max"
+    else
+      desired[i]=$((assigned + warm))
+    fi
     needs[i]=$((desired[i] - service - pending - leases))
     [ "${needs[i]}" -ge 0 ] || needs[i]=0
     removals[i]=$((service - desired[i]))
@@ -66,11 +84,12 @@ scheduler_plan() {
     # standalone host estimate. Service, pending, and offered slots are each
     # resource-backed; assigned demand is not additional capacity until one of
     # those slots exists to serve it.
-    admitted[i]=0; advertised[i]=$((service + pending + leases)); new_leases[i]="$leases"; blocked[i]=""; start_order[i]=""
+    admitted[i]=0; advertised[i]=$((service + pending + leases)); new_leases[i]="$leases"
+    blocked[i]=""; blocked_count[i]=0; start_order[i]=""
     if [ "$snapshot_fresh" != 1 ] || [ "$pool_fresh" != 1 ]; then
-      blocked[i]=stale_demand; needs[i]=0; removals[i]=0
+      blocked[i]=stale_demand; blocked_count[i]="${needs[i]}"; needs[i]=0; removals[i]=0
     elif [ "$healthy" != 1 ]; then
-      blocked[i]=session_unhealthy; needs[i]=0; removals[i]=0
+      blocked[i]=session_unhealthy; blocked_count[i]="${needs[i]}"; needs[i]=0; removals[i]=0
     fi
     # `charged` is intentionally parsed even though the broker has already
     # subtracted it. This keeps the pure input contract explicit and testable.
@@ -78,8 +97,10 @@ scheduler_plan() {
   done < "$input"
 
   n="${#ids[@]}"
-  [ "$n" -gt 0 ] && [ "$n" -le "$POOL_MAX_COUNT" ] ||
-    { SCHEDULER_ERROR=invalid_pool_count; return 1; }
+  if [ "$n" -le 0 ] || [ "$n" -gt "$POOL_MAX_COUNT" ]; then
+    SCHEDULER_ERROR=invalid_pool_count
+    return 1
+  fi
   cursor=$((cursor % n)); last_cursor="$cursor"
 
   # Equal round-robin: at most one admission per feasible pool in each round.
@@ -117,12 +138,13 @@ scheduler_plan() {
       else blocked[i]=infeasible
       fi
     fi
+    [ "${blocked_count[i]}" -gt 0 ] || blocked_count[i]="${needs[i]}"
     # The ordered start field contains the pool-local order only for admitted
     # rows. The caller expands admitted counts using the emitted fair pool order.
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "${ids[i]}" "${desired[i]}" "${admitted[i]}" "${blocked[i]:-none}" \
       "${start_order[i]:-none}" \
-      "${removals[i]}" "${advertised[i]}" "${new_leases[i]}"
+      "${removals[i]}" "${advertised[i]}" "${new_leases[i]}" "${blocked_count[i]}"
   done
 }
 
