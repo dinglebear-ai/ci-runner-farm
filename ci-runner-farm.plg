@@ -93,6 +93,19 @@ EOF_CACHEDIRS
     echo "ci-runner-farm: NOTE - saved $DF lacks the runner-owned cache-dir block from default.Dockerfile; merge it manually so non-root runners can write beside the cache mounts."
   fi
 fi
+# The saved Dockerfile is seeded from default.Dockerfile once and never resynced,
+# so an install predating the dockerd-supervisor fix keeps a watchdog that can
+# never restart dockerd: it ran the restart as the runner user against root-owned
+# /var/run and /var/log, so the redirect failed before "service docker start" was
+# ever reached. Any runner whose dockerd dies then stays degraded until the
+# container is recycled. Deliberately a notice, not an automatic rewrite - the
+# replacement restructures the whole RUN block into two scripts, and this file
+# executes unattended on every boot, so a silent multi-line rewrite of a possibly
+# customized Dockerfile is not a trade worth making here.
+if [ -f "$DF" ] && grep -q 'rm -f /var/run/docker.pid; service docker start' "$DF" \
+   && ! grep -q 'crf-dockerd-restart' "$DF"; then
+  echo "ci-runner-farm: NOTE - saved $DF carries the old dockerd watchdog, which cannot restart dockerd (it runs unprivileged against root-owned paths). Copy the wait-docker.sh / crf-dockerd-restart blocks from $PLGDIR/default.Dockerfile, or delete $DF to reseed it, then press Build."
+fi
 ( docker pull myoung34/github-runner:latest >/dev/null 2>&1 & ) || true
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
