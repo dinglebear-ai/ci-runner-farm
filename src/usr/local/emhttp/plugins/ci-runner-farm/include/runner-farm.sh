@@ -3234,23 +3234,38 @@ cmd_queued_refresh() {
 
   # Produce a tab-safe, bounded run manifest. User-controlled workflow names are
   # base64 encoded before crossing the shell boundary; repo + id are validated
-  # again before becoming an API path.
+  # again before becoming an API path. Select runs round-robin across repositories
+  # so one noisy repository cannot consume the entire bounded detail window.
   php -r '
-    $left=20;
+    $left=20; $repos=[];
     foreach (file($argv[1], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
       [$repo,$file]=array_pad(explode("\t",$line,2),2,"");
       if (!preg_match("~^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$~D",$repo)) continue;
-      $doc=json_decode((string)@file_get_contents($file),true);
+      $doc=json_decode((string)@file_get_contents($file),true); $runs=[];
       foreach (($doc["workflow_runs"] ?? []) as $run) {
-        if ($left<=0) break 2;
         $id=(string)($run["id"] ?? "");
         if (!preg_match("~^[0-9]{1,20}$~D",$id)) continue;
-        $number=(string)($run["run_number"] ?? "");
-        $name=(string)($run["name"] ?? $run["display_title"] ?? "Workflow");
-        $created=(string)($run["created_at"] ?? "");
-        echo $repo,"\t",$id,"\t",preg_replace("~[^0-9]~","",$number),"\t",base64_encode($name),"\t",base64_encode($created),"\n";
-        --$left;
+        $runs[]=[
+          "id"=>$id,
+          "number"=>preg_replace("~[^0-9]~","",(string)($run["run_number"] ?? "")),
+          "name"=>(string)($run["name"] ?? $run["display_title"] ?? "Workflow"),
+          "created"=>(string)($run["created_at"] ?? "")
+        ];
       }
+      if ($runs) $repos[]=["repo"=>$repo,"runs"=>$runs,"index"=>0];
+    }
+    while ($left>0) {
+      $emitted=false;
+      foreach ($repos as &$entry) {
+        if ($left<=0) break;
+        $index=$entry["index"];
+        if ($index>=count($entry["runs"])) continue;
+        $run=$entry["runs"][$index]; $entry["index"]=$index+1;
+        echo $entry["repo"],"\t",$run["id"],"\t",$run["number"],"\t",base64_encode($run["name"]),"\t",base64_encode($run["created"]),"\n";
+        --$left; $emitted=true;
+      }
+      unset($entry);
+      if (!$emitted) break;
     }
   ' "$tmpd/repos.tsv" > "$tmpd/run-manifest.tsv" 2>/dev/null || :
 
@@ -3300,7 +3315,10 @@ cmd_queued_refresh() {
         $labels=array_values(array_filter(array_map("strval",is_array($job["labels"] ?? null)?$job["labels"]:[])));
         $pool="";
         foreach ($labels as $label) if (isset($poolMap[$label])) { $pool=$poolMap[$label]; break; }
-        if (!in_array("self-hosted",$labels,true) || $pool==="") continue;
+        // Pool runners register only their derived routing label. GitHub may omit
+        // the implicit self-hosted label from queued-job responses, so a configured
+        // routing-label match is the authoritative farm-membership test here.
+        if ($pool==="") continue;
         if (count($rows)>=40) { $rowTruncated=true; break 2; }
         $rows[]=[
           "run_id"=>(int)$runId,
