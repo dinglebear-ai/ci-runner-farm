@@ -16,17 +16,17 @@ ready and does not enumerate the complete MinIO prefix.
 
 ## Current resource envelope
 
-The persistent Tootie profile targets 16 runners: five Rust runners at 6 CPUs
-and 7 GiB, two Python runners at 2 CPUs and 6 GiB, three TypeScript runners at
+The persistent Tootie profile targets 16 runners: six Rust runners at 6 CPUs
+and 7 GiB, one Python runner at 2 CPUs and 6 GiB, three TypeScript runners at
 2 CPUs and 6 GiB, three Ops runners at 2 CPUs and 6 GiB, plus one 8-CPU/10-GiB
-runner for each of Go, System, and Residential Egress. The pools reserve 70 CPUs
-and 113 GiB in total.
+runner for each of Go, System, and Residential Egress. The pools reserve 74 CPUs
+and 114 GiB in total.
 
 With a 77-CPU budget, 1-CPU host reserve, 124-GiB memory budget, and 8-GiB host
 reserve, the admission controller exposes 76 CPUs and 116 GiB. This leaves
-6 CPUs and 3 GiB of admitted headroom. A sixth 7-GiB Rust runner would raise the
-fleet claim to 120 GiB and is therefore intentionally not configured unless the
-host reserve or another pool allocation is changed first.
+2 CPUs and 2 GiB of admitted headroom. The single Python slot is intentional: it
+keeps six Rust workers available for the dominant queue without weakening the
+host reserves or overcommitting memory.
 
 Before any drain or reconciliation, verify that
 `ci-runner-farm-runner:latest` resolves to the approved image and that a
