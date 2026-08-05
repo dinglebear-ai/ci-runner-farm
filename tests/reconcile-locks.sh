@@ -134,6 +134,58 @@ sed -n '/^reconcile_stale_runners()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-stale
 
 echo 'reconcile-retiring-fairness: OK'
 
+# GitHub may transiently report an actively working stale runner as idle. Its
+# graceful recycle must refuse without starving a later stale runner that is
+# genuinely idle. Reconciliation still mutates at most one runner per pass.
+(
+  # shellcheck disable=SC1090
+  . "$tmpdir/reconcile-stale.sh"
+  validate_runtime_config() { return 0; }
+  cleanup_pool_runtime_state() { :; }
+  fleet_inventory_refresh() { return 0; }
+  crf_confgen_prepare() { :; }
+  pool_mode_enabled() { return 0; }
+  count_pool_missing_capacity() { echo 0; }
+  provision_base() { :; }
+  managed_names() { printf '%s
+' ci-runner-refused ci-runner-idle; }
+  runner_identity_validate() { return 0; }
+  runner_pool() { echo rust; }
+  pool_record() { return 0; }
+  pool_records() { :; }
+  inventory_field() { echo running; }
+  runner_state() { echo idle; }
+  crf_confgen() { echo current; }
+  runner_confgen() { echo stale; }
+  runner_authoritatively_failed() { return 1; }
+  recreate_runner() {
+    printf '%s
+' "$1" >>"$tmpdir/recycle-attempts"
+    [ "$1" = ci-runner-refused ] && return 1
+    printf '%s
+' "$1" >"$tmpdir/recycled"
+  }
+  docker() {
+    [ "$1" = ps ] && printf '%s
+' ci-runner-refused
+  }
+  start_one_missing_desired() { :; }
+  log() { :; }
+  GH_OWNER=dinglebear-ai
+  RUNDIR="$tmpdir"
+  reconcile_stale_runners
+)
+[ "$(cat "$tmpdir/recycled" 2>/dev/null)" = ci-runner-idle ] || {
+  echo "FAIL: refused stale runner blocked a later idle stale runner" >&2
+  exit 1
+}
+[ "$(wc -l < "$tmpdir/recycle-attempts")" -eq 2 ] || {
+  echo "FAIL: stale reconciliation did not inspect exactly the refused and idle runners" >&2
+  exit 1
+}
+
+echo 'reconcile-stale-refusal-fairness: OK'
+
 
 # A stale, reused, or unrelated PID must not suppress reconciliation. Only a
 # live process whose argv contains the exact reconcile-drain subcommand owns the

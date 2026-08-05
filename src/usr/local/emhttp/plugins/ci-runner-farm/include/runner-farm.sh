@@ -2460,16 +2460,20 @@ reconcile_stale_runners() {
     [ "$state" = error ] && recycle_mode=force
     if ! recreate_runner "$c" "$recycle_mode" >/dev/null 2>&1; then
       if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
-        log "reconcile: recycle of $c failed but it is still present — will retry next pass"
-      else
-        # cmd_recycle removed it but the replacement failed to start: the fleet just
-        # shrank and no later pass can retry a runner that no longer exists. Record it
-        # so the drain reports the loss instead of a clean-migration success.
-        log "reconcile: $c was removed but its replacement failed to start — fleet is down one runner"
-        echo "$c" >> "$RUNDIR/reconcile.shrink"
+        # GitHub can briefly report an active runner as idle. A graceful recycle
+        # correctly refuses in that case, so no mutation happened and this pass
+        # may continue to a later stale runner that is actually idle.
+        log "reconcile: recycle of $c failed but it is still present — checking other stale runners"
+        continue
       fi
+      # cmd_recycle removed it but the replacement failed to start: the fleet just
+      # shrank and no later pass can retry a runner that no longer exists. Record it
+      # so the drain reports the loss instead of a clean-migration success.
+      log "reconcile: $c was removed but its replacement failed to start — fleet is down one runner"
+      echo "$c" >> "$RUNDIR/reconcile.shrink"
+      return 0
     fi
-    return 0                                          # one per pass; the drain/tick loop re-invokes
+    return 0                                          # one successful mutation per pass
   done
   start_one_missing_desired
   return 0
