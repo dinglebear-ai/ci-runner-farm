@@ -11,6 +11,14 @@
 * Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
 
+## [1.8.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.0...v1.8.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **reconcile:** skip refused stale runners ([#15](https://github.com/dinglebear-ai/ci-runner-farm/issues/15)) ([ee4ccc7](https://github.com/dinglebear-ai/ci-runner-farm/commit/ee4ccc7f9a3cfa411f5b4ce1352759ba04053fd1))
+* **ui:** preserve Unraid chrome with framed app shell ([3df3af0](https://github.com/dinglebear-ai/ci-runner-farm/commit/3df3af0bc46f30a801942fb7b4e458af426c29d1))
+
 ## [1.8.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.7.0...v1.8.0) (2026-08-04)
 
 
