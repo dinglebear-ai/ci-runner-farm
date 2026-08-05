@@ -8,20 +8,34 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/protocol"
 )
 
-type fakePoller struct{ active, peak atomic.Int32 }
-
-func (f *fakePoller) Poll(_ context.Context, _ Pool, capacity int) (PollResult, error) {
-	n := f.active.Add(1)
-	for n > f.peak.Load() && !f.peak.CompareAndSwap(f.peak.Load(), n) {
-	}
-	time.Sleep(time.Millisecond)
-	f.active.Add(-1)
-	return PollResult{AssignedJobs: capacity, MessageID: 1}, nil
+type barrierPoller struct {
+	started chan Pool
+	mu      sync.Mutex
+	active  map[string]int
 }
+
+func (p *barrierPoller) Poll(ctx context.Context, pool Pool, capacity int) (PollResult, error) {
+	p.mu.Lock()
+	p.active[pool.ID]++
+	active := p.active[pool.ID]
+	p.mu.Unlock()
+	if active != 1 {
+		return PollResult{}, errors.New("duplicate concurrent poll")
+	}
+	p.started <- pool
+	<-ctx.Done()
+	p.mu.Lock()
+	p.active[pool.ID]--
+	p.mu.Unlock()
+	return PollResult{AssignedJobs: capacity, MessageID: 1}, ctx.Err()
+}
+
 func TestOneLongPollPerPool(t *testing.T) {
-	p := &fakePoller{}
+	p := &barrierPoller{started: make(chan Pool, 8), active: map[string]int{}}
 	cfg := Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: 2 * time.Millisecond}
 	for i := 0; i < 8; i++ {
@@ -35,17 +49,118 @@ func TestOneLongPollPerPool(t *testing.T) {
 	for _, pool := range cfg.Pools {
 		leases[pool.ID] = 1
 	}
-	s.SetLeases(leases)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	if err := s.Run(ctx); err != nil {
+	if err := s.SetLeases(leases); err != nil {
 		t.Fatal(err)
 	}
-	if p.peak.Load() != int32(len(cfg.Pools)) {
-		t.Fatalf("want one concurrent long poll per pool, peak=%d pools=%d", p.peak.Load(), len(cfg.Pools))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	seen := map[string]bool{}
+	for range cfg.Pools {
+		select {
+		case pool := <-p.started:
+			if seen[pool.ID] {
+				cancel()
+				t.Fatalf("pool %s started more than one concurrent poll", pool.ID)
+			}
+			seen[pool.ID] = true
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("not every pool started its long poll")
+		}
 	}
-	if s.Snapshot().Sequence == 0 {
-		t.Fatal("no snapshot")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != len(cfg.Pools) || s.Snapshot().Sequence == 0 {
+		t.Fatalf("incomplete supervisor startup: seen=%d snapshot=%#v", len(seen), s.Snapshot())
+	}
+}
+
+type staticPoller struct{ result PollResult }
+
+func (p *staticPoller) Poll(context.Context, Pool, int) (PollResult, error) { return p.result, nil }
+
+func validSupervisorConfig() Config {
+	return Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: time.Second,
+		Pools: []Pool{{ID: "rust", ScaleSetID: 1}}}
+}
+
+func TestSupervisorRejectsInvalidIdentityPoolsAndLeases(t *testing.T) {
+	valid := validSupervisorConfig()
+	tests := []struct {
+		name   string
+		cfg    Config
+		poller Poller
+	}{
+		{"nil poller", valid, nil},
+		{"bad controller", func() Config { c := valid; c.ControllerInstanceID = "../bad"; return c }(), &staticPoller{}},
+		{"bad revision", func() Config { c := valid; c.ConfigRevision = "bad"; return c }(), &staticPoller{}},
+		{"invalid pool", func() Config { c := valid; c.Pools = []Pool{{ID: "Rust", ScaleSetID: 1}}; return c }(), &staticPoller{}},
+		{"zero scale set", func() Config { c := valid; c.Pools = []Pool{{ID: "rust", ScaleSetID: 0}}; return c }(), &staticPoller{}},
+		{"duplicate pool", func() Config {
+			c := valid
+			c.Pools = []Pool{{ID: "rust", ScaleSetID: 1}, {ID: "rust", ScaleSetID: 2}}
+			return c
+		}(), &staticPoller{}},
+		{"duplicate scale set", func() Config {
+			c := valid
+			c.Pools = []Pool{{ID: "rust", ScaleSetID: 1}, {ID: "python", ScaleSetID: 1}}
+			return c
+		}(), &staticPoller{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := New(tt.cfg, tt.poller); err == nil {
+				t.Fatalf("accepted invalid config: %#v", tt.cfg)
+			}
+		})
+	}
+	s, err := New(valid, &staticPoller{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leases := range []map[string]int{{"foreign": 1}, {"rust": -1}, {"rust": 65}} {
+		if err := s.SetLeases(leases); err == nil {
+			t.Fatalf("accepted invalid leases: %#v", leases)
+		}
+	}
+	if err := s.SetLeases(map[string]int{"rust": 7}); err != nil || s.leaseForPool("rust") != 7 {
+		t.Fatalf("valid lease rejected or not stored: err=%v lease=%d", err, s.leaseForPool("rust"))
+	}
+}
+
+func TestSupervisorClonesConfigurationPollResultsAndSnapshots(t *testing.T) {
+	cfg := validSupervisorConfig()
+	s, err := New(cfg, &staticPoller{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Pools[0].ID = "mutated"
+	if s.cfg.Pools[0].ID != "rust" {
+		t.Fatal("supervisor retained caller-owned pool configuration")
+	}
+	original := &protocol.Snapshot{Pools: []protocol.PoolSnapshot{{PoolID: "rust", AcquiredHandles: []int64{41}}}}
+	s.snapshot.Store(original)
+	first := s.Snapshot()
+	first.Pools[0].PoolID = "mutated"
+	first.Pools[0].AcquiredHandles[0] = 99
+	second := s.Snapshot()
+	if second.Pools[0].PoolID != "rust" || second.Pools[0].AcquiredHandles[0] != 41 {
+		t.Fatalf("snapshot exposed mutable internal state: %#v", second)
+	}
+	if !validPollResult(PollResult{AssignedJobs: 1, MessageID: 1, AcquiredHandles: []int64{7}}) {
+		t.Fatal("valid poll result rejected")
+	}
+	for _, result := range []PollResult{
+		{AssignedJobs: -1}, {MessageID: -1}, {AcquiredHandles: []int64{0}},
+		{AcquiredHandles: []int64{7, 7}}, {AcquiredHandles: make([]int64, 65)},
+	} {
+		if validPollResult(result) {
+			t.Fatalf("accepted invalid poll result: %#v", result)
+		}
 	}
 }
 

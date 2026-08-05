@@ -176,9 +176,11 @@ scaleset_quarantine_state_write() {
     if(function_exists("fsync")&&!fsync($h))exit(4);
     fclose($h);
   ' "$tmp" "$GH_OWNER" "$installation" "$SCALESET_QUARANTINE_GROUP_NAME" \
-    "$group_id" "$phase" || { rm -f "$tmp"; return 1; }
-  chmod 0600 "$tmp" && mv -f "$tmp" "$SCALESET_QUARANTINE_STATE" ||
-    { rm -f "$tmp"; return 1; }
+    "$group_id" "$phase" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$SCALESET_QUARANTINE_STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   scaleset_quarantine_state_load
 }
 
@@ -371,8 +373,8 @@ scaleset_supervisor_start() {
     8>&- 7>&- 9>&- >>"$helper_log" 2>&1 &
   printf '%s\n' "$!" > "$SCALESET_PID"
   chmod 0600 "$SCALESET_PID"
-  local i
-  for i in $(seq 1 100); do
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
     if [ -S "$SCALESET_SOCKET" ]; then
       local eligible=false
       if declare -F migration_load >/dev/null && migration_load &&
@@ -393,6 +395,7 @@ scaleset_supervisor_start() {
     fi
     kill -0 "$(cat "$SCALESET_PID" 2>/dev/null)" 2>/dev/null || break
     sleep 0.1
+    attempts=$((attempts + 1))
   done
   err "scale-set supervisor did not create its control socket"
   scaleset_supervisor_stop
@@ -400,13 +403,13 @@ scaleset_supervisor_start() {
 }
 
 scaleset_supervisor_stop() {
-  local pid="" i
+  local pid="" attempts=0
   [ -f "$SCALESET_PID" ] && pid="$(cat "$SCALESET_PID" 2>/dev/null)"
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
-    for i in $(seq 1 100); do
-      kill -0 "$pid" 2>/dev/null || break
+    while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 100 ]; do
       sleep 0.1
+      attempts=$((attempts + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
       kill -KILL "$pid" 2>/dev/null || true
@@ -530,7 +533,10 @@ scaleset_runtime_config_write() {
   local config_rev ownership_rev installation group_ids group_id quarantine_group_id controller host_id pools tmp rec pool route labels
   local identity plugin image dockerfile entrypoint _owner _installation _host
   [ "${GH_SCOPE:-}" = org ] || { err "scale sets require organization scope"; return 1; }
-  pool_snapshot_load && pool_is_v2 || { err "scale sets require V2 runner pools"; return 1; }
+  if ! pool_snapshot_load || ! pool_is_v2; then
+    err "scale sets require V2 runner pools"
+    return 1
+  fi
   config_rev="$(config_revision)" || return 1
   ownership_rev="$(scaleset_ownership_revision)" || return 1
   installation="$(scaleset_installation_id)" || return 1
@@ -694,7 +700,7 @@ scaleset_snapshot_tsv() {
 scaleset_publish_zero_capacity() {
   local pools payload
   pools="$(mktemp "$SCALESET_STATE_DIR/zero-capacity.XXXXXX")" || return 1
-  trap 'rm -f "$pools"' RETURN
+  trap 'trap - RETURN; rm -f "$pools"' RETURN
   while IFS= read -r rec; do
     [ -n "$rec" ] && printf '%s\n' "${rec%%|*}" >>"$pools"
   done < <(pool_records)
@@ -710,7 +716,7 @@ scaleset_activation_prove_effective() {
   local expected deadline="${SCALESET_ACTIVATION_TIMEOUT_SECONDS:-30}"
   [[ "$deadline" =~ ^[1-9][0-9]*$ ]] && [ "$deadline" -le 120 ] || return 1
   expected="$(mktemp "$SCALESET_STATE_DIR/activation-pools.XXXXXX")" || return 1
-  trap 'rm -f "$expected"' RETURN
+  trap 'trap - RETURN; rm -f "$expected"' RETURN
   while IFS= read -r rec; do
     [ -n "$rec" ] && printf '%s\n' "${rec%%|*}" >>"$expected"
   done < <(pool_records)
@@ -835,7 +841,7 @@ scaleset_scheduler_policy() {
 
 _scaleset_autoscale_tick_locked() {
   local snapshot_tsv plan_input plan_output leases_tsv cursor=0 sequence rec pool assigned healthy handles
-  local warm service charged pending leases max cpu memory desired admitted blocked order removals advertised target fresh scheduler_assigned
+  local warm service charged pending leases max cpu memory advertised target fresh scheduler_assigned
   local current add epoch spec config_rev reservation handle container remote payload response descriptor
   scaleset_snapshot_refresh || { err "scale-set demand snapshot is unavailable"; return 1; }
   fleet_inventory_refresh || { err "scale-set Docker inventory is unavailable"; return 1; }
@@ -878,14 +884,19 @@ _scaleset_autoscale_tick_locked() {
   cp "$plan_output" "$SCALESET_STATE_DIR/last-plan.tmp.$$" &&
     chmod 0600 "$SCALESET_STATE_DIR/last-plan.tmp.$$" &&
     mv "$SCALESET_STATE_DIR/last-plan.tmp.$$" "$SCALESET_STATE_DIR/last-plan.tsv" || return 1
-  printf '%s\n' "$SCHEDULER_CURSOR" >"$RUNDIR/scaleset.scheduler.cursor"
+  cursor_tmp="$RUNDIR/scaleset.scheduler.cursor.tmp.$$"
+  if ! { umask 077; printf '%s\n' "$SCHEDULER_CURSOR" >"$cursor_tmp"; } ||
+     ! chmod 0600 "$cursor_tmp" || ! mv -- "$cursor_tmp" "$RUNDIR/scaleset.scheduler.cursor"; then
+    rm -f -- "$cursor_tmp"
+    return 1
+  fi
   : >"$leases_tsv"
-  while IFS='|' read -r pool desired admitted blocked order removals advertised target; do
+  while IFS='|' read -r pool _desired _admitted _blocked _order _removals advertised target _blocked_count; do
     current="$(scaleset_reservation_count "$pool" offered)"
     add=$((target - current)); [ "$add" -gt 0 ] || add=0
     cpu="$(pool_cpu_milli "$pool")"; memory="$(pool_memory_bytes "$pool")"
     spec="$(pool_runner_spec_hash "$pool")" || return 1
-    for epoch in $(seq 1 "$add"); do
+    for ((epoch=1; epoch<=add; epoch++)); do
       offer_lease_create "$pool" "${sequence:-0}" "$epoch-$RANDOM" "$cpu" "$memory" \
         "$spec" "$config_rev" "$(( $(date +%s) + 90 ))" || return 1
     done

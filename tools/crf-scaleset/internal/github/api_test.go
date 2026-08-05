@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestLabelsIncludeCanonicalScaleSetName(t *testing.T) {
 }
 
 func TestFromScaleSetPreservesAuthoritativeLabels(t *testing.T) {
-	got := fromScaleSet(&scaleset.RunnerScaleSet{
+	got, err := fromScaleSet(&scaleset.RunnerScaleSet{
 		ID: 62, Name: "crf-install-ops-revision", RunnerGroupID: 4,
 		Labels: []scaleset.Label{
 			{Type: "System", Name: "crf-install-ops-revision"},
@@ -65,8 +66,24 @@ func TestFromScaleSetPreservesAuthoritativeLabels(t *testing.T) {
 			{Type: "System", Name: "tailscale"},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Equal(got.Labels, []string{"crf-install-ops-revision", "ci-pool-ops", "tailscale"}) {
 		t.Fatalf("adapter discarded authoritative labels: %#v", got.Labels)
+	}
+}
+
+func TestFromScaleSetRejectsMissingOrMalformedResponse(t *testing.T) {
+	for _, value := range []*scaleset.RunnerScaleSet{
+		nil,
+		{},
+		{ID: 1, Name: "", RunnerGroupID: 2},
+		{ID: 1, Name: "ci-pool-rust", RunnerGroupID: 2, Labels: []scaleset.Label{{Name: ""}}},
+	} {
+		if _, err := fromScaleSet(value); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("accepted invalid scale-set response %#v: %v", value, err)
+		}
 	}
 }
 

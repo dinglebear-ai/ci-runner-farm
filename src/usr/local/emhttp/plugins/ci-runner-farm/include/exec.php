@@ -248,15 +248,21 @@ switch ($action) {
     $owner = post_scalar('owner', 255);
     $poolAutoscale = array_key_exists('pool_autoscale', $_POST) ?
       post_scalar('pool_autoscale', 255) : 'inherit';
+    $backend = post_scalar('backend', 16, true);
+    $runnerCpus = post_scalar('runner_cpus', 32, true);
+    $runnerMemory = post_scalar('runner_memory', 32, true);
     if (!is_string($mode) || !in_array($mode, ['single','pools'], true) ||
         !is_string($scope) || !in_array($scope, ['repo','org'], true) ||
         !is_string($pools) || strlen($pools) > 16384 ||
-        !is_string($owner) || strlen($owner) > 255 || !is_string($poolAutoscale)) {
+        !is_string($owner) || strlen($owner) > 255 || !is_string($poolAutoscale) ||
+        !is_string($backend) || !in_array($backend, ['classic','scaleset'], true) ||
+        !is_string($runnerCpus) || !is_string($runnerMemory)) {
       http_response_code(400); echo json_encode(['ok'=>false,'error'=>'invalid pool validation request']); break;
     }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' validate-pools ' .
       escapeshellarg($mode) . ' ' . escapeshellarg($pools) . ' ' . escapeshellarg($scope) . ' ' .
-      escapeshellarg($owner) . ' ' . escapeshellarg($poolAutoscale));
+      escapeshellarg($owner) . ' ' . escapeshellarg($poolAutoscale) . ' ' . escapeshellarg($backend) . ' ' .
+      escapeshellarg($runnerCpus) . ' ' . escapeshellarg($runnerMemory));
     if ($out !== '') echo $out;
     else { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'pool validation failed']); }
     break;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -86,6 +87,13 @@ func loadProbeConfig(path string) (probeConfig, error) {
 	var cfg probeConfig
 	if err := dec.Decode(&cfg); err != nil {
 		return probeConfig{}, err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return probeConfig{}, fmt.Errorf("probe_config_trailing_data")
+	}
+	if err := cfg.Runtime.Validate(); err != nil {
+		return probeConfig{}, fmt.Errorf("invalid_runtime_config: %w", err)
 	}
 	if cfg.Live.Owner == "" || cfg.Live.Owner != cfg.Runtime.Owner ||
 		cfg.Live.RunnerGroupName == "" || cfg.Live.RunnerGroupPolicy == "" {

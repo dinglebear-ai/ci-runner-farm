@@ -147,7 +147,8 @@ for executable in \
   [ -x "$tmp/package/$executable" ] ||
     crf_fail "packaged $executable is not executable"
 done
-file "$helper" | grep -Fq 'statically linked' || crf_fail "packaged helper is not static"
+helper_type="$(file "$helper")"
+grep -Fq 'statically linked' <<<"$helper_type" || crf_fail "packaged helper is not static"
 "$helper" version >"$tmp/version.json"
 php -r '
   $j=json_decode(file_get_contents($argv[1]),true);

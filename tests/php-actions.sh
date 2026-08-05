@@ -15,6 +15,9 @@ need "preg_match('/^(?:0|[1-9][0-9]?)$/'"
 need '(int)$raw > 64'
 need "case 'validate-pools':"
 need 'post_scalar('\''pools'\'', 16384)'
+need "post_scalar('backend', 16, true)"
+need "post_scalar('runner_cpus', 32, true)"
+need "post_scalar('runner_memory', 32, true)"
 need 'runner_name_valid($n)'
 need "http_response_code(405)"
 need "http_response_code(400)"
@@ -22,6 +25,9 @@ need "escapeshellarg(\$pool)"
 need "escapeshellarg(\$raw)"
 need "'runner pools cannot scale to zero'"
 need "escapeshellarg(\$owner)"
+need "escapeshellarg(\$backend)"
+need "escapeshellarg(\$runnerCpus)"
+need "escapeshellarg(\$runnerMemory)"
 need 'bounded_request_string(post_scalar('
 need "case 'apply-config':"
 need "expected_config_revision"

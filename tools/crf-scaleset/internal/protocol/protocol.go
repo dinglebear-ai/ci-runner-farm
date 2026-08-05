@@ -82,7 +82,8 @@ func Decode(rd io.Reader) (Request, error) {
 	if err := dec.Decode(&req); err != nil {
 		return Request{}, fmt.Errorf("decode: %w", err)
 	}
-	if dec.More() {
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("trailing_data")
 	}
 	return req, req.Validate()

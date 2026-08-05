@@ -4012,15 +4012,21 @@ cmd_boot_autostart() {
 
 cmd_validate_pools() {
   local mode="${1:-$RUNNER_MODE}" pools="${2:-$RUNNER_POOLS}" scope="${3:-$GH_SCOPE}" owner="${4-$GH_OWNER}"
-  local pool_selection="${5-${POOL_AUTOSCALE-inherit}}" previous="${POOL_AUTOSCALE-inherit}" rc=0
-  POOL_AUTOSCALE="$pool_selection"
+  local pool_selection="${5-${POOL_AUTOSCALE-inherit}}" backend="${6-${POOL_BACKEND:-classic}}"
+  local runner_cpus="${7-${RUNNER_CPUS:-1}}" runner_memory="${8-${RUNNER_MEMORY:-16g}}"
+  local previous_selection="${POOL_AUTOSCALE-inherit}" previous_backend="${POOL_BACKEND:-classic}"
+  local previous_cpus="${RUNNER_CPUS:-1}" previous_memory="${RUNNER_MEMORY:-16g}" rc=0
+  case "$backend" in classic|scaleset) ;; *) printf '{"ok":false,"error":"Pool backend must be classic or scaleset."}\n'; return 1 ;; esac
+  POOL_AUTOSCALE="$pool_selection"; POOL_BACKEND="$backend"
+  RUNNER_CPUS="$runner_cpus"; RUNNER_MEMORY="$runner_memory"
   if pool_config_validate "$mode" "$pools" "$scope" "$owner"; then
     printf '{"ok":true}\n'
   else
     printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
     rc=1
   fi
-  POOL_AUTOSCALE="$previous"
+  POOL_AUTOSCALE="$previous_selection"; POOL_BACKEND="$previous_backend"
+  RUNNER_CPUS="$previous_cpus"; RUNNER_MEMORY="$previous_memory"
   return "$rc"
 }
 
@@ -4034,7 +4040,9 @@ case "${1:-status}" in
     if [ -n "${3:-}" ]; then with_fleet_lock wait cmd_scale "${2}" "${3}"
     else with_fleet_lock wait cmd_scale "${2:?usage: scale [pool] <N>}"; fi ;;
   validate-pools)
-    if [ "$#" -ge 6 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6"
+    if [ "$#" -ge 9 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7" "$8" "$9"
+    elif [ "$#" -ge 7 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7"
+    elif [ "$#" -ge 6 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6"
     elif [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
     else cmd_validate_pools "${2:-}" "${3:-}" "${4:-}"; fi ;;
   config-revision) config_revision ;;
