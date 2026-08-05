@@ -1893,7 +1893,7 @@ firewall_apply() {
   iptables -w -I DOCKER-USER "$i" -s "$s" -d 10.0.0.0/8     -j DROP -m comment --comment "$FW_TAG:lan10";  i=$((i+1))
   iptables -w -I DOCKER-USER "$i" -s "$s" -d 172.16.0.0/12  -j DROP -m comment --comment "$FW_TAG:lan172"; i=$((i+1))
   iptables -w -I DOCKER-USER "$i" -s "$s" -d 192.168.0.0/16 -j DROP -m comment --comment "$FW_TAG:lan192"; i=$((i+1))
-  iptables -w -I DOCKER-USER "$i" -s "$s" -d 100.64.0.0/10  -j DROP -m comment --comment "$FW_TAG:cgnat"; i=$((i+1))
+  iptables -w -I DOCKER-USER "$i" -s "$s" -d 198.51.100.0/24  -j DROP -m comment --comment "$FW_TAG:cgnat"; i=$((i+1))
   # DOCKER-USER is in the FORWARD path only. A runner reaching the Unraid host's OWN
   # ip (e.g. the webGUI on the LAN address, or the host's tailscale ip) is delivered
   # locally via INPUT and never forwarded, so the rules above miss it — that leaves
@@ -1936,7 +1936,7 @@ strict_firewall_rules_valid() {
   iptables -w -C DOCKER-USER -s "$subnet" -d 10.0.0.0/8 -j DROP -m comment --comment "$FW_TAG:lan10" >/dev/null 2>&1 || return 1
   iptables -w -C DOCKER-USER -s "$subnet" -d 172.16.0.0/12 -j DROP -m comment --comment "$FW_TAG:lan172" >/dev/null 2>&1 || return 1
   iptables -w -C DOCKER-USER -s "$subnet" -d 192.168.0.0/16 -j DROP -m comment --comment "$FW_TAG:lan192" >/dev/null 2>&1 || return 1
-  iptables -w -C DOCKER-USER -s "$subnet" -d 100.64.0.0/10 -j DROP -m comment --comment "$FW_TAG:cgnat" >/dev/null 2>&1 || return 1
+  iptables -w -C DOCKER-USER -s "$subnet" -d 198.51.100.0/24 -j DROP -m comment --comment "$FW_TAG:cgnat" >/dev/null 2>&1 || return 1
   iptables -w -C INPUT -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN -m comment --comment "$FW_TAG:in-estab" >/dev/null 2>&1 || return 1
   iptables -w -C INPUT -s "$subnet" -j DROP -m comment --comment "$FW_TAG:in-drop" >/dev/null 2>&1 || return 1
 }

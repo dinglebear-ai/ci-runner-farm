@@ -8,11 +8,11 @@
 # ubuntu 26.04 "resolute" (glibc 2.43), built LOCALLY from upstream's own
 # recipe (myoung34/docker-github-actions-runner Dockerfile.base + Dockerfile
 # with FROM swapped to ubuntu:26.04) because upstream ships no 26.04 tag.
-# Why 26.04: kache keys proc-macros/dylibs on the glibc version and dookie is
-# glibc 2.43 — on 24.04 (2.39) the runners and dookie were two disjoint cache
+# Why 26.04: kache keys proc-macros/dylibs on the glibc version and devhost is
+# glibc 2.43 — on 24.04 (2.39) the runners and devhost were two disjoint cache
 # key populations in the shared remote (ADR-0023). Matching glibc merges them.
 # The pinned runner version inside the local image self-updates at runtime;
-# rebuild recipe: /tmp/gha-runner-src on tootie or re-clone
+# rebuild recipe: /tmp/gha-runner-src on nashost or re-clone
 # github.com/myoung34/docker-github-actions-runner and re-run the two builds.
 # 26.04 keeps the ubuntu-latest package universe (libwebkit2gtk-4.1-dev etc.
 # verified present for Tauri builds).
@@ -78,13 +78,13 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
       /home/runner/.npm /home/runner/.local/share/pnpm/store \
  && chown -R runner:runner /home/runner/.cargo /home/runner/.cache /home/runner/.npm /home/runner/.local
 
-# Match dookie's host cargo profile EXACTLY (~/.cargo/config.toml on dookie).
+# Match devhost's host cargo profile EXACTLY (~/.cargo/config.toml on devhost).
 # kache folds -C flags into the cache key, so profile drift forks the fleet
 # into disjoint key populations even with identical glibc/toolchain: dev
-# builds on dookie (debug=0, codegen-units=256) could never serve default-
+# builds on devhost (debug=0, codegen-units=256) could never serve default-
 # profile runner builds. Same speed-first philosophy as the dev box: fast
 # agent compile loops over debuginfo. Keep this block in lockstep with
-# dookie's [profile.dev]/[profile.test] or the shared remote splits again.
+# devhost's [profile.dev]/[profile.test] or the shared remote splits again.
 RUN mkdir -p /home/runner/.cargo && printf '%s\n' \
   "[profile.dev]" \
   "debug = 0" \
@@ -125,7 +125,7 @@ RUN mkdir -p /home/runner/.config/kache && printf '%s\n' \
   "[cache.remote]" \
   "type = \"s3\"" \
   "bucket = \"kache\"" \
-  "endpoint = \"http://10.1.0.2:9000\"" \
+  "endpoint = \"http://192.0.2.2:9000\"" \
   "region = \"us-east-1\"" \
   "prefix = \"rust\"" \
   "profile = \"kache\"" \

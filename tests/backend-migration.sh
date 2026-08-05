@@ -68,13 +68,13 @@ bash -c '
   ACCESS_TOKEN=test-token
   err(){ printf "%s\n" "$*" >&2; }
   log(){ :; }
-  host(){ echo tootie; }
+  host(){ echo nashost; }
   scaleset_installation_id(){ echo 11111111-2222-3333-4444-555555555555; }
   . "$SCRIPT_DIR/runner-migration.sh"
   managed_names(){ printf "%s\n" ci-runner-rust-1 ci-runner-python-1; }
   github_runner_inventory(){
     printf "%s\n" \
-      "101|tootie-ci-runner-rust-1|online|1" \
+      "101|nashost-ci-runner-rust-1|online|1" \
       "102|ci-runner-python-1|online|0"
   }
   gh_api_request(){
@@ -101,7 +101,7 @@ bash -c '
       "PUT:/orgs/dinglebear-ai/actions/runner-groups/77/runners/102")
         echo 102 >>"$root/moved"; GH_STATUS=204 ;;
       "GET:/orgs/dinglebear-ai/actions/runner-groups/77/runners?per_page=100&page=1")
-        GH_RESPONSE='\''{"runners":[{"id":101,"name":"tootie-ci-runner-rust-1","status":"online","busy":true},{"id":102,"name":"ci-runner-python-1","status":"online","busy":false}]}'\''
+        GH_RESPONSE='\''{"runners":[{"id":101,"name":"nashost-ci-runner-rust-1","status":"online","busy":true},{"id":102,"name":"ci-runner-python-1","status":"online","busy":false}]}'\''
         ;;
       "DELETE:/orgs/dinglebear-ai/actions/runner-groups/77")
         rm -f "$root/group-created"; GH_STATUS=204 ;;
@@ -131,7 +131,7 @@ bash -c '
   SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
   MIGRATION_CLASSIC_QUIESCE_FILE=$RUNDIR/quiesced
   GH_OWNER=dinglebear-ai; NAME_PREFIX=ci-runner
-  err(){ :; }; host(){ echo tootie; }
+  err(){ :; }; host(){ echo nashost; }
   fleet_inventory_refresh(){ return 0; }; current_count(){ echo 0; }
   github_runner_inventory(){ return 7; }
   . "$SCRIPT_DIR/runner-migration.sh"
@@ -270,7 +270,7 @@ bash -c '
   runner_state(){ echo idle; }
   remove_runner(){ runners="${runners/ $1/}"; runners="${runners/$1 /}"; runners="${runners/$1/}"; }
   github_runner_inventory(){ return 0; }
-  host(){ echo tootie; }
+  host(){ echo nashost; }
   cmd_start(){ runners="ci-runner-python-1"; }
   cat >"$SCALESET_COMPAT" <<EOF
 {"compatibility_record_id":"$compatibility","runner_group_id":7,"quarantine_runner_group_id":8,"cleanup":{"complete":true},"capabilities":{"eligibility_barrier":true}}

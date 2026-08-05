@@ -25,9 +25,9 @@
 ### Changed
 * Move the canonical repository and scale-set helper module identity to `dinglebear-ai/ci-runner-farm`.
 * Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
-* Include PHP CLI, ripgrep, and file inspection tools in the Tootie runner image so the repository's syntax, behavioral, and release gates run on the farm.
+* Include PHP CLI, ripgrep, and file inspection tools in the Nashost runner image so the repository's syntax, behavioral, and release gates run on the farm.
 * Make the watchdog process-enumeration regression test independent of host PID ordering.
-* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
+* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Nashost runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
 </CHANGES>
 

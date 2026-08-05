@@ -1,6 +1,6 @@
 # Generic Runner Pools Deployment and Rollback
 
-This runbook stages code on `tootie` without changing the active runner-pool
+This runbook stages code on `nashost` without changing the active runner-pool
 configuration. It never publishes to, or pushes Git refs toward, the official
 `unraid/ci-runner-farm` repository.
 
@@ -56,7 +56,7 @@ endpoint. Wait for busy runners to drain before retiring temporary identities.
 
 ## 2026-07-30 code-only proof
 
-Commit `b1834cb` was staged on tootie under a unique plugin directory. The host
+Commit `b1834cb` was staged on nashost under a unique plugin directory. The host
 reported Linux 6.18.38-Unraid, Docker 29.5.3, cgroup v2, 24 online CPUs,
 131517828 KiB RAM, no swap, and ZFS at `/mnt/cache`. The active configuration
 was mode 0600 with SHA-256
