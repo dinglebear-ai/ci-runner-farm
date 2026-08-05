@@ -41,7 +41,7 @@ $defaults = [
   'RESOURCE_CPU_OVERCOMMIT'=>'1.0', 'RESOURCE_MEMORY_SWAP'=>'none', 'RESOURCE_PIDS_LIMIT'=>'4096',
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
-  'CACHE_MOUNTS'=>'cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
+  'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
   'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'RUNNER_NETWORK'=>'ci-runner-net', 'MIRROR_PORT'=>'5000',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
@@ -358,10 +358,10 @@ _(Workspace tmpfs size)_:
 :end
 
 _(Cache mounts)_:
-: <input type="text" name="CACHE_MOUNTS" value="<?=crf_g($cfg,'CACHE_MOUNTS','cargo-registry:/home/runner/.cargo/registry cargo-git:/home/runner/.cargo/git pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright')?>">
+: <input type="text" name="CACHE_MOUNTS" value="<?=crf_g($cfg,'CACHE_MOUNTS','pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright')?>">
 
 :crf_cache_mounts_plug:
-> Space-separated `host-subdir:container-path` warm caches mounted into every runner (created under the cache root). Defaults cover Cargo registry/git plus pnpm/npm/yarn/Playwright; edit for your stack. The Rust image preset keeps each runner’s local sccache inside its container until a shared backend or per-runner mount is configured.
+> Space-separated `host-subdir:container-path` warm caches mounted into every runner (created under the cache root). Defaults cover pnpm/npm/yarn/Playwright. Do not share writable Cargo registry or Cargo git directories across concurrent runners: parallel crate extraction can corrupt the shared source tree. Rust compiler artifacts should use Kache, sccache, or another concurrency-safe backend instead.
 :end
 
 ### Docker
