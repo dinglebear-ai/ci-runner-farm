@@ -61,7 +61,7 @@ ln -s "$RESERVATION_DIR/op.state" "$RESERVATION_DIR/link.state"
 status_model_refresh
 [ "$STATUS_OBSERVED_AT" -gt 0 ] || fail 'observed_at is not an integer timestamp'
 [[ "$STATUS_INVENTORY_REVISION" =~ ^[0-9a-f]{64}$ ]] || fail 'inventory revision is not sha256'
-printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["cpu_milli"]["admissible"]??-1)===6000?0:1);'
+printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["available"]??false)===true&&array_key_exists("reason",$j)&&$j["reason"]===null&&($j["cpu_milli"]["admissible"]??-1)===6000?0:1);'
 printf '%s' "$STATUS_RESERVATIONS_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(is_array($j)&&count($j)===1&&($j[0]["operation_id"]??"")==="op"?0:1);'
 row="$(status_scaleset_pool_tsv python)"
 crf_assert_eq '3|2|1|77|eligible|0|0|5|2|3' "$row" 'live scale-set status projection'
@@ -71,7 +71,7 @@ chmod 0600 "$SCALESET_SNAPSHOT"
 STATUS_RESOURCES_JSON='{"stale":true}'
 resource_snapshot_refresh(){ return 1; }
 status_model_refresh
-printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["cpu_milli"]["budget"]??-1)===0?0:1);'
+printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["available"]??true)===false&&($j["reason"]??"")==="resource_state_unavailable"&&($j["cpu_milli"]["budget"]??-1)===0?0:1);'
 
 # Before a transition exists, Fleet must publish the exact scale-set ownership
 # identity (including both runner groups), not the older generic fallback.

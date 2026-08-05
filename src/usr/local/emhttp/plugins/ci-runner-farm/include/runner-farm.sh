@@ -3030,7 +3030,7 @@ cmd_image_info_json() {
     cid="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)"
     [ "$cid" = "$id" ] && inuse=$((inuse+1))
   done
-  echo "{\"exists\":true,\"image\":\"$(echo "$img"|json_escape)\",\"id\":\"$(echo "$id" | cut -c8-19)\",\"created\":\"$created\",\"size_mb\":$(( ${size:-0}/1024/1024 )),\"base\":\"$(echo "$base"|json_escape)\",\"in_use\":$inuse,\"dockerfile\":\"$(echo "$df"|json_escape)\",\"source\":\"$(echo "$IMAGE_SOURCE"|json_escape)\"}"
+  echo "{\"exists\":true,\"image\":\"$(echo "$img"|json_escape)\",\"id\":\"$(echo "$id" | cut -c8-19)\",\"image_id\":\"$(echo "$id"|json_escape)\",\"created\":\"$created\",\"size_mb\":$(( ${size:-0}/1024/1024 )),\"size_bytes\":${size:-0},\"base\":\"$(echo "$base"|json_escape)\",\"in_use\":$inuse,\"dockerfile\":\"$(echo "$df"|json_escape)\",\"source\":\"$(echo "$IMAGE_SOURCE"|json_escape)\"}"
 }
 
 # "1.5GiB" / "512MiB" / "900kB" -> integer MiB (docker stats human units)
@@ -3160,9 +3160,13 @@ cmd_queued_refresh() {
         foreach ($labels as $label) if (isset($poolMap[$label])) { $pool=$poolMap[$label]; break; }
         if (!in_array("self-hosted",$labels,true) || $pool==="") continue;
         if (count($rows)>=40) { $rowTruncated=true; break 2; }
+        $jobId=(string)($job["id"] ?? "");
+        if (!preg_match("/^[1-9][0-9]*$/",$runId) || !preg_match("/^[1-9][0-9]*$/",$jobId)) {
+          $detailComplete=false; continue;
+        }
         $rows[]=[
-          "run_id"=>(int)$runId,
-          "job_id"=>(int)($job["id"] ?? 0),
+          "run_id"=>$runId,
+          "job_id"=>$jobId,
           "repo"=>$repo,
           "workflow"=>"#".$runNumber." · ".(string)($job["name"] ?? $workflow),
           "labels"=>implode(", ",$labels),

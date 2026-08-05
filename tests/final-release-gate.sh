@@ -122,6 +122,12 @@ bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
 bash tests/readiness-json.sh >/dev/null
+php tests/api-request.php >/dev/null
+php tests/api-status.php >/dev/null
+php tests/api-auxiliary.php >/dev/null
+bash tests/graphql-controller-api.sh >/dev/null
+bash tests/graphql-status-api.sh >/dev/null
+bash tests/graphql-auxiliary-api.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

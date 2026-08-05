@@ -204,7 +204,7 @@ runner_api_observed_refresh() {
 }
 
 runner_api_emit() {
-  local request_id="$1" ok="$2" code="$3" message="$4" source="${5:-@null}" helper rc
+  local request_id="$1" ok="$2" code="$3" message="$4" source="${5:-@null}" helper
   helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-response.php"
   runner_api_observed_refresh
   if /usr/bin/php "$helper" "$source" "$request_id" "$ok" "$code" "$message" \
@@ -236,6 +236,170 @@ runner_api_fail_ownership_changed() { runner_api_fail ownership_changed "${1:-ow
 runner_api_fail_compatibility_changed() { runner_api_fail compatibility_changed "${1:-compatibility changed}" 3 "${2:-}"; }
 runner_api_fail_backend_unavailable() { runner_api_fail backend_unavailable "${1:-backend unavailable}" 5 "${2:-}"; }
 runner_api_fail_output_too_large() { runner_api_fail output_too_large "${1:-output too large}" 5 "${2:-}"; }
+runner_api_fail_unsupported_schema() { runner_api_fail unsupported_schema "${1:-unsupported schema}" 2 "${2:-}"; }
+
+runner_api_result_file_create() {
+  local prefix="$1" dir="$RUNDIR/api-results" path
+  case "$prefix" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  mkdir -p -- "$dir" || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  chmod 0700 "$dir" || return 1
+  path="$(mktemp "$dir/$prefix.XXXXXX")" || return 1
+  chmod 0600 "$path" || { rm -f -- "$path"; return 1; }
+  printf '%s' "$path"
+}
+
+runner_api_result_file_cleanup() {
+  local path="$1"
+  case "$path" in "$RUNDIR"/api-results/*) rm -f -- "$path" ;; *) return 1 ;; esac
+}
+
+runner_api_normalizer_failure() {
+  local rc="$1" request_id="${2:-}"
+  case "$rc" in
+    6) runner_api_fail_unsupported_schema 'controller schema is unsupported' "$request_id" ;;
+    7) runner_api_fail_output_too_large 'controller output is too large' "$request_id" ;;
+    8) runner_api_fail_backend_unavailable 'Docker inventory is unavailable' "$request_id" ;;
+    *) runner_api_fail_backend_unavailable 'controller output is invalid' "$request_id" ;;
+  esac
+}
+
+runner_api_status() {
+  local raw strict helper normalize_rc emit_rc size
+  raw="$(runner_api_result_file_create status.raw)" || { runner_api_fail_backend_unavailable 'could not create status buffer' ''; return; }
+  strict="$(runner_api_result_file_create status.strict)" || {
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_fail_backend_unavailable 'could not create status buffer' ''
+    return
+  }
+  if ! cmd_status_json >"$raw"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_backend_unavailable 'Docker inventory is unavailable' ''
+    return
+  fi
+  if ! runner_api_private_file_valid "$raw" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    size="$(stat -c %s "$raw" 2>/dev/null || echo 0)"
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt "$RUNNER_API_MAX_RESPONSE_BYTES" ]; then
+      runner_api_fail_output_too_large 'status output is too large' ''
+    else
+      runner_api_fail_backend_unavailable 'status output is unsafe' ''
+    fi
+    return
+  fi
+  helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-status.php"
+  if /usr/bin/php "$helper" status "$raw" "${INVENTORY_FILE:-}" >"$strict"; then
+    :
+  else
+    normalize_rc=$?
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_normalizer_failure "$normalize_rc" ''
+    return
+  fi
+  if ! runner_api_private_file_valid "$strict" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_output_too_large 'strict status output is too large' ''
+    return
+  fi
+  if runner_api_emit '' true ok 'fleet status' "$strict"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$raw" || true
+  runner_api_result_file_cleanup "$strict" || true
+  return "$emit_rc"
+}
+
+runner_api_readiness() {
+  local raw strict helper normalize_rc emit_rc
+  raw="$(runner_api_result_file_create readiness.raw)" || { runner_api_fail_backend_unavailable 'could not create readiness buffer' ''; return; }
+  strict="$(runner_api_result_file_create readiness.strict)" || {
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_fail_backend_unavailable 'could not create readiness buffer' ''
+    return
+  }
+  if ! cmd_readiness_json >"$raw"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_backend_unavailable 'readiness is unavailable' ''
+    return
+  fi
+  helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-status.php"
+  if /usr/bin/php "$helper" readiness "$raw" >"$strict"; then
+    :
+  else
+    normalize_rc=$?
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_normalizer_failure "$normalize_rc" ''
+    return
+  fi
+  if ! runner_api_private_file_valid "$strict" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_output_too_large 'readiness output is too large' ''
+    return
+  fi
+  if runner_api_emit '' true ok 'fleet readiness' "$strict"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$raw" || true
+  runner_api_result_file_cleanup "$strict" || true
+  return "$emit_rc"
+}
+
+runner_api_auxiliary() {
+  local mode="$1" raw strict helper normalize_rc emit_rc message size command_ok=0
+  raw="$(runner_api_result_file_create "$mode.raw")" || { runner_api_fail_backend_unavailable 'could not create auxiliary buffer' ''; return; }
+  strict="$(runner_api_result_file_create "$mode.strict")" || {
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_fail_backend_unavailable 'could not create auxiliary buffer' ''
+    return
+  }
+  case "$mode" in
+    queue) if cmd_queued_json >"$raw"; then command_ok=1; fi; message='queue snapshot' ;;
+    statistics) if cmd_stats_json >"$raw"; then command_ok=1; fi; message='run statistics' ;;
+    cache) if cmd_cache_usage_json >"$raw"; then command_ok=1; fi; message='cache usage' ;;
+    image) if cmd_image_info_json >"$raw"; then command_ok=1; fi; message='runner image' ;;
+    *) command_ok=0; message='auxiliary data' ;;
+  esac
+  if [ "$command_ok" -ne 1 ]; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_backend_unavailable "$message is unavailable" ''
+    return
+  fi
+  if ! runner_api_private_file_valid "$raw" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    size="$(stat -c %s "$raw" 2>/dev/null || echo 0)"
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt "$RUNNER_API_MAX_RESPONSE_BYTES" ]; then
+      runner_api_fail_output_too_large "$message output is too large" ''
+    else
+      runner_api_fail_backend_unavailable "$message output is unsafe" ''
+    fi
+    return
+  fi
+  helper="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/api-auxiliary.php"
+  if /usr/bin/php "$helper" "$mode" "$raw" >"$strict"; then
+    :
+  else
+    normalize_rc=$?
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_normalizer_failure "$normalize_rc" ''
+    return
+  fi
+  if ! runner_api_private_file_valid "$strict" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$raw" || true
+    runner_api_result_file_cleanup "$strict" || true
+    runner_api_fail_output_too_large "$message output is too large" ''
+    return
+  fi
+  if runner_api_emit '' true ok "$message" "$strict"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$raw" || true
+  runner_api_result_file_cleanup "$strict" || true
+  return "$emit_rc"
+}
 
 runner_api_reject() {
   runner_api_fail_invalid_request 'unsupported API operation' ''
@@ -245,6 +409,12 @@ runner_api_dispatch() {
   local operation="${1:-}"
   trap runner_api_cleanup_request EXIT
   case "$operation" in
+    status) runner_api_status ;;
+    readiness) runner_api_readiness ;;
+    queue) runner_api_auxiliary queue ;;
+    statistics) runner_api_auxiliary statistics ;;
+    cache-usage) runner_api_auxiliary cache ;;
+    image) runner_api_auxiliary image ;;
     *) runner_api_reject ;;
   esac
 }
