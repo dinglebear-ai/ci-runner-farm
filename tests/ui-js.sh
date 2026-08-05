@@ -98,6 +98,7 @@ image_page=src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmImage.page
 grep -Fq "const CRFI_DRAFT_KEY='ci-runner-farm:settings-draft:v1'" "$image_page"
 grep -Fq 'crfiStageSettings({IMAGE_AUTOUPDATE:String(value)})' "$image_page"
 grep -Fq 'crfiRestoreSettingsDraft();' "$image_page"
+grep -Fq 'crfiCandidate(null)' "$image_page"
 if grep -Fq "action:'apply-config'" "$image_page"; then
   echo 'Runner Image bypasses the shared Settings review/apply transaction' >&2; exit 1
 fi

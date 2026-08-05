@@ -585,7 +585,7 @@ async function crfConfirmPoolApply(){
   const submit=crfPoolsForm.querySelector('input[type=submit]'),result=document.getElementById('crf-pools-result');
   const confirm=document.getElementById('crfp-confirm-apply');crfPoolsForm.dataset.applying='1';submit.disabled=true;confirm.disabled=true;
   try{
-    const validated=await crfPost({action:'validate-pools',mode:settings.RUNNER_MODE,pools:settings.RUNNER_POOLS,scope:CRF_POOL_SCOPE,owner:CRF_POOL_OWNER,pool_autoscale:settings.POOL_AUTOSCALE,backend:settings.POOL_BACKEND,runner_cpus:settings.RUNNER_CPUS,runner_memory:settings.RUNNER_MEMORY});
+    const validated=await crfPost({action:'validate-pools',mode:settings.RUNNER_MODE,pools:settings.RUNNER_POOLS,scope:CRF_POOL_SCOPE,owner:CRF_POOL_OWNER,pool_autoscale:settings.POOL_AUTOSCALE,autoscale:settings.AUTOSCALE,backend:settings.POOL_BACKEND,runner_cpus:settings.RUNNER_CPUS,runner_memory:settings.RUNNER_MEMORY});
     if(!validated.ok)throw new Error(validated.error||'Pool validation failed');
     const applied=await crfPost({action:'apply-config',expected_config_revision:CRF_POOL_CONFIG_REVISION,settings:JSON.stringify(settings)});
     if(!applied.ok)throw new Error(applied.error||'Apply failed');

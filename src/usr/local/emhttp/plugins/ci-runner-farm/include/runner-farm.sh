@@ -195,6 +195,9 @@ KACHE_WATCHDOG_PID="${RUNDIR}/kache-watchdog.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 MAINTENANCE_FILE="${RUNDIR}/maintenance.state"
+MUTATION_OWNER_FILE="${RUNDIR}/mutation-owner.state"
+BUILD_CANDIDATE_FILE="${CFGDIR}/build-candidate.state"
+PROMOTED_IMAGE_FILE="${CFGDIR}/promoted-image.state"
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
@@ -2448,6 +2451,111 @@ provision_preflight() {
   strict_firewall_ensure || return 1
 }
 
+# A fleet lock prevents simultaneous mutations, while this lease prevents a second
+# operator or automation session from taking the lock between commands in a larger
+# operation. A claimed owner must be supplied as CRF_MUTATION_OWNER until release.
+mutation_owner_token_valid() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]
+}
+
+mutation_owner_state_load() {
+  MUTATION_OWNER=""; MUTATION_OWNER_PID=""; MUTATION_OWNER_CLAIMED_AT=""; MUTATION_OWNER_EXPIRES_AT=""
+  [ -e "$MUTATION_OWNER_FILE" ] || return 1
+  if [ ! -f "$MUTATION_OWNER_FILE" ] || [ -L "$MUTATION_OWNER_FILE" ] ||
+     [ "$(stat -c %a "$MUTATION_OWNER_FILE" 2>/dev/null)" != 600 ] ||
+     [ "$(stat -c %s "$MUTATION_OWNER_FILE" 2>/dev/null || echo 4097)" -gt 4096 ]; then
+    err "mutation owner state is unsafe; remove $MUTATION_OWNER_FILE manually"
+    return 2
+  fi
+  local key boot_id current_boot now
+  for key in schema owner boot_id owner_pid claimed_at expires_at; do
+    [ "$(grep -c "^${key}=" "$MUTATION_OWNER_FILE" 2>/dev/null)" = 1 ] || {
+      err "mutation owner state is malformed"; return 2;
+    }
+  done
+  [ "$(sed -n 's/^schema=//p' "$MUTATION_OWNER_FILE")" = 1 ] || return 2
+  MUTATION_OWNER="$(sed -n 's/^owner=//p' "$MUTATION_OWNER_FILE")"
+  boot_id="$(sed -n 's/^boot_id=//p' "$MUTATION_OWNER_FILE")"
+  MUTATION_OWNER_PID="$(sed -n 's/^owner_pid=//p' "$MUTATION_OWNER_FILE")"
+  MUTATION_OWNER_CLAIMED_AT="$(sed -n 's/^claimed_at=//p' "$MUTATION_OWNER_FILE")"
+  MUTATION_OWNER_EXPIRES_AT="$(sed -n 's/^expires_at=//p' "$MUTATION_OWNER_FILE")"
+  if ! mutation_owner_token_valid "$MUTATION_OWNER" ||
+     ! [[ "$boot_id" =~ ^[A-Fa-f0-9-]{16,64}$ ]] ||
+     ! resource_positive_uint_valid "$MUTATION_OWNER_PID" 4194304 ||
+     ! resource_positive_uint_valid "$MUTATION_OWNER_CLAIMED_AT" 9999999999 ||
+     ! resource_positive_uint_valid "$MUTATION_OWNER_EXPIRES_AT" 9999999999; then
+    err "mutation owner state is malformed"
+    return 2
+  fi
+  current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+  now="$(date +%s)"
+  if [ "$boot_id" != "$current_boot" ] || [ "$now" -ge "$MUTATION_OWNER_EXPIRES_AT" ]; then
+    rm -f "$MUTATION_OWNER_FILE"
+    MUTATION_OWNER=""
+    return 1
+  fi
+  return 0
+}
+
+cmd_mutation_owner_claim() {
+  local owner="${1:-}" ttl="${2:-1800}" now boot tmp
+  mutation_owner_token_valid "$owner" || { err "owner must be a safe 1-128 character session token"; return 2; }
+  resource_positive_uint_valid "$ttl" 86400 && [ "$ttl" -ge 60 ] || {
+    err "owner lease must be 60-86400 seconds"; return 2;
+  }
+  if mutation_owner_state_load; then
+    [ "$MUTATION_OWNER" = "$owner" ] || {
+      err "fleet mutation lease is owned by '$MUTATION_OWNER' until $MUTATION_OWNER_EXPIRES_AT"; return 1;
+    }
+  else
+    local rc=$?; [ "$rc" -eq 1 ] || return "$rc"
+  fi
+  now="$(date +%s)"; boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+  tmp="$MUTATION_OWNER_FILE.tmp.$$"
+  ( umask 077; printf 'schema=1\nowner=%s\nboot_id=%s\nowner_pid=%s\nclaimed_at=%s\nexpires_at=%s\n'       "$owner" "$boot" "$$" "$now" "$((now + ttl))" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$MUTATION_OWNER_FILE" || { rm -f "$tmp"; return 1; }
+  printf '{"ok":true,"active":true,"owner":"%s","expires_at":%s}\n'     "$(printf '%s' "$owner" | json_escape)" "$((now + ttl))"
+}
+
+cmd_mutation_owner_release() {
+  local owner="${1:-}"
+  mutation_owner_token_valid "$owner" || { err "owner token required"; return 2; }
+  if mutation_owner_state_load; then
+    [ "$MUTATION_OWNER" = "$owner" ] || { err "fleet mutation lease belongs to '$MUTATION_OWNER'"; return 1; }
+    rm -f "$MUTATION_OWNER_FILE"
+  else
+    local rc=$?; [ "$rc" -eq 1 ] || return "$rc"
+  fi
+  printf '{"ok":true,"active":false}\n'
+}
+
+cmd_mutation_owner_status() {
+  if mutation_owner_state_load; then
+    printf '{"ok":true,"active":true,"owner":"%s","owner_pid":%s,"claimed_at":%s,"expires_at":%s}\n'       "$(printf '%s' "$MUTATION_OWNER" | json_escape)" "$MUTATION_OWNER_PID"       "$MUTATION_OWNER_CLAIMED_AT" "$MUTATION_OWNER_EXPIRES_AT"
+  else
+    local rc=$?; [ "$rc" -eq 1 ] || return "$rc"
+    printf '{"ok":true,"active":false}\n'
+  fi
+}
+
+mutation_owner_guard() {
+  local mode="$1" action="$2" supplied="${CRF_MUTATION_OWNER:-}"
+  case "$action" in cmd_mutation_owner_claim|cmd_mutation_owner_release|cmd_mutation_owner_status) return 0 ;; esac
+  if mutation_owner_state_load; then
+    if [ "$supplied" = "$MUTATION_OWNER" ]; then return 0; fi
+    if [ "$mode" = try ]; then
+      log "$action: skipped while mutation lease '$MUTATION_OWNER' is active"
+    else
+      err "$action refused: mutation lease '$MUTATION_OWNER' is active; set CRF_MUTATION_OWNER to that session token"
+    fi
+    return 1
+  else
+    local rc=$?
+    [ "$rc" -eq 1 ]
+  fi
+}
+
 # Serialize all fleet mutation (UI start/stop/restart/scale/recycle AND the autoscale
 # / image-update daemon ticks) behind one lock (fd 8), so a manual action and a daemon
 # tick can't race into a duplicate docker-run or a false "removed but not recreated"
@@ -2458,9 +2566,9 @@ provision_preflight() {
 with_fleet_lock() {
   local mode="$1"; shift
   if [ "$mode" = try ]; then
-    ( flock -n 8 || exit 0; "$@" ) 8>"$RUNDIR/fleet.lock"
+    ( flock -n 8 || exit 0; mutation_owner_guard try "${1:-mutation}" || exit 0; "$@" ) 8>"$RUNDIR/fleet.lock"
   else
-    ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$RUNDIR/fleet.lock"
+    ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; mutation_owner_guard wait "${1:-mutation}" || exit 1; "$@" ) 8>"$RUNDIR/fleet.lock"
   fi
 }
 cmd_restart() {
@@ -4087,7 +4195,7 @@ cmd_build_async() {
 # live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
 # from the __BUILD_RC__ sentinel only once the build is no longer running.
 cmd_build_status() {
-  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" txt running rc n disp
+  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" txt running rc n disp candidate_tag=null image_id=null promotion_required=false
   umask 077
   mkdir -p "$RUNDIR" 2>/dev/null
   exec 7> "$lock" || { echo '{"ok":false,"running":false,"rc":null,"log":"build status unavailable"}'; return 0; }
@@ -4101,7 +4209,13 @@ cmd_build_status() {
     [ -n "$n" ] && rc="$n"
   fi
   disp="$(printf '%s' "$txt" | grep -v '__BUILD_RC__=')"
-  printf '{"ok":true,"running":%s,"rc":%s,"log":%s}\n' "$running" "$rc" "$(printf '%s' "$disp" | json_string)"
+  if [ "$running" = false ] && [ "$rc" = 0 ] && build_candidate_state_load; then
+    candidate_tag="$(printf '%s' "$BUILD_CANDIDATE_TAG" | json_string)"
+    image_id="$(printf '%s' "$BUILD_CANDIDATE_IMAGE_ID" | json_string)"
+    promotion_required=true
+  fi
+  printf '{"ok":true,"running":%s,"rc":%s,"candidate_tag":%s,"image_id":%s,"promotion_required":%s,"log":%s}\n' \
+    "$running" "$rc" "$candidate_tag" "$image_id" "$promotion_required" "$(printf '%s' "$disp" | json_string)"
 }
 
 # {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
@@ -4143,9 +4257,57 @@ cmd_history_log() {
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
 }
 
+build_candidate_tag_valid() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$ ]]
+}
+
+build_candidate_state_load() {
+  BUILD_CANDIDATE_TAG=""; BUILD_CANDIDATE_IMAGE_ID=""; BUILD_CANDIDATE_DOCKERFILE_SHA=""; BUILD_CANDIDATE_BUILT_AT=""
+  [ -f "$BUILD_CANDIDATE_FILE" ] && [ ! -L "$BUILD_CANDIDATE_FILE" ] || return 1
+  [ "$(stat -c %a "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 600 ] || return 1
+  [ "$(stat -c %s "$BUILD_CANDIDATE_FILE" 2>/dev/null || echo 4097)" -le 4096 ] || return 1
+  local key
+  for key in schema dockerfile_sha candidate_tag image_id built_at; do
+    [ "$(grep -c "^${key}=" "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 1 ] || return 1
+  done
+  [ "$(sed -n 's/^schema=//p' "$BUILD_CANDIDATE_FILE")" = 1 ] || return 1
+  BUILD_CANDIDATE_DOCKERFILE_SHA="$(sed -n 's/^dockerfile_sha=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_TAG="$(sed -n 's/^candidate_tag=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_IMAGE_ID="$(sed -n 's/^image_id=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_BUILT_AT="$(sed -n 's/^built_at=//p' "$BUILD_CANDIDATE_FILE")"
+  [[ "$BUILD_CANDIDATE_DOCKERFILE_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    build_candidate_tag_valid "$BUILD_CANDIDATE_TAG" &&
+    [[ "$BUILD_CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+    resource_positive_uint_valid "$BUILD_CANDIDATE_BUILT_AT" 9999999999
+}
+
+cmd_promote_image() {
+  local candidate="${1:-}" expected_id="${2:-}" actual tmp now
+  build_candidate_tag_valid "$candidate" || { err "valid immutable candidate tag required"; return 2; }
+  [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "expected candidate image id required"; return 2; }
+  build_candidate_state_load || { err "no verified build candidate metadata is available"; return 1; }
+  [ "$candidate" = "$BUILD_CANDIDATE_TAG" ] && [ "$expected_id" = "$BUILD_CANDIDATE_IMAGE_ID" ] || {
+    err "candidate does not match the saved build metadata"; return 1;
+  }
+  actual="$(docker image inspect "$candidate" --format '{{.Id}}' 2>/dev/null)" || {
+    err "candidate image is unavailable"; return 1;
+  }
+  [ "$actual" = "$expected_id" ] || { err "candidate image id changed; refusing promotion"; return 1; }
+  docker tag "$candidate" "$BUILTIN_IMAGE" || { err "could not promote candidate"; return 1; }
+  [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" = "$expected_id" ] || {
+    err "production tag verification failed"; return 1;
+  }
+  now="$(date +%s)"; tmp="$PROMOTED_IMAGE_FILE.tmp.$$"
+  ( umask 077; printf 'schema=1\ncandidate_tag=%s\nimage_id=%s\ndockerfile_sha=%s\npromoted_at=%s\n'       "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$PROMOTED_IMAGE_FILE" || { rm -f "$tmp"; return 1; }
+  rm -f "$BUILD_CANDIDATE_FILE"
+  printf '{"ok":true,"candidate_tag":"%s","image_id":"%s","production_tag":"%s"}\n'     "$(printf '%s' "$candidate" | json_escape)" "$expected_id" "$(printf '%s' "$BUILTIN_IMAGE" | json_escape)"
+}
+
 cmd_build_image() {
-  # Build the runner image from the editable Dockerfile. Uses a CLEAN temp
-  # context (only the Dockerfile) so the token/config never enter the build.
+  # Build into a unique candidate tag. The production BUILTIN_IMAGE tag is changed
+  # only by cmd_promote_image after exact metadata and image-id verification.
   local df="${1:-$CFGDIR/Dockerfile}"
   if [ -n "${1:-}" ]; then
     case "$df" in "$RUNDIR"/build.Dockerfile.*) ;; *) err "invalid Dockerfile snapshot"; return 1 ;; esac
@@ -4154,17 +4316,31 @@ cmd_build_image() {
     [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
     [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   fi
-  local ctx; ctx="$(mktemp -d)"
-  cp "$df" "$ctx/Dockerfile"
-  log "building image '$BUILTIN_IMAGE' from $df"
-  docker build -t "$BUILTIN_IMAGE" "$ctx"; local rc=$?
-  rm -rf "$ctx"
-  if [ $rc -eq 0 ]; then
-    log "build complete: $BUILTIN_IMAGE — set Image source to Built-in and restart the fleet to use it"
-  else
-    err "build failed (rc=$rc)"
+  local ctx df_sha candidate_repo candidate_tag image_id now tmp rc
+  ctx="$(mktemp -d)" || return 1
+  cp "$df" "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
+  df_sha="$(sha256sum "$ctx/Dockerfile" | awk '{print $1}')"
+  candidate_repo="${BUILTIN_IMAGE%:*}"
+  now="$(date +%s)"
+  candidate_tag="${candidate_repo}:candidate-${df_sha:0:12}-${now}-$$"
+  build_candidate_tag_valid "$candidate_tag" || { rm -rf "$ctx"; err "could not derive safe candidate tag"; return 1; }
+  if docker image inspect "$candidate_tag" >/dev/null 2>&1; then
+    rm -rf "$ctx"
+    err "candidate tag already exists"
+    return 1
   fi
-  return $rc
+  log "building immutable candidate '$candidate_tag' from $df"
+  docker build -t "$candidate_tag" "$ctx"; rc=$?
+  rm -rf "$ctx"
+  if [ "$rc" -ne 0 ]; then err "build failed (rc=$rc)"; return "$rc"; fi
+  image_id="$(docker image inspect "$candidate_tag" --format '{{.Id}}' 2>/dev/null)"
+  [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "candidate image id verification failed"; return 1; }
+  tmp="$BUILD_CANDIDATE_FILE.tmp.$$"
+  ( umask 077; printf 'schema=1\ndockerfile_sha=%s\ncandidate_tag=%s\nimage_id=%s\nbuilt_at=%s\n'       "$df_sha" "$candidate_tag" "$image_id" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$BUILD_CANDIDATE_FILE" || { rm -f "$tmp"; return 1; }
+  log "candidate verified: $candidate_tag ($image_id)"
+  log "promotion required: $0 promote-image '$candidate_tag' '$image_id'"
 }
 
 # Called from the plugin install step (which ALSO re-runs on every boot via
@@ -4207,20 +4383,37 @@ cmd_validate_pools() {
   local mode="${1:-$RUNNER_MODE}" pools="${2:-$RUNNER_POOLS}" scope="${3:-$GH_SCOPE}" owner="${4-$GH_OWNER}"
   local pool_selection="${5-${POOL_AUTOSCALE-inherit}}" backend="${6-${POOL_BACKEND:-classic}}"
   local runner_cpus="${7-${RUNNER_CPUS:-1}}" runner_memory="${8-${RUNNER_MEMORY:-16g}}"
+  local autoscale="${9-${AUTOSCALE:-false}}"
   local previous_selection="${POOL_AUTOSCALE-inherit}" previous_backend="${POOL_BACKEND:-classic}"
-  local previous_cpus="${RUNNER_CPUS:-1}" previous_memory="${RUNNER_MEMORY:-16g}" rc=0
+  local previous_cpus="${RUNNER_CPUS:-1}" previous_memory="${RUNNER_MEMORY:-16g}"
+  local previous_autoscale="${AUTOSCALE:-false}" rc=0
   case "$backend" in classic|scaleset) ;; *) printf '{"ok":false,"error":"Pool backend must be classic or scaleset."}\n'; return 1 ;; esac
-  POOL_AUTOSCALE="$pool_selection"; POOL_BACKEND="$backend"
+  case "$autoscale" in true|false) ;; *) printf '{"ok":false,"error":"Autoscale must be true or false."}\n'; return 1 ;; esac
+  POOL_AUTOSCALE="$pool_selection"; POOL_BACKEND="$backend"; AUTOSCALE="$autoscale"
   RUNNER_CPUS="$runner_cpus"; RUNNER_MEMORY="$runner_memory"
-  if pool_config_validate "$mode" "$pools" "$scope" "$owner"; then
+  if pool_config_validate "$mode" "$pools" "$scope" "$owner" && resource_v2_preflight; then
     printf '{"ok":true}\n'
   else
+    [ -n "$POOL_CONFIG_ERROR" ] || pool_error "$(resource_reason_text "$RESOURCE_REASON")" resources
     printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$POOL_CONFIG_ERROR" | json_escape)"
     rc=1
   fi
-  POOL_AUTOSCALE="$previous_selection"; POOL_BACKEND="$previous_backend"
+  POOL_AUTOSCALE="$previous_selection"; POOL_BACKEND="$previous_backend"; AUTOSCALE="$previous_autoscale"
   RUNNER_CPUS="$previous_cpus"; RUNNER_MEMORY="$previous_memory"
   return "$rc"
+}
+
+scheduler_prewarm_guarded() {
+  backend_scaleset_admission_allowed && scheduler_prewarm_set "$@"
+}
+
+migration_continue_guarded() {
+  migration_load || return 1
+  case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE" in
+    classic:*) migration_advance_forward ;;
+    scaleset:scaleset_active) : ;;
+    scaleset:*) migration_advance_reverse ;;
+  esac
 }
 
 case "${1:-status}" in
@@ -4233,7 +4426,8 @@ case "${1:-status}" in
     if [ -n "${3:-}" ]; then with_fleet_lock wait cmd_scale "${2}" "${3}"
     else with_fleet_lock wait cmd_scale "${2:?usage: scale [pool] <N>}"; fi ;;
   validate-pools)
-    if [ "$#" -ge 9 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7" "$8" "$9"
+    if [ "$#" -ge 10 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7" "$8" "$9" "${10}"
+    elif [ "$#" -ge 9 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7" "$8" "$9"
     elif [ "$#" -ge 7 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6" "$7"
     elif [ "$#" -ge 6 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5" "$6"
     elif [ "$#" -ge 5 ]; then cmd_validate_pools "${2:-}" "${3:-}" "${4:-}" "$5"
@@ -4256,7 +4450,10 @@ case "${1:-status}" in
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
   maintenance)  with_fleet_lock wait cmd_maintenance "${2:-status}" ;;
-  reconcile-config) cmd_reconcile_config ;;
+  mutation-owner-claim) with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
+  mutation-owner-release) with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
+  mutation-owner-status) cmd_mutation_owner_status ;;
+  reconcile-config) with_fleet_lock wait cmd_reconcile_config ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
@@ -4264,38 +4461,33 @@ case "${1:-status}" in
   build-image)      cmd_build_image "${2:-}" ;;
   build-async)      cmd_build_async "${2:-}" ;;
   build-status)     cmd_build_status ;;
+  promote-image)    with_fleet_lock wait cmd_promote_image "${2:?usage: promote-image <candidate-tag> <image-id>}" "${3:?usage: promote-image <candidate-tag> <image-id>}" ;;
   farm-log)         cmd_farm_log ;;
   history-log)      cmd_history_log "${2:?usage: history-log <name>}" ;;
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
-  autoscale-tick)   autoscale_tick ;;
+  autoscale-tick)   with_fleet_lock wait autoscale_tick ;;
   kache-watchdog-daemon) kache_watchdog_daemon ;;
   kache-watchdog-start)  kache_watchdog_start ;;
   kache-watchdog-stop)   kache_watchdog_stop ;;
   kache-watchdog-status) kache_watchdog_status ;;
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
-  prewarm)          backend_scaleset_admission_allowed && scheduler_prewarm_set "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
+  prewarm)          with_fleet_lock wait scheduler_prewarm_guarded "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
-  jit-reconcile)    jit_reconcile ;;
-  begin-migration)  migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
-  continue-migration) migration_load && {
-    case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE" in
-      classic:*) migration_advance_forward ;;
-      scaleset:scaleset_active) : ;;
-      scaleset:*) migration_advance_reverse ;;
-    esac
-  } ;;
-  rollback-backend) migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
-  compatibility-start) scaleset_compatibility_start ;;
+  jit-reconcile)    with_fleet_lock wait jit_reconcile ;;
+  begin-migration)  with_fleet_lock wait migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  continue-migration) with_fleet_lock wait migration_continue_guarded ;;
+  rollback-backend) with_fleet_lock wait migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
+  compatibility-start) with_fleet_lock wait scaleset_compatibility_start ;;
   compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
   operation-status) scaleset_operation_status "${2:?operation id}" ;;
-  autoscale-start)  autoscale_start ;;
-  autoscale-stop)   autoscale_stop ;;
+  autoscale-start)  with_fleet_lock wait autoscale_start ;;
+  autoscale-stop)   with_fleet_lock wait autoscale_stop ;;
   autoscale-status) autoscale_status ;;
   imageupdate-daemon) imageupdate_daemon ;;
-  imageupdate-tick)   imageupdate_tick ;;
-  imageupdate-start)  imageupdate_start ;;
-  imageupdate-stop)   imageupdate_stop ;;
+  imageupdate-tick)   with_fleet_lock wait imageupdate_tick ;;
+  imageupdate-start)  with_fleet_lock wait imageupdate_start ;;
+  imageupdate-stop)   with_fleet_lock wait imageupdate_stop ;;
   imageupdate-status) imageupdate_status ;;
   *) echo "usage: $0 {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|kache-watchdog-start|kache-watchdog-stop|kache-watchdog-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
 esac

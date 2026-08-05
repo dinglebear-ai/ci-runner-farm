@@ -164,6 +164,7 @@ grep -q "case 'validate-pools'" "$EXEC" && ok || bad 'server pool validation end
 grep -q "post_scalar('backend', 16, true)" "$EXEC" && ok || bad 'pending backend is absent from server pool validation'
 grep -q "post_scalar('runner_cpus', 32, true)" "$EXEC" && ok || bad 'pending CPU default is absent from server pool validation'
 grep -q "post_scalar('runner_memory', 32, true)" "$EXEC" && ok || bad 'pending memory default is absent from server pool validation'
+grep -q "post_scalar('autoscale', 5, true)" "$EXEC" && ok || bad 'pending autoscale master is absent from server pool validation'
 grep -q 'scheduling routes, not trust boundaries' README.md && ok || bad 'routing/security boundary is undocumented'
 grep -q 'Deploy the plugin while.*Single fleet' README.md && ok || bad 'safe single-mode activation is undocumented'
 grep -q 'runs-on: ci-pool-rust' README.md && ok || bad 'Rust selector is undocumented'
