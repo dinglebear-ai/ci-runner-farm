@@ -22,6 +22,11 @@ must(str_contains($exec, "tempnam(\$CFGDIR, '.apply.')"), 'staging is not same-d
 must(str_contains($exec, "chmod(\$staged, 0600)"), 'staging mode is not private');
 must(str_contains($exec, "function_exists('fsync')"), 'staging does not flush durable content');
 must(str_contains($engine, 'with_fleet_lock wait cmd_apply_config'), 'apply is not serialized');
+must(str_contains($engine, 'resource_v2_preflight'), 'apply validation omits resource admission');
+$applyStart = strpos($engine, 'cmd_apply_config()');
+$applyValidate = strpos($engine, 'validate_settings_config', $applyStart);
+$applyCommit = strpos($engine, 'mv -f "$staged" "$old_cfg"', $applyStart);
+must($applyStart !== false && $applyValidate !== false && $applyCommit !== false && $applyValidate < $applyCommit, 'apply commits before resource/settings validation');
 must(str_contains($engine, '"code":"stale_config"'), 'stale writes have no stable conflict code');
 must(str_contains($engine, 'mv -f "$staged" "$old_cfg"'), 'commit is not an atomic rename');
 must(str_contains($engine, 'chmod 0600 "$backup_tmp"'), 'backup is not private');

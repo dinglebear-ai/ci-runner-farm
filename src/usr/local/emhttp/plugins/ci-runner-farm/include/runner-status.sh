@@ -6,7 +6,7 @@
 STATUS_OBSERVED_AT=0
 STATUS_INVENTORY_REVISION=""
 STATUS_CONFIG_REVISION=""
-STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}}'
+STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
 STATUS_RESERVATIONS_JSON='[]'
 STATUS_BACKEND_JSON='{"requested":"classic","effective":"classic","transition_phase":"classic_active","transition_id":"","transition_revision":"","ownership_revision":""}'
 STATUS_COMPATIBILITY_JSON='{"valid":false,"reason":"not_checked"}'
@@ -130,7 +130,7 @@ status_recent_activity_json() {
 
 status_model_refresh() {
   local cpu_reserve=0 memory_reserve=0
-  STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}}'
+  STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
   STATUS_OBSERVED_AT="$(date +%s)"
   STATUS_CONFIG_REVISION="$(config_revision)"
   if [ -f "$INVENTORY_FILE" ] && [ ! -L "$INVENTORY_FILE" ]; then
@@ -141,7 +141,7 @@ status_model_refresh() {
   if resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1; then
     cpu_reserve="$(parse_cpu_milli "${RESOURCE_CPU_RESERVE:-1}" 2>/dev/null || echo 0)"
     memory_reserve="$(parse_memory_bytes "${RESOURCE_MEMORY_RESERVE:-1g}" 2>/dev/null || echo 0)"
-    STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
+    STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"configured\":${RESOURCE_CONFIGURED_CPU_MILLI:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI:-0},\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"configured\":${RESOURCE_CONFIGURED_MEMORY_BYTES:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES:-0},\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
   fi
   STATUS_RESERVATIONS_JSON="$(status_reservations_json)"
   status_recent_activity_json || STATUS_RECENT_ACTIVITY_JSON='[]'

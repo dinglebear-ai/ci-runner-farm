@@ -124,10 +124,14 @@ a syntax-highlighted, in-page Dockerfile editor over a generic
 [starter image](src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile)
 (stock self-hosted runner base + a Docker-in-Docker readiness wrapper). Click the
 **toolchain** pills — **Rust**, **Python**, **Node / TS**, **Android** — to
-splice matching install blocks in or out, then **Save + Build** and watch the
-live build log. The Rust preset includes stable Rust, Clippy, rustfmt, native
-build tooling, and a verified prebuilt `sccache` configured as `RUSTC_WRAPPER`.
-Restart the fleet to roll onto the new image. No registry needed.
+splice matching install blocks in or out, then **Save + Build Candidate** and watch
+the live build log. A successful build receives an immutable candidate tag bound
+to the Dockerfile SHA-256 and Docker image ID. The production
+`ci-runner-farm-runner:latest` tag does not move until **Promote Verified
+Candidate** rechecks that exact image ID. The Rust preset includes stable Rust,
+Clippy, rustfmt, native build tooling, and a verified prebuilt `sccache`
+configured as `RUSTC_WRAPPER`. Restart the fleet to roll onto the promoted
+image. No registry needed.
 
 ![The Runner image tab — a syntax-highlighted Dockerfile editor, one-click Rust / Python / Node·TS / Android toolchain blocks, and a live build log](docs/images/runner-image.png)
 
@@ -264,8 +268,22 @@ for the full picture.
 Everything in the UI maps to the control script:
 
 ```
-include/runner-farm.sh {start|boot-autostart|stop|restart|scale [pool] N|status|status-json|logs i|validate|validate-pools|build-image|prune-cache|autoscale-*}
+include/runner-farm.sh {start|boot-autostart|stop|restart|scale [pool] N|status|status-json|logs i|validate|validate-pools|build-image|build-status|promote-image TAG IMAGE_ID|mutation-owner-{claim|status|release}|prune-cache|autoscale-*}
 ```
+
+Use a mutation-owner lease when an operator or automation needs several fleet
+mutations to remain exclusive:
+
+```sh
+owner="maintenance-$(date +%s)"
+include/runner-farm.sh mutation-owner-claim "$owner" 1800
+CRF_MUTATION_OWNER="$owner" include/runner-farm.sh reconcile-config
+CRF_MUTATION_OWNER="$owner" include/runner-farm.sh recycle ci-runner-rust-1
+include/runner-farm.sh mutation-owner-release "$owner"
+```
+
+While the lease is active, competing mutations fail and background mutation
+ticks skip their pass. Read-only status remains available.
 
 ---
 

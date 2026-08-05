@@ -20,6 +20,8 @@ json_escape(){ sed 's/\\/\\\\/g;s/"/\\"/g'; }
 reservation_field(){ sed -n "s/^$2=//p" "$1" | head -1; }
 resource_snapshot_refresh(){
   RESOURCE_CPU_BUDGET_MILLI=7000 RESOURCE_MEMORY_BUDGET_BYTES=7516192768
+  RESOURCE_CONFIGURED_CPU_MILLI=1000 RESOURCE_CONFIGURED_MEMORY_BYTES=2147483648
+  RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI=6000 RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES=5368709120
   RESOURCE_CPU_RESERVED_MILLI=1000 RESOURCE_MEMORY_RESERVED_BYTES=2147483648
   RESOURCE_CPU_ADMISSIBLE_MILLI=6000 RESOURCE_MEMORY_ADMISSIBLE_BYTES=5368709120
 }
@@ -61,7 +63,7 @@ ln -s "$RESERVATION_DIR/op.state" "$RESERVATION_DIR/link.state"
 status_model_refresh
 [ "$STATUS_OBSERVED_AT" -gt 0 ] || fail 'observed_at is not an integer timestamp'
 [[ "$STATUS_INVENTORY_REVISION" =~ ^[0-9a-f]{64}$ ]] || fail 'inventory revision is not sha256'
-printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["cpu_milli"]["admissible"]??-1)===6000?0:1);'
+printf '%s' "$STATUS_RESOURCES_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(($j["cpu_milli"]["configured"]??-1)===1000&&($j["cpu_milli"]["configured_headroom"]??-1)===6000&&($j["cpu_milli"]["admissible"]??-1)===6000?0:1);'
 printf '%s' "$STATUS_RESERVATIONS_JSON" | php -r '$j=json_decode(stream_get_contents(STDIN),true);exit(is_array($j)&&count($j)===1&&($j[0]["operation_id"]??"")==="op"?0:1);'
 row="$(status_scaleset_pool_tsv python)"
 crf_assert_eq '3|2|1|77|eligible|0|0|5|2|3' "$row" 'live scale-set status projection'

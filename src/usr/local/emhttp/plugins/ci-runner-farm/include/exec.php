@@ -248,6 +248,7 @@ switch ($action) {
     $owner = post_scalar('owner', 255);
     $poolAutoscale = array_key_exists('pool_autoscale', $_POST) ?
       post_scalar('pool_autoscale', 255) : 'inherit';
+    $autoscale = post_scalar('autoscale', 5, true);
     $backend = post_scalar('backend', 16, true);
     $runnerCpus = post_scalar('runner_cpus', 32, true);
     $runnerMemory = post_scalar('runner_memory', 32, true);
@@ -255,6 +256,7 @@ switch ($action) {
         !is_string($scope) || !in_array($scope, ['repo','org'], true) ||
         !is_string($pools) || strlen($pools) > 16384 ||
         !is_string($owner) || strlen($owner) > 255 || !is_string($poolAutoscale) ||
+        !is_string($autoscale) || !in_array($autoscale, ['true','false'], true) ||
         !is_string($backend) || !in_array($backend, ['classic','scaleset'], true) ||
         !is_string($runnerCpus) || !is_string($runnerMemory)) {
       http_response_code(400); echo json_encode(['ok'=>false,'error'=>'invalid pool validation request']); break;
@@ -262,7 +264,7 @@ switch ($action) {
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' validate-pools ' .
       escapeshellarg($mode) . ' ' . escapeshellarg($pools) . ' ' . escapeshellarg($scope) . ' ' .
       escapeshellarg($owner) . ' ' . escapeshellarg($poolAutoscale) . ' ' . escapeshellarg($backend) . ' ' .
-      escapeshellarg($runnerCpus) . ' ' . escapeshellarg($runnerMemory));
+      escapeshellarg($runnerCpus) . ' ' . escapeshellarg($runnerMemory) . ' ' . escapeshellarg($autoscale));
     if ($out !== '') echo $out;
     else { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'pool validation failed']); }
     break;
@@ -497,6 +499,18 @@ switch ($action) {
     // The engine owns the flock/launch state machine (build-async verb); thin shim.
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' build-async ' . escapeshellarg($dockerfileSha));
     echo $out !== '' ? $out : json_encode(['ok'=>false,'error'=>'build launch failed']);
+    break;
+
+  case 'promote-image':
+    $candidate = post_scalar('candidate_tag', 200, true);
+    $imageId = post_scalar('image_id', 71, true);
+    if (!is_string($candidate) || !preg_match('/^[A-Za-z0-9._\/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$/D', $candidate) ||
+        !is_string($imageId) || !preg_match('/^sha256:[0-9a-f]{64}$/D', $imageId)) {
+      http_response_code(400); echo json_encode(['ok'=>false,'error'=>'valid candidate tag and image id required']); break;
+    }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' promote-image ' . escapeshellarg($candidate) . ' ' . escapeshellarg($imageId));
+    $j = last_json($out);
+    echo $j !== '' ? $j : json_encode(['ok'=>$rc === 0,'action'=>'promote-image']);
     break;
 
   case 'queued-json':

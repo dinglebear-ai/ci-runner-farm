@@ -39,6 +39,7 @@ if(!ctx.crfPoolAdditionalReserved('ci-pool-rust'))fail('derived routing label ac
 if(ctx.crfPoolRoutingReserved('ci-pool-rust'))fail('derived routing label rejected for routing');
 for(const required of [
   "'ci-pool-'+original[0]",
+  "autoscale:settings.AUTOSCALE",
   "backend:settings.POOL_BACKEND",
   "runner_cpus:settings.RUNNER_CPUS",
   "runner_memory:settings.RUNNER_MEMORY",

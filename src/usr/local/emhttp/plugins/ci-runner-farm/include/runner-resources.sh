@@ -10,6 +10,10 @@ RESOURCE_CPU_RESERVED_MILLI=0
 RESOURCE_MEMORY_RESERVED_BYTES=0
 RESOURCE_CPU_ADMISSIBLE_MILLI=0
 RESOURCE_MEMORY_ADMISSIBLE_BYTES=0
+RESOURCE_CONFIGURED_CPU_MILLI=0
+RESOURCE_CONFIGURED_MEMORY_BYTES=0
+RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI=0
+RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES=0
 RESOURCE_RESERVATION_CPU_MILLI=0
 RESOURCE_RESERVATION_MEMORY_BYTES=0
 RESOURCE_INVENTORY_CPU_MILLI=0
@@ -129,6 +133,37 @@ resource_claim_sum() {
     return 1
   fi
   printf '%s|%s\n' "$((count * cpu))" "$((count * memory))"
+}
+
+resource_configured_totals() {
+  local rec pool count cpu memory claim claim_cpu claim_memory
+  RESOURCE_CONFIGURED_CPU_MILLI=0
+  RESOURCE_CONFIGURED_MEMORY_BYTES=0
+  RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI=0
+  RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES=0
+  [ "${POOL_CONFIG_VERSION:-}" = v2 ] || return 0
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    pool="${rec%%|*}"
+    if pool_autoscale_enabled "$pool"; then count="$(pool_record_field "$rec" 5)"
+    else count="$(pool_record_field "$rec" 4)"; fi
+    cpu="$(pool_record_field "$rec" 8)"
+    memory="$(pool_record_field "$rec" 9)"
+    [ "$cpu" != inherit ] || cpu="$(parse_cpu_milli "${RUNNER_CPUS:-1}")"
+    [ "$memory" != inherit ] || memory="$(parse_memory_bytes "${RUNNER_MEMORY:-16g}")"
+    claim="$(resource_claim_sum "$count" "$cpu" "$memory")" || { resource_error invalid_claim; return 1; }
+    claim_cpu="${claim%%|*}"; claim_memory="${claim#*|}"
+    if [ "$claim_cpu" -gt $((RESOURCE_CPU_BUDGET_MILLI - RESOURCE_CONFIGURED_CPU_MILLI)) ]; then
+      resource_error configured_cpu_exceeds_budget; return 1
+    fi
+    if [ "$claim_memory" -gt $((RESOURCE_MEMORY_BUDGET_BYTES - RESOURCE_CONFIGURED_MEMORY_BYTES)) ]; then
+      resource_error configured_memory_exceeds_budget; return 1
+    fi
+    RESOURCE_CONFIGURED_CPU_MILLI=$((RESOURCE_CONFIGURED_CPU_MILLI + claim_cpu))
+    RESOURCE_CONFIGURED_MEMORY_BYTES=$((RESOURCE_CONFIGURED_MEMORY_BYTES + claim_memory))
+  done < <(printf '%s\n' "$POOL_RECORDS" | tr ';' '\n')
+  RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI=$((RESOURCE_CPU_BUDGET_MILLI - RESOURCE_CONFIGURED_CPU_MILLI))
+  RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES=$((RESOURCE_MEMORY_BUDGET_BYTES - RESOURCE_CONFIGURED_MEMORY_BYTES))
 }
 
 resource_standalone_capacity() {
@@ -355,6 +390,13 @@ resource_inventory_totals() {
 resource_snapshot_refresh() {
   local inventory="$1"
   resource_budget_resolve || return 1
+  if [ "${POOL_CONFIG_VERSION:-}" = v2 ]; then
+    resource_configured_totals || return 1
+  else
+    RESOURCE_CONFIGURED_CPU_MILLI=0; RESOURCE_CONFIGURED_MEMORY_BYTES=0
+    RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI="$RESOURCE_CPU_BUDGET_MILLI"
+    RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES="$RESOURCE_MEMORY_BUDGET_BYTES"
+  fi
   resource_inventory_totals "$inventory" || return 1
   reservation_totals || return 1
   RESOURCE_CPU_RESERVED_MILLI="$(resource_add_capped     "$RESOURCE_INVENTORY_CPU_MILLI" "$RESOURCE_RESERVATION_CPU_MILLI" "$RESOURCE_CPU_BUDGET_MILLI")" || return 1
@@ -384,6 +426,9 @@ resource_reason_text() {
     memory_claim_exceeds_budget) echo "One runner needs more memory than the host scheduling budget." ;;
     cpu_exhausted) echo "CPU scheduling budget is fully reserved." ;;
     memory_exhausted) echo "Memory scheduling budget is fully reserved." ;;
+    configured_cpu_exceeds_budget) echo "Configured pool baseline exceeds the post-reserve CPU scheduling budget." ;;
+    configured_memory_exceeds_budget) echo "Configured pool baseline exceeds the post-reserve memory scheduling budget." ;;
+    invalid_configured_capacity) echo "Configured pool baseline is invalid." ;;
     host_docker_socket_forbidden) echo "V2 pools cannot share the host Docker socket." ;;
     *) echo "Resource admission is blocked." ;;
   esac
@@ -391,17 +436,23 @@ resource_reason_text() {
 
 resource_v2_preflight() {
   local rec pool
-  pool_snapshot_load || return 1
+  [ -n "${POOL_CONFIG_VERSION:-}" ] || pool_snapshot_load || return 1
   [ "$POOL_CONFIG_VERSION" = v2 ] || return 0
   [ "${SHARE_DOCKER_SOCK:-false}" != true ] ||
     { resource_error host_docker_socket_forbidden; return 1; }
   [ -r /sys/fs/cgroup/cgroup.controllers ] || [ "${CRF_SKIP_CGROUP_PREFLIGHT:-0}" = 1 ] ||
     { resource_error cgroup_v2_unavailable; return 1; }
+  resource_budget_resolve || return 1
+  resource_configured_totals || return 1
+  local cpu memory
   while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
     pool="${rec%%|*}"
-    [ "$(pool_cpu_milli "$pool" 2>/dev/null || echo 0)" -gt 0 ] ||
-      { resource_error invalid_claim; return 1; }
-    [ "$(pool_memory_bytes "$pool" 2>/dev/null || echo 0)" -gt 0 ] ||
-      { resource_error invalid_claim; return 1; }
-  done < <(pool_records)
+    cpu="$(pool_record_field "$rec" 8)"
+    memory="$(pool_record_field "$rec" 9)"
+    [ "$cpu" != inherit ] || cpu="$(parse_cpu_milli "${RUNNER_CPUS:-1}" 2>/dev/null || echo 0)"
+    [ "$memory" != inherit ] || memory="$(parse_memory_bytes "${RUNNER_MEMORY:-16g}" 2>/dev/null || echo 0)"
+    [ "$cpu" -gt 0 ] 2>/dev/null || { resource_error invalid_claim; return 1; }
+    [ "$memory" -gt 0 ] 2>/dev/null || { resource_error invalid_claim; return 1; }
+  done < <(printf '%s\n' "$POOL_RECORDS" | tr ';' '\n')
 }

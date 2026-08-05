@@ -105,6 +105,10 @@ php -r '
 # the request lock these concurrent callers overlap in the helper and can reach
 # the controller out of sequence.
 rm -f "$CRF_FAKE_OVERLAP"
+# This is a serialization assertion, not a host-speed benchmark. Give the
+# intentionally queued fan-out enough lock budget on heavily loaded CI hosts.
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=120
+SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS=180
 request_pids=""
 for i in $(seq 1 12); do
   ( scaleset_request read_snapshot '{}' >"$root/concurrent.$i.json" ) &
@@ -123,6 +127,7 @@ for file in "$root"/concurrent.*.json; do
 done | sort -n >"$root/sequences.actual"
 seq 2 13 >"$root/sequences.expected"
 diff -u "$root/sequences.expected" "$root/sequences.actual"
+unset SCALESET_REQUEST_IO_TIMEOUT_SECONDS SCALESET_REQUEST_LOCK_TIMEOUT_SECONDS
 
 # A helper that accepts the request but never returns must not hold the global
 # request lock forever. The bounded I/O deadline terminates it and releases the
@@ -144,13 +149,10 @@ cat >/dev/null
 wait "$child"
 EOF
 chmod 0755 "$fake_helper"
-# 5s, not 1s. The deadline has to cover bash startup for the helper process, and
-# on a loaded host (this repo's own runner fleet saturates the box it is
-# developed on) that alone can exceed a second -- the helper was being killed
-# before it ever ran, which made this test fail intermittently at ~40% under
-# load. The property under test is that a hung helper is terminated and its
-# child reaped, which the exact deadline value does not affect.
-SCALESET_REQUEST_IO_TIMEOUT_SECONDS=5
+# Ten seconds gives the helper enough room to start and record its child even on
+# a saturated self-hosted runner. The property under test is bounded termination,
+# child reaping, and lock release; it does not depend on a one-second deadline.
+SCALESET_REQUEST_IO_TIMEOUT_SECONDS=10
 started="$(date +%s)"
 set +e
 scaleset_request read_snapshot '{}' >/dev/null 2>&1
@@ -158,8 +160,11 @@ timeout_rc=$?
 set -e
 elapsed=$(( $(date +%s) - started ))
 [ "$timeout_rc" -eq 124 ] || { echo "scale-set helper timeout returned $timeout_rc, expected 124" >&2; exit 1; }
-[ "$elapsed" -le 20 ] || { echo "scale-set helper timeout took ${elapsed}s" >&2; exit 1; }
-# Tolerate the write landing slightly after the helper is signalled.
+# timeout(1) enforces the ten-second deadline plus five-second kill grace. Keep
+# additional scheduler slack for saturated self-hosted runners while independently
+# proving the timeout result, child cleanup, and released request lock below.
+[ "$elapsed" -le 45 ] || { echo "scale-set helper timeout took ${elapsed}s" >&2; exit 1; }
+# Tolerate the pidfile write becoming visible just after the helper is signalled.
 for _ in $(seq 1 50); do
   [ -s "$CRF_FAKE_CHILD_PID" ] && break
   sleep 0.1

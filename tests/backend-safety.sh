@@ -21,10 +21,11 @@ cd "$(dirname "$0")/.."
 engine=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 endpoint=src/usr/local/emhttp/plugins/ci-runner-farm/include/exec.php
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+TEST_ROOT="$tmp"
+trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_candidate_state_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -76,18 +77,35 @@ pool_autoscale_tick fixed
 
 # Empty argv from the dispatcher must mean the canonical Dockerfile, not an
 # invalid snapshot. Capture the exact clean-context content passed to Docker.
-CFGDIR="$tmp/cfg" RUNDIR="$tmp/run" BUILTIN_IMAGE=ci-runner-farm-runner:latest
-mkdir -p "$CFGDIR" "$RUNDIR"
+CFGDIR="$TEST_ROOT/cfg" RUNDIR="$TEST_ROOT/run" BUILTIN_IMAGE=ci-runner-farm-runner:latest
+BUILD_CANDIDATE_FILE="$CFGDIR/build-candidate.state"
+PROMOTED_IMAGE_FILE="$CFGDIR/promoted-image.state"
+mkdir -p "$CFGDIR" "$RUNDIR" "$TEST_ROOT/images"
 printf 'FROM scratch\nLABEL source=canonical\n' > "$CFGDIR/Dockerfile"
-docker_capture="$tmp/dockerfile.seen"
+docker_capture="$TEST_ROOT/dockerfile.seen"
 log(){ :; }
-err(){ printf '%s\n' "$*" > "$tmp/error"; }
+err(){ printf '%s\n' "$*" > "$TEST_ROOT/error"; }
+resource_positive_uint_valid(){ [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] && [ "$1" -le "${2:-9000000000000000000}" ]; }
+image_path(){ printf '%s/images/%s\n' "$TEST_ROOT" "$(printf '%s' "$1" | sha256sum | awk '{print $1}')"; }
 docker(){
-  [ "$1" = build ] || return 31
-  cp "$4/Dockerfile" "$docker_capture"
+  case "${1:-}:${2:-}" in
+    image:inspect)
+      local path; path="$(image_path "$3")"
+      [ -f "$path" ] || return 1
+      [ "${4:-}" != --format ] || cat "$path"
+      ;;
+    build:-t)
+      cp "$4/Dockerfile" "$docker_capture"
+      printf 'sha256:%064d\n' 0 | tr 0 a > "$(image_path "$3")"
+      ;;
+    tag:) cp "$(image_path "$2")" "$(image_path "$3")" ;;
+    *) return 31 ;;
+  esac
 }
 cmd_build_image "" || crf_fail 'empty dispatcher argument rejected the canonical Dockerfile'
 cmp -s "$CFGDIR/Dockerfile" "$docker_capture" || crf_fail 'build did not receive canonical Dockerfile content'
+build_candidate_state_load || crf_fail 'direct build did not preserve verified candidate metadata'
+[ "$BUILD_CANDIDATE_TAG" != "$BUILTIN_IMAGE" ] || crf_fail 'direct build targeted the production image tag'
 
 # A stale save identity must fail before launch. A matching identity launches
 # only the private snapshot, and both runtime build files remain mode 0600.

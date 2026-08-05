@@ -18,6 +18,7 @@ need 'post_scalar('\''pools'\'', 16384)'
 need "post_scalar('backend', 16, true)"
 need "post_scalar('runner_cpus', 32, true)"
 need "post_scalar('runner_memory', 32, true)"
+need "post_scalar('autoscale', 5, true)"
 need 'runner_name_valid($n)'
 need "http_response_code(405)"
 need "http_response_code(400)"
@@ -28,6 +29,7 @@ need "escapeshellarg(\$owner)"
 need "escapeshellarg(\$backend)"
 need "escapeshellarg(\$runnerCpus)"
 need "escapeshellarg(\$runnerMemory)"
+need "escapeshellarg(\$autoscale)"
 need 'bounded_request_string(post_scalar('
 need "case 'apply-config':"
 need "expected_config_revision"
