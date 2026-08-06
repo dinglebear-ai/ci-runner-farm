@@ -51,6 +51,12 @@ grep -Fq 'compatibility-operation-worker' \
 grep -Fq 'operation_create_unique compatibility_test' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh ||
   crf_fail "compatibility start does not create a unique durable operation"
+grep -Fq 'operation_create_unique provisioning_validation' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh ||
+  crf_fail "provisioning start does not create a unique durable operation"
+grep -Fq 'provisioning-operation-worker' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "durable provisioning worker dispatch is missing"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -144,6 +150,7 @@ php tests/api-log.php >/dev/null
 bash tests/graphql-log-api.sh >/dev/null
 bash tests/operations.sh >/dev/null
 bash tests/compatibility-operations.sh >/dev/null
+bash tests/provisioning-operations.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

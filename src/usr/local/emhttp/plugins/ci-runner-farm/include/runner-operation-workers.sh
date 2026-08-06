@@ -160,3 +160,61 @@ operation_compatibility_worker() {
     operation_finish "$id" failed probe_failed       'Compatibility gate did not pass.' "$log_path"
   fi
 }
+
+
+cmd_provisioning_operation_start() {
+  local expected="$1" current id rc
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || {
+    operation_start_error invalid_revision 'valid configuration revision required'
+    return 2
+  }
+  current="$(config_revision 2>/dev/null)" || {
+    operation_start_error backend_unavailable 'configuration revision is unavailable'
+    return 5
+  }
+  if [ "$current" != "$expected" ]; then
+    operation_start_error stale_config 'configuration changed'
+    return 3
+  fi
+  if id="$(operation_create_unique provisioning_validation "$current" provisioning_log)"; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ] && operation_id_valid "$id"; then
+      operation_start_error operation_running 'a provisioning validation is already active' "$id"
+      return 4
+    fi
+    operation_start_error backend_unavailable 'could not create provisioning operation'
+    return 5
+  fi
+  if ! operation_worker_launch provisioning-operation-worker "$id"; then
+    operation_finish "$id" failed launch_failed 'Provisioning worker could not be launched.' >/dev/null 2>&1 || true
+    operation_start_error backend_unavailable 'provisioning worker could not be launched' "$id"
+    return 5
+  fi
+  operation_start_success "$id"
+}
+
+operation_provisioning_worker() {
+  local id="$1" log_path
+  operation_id_valid "$id" || return 1
+  operation_mark_running "$id" 'Provisioning validation started.' || return 1
+  log_path="$(operation_output_log_prepare "$id" provisioning_log)" || {
+    operation_finish "$id" failed backend_unavailable 'Provisioning log could not be created.' >/dev/null 2>&1 || true
+    return 1
+  }
+  if ! operation_config_matches "$id"; then
+    printf '%s\n' 'configuration changed before provisioning validation' >>"$log_path"
+    operation_finish "$id" failed stale_config 'Configuration changed before provisioning validation.' "$log_path"
+    return
+  fi
+  if cmd_validate >>"$log_path" 2>&1; then
+    if ! operation_config_matches "$id"; then
+      operation_finish "$id" failed stale_config 'Configuration changed while provisioning validation was running.' "$log_path"
+      return
+    fi
+    operation_finish "$id" succeeded provisioning_valid 'Provisioning mechanics were verified.' "$log_path"
+  else
+    operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+  fi
+}

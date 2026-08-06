@@ -3829,36 +3829,49 @@ cmd_logs() { docker logs --tail "${2:-100}" -f "${NAME_PREFIX}-${1:-1}"; }
 
 cmd_validate() {
   # Prove the provisioning mechanics WITHOUT a GitHub token: launch the image
-  # with an inert entrypoint, verify mounts/limits, then tear it down.
+  # with an inert entrypoint, verify mounts/limits, then tear it down. Every path
+  # after docker run owns cleanup so a failed inspect cannot leave a container.
+  local name="${NAME_PREFIX}-validate" errf rc=0 created=false a eimg
+  local NO_REGISTER=1
+  local -a injected=()
   check_cache_root || return 1
-  ensure_dirs
-  registry_login
-  local name="${NAME_PREFIX}-validate"
-  docker rm -f "$name" >/dev/null 2>&1
-  local NO_REGISTER=1               # validate swaps the entrypoint for a sleep — never registers
-  build_args 99 "$name"
-  # swap real entrypoint for an inert sleep so no registration is attempted
-  local injected=(); local a; local eimg; eimg="$(effective_image)"
+  ensure_dirs || return 1
+  registry_login || return 1
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  build_args 99 "$name" || return 1
+  eimg="$(effective_image)" || return 1
   for a in "${ARGS[@]}"; do
     [ "$a" = "$eimg" ] && injected+=( --entrypoint /bin/sh "$eimg" -c "sleep 30" ) || injected+=( "$a" )
   done
   log "validate: launching inert container to verify mounts/limits..."
-  local errf; errf="$(mktemp /tmp/crf-validate.XXXXXX)"
-  if ! docker run "${injected[@]}" >/dev/null 2>"$errf"; then
-    err "docker run failed:"; cat "$errf" >&2; rm -f "$errf"; return 1
+  errf="$(mktemp "${RUNDIR:-/tmp}/crf-validate.XXXXXX" 2>/dev/null)" || return 1
+  chmod 0600 "$errf" || { rm -f -- "$errf"; return 1; }
+  if docker run "${injected[@]}" >/dev/null 2>"$errf"; then
+    created=true
+  else
+    err "docker run failed:"
+    cat "$errf" >&2
+    rc=1
   fi
-  rm -f "$errf"
-  echo "--- resource limits ---"
-  docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name"
-  echo "--- mounts ---"
-  docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name"
-  echo "--- tmpfs ---"
-  docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name"
-  echo "--- docker.sock reachable inside container ---"
-  docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
-  docker rm -f "$name" >/dev/null 2>&1
+  rm -f -- "$errf"
+  if [ "$created" = true ]; then
+    echo "--- resource limits ---"
+    docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name" || rc=1
+    echo "--- mounts ---"
+    docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name" || rc=1
+    echo "--- tmpfs ---"
+    docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name" || rc=1
+    echo "--- docker.sock reachable inside container ---"
+    docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null || rc=1
+  fi
+  docker rm -f "$name" >/dev/null 2>&1 || true
   [ -n "$name" ] && [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || true
-  log "validate: OK (container removed). Provisioning mechanics verified on this host."
+  if [ "$rc" -eq 0 ]; then
+    log "validate: OK (container removed). Provisioning mechanics verified on this host."
+  else
+    err "validate: provisioning mechanics did not pass; container removed"
+  fi
+  return "$rc"
 }
 
 # Clear the plugin's caches under CACHE_ROOT. Two independent safeguards: (1) the
@@ -4138,6 +4151,8 @@ case "${1:-status}" in
   compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
   compatibility-operation-start) cmd_compatibility_operation_start "${2:?expected config revision}" ;;
   compatibility-operation-worker) operation_compatibility_worker "${2:?operation id}" ;;
+  provisioning-operation-start) cmd_provisioning_operation_start "${2:?expected config revision}" ;;
+  provisioning-operation-worker) operation_provisioning_worker "${2:?operation id}" ;;
   operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
