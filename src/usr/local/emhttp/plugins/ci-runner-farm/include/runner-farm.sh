@@ -2335,6 +2335,8 @@ with_fleet_lock() {
     ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$RUNDIR/fleet.lock"
   fi
 }
+# Lock ownership contract: this lifecycle body is intentionally unlocked. The
+# legacy dispatcher or strict API caller must own exactly one fleet lock.
 cmd_restart() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
   cmd_stop
@@ -2711,6 +2713,8 @@ start_one_missing_desired() {
   done < <(pool_records)
 }
 
+# Lock ownership contract: cmd_start is an unlocked lifecycle body. Callers
+# serialize it through with_fleet_lock; it must never acquire that lock itself.
 cmd_start() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
   auth_credentials_configured ||
@@ -2848,6 +2852,8 @@ remove_runner_force() {
 # ($CACHE_ROOT/registry-mirror) is intentionally left behind — like the config and
 # token — so a later Start rebuilds the container with its cache warm; only the
 # container is removed here, not the cached layers.
+# Lock ownership contract: cmd_stop is an unlocked lifecycle body. Callers
+# serialize it through with_fleet_lock; forced teardown stays inside this body.
 cmd_stop() {
   kache_watchdog_stop
   autoscale_stop

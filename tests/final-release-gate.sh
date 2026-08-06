@@ -69,6 +69,12 @@ grep -Fq 'operation_latest_public' \
 grep -Fq 'runner_api_operation_read' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
   crf_fail "strict operation-read dispatch is missing"
+grep -Fq 'runner_api_fleet_guard' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "fleet revision guard is missing"
+grep -Fq 'caller must be the sole fleet-lock owner' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict fleet lock ownership contract is missing"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -165,6 +171,7 @@ bash tests/compatibility-operations.sh >/dev/null
 bash tests/provisioning-operations.sh >/dev/null
 bash tests/image-build-operations.sh >/dev/null
 bash tests/operation-api.sh >/dev/null
+bash tests/revision-guards.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

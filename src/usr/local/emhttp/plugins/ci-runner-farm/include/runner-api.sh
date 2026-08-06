@@ -240,6 +240,84 @@ runner_api_fail_unsupported_schema() { runner_api_fail unsupported_schema "${1:-
 runner_api_fail_invalid_runner() { runner_api_fail invalid_runner "${1:-invalid runner}" 4 "${2:-}"; }
 runner_api_fail_operation_not_found() { runner_api_fail operation_not_found "${1:-operation not found}" 4 "${2:-}"; }
 
+runner_api_config_guard() {
+  local expected="$1" request_id="${2:-}" current
+  runner_api_sha256_valid "$expected" || {
+    runner_api_fail_invalid_revision 'configuration revision is invalid' "$request_id"
+    return
+  }
+  if ! declare -F load_cfg >/dev/null || ! load_cfg; then
+    runner_api_fail_backend_unavailable 'configuration authority is unavailable' "$request_id"
+    return
+  fi
+  current="$(config_revision 2>/dev/null)" || {
+    runner_api_fail_backend_unavailable 'configuration revision is unavailable' "$request_id"
+    return
+  }
+  runner_api_sha256_valid "$current" || {
+    runner_api_fail_backend_unavailable 'configuration revision is invalid' "$request_id"
+    return
+  }
+  if [ "$current" != "$expected" ]; then
+    runner_api_fail_stale_config 'configuration changed' "$request_id"
+    return
+  fi
+}
+
+runner_api_fleet_guard() {
+  local expected_config="$1" expected_inventory="$2" request_id="${3:-}"
+  local current_config current_inventory
+  runner_api_sha256_valid "$expected_config" && runner_api_sha256_valid "$expected_inventory" || {
+    runner_api_fail_invalid_revision 'fleet revisions are invalid' "$request_id"
+    return
+  }
+  if ! declare -F load_cfg >/dev/null || ! load_cfg; then
+    runner_api_fail_backend_unavailable 'configuration authority is unavailable' "$request_id"
+    return
+  fi
+  if ! declare -F fleet_inventory_refresh >/dev/null || ! fleet_inventory_refresh; then
+    runner_api_fail_backend_unavailable 'fleet inventory is unavailable' "$request_id"
+    return
+  fi
+  current_config="$(config_revision 2>/dev/null)" || {
+    runner_api_fail_backend_unavailable 'configuration revision is unavailable' "$request_id"
+    return
+  }
+  if ! runner_api_private_file_valid "${INVENTORY_FILE:-}" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_fail_backend_unavailable 'fleet inventory is unsafe' "$request_id"
+    return
+  fi
+  current_inventory="$(sha256sum "$INVENTORY_FILE" 2>/dev/null | cut -d' ' -f1)"
+  runner_api_sha256_valid "$current_config" && runner_api_sha256_valid "$current_inventory" || {
+    runner_api_fail_backend_unavailable 'fleet authority revision is invalid' "$request_id"
+    return
+  }
+  if [ "$current_config" != "$expected_config" ]; then
+    runner_api_fail_stale_config 'configuration changed' "$request_id"
+    return
+  fi
+  if [ "$current_inventory" != "$expected_inventory" ]; then
+    runner_api_fail_stale_inventory 'fleet inventory changed' "$request_id"
+    return
+  fi
+}
+
+runner_api_guarded_config_action() {
+  local expected="$1" request_id="$2"
+  shift 2
+  runner_api_config_guard "$expected" "$request_id" || return $?
+  "$@"
+}
+
+# The caller must be the sole fleet-lock owner. This helper refreshes and guards
+# both authorities inside that lock, then invokes one fixed internal action.
+runner_api_guarded_fleet_action() {
+  local expected_config="$1" expected_inventory="$2" request_id="$3"
+  shift 3
+  runner_api_fleet_guard "$expected_config" "$expected_inventory" "$request_id" || return $?
+  "$@"
+}
+
 runner_api_result_file_create() {
   local prefix="$1" dir="$RUNDIR/api-results" path
   case "$prefix" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
