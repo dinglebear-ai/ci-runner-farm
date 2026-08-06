@@ -293,6 +293,20 @@ if ($action === 'transition' && $argc === 11) {
     operation_write_file($target, $existing);
     exit(0);
 }
+if ($action === 'active' && $argc === 5) {
+    $record = operation_read_file($argv[2], $argv[3]);
+    $kind = operation_kind($argv[4]);
+    if ($record['kind'] === $kind && in_array($record['state'], ['queued', 'running'], true)) {
+        echo $record['operation_id'], PHP_EOL;
+        exit(0);
+    }
+    exit(1);
+}
+if ($action === 'config' && $argc === 4) {
+    $record = operation_read_file($argv[2], $argv[3]);
+    echo $record['config_revision'], PHP_EOL;
+    exit(0);
+}
 if (in_array($action, ['validate', 'public', 'worker', 'state'], true) && $argc === 4) {
     $record = operation_read_file($argv[2], $argv[3]);
     if ($action === 'validate') $value = $record;

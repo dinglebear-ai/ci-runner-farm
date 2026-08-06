@@ -97,6 +97,39 @@ operation_create_commit() {
   fi
 }
 
+operation_active_id_by_kind_locked() {
+  local kind="$1" file id active
+  operation_kind_valid "$kind" || return 1
+  for file in "$OPERATION_DIR"/*.json; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    id="$(basename "$file" .json)"
+    operation_id_valid "$id" && operation_record_file_valid "$file" || continue
+    active="$(/usr/bin/php "$(operation_helper_path)" active "$file" "$id" "$kind" 2>/dev/null)" || continue
+    operation_id_valid "$active" || continue
+    printf '%s\n' "$active"
+    return 0
+  done
+  return 1
+}
+
+operation_create_unique() {
+  local kind="$1" config_revision="$2" output_source="$3" id existing rc=0
+  operation_kind_valid "$kind" && [[ "$config_revision" =~ ^[0-9a-f]{64}$ ]] &&
+    operation_output_source_valid "$output_source" || return 1
+  id="${CRF_OPERATION_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null)}"
+  operation_id_valid "$id" || return 1
+  operation_lock_acquire || return 1
+  if existing="$(operation_active_id_by_kind_locked "$kind")"; then
+    operation_lock_release
+    printf '%s\n' "$existing"
+    return 2
+  fi
+  operation_create_commit "$kind" "$config_revision" "$output_source" "$id" || rc=1
+  operation_lock_release
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s\n' "$id"
+}
+
 operation_create() {
   local kind="$1" config_revision="$2" output_source="$3" id rc=0
   operation_kind_valid "$kind" && [[ "$config_revision" =~ ^[0-9a-f]{64}$ ]] &&
@@ -172,6 +205,14 @@ operation_read_public() {
   path="$(operation_record_path "$id")" || return 1
   operation_record_file_valid "$path" || return 1
   /usr/bin/php "$helper" public "$path" "$id"
+}
+
+operation_config_revision_read() {
+  local id="$1" path helper
+  helper="$(operation_helper_path)"
+  path="$(operation_record_path "$id")" || return 1
+  operation_record_file_valid "$path" || return 1
+  /usr/bin/php "$helper" config "$path" "$id"
 }
 
 operation_state_read() {

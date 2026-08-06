@@ -18,6 +18,7 @@ id1='00000001-0000-0000-0000-000000000001'
 CRF_OPERATION_ID="$id1"
 created="$(operation_create compatibility_test "$sha" compatibility_log)"
 crf_assert_eq "$id1" "$created" 'created operation ID'
+crf_assert_eq "$sha" "$(operation_config_revision_read "$id1")" 'operation config revision'
 crf_assert_file_mode "$OPERATION_DIR" 700
 crf_assert_file_mode "$OPERATION_DIR/$id1.json" 600
 if operation_create compatibility_test "$sha" compatibility_log >/dev/null 2>&1; then crf_fail 'duplicate operation ID was accepted'; fi
@@ -54,6 +55,12 @@ rm "$OPERATION_DIR/00000002-0000-0000-0000-000000000002.json"
 
 idq='00000003-0000-0000-0000-000000000003'
 CRF_OPERATION_ID="$idq" operation_create image_build "$sha" image_build_log >/dev/null
+set +e
+existing="$(CRF_OPERATION_ID='00000003-0000-0000-0000-000000000099' operation_create_unique image_build "$sha" image_build_log)"
+unique_rc=$?
+set -e
+crf_assert_eq 2 "$unique_rc" 'duplicate active kind exit code'
+crf_assert_eq "$idq" "$existing" 'duplicate active kind operation ID'
 idm='00000004-0000-0000-0000-000000000004'
 CRF_OPERATION_ID="$idm" operation_create provisioning_validation "$sha" provisioning_log >/dev/null
 CRF_OPERATION_PID=4194304 CRF_OPERATION_START_TICKS=1 operation_mark_running "$idm" 'Validation started.'

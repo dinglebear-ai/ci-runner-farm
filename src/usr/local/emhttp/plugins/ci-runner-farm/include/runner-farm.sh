@@ -138,6 +138,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-jit.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh
 . "$SCRIPT_DIR/runner-operations.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh
+. "$SCRIPT_DIR/runner-operation-workers.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh
@@ -4134,6 +4136,8 @@ case "${1:-status}" in
   rollback-backend) migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   compatibility-start) scaleset_compatibility_start ;;
   compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
+  compatibility-operation-start) cmd_compatibility_operation_start "${2:?expected config revision}" ;;
+  compatibility-operation-worker) operation_compatibility_worker "${2:?operation id}" ;;
   operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;
