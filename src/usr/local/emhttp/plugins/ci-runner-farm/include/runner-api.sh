@@ -239,6 +239,10 @@ runner_api_fail_output_too_large() { runner_api_fail output_too_large "${1:-outp
 runner_api_fail_unsupported_schema() { runner_api_fail unsupported_schema "${1:-unsupported schema}" 2 "${2:-}"; }
 runner_api_fail_invalid_runner() { runner_api_fail invalid_runner "${1:-invalid runner}" 4 "${2:-}"; }
 runner_api_fail_operation_not_found() { runner_api_fail operation_not_found "${1:-operation not found}" 4 "${2:-}"; }
+runner_api_fail_invalid_config() { runner_api_fail invalid_config "${1:-invalid configuration}" 4 "${2:-}"; }
+runner_api_fail_backend_transition() { runner_api_fail backend_transition_in_progress "${1:-backend transition in progress}" 4 "${2:-}"; }
+runner_api_fail_backend_not_ready() { runner_api_fail backend_not_ready "${1:-backend not ready}" 4 "${2:-}"; }
+runner_api_fail_resource_capacity() { runner_api_fail resource_capacity "${1:-requested capacity was not reached}" 4 "${2:-}"; }
 
 runner_api_config_guard() {
   local expected="$1" request_id="${2:-}" current
@@ -575,6 +579,93 @@ runner_api_log() {
   return "$emit_rc"
 }
 
+runner_api_lifecycle_preflight() {
+  local operation="$1" request_id="$2"
+  if ! validate_runtime_config >/dev/null 2>&1; then
+    runner_api_fail_invalid_config 'runner configuration is invalid' "$request_id"
+    return
+  fi
+  case "$operation" in
+    start|restart)
+      if ! auth_credentials_configured >/dev/null 2>&1; then
+        runner_api_fail_backend_not_ready 'valid GitHub credentials are required' "$request_id"
+        return
+      fi
+      if declare -F migration_load >/dev/null && migration_load >/dev/null 2>&1; then
+        case "${MIGRATION_PHASE:-}" in
+          classic_active|scaleset_active) ;;
+          activating_classic)
+            if [ "${MIGRATION_EFFECTIVE_BACKEND:-}" = scaleset ] &&
+               [ "${MIGRATION_LAST_BARRIER:-}" = jit_drained ] &&
+               declare -F backend_classic_admission_allowed >/dev/null &&
+               backend_classic_admission_allowed >/dev/null 2>&1; then
+              :
+            else
+              runner_api_fail_backend_transition 'backend transition blocks fleet start' "$request_id"
+              return
+            fi
+            ;;
+          *)
+            runner_api_fail_backend_transition 'backend transition blocks fleet start' "$request_id"
+            return
+            ;;
+        esac
+      fi
+      ;;
+  esac
+}
+
+runner_api_lifecycle_capture() {
+  local log_path="$1"
+  shift
+  "$@" 2>&1 | tail -c "$RUNNER_API_MAX_LOG_BYTES" >"$log_path"
+  return "${PIPESTATUS[0]}"
+}
+
+# Called only beneath the dispatch-owned fleet lock.
+runner_api_lifecycle_locked() {
+  local operation="$1" expected_config="$2" expected_inventory="$3" request_id="$4"
+  local log_path rc=0 refresh_ok=0 message
+  runner_api_fleet_guard "$expected_config" "$expected_inventory" "$request_id" || return $?
+  runner_api_lifecycle_preflight "$operation" "$request_id" || return $?
+  log_path="$(runner_api_result_file_create "$operation.lifecycle")" || {
+    runner_api_fail_backend_unavailable 'could not create lifecycle log buffer' "$request_id"
+    return
+  }
+  case "$operation" in
+    start) runner_api_lifecycle_capture "$log_path" cmd_start || rc=$?; message='fleet started' ;;
+    stop) runner_api_lifecycle_capture "$log_path" cmd_stop || rc=$?; message='fleet stopped' ;;
+    restart) runner_api_lifecycle_capture "$log_path" cmd_restart || rc=$?; message='fleet restarted' ;;
+    *)
+      runner_api_result_file_cleanup "$log_path" || true
+      runner_api_fail_invalid_request 'unsupported lifecycle operation' "$request_id"
+      return
+      ;;
+  esac
+  if fleet_inventory_refresh >/dev/null 2>&1; then refresh_ok=1; fi
+  runner_api_result_file_cleanup "$log_path" || true
+  if [ "$rc" -eq 0 ] && [ "$refresh_ok" -eq 1 ]; then
+    runner_api_emit "$request_id" true ok "$message" @null
+    return
+  fi
+  if [ "$refresh_ok" -ne 1 ]; then
+    runner_api_fail_backend_unavailable 'fleet inventory could not be refreshed after lifecycle action' "$request_id"
+    return
+  fi
+  case "$operation:$rc" in
+    start:*|restart:11)
+      runner_api_fail_resource_capacity 'fleet started with partial capacity' "$request_id"
+      ;;
+    restart:10)
+      runner_api_fail_backend_unavailable 'fleet restart stopped before start phase' "$request_id"
+      ;;
+    stop:*|restart:*)
+      runner_api_fail_backend_unavailable 'fleet lifecycle action failed' "$request_id"
+      ;;
+    *) runner_api_fail_backend_unavailable 'fleet lifecycle action failed' "$request_id" ;;
+  esac
+}
+
 runner_api_operation_read() {
   local request_id="${RUNNER_API_FIELDS[0]}" id="${RUNNER_API_FIELDS[1]}" path result emit_rc
   path="$(operation_record_path "$id")" || {
@@ -618,6 +709,11 @@ runner_api_dispatch() {
     statistics) runner_api_auxiliary statistics ;;
     cache-usage) runner_api_auxiliary cache ;;
     image) runner_api_auxiliary image ;;
+    start|stop|restart)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_lifecycle_locked "$operation" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" "${RUNNER_API_FIELDS[0]}"
+      ;;
     operation-read)
       runner_api_prepare_request "$operation" || return $?
       runner_api_operation_read

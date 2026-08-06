@@ -75,6 +75,15 @@ grep -Fq 'runner_api_fleet_guard' \
 grep -Fq 'caller must be the sole fleet-lock owner' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
   crf_fail "strict fleet lock ownership contract is missing"
+grep -Fq 'runner_api_lifecycle_locked' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict lifecycle adapter is missing"
+grep -Fq 'cmd_stop || return 10' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "restart stop-phase mapping is missing"
+grep -Fq 'cmd_start || return 11' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "restart start-phase mapping is missing"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -172,6 +181,7 @@ bash tests/provisioning-operations.sh >/dev/null
 bash tests/image-build-operations.sh >/dev/null
 bash tests/operation-api.sh >/dev/null
 bash tests/revision-guards.sh >/dev/null
+bash tests/lifecycle-api.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

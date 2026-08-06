@@ -2339,8 +2339,8 @@ with_fleet_lock() {
 # legacy dispatcher or strict API caller must own exactly one fleet lock.
 cmd_restart() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  cmd_stop
-  cmd_start
+  cmd_stop || return 10
+  cmd_start || return 11
 }
 
 # Operator convenience: (re)start the shared image cache + regenerate the runner DinD
