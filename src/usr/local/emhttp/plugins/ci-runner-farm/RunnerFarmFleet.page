@@ -30,8 +30,8 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
         <h1 class="crf-page-title">Runners</h1>
       </div>
       <div class="crf-page-actions">
-        <button class="crf-button crf-button-primary" id="crf-start-action" data-crf-mutation onclick="crfAction('start')" style="display:none"><i class="fa fa-play" aria-hidden="true"></i>Start</button>
-        <button class="crf-button crf-button-dark" id="crf-stop-action" onclick="crfAction('stop')"><img class="crf-button-source-icon" src="/plugins/ci-runner-farm/assets/icons/stop.svg" alt="">Stop</button>
+        <button type="button" class="crf-button crf-button-primary" id="crf-start-action" data-crf-mutation onclick="crfAction('start')" style="display:none"><i class="fa fa-play" aria-hidden="true"></i>Start</button>
+        <button type="button" class="crf-button crf-button-dark" id="crf-stop-action" onclick="crfAction('stop')"><img class="crf-button-source-icon" src="/plugins/ci-runner-farm/assets/icons/stop.svg" alt="">Stop</button>
         <span class="crf-hero-menu-wrap">
           <button class="crf-button crf-icon-button" id="crf-hero-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More actions" onclick="crfToggleHeroMenu()"><img class="crf-hero-ellipsis" src="/plugins/ci-runner-farm/assets/icons/ellipsis.svg" alt=""></button>
           <span class="crf-hero-menu" id="crf-hero-menu" role="menu" hidden>
@@ -87,7 +87,7 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
   <div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
   <div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
 
-  <div class="crf-single-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span><input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled><button id="crf-scale-button" class="crf-button crf-button-primary crf-button-compact" onclick="crfScale()" disabled>Scale to</button></div>
+  <div class="crf-single-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span><input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled><button type="button" id="crf-scale-button" class="crf-button crf-button-primary crf-button-compact" onclick="crfScale()" disabled>Scale to</button></div>
 
   <section id="crf-runner-tables">
     <div id="crf-pools-section" class="crf-pools-section" style="display:none"></div>
@@ -229,19 +229,19 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
   .crf-load-legend b{margin-left:4px;color:var(--crf-ink-2);font-size:10.5px;font-variant-numeric:tabular-nums}
   .crf-load-key{display:inline-block;width:8px;height:3px;border-radius:2px}.crf-load-key-cpu{background:#ff8c2f}.crf-load-key-busy{background:#c4c4c4;margin-left:4px}
   #crf-load-chart{display:block;width:100%;height:34px}
-  .crf-cache-clear{margin-left:auto;border:0;border-radius:9999px;background:var(--crf-orange-soft);color:#ff8c2f;padding:1px 8px;font:600 10.5px clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
-  .crf-cache-clear:hover{background:#fed7aa;text-decoration:none}
+  button.crf-cache-clear{appearance:none;box-sizing:border-box;min-width:0;height:20px;margin:0 0 0 auto;padding:1px 8px;border:0;border-radius:9999px;background:var(--crf-orange-soft);color:#ff8c2f;font:600 10.5px/1 clear-sans,ui-sans-serif,system-ui,sans-serif;letter-spacing:normal;text-transform:none;cursor:pointer}
+  button.crf-cache-clear:hover{background:#fed7aa;text-decoration:none}
   .crf-fleet-warning{min-height:34px;display:flex;align-items:center;gap:8px;padding:8px 24px;background:var(--crf-warning-soft);border-top:1px solid #fde68a;color:var(--crf-warning-ink);font-size:12.5px}
   .crf-fleet-warning>img{display:block;width:12px;height:12px;flex:none}.crf-fleet-warning strong{font-weight:600}.crf-fleet-warning .crf-warning-detail{font-weight:400}
-  .crf-fleet-warning-dismiss{margin-left:auto;padding:0;border:0;background:transparent;color:inherit;font:600 11px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
-  .crf-fleet-warning-dismiss:hover{text-decoration:underline}
+  button.crf-fleet-warning-dismiss{appearance:none;min-width:0;margin:0 0 0 auto;padding:0;border:0;background:transparent;color:inherit;font:600 11px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;letter-spacing:normal;text-transform:none;cursor:pointer}
+  button.crf-fleet-warning-dismiss:hover{text-decoration:underline}
   .crf-single-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--crf-ink-3);font-size:12px}
   .crf-single-scale input{width:54px!important;height:28px!important;margin:0!important;padding:0 8px!important;border:1px solid #d4d4d4!important;border-radius:6px!important;background:#fff!important;color:var(--crf-ink)!important;font-size:12px!important}
   .crf-pools-section{display:flex;flex-direction:column;gap:16px;margin:0}
   .crf-pool-fleet{margin:0;background:#fff;border:2px solid #f5f5f5;border-radius:6px;box-shadow:var(--crf-shadow);overflow:hidden}
   .crf-pool-fleet-meta{height:59px;min-height:59px;box-sizing:border-box;padding:12px 20px;display:flex;align-items:center;gap:10px;border:0;border-bottom:1px solid var(--crf-border-soft);border-radius:0;background:var(--crf-panel-soft);color:var(--crf-ink-3);font-size:11px}
-  .crf-pool-toggle{width:22px;height:22px;display:grid;place-items:center;flex:none;border:0;border-radius:6px;background:transparent;color:var(--crf-ink-3);font-size:9px;cursor:pointer}
-  .crf-pool-toggle:hover{background:#f0f0f0}.crf-pool-toggle i{transition:transform .15s}.crf-pool-fleet.is-collapsed .crf-pool-toggle i{transform:rotate(-90deg)}.crf-pool-fleet.is-collapsed .crf-bays{display:none}
+  button.crf-pool-toggle{appearance:none;box-sizing:border-box;width:22px;min-width:22px;height:22px;margin:0;padding:0;display:grid;place-items:center;flex:none;border:0;border-radius:6px;background:transparent;color:var(--crf-ink-3);font:400 9px/1 clear-sans,ui-sans-serif,system-ui,sans-serif;letter-spacing:normal;text-transform:none;cursor:pointer}
+  button.crf-pool-toggle:hover{background:#f0f0f0}.crf-pool-toggle i{transition:transform .15s}.crf-pool-fleet.is-collapsed .crf-pool-toggle i{transform:rotate(-90deg)}.crf-pool-fleet.is-collapsed .crf-bays{display:none}
   .crf-pool-icon{width:30px;height:30px;display:grid;place-items:center;flex:none;border-radius:7px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:14px;overflow:hidden}
   .crf-pool-icon img{display:block;max-width:22px;max-height:22px}
   .crf-pool-fleet[data-pool="python"] .crf-pool-icon{background:#dbeafe;color:#1e40af}.crf-pool-fleet[data-pool="typescript"] .crf-pool-icon{background:#e3ecf8;color:#2f6bb0}.crf-pool-fleet[data-pool="go"] .crf-pool-icon{background:#daf1f7;color:#0d7fa5}.crf-pool-fleet[data-pool="ops"] .crf-pool-icon,.crf-pool-fleet[data-pool="system"] .crf-pool-icon{background:#ececec;color:#525252}
@@ -268,8 +268,8 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
   .crf-pool-health.is-visible{display:grid}
   .crf-pool-fleet-meta .crf-pool-control{margin-left:auto}
   .crf-pool-control{gap:6px;color:var(--crf-ink-3)}
-  .crf-pool-scale-trigger{height:28px;padding:0 12px;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--crf-border);border-radius:6px;background:#fff;color:var(--crf-ink-3);font:600 12px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;cursor:pointer;white-space:nowrap}.crf-pool-scale-trigger img{display:block;width:10px;height:10px}
-  .crf-pool-scale-trigger:hover{background:#f5f5f5;color:var(--crf-ink)}
+  button.crf-pool-scale-trigger{appearance:none;box-sizing:border-box;min-width:0;height:28px;margin:0;padding:0 12px;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--crf-border);border-radius:6px;background:#fff;color:var(--crf-ink-3);font:600 12px/normal clear-sans,ui-sans-serif,system-ui,sans-serif;letter-spacing:normal;text-transform:none;cursor:pointer;white-space:nowrap}.crf-pool-scale-trigger img{display:block;width:10px;height:10px}
+  button.crf-pool-scale-trigger:hover{background:#f5f5f5;color:var(--crf-ink)}
   .crf-pool-scale-editor{display:flex;align-items:center;gap:6px}.crf-pool-scale-editor[hidden]{display:none}
   .crf-pool-control input{width:48px!important;height:28px!important;margin:0!important;border:1px solid #d4d4d4!important;border-radius:6px!important;padding:0 7px!important}
   .crf-pool-control uui-button:not(:defined){height:28px;padding:0 12px;background:#fff;border:1px solid var(--crf-border);color:var(--crf-ink-3);font-size:12px;font-weight:600}
@@ -305,13 +305,13 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
   .crf-queue-head{display:flex;align-items:center;gap:10px;min-height:49px;padding:0 20px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft);flex-wrap:wrap}
   .crf-queue-icon{width:26px;height:26px;border-radius:7px;background:var(--crf-warning-soft);color:var(--crf-warning-ink);display:grid;place-items:center;flex:none}.crf-queue-icon img{display:block;width:13px;height:13px}
   .crf-queue-title{font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:var(--crf-ink-2)}.crf-queue-subtitle{font-size:12.5px;color:var(--crf-ink-3)}.crf-queue-spacer{flex:1}
-  #crf-queue-depth{display:block;width:80px;height:18px;flex:none}.crf-queue-close{width:27px;height:27px;margin:0;padding:0;border:0;border-radius:5px;background:transparent;color:var(--crf-ink-4);display:grid;place-items:center;cursor:pointer}.crf-queue-close img{display:block;width:12px;height:12px}.crf-queue-close:hover{background:#f0f0f0;color:var(--crf-ink)}
+  #crf-queue-depth{display:block;width:80px;height:18px;flex:none}button.crf-queue-close{appearance:none;box-sizing:border-box;width:27px;min-width:27px;height:27px;margin:0;padding:0;border:0;border-radius:5px;background:transparent;color:var(--crf-ink-4);display:grid;place-items:center;letter-spacing:normal;text-transform:none;cursor:pointer}.crf-queue-close img{display:block;width:12px;height:12px}button.crf-queue-close:hover{background:#f0f0f0;color:var(--crf-ink)}
   .crf-queue-pressure{display:flex;align-items:center;gap:8px;min-height:33px;padding:0 20px;border-bottom:1px solid #f7f7f7;flex-wrap:wrap}.crf-queue-pressure[hidden]{display:none}.crf-queue-pressure-label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--crf-ink-4)}.crf-queue-pressure-chip{display:inline-flex;align-items:center;border-radius:9999px;padding:2px 9px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:11px;font-weight:600}.crf-queue-pressure-partial{margin-left:auto;color:var(--crf-warning-ink);font-size:11px;font-weight:600}
   .crf-queue-grid{position:relative;display:grid;grid-template-columns:minmax(220px,1.5fr) minmax(150px,1fr) 110px minmax(150px,1fr) 80px 34px;align-items:center;padding:9px 20px;border-bottom:1px solid #f7f7f7;gap:0}.crf-queue-grid:hover{background:#fff7ed}
   .crf-queue-grid-head{height:32px;box-sizing:border-box;padding-top:0;padding-bottom:0;border-bottom-color:var(--crf-border-soft)}.crf-queue-grid-head:hover{background:#fff}.crf-queue-grid-head>span{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--crf-ink-2)}.crf-queue-grid-head>span:nth-child(5){text-align:right}
   .crf-queue-rail{position:absolute;inset:0 auto 0 0;width:3px;background:#e9bf41}.crf-queue-workflow{display:flex;flex-direction:column;gap:1px;min-width:0}.crf-queue-workflow strong{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-workflow small{font:11.5px ui-monospace,Menlo,monospace;color:var(--crf-ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .crf-queue-labels{font:11.5px ui-monospace,Menlo,monospace;color:var(--crf-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-pool{justify-self:start;display:inline-flex;align-items:center;border-radius:9999px;padding:2px 9px;background:var(--crf-orange-soft);color:var(--crf-orange-ink);font-size:11px;font-weight:600}.crf-queue-pool.is-unknown{background:#e5e7eb;color:#4b5563}.crf-queue-reason{font-size:12px;color:var(--crf-warning-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crf-queue-wait{font-size:12.5px;font-weight:600;color:var(--crf-warning-ink);font-variant-numeric:tabular-nums;text-align:right}
-  .crf-queue-cancel{justify-self:end;width:26px;height:26px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;color:#d4d4d4;display:grid;place-items:center;cursor:pointer;transition:all .15s}.crf-queue-cancel img{display:block;width:12px;height:12px}.crf-queue-cancel:hover{background:#fef2f2;color:#bd1818;transform:scale(1.1)}.crf-queue-cancel:disabled{opacity:.45;cursor:wait;transform:none}.crf-queue-empty{padding:18px 20px;display:flex;align-items:center;gap:8px;color:var(--crf-ink-4);font-size:12.5px}
+  button.crf-queue-cancel{appearance:none;box-sizing:border-box;justify-self:end;width:26px;min-width:26px;height:26px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;color:#d4d4d4;display:grid;place-items:center;letter-spacing:normal;text-transform:none;cursor:pointer;transition:all .15s}.crf-queue-cancel img{display:block;width:12px;height:12px}button.crf-queue-cancel:hover{background:#fef2f2;color:#bd1818;transform:scale(1.1)}button.crf-queue-cancel:disabled{opacity:.45;cursor:wait;transform:none}.crf-queue-empty{padding:18px 20px;display:flex;align-items:center;gap:8px;color:var(--crf-ink-4);font-size:12.5px}
   .crf-banner{width:100%;margin:0}
   @media(max-width:980px){.crf-bay-head,.crf-queue-grid-head{display:none}.crf-bay,.crf-queue-grid{display:flex;flex-wrap:wrap;gap:6px 16px}.crf-bay>.crf-usage{flex:1 1 180px}.crf-queue-workflow{flex:1 1 260px}.crf-queue-labels{flex:1 1 220px}.crf-pool-fleet-meta{flex-wrap:wrap}.crf-pool-fleet-meta .crf-pool-control{margin-left:0}.crf-fleet-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.crf-load-stat{grid-column:span 2!important}}
   @media(max-width:760px){
@@ -332,12 +332,12 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
     .crf-fleet-stats .crf-stat-value,.crf-fleet-stats .crf-stat-small{font-size:24px}
     #crf-load-chart{height:58px!important}
     .crf-load-legend{font-size:10.5px}
-    .crf-cache-clear{min-width:56px;min-height:40px;padding:7px 10px}
+    button.crf-cache-clear{min-width:56px;min-height:40px;height:40px;padding:7px 10px}
     .crf-fleet-warning,.crf-farm-stopped{padding:13px 14px;align-items:flex-start;gap:9px;line-height:1.4}
     .crf-fleet-warning>img{width:15px;height:15px;margin-top:1px}
     .crf-fleet-warning strong{flex:1 1 calc(100% - 28px);font-size:13px}
     .crf-fleet-warning .crf-warning-detail{display:block;flex:1 1 100%;margin-left:24px}
-    .crf-fleet-warning-dismiss{min-height:44px;margin:0 0 0 auto;padding:0 12px;font-size:12px}
+    button.crf-fleet-warning-dismiss{min-height:44px;margin:0 0 0 auto;padding:0 12px;font-size:12px}
     .crf-farm-stopped .crf-stopped-spacer{display:none}
     .crf-farm-stopped .crf-button{width:100%;margin-top:4px}
     .crf-single-scale{width:100%;margin:0;padding:2px 0;justify-content:flex-end}
@@ -345,7 +345,7 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
     .crf-pools-section{gap:12px}
     .crf-pool-fleet{border-width:1px;border-radius:12px}
     .crf-pool-fleet-meta{height:auto;min-height:0;padding:12px;display:grid;grid-template-columns:44px 36px minmax(0,1fr) auto;grid-template-areas:"toggle icon heading control" ". . metrics metrics" ". . state state";gap:6px 9px;align-items:center}
-    .crf-pool-toggle{grid-area:toggle;width:44px;height:44px;border:1px solid var(--crf-border);border-radius:9px;background:#fff}
+    button.crf-pool-toggle{grid-area:toggle;width:44px;min-width:44px;height:44px;border:1px solid var(--crf-border);border-radius:9px;background:#fff}
     .crf-pool-icon{grid-area:icon;width:36px;height:36px;border-radius:10px}
     .crf-pool-heading{grid-area:heading}
     .crf-pool-title{font-size:16px}
@@ -356,7 +356,7 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
     .crf-pool-state-wrap{grid-area:state;margin:0;white-space:normal;font-size:11px;line-height:1.35}
     .crf-pool-resources{display:none}
     .crf-pool-fleet-meta .crf-pool-control{grid-area:control;margin:0!important}
-    .crf-pool-scale-trigger{width:44px;height:40px;padding:0;justify-content:center;font-size:0}
+    button.crf-pool-scale-trigger{width:44px;min-width:44px;height:40px;padding:0;justify-content:center;font-size:0}
     .crf-pool-scale-trigger img{width:15px;height:15px}
     .crf-pool-scale-editor{position:absolute;right:12px;z-index:20;padding:8px;border:1px solid var(--crf-border);border-radius:10px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.14)}
     .crf-bay-head{display:none!important}
@@ -382,7 +382,7 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
     .crf-queue-pool{grid-area:pool}
     .crf-queue-reason{grid-area:reason;white-space:normal}
     .crf-queue-wait{grid-area:wait}
-    .crf-queue-cancel{grid-area:cancel;width:44px;height:44px}
+    button.crf-queue-cancel{grid-area:cancel;width:44px;min-width:44px;height:44px}
     .crf-queue-pressure{padding:8px 12px}
     .crf-queue-pressure-partial{width:100%;margin-left:0}
     .crf-queue-empty{padding:18px 14px;line-height:1.45}
