@@ -4153,6 +4153,8 @@ case "${1:-status}" in
   compatibility-operation-worker) operation_compatibility_worker "${2:?operation id}" ;;
   provisioning-operation-start) cmd_provisioning_operation_start "${2:?expected config revision}" ;;
   provisioning-operation-worker) operation_provisioning_worker "${2:?operation id}" ;;
+  image-build-operation-start) cmd_image_build_operation_start "${2:?expected Dockerfile SHA-256}" ;;
+  image-build-operation-worker) operation_image_build_worker "${2:?operation id}" "${3:?expected Dockerfile SHA-256}" ;;
   operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  autoscale_start ;;
   autoscale-stop)   autoscale_stop ;;

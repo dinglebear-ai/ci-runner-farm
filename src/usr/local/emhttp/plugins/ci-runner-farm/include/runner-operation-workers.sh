@@ -19,7 +19,7 @@ operation_output_log_path() {
   case "$source" in
     compatibility_log) printf '%s/%s.compatibility.log' "$OPERATION_RUNTIME_DIR" "$id" ;;
     provisioning_log) printf '%s/%s.provisioning.log' "$OPERATION_RUNTIME_DIR" "$id" ;;
-    image_build_log) printf '%s/%s.image-build.log' "$OPERATION_RUNTIME_DIR" "$id" ;;
+    image_build_log) printf '%s/build.log' "${RUNDIR:-$OPERATION_RUNTIME_DIR}" ;;
     *) return 1 ;;
   esac
 }
@@ -216,5 +216,169 @@ operation_provisioning_worker() {
     operation_finish "$id" succeeded provisioning_valid 'Provisioning mechanics were verified.' "$log_path"
   else
     operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+  fi
+}
+
+
+operation_image_source_path() {
+  local source="${CFGDIR:-/boot/config/plugins/ci-runner-farm}/Dockerfile"
+  [ -f "$source" ] || source="${CRF_DEFAULT_DOCKERFILE:-/usr/local/emhttp/plugins/${PLUGIN:-ci-runner-farm}/default.Dockerfile}"
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  printf '%s' "$source"
+}
+
+operation_image_source_hash() {
+  local source size
+  source="$(operation_image_source_path)" || return 1
+  size="$(stat -c %s "$source" 2>/dev/null || echo invalid)"
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -ge 1 ] && [ "$size" -le 1048576 ] || return 1
+  sha256sum "$source" 2>/dev/null | awk '{print $1}'
+}
+
+operation_image_snapshot_path() {
+  operation_id_valid "$1" || return 1
+  operation_runtime_dir_ensure || return 1
+  printf '%s/%s.Dockerfile' "$OPERATION_RUNTIME_DIR" "$1"
+}
+
+operation_image_snapshot_prepare() {
+  local id="$1" expected="$2" source actual path tmp
+  operation_id_valid "$id" && [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  source="$(operation_image_source_path)" || return 1
+  actual="$(operation_image_source_hash)" || return 1
+  [ "$actual" = "$expected" ] || return 2
+  path="$(operation_image_snapshot_path "$id")" || return 1
+  [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  tmp="$(mktemp "$OPERATION_RUNTIME_DIR/$id.Dockerfile.tmp.XXXXXX")" || return 1
+  if ! cp -- "$source" "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  actual="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"
+  if [ "$actual" != "$expected" ] || ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp" "$path"
+    return 2
+  fi
+  printf '%s' "$path"
+}
+
+operation_image_snapshot_valid() {
+  local id="$1" expected="$2" path size mode actual
+  path="$(operation_image_snapshot_path "$id")" || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  size="$(stat -c %s "$path" 2>/dev/null || echo invalid)"
+  mode="$(stat -c %a "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -ge 1 ] && [ "$size" -le 1048576 ] &&
+    [ "$mode" = 600 ] || return 1
+  actual="$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+  [ "$actual" = "$expected" ]
+}
+
+cmd_image_build_operation_start() {
+  local expected="$1" actual config id snapshot rc
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || {
+    operation_start_error invalid_revision 'valid Dockerfile SHA-256 required'
+    return 2
+  }
+  actual="$(operation_image_source_hash 2>/dev/null)" || {
+    operation_start_error backend_unavailable 'saved Dockerfile is unavailable'
+    return 5
+  }
+  if [ "$actual" != "$expected" ]; then
+    operation_start_error stale_dockerfile 'Dockerfile changed after it was saved'
+    return 3
+  fi
+  config="$(config_revision 2>/dev/null)" || {
+    operation_start_error backend_unavailable 'configuration revision is unavailable'
+    return 5
+  }
+  if id="$(operation_create_unique image_build "$config" image_build_log)"; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ] && operation_id_valid "$id"; then
+      operation_start_error operation_running 'an image build is already active' "$id"
+      return 4
+    fi
+    operation_start_error backend_unavailable 'could not create image build operation'
+    return 5
+  fi
+  if snapshot="$(operation_image_snapshot_prepare "$id" "$expected")"; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      operation_finish "$id" failed stale_dockerfile 'Dockerfile changed while the build was queued.' >/dev/null 2>&1 || true
+      operation_start_error stale_dockerfile 'Dockerfile changed while the build was queued' "$id"
+      return 3
+    fi
+    operation_finish "$id" failed backend_unavailable 'Dockerfile snapshot could not be created.' >/dev/null 2>&1 || true
+    operation_start_error backend_unavailable 'Dockerfile snapshot could not be created' "$id"
+    return 5
+  fi
+  if ! operation_worker_launch image-build-operation-worker "$id" "$expected"; then
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed launch_failed 'Image build worker could not be launched.' >/dev/null 2>&1 || true
+    operation_start_error backend_unavailable 'image build worker could not be launched' "$id"
+    return 5
+  fi
+  operation_start_success "$id"
+}
+
+operation_image_build_worker() {
+  local id="$1" expected="$2" snapshot lock log_path rc
+  operation_id_valid "$id" && [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  operation_mark_running "$id" 'Image build started.' || return 1
+  snapshot="$(operation_image_snapshot_path "$id")" || return 1
+  if ! operation_image_snapshot_valid "$id" "$expected"; then
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed stale_dockerfile 'Dockerfile snapshot did not match the requested SHA-256.' >/dev/null 2>&1 || true
+    return
+  fi
+  mkdir -p -- "$RUNDIR" || {
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed backend_unavailable 'Build runtime directory is unavailable.' >/dev/null 2>&1 || true
+    return
+  }
+  lock="$RUNDIR/build.lock"
+  [ ! -L "$lock" ] || {
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed backend_unavailable 'Build lock is unsafe.' >/dev/null 2>&1 || true
+    return
+  }
+  exec 9>"$lock" || {
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed backend_unavailable 'Build lock could not be opened.' >/dev/null 2>&1 || true
+    return
+  }
+  chmod 0600 "$lock" || {
+    exec 9>&-
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed backend_unavailable 'Build lock could not be secured.' >/dev/null 2>&1 || true
+    return
+  }
+  if ! flock -n 9; then
+    exec 9>&-
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed operation_running 'Another image build is already running.' >/dev/null 2>&1 || true
+    return
+  fi
+  log_path="$(operation_output_log_prepare "$id" image_build_log)" || {
+    flock -u 9 || true
+    exec 9>&-
+    rm -f -- "$snapshot"
+    operation_finish "$id" failed backend_unavailable 'Build log could not be created.' >/dev/null 2>&1 || true
+    return
+  }
+  if cmd_build_image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
+  rm -f -- "$snapshot"
+  printf '__BUILD_RC__=%s\n' "$rc" >>"$log_path"
+  chmod 0600 "$log_path" || true
+  flock -u 9 || true
+  exec 9>&-
+  if [ "$rc" -eq 0 ]; then
+    operation_finish "$id" succeeded image_built 'Runner image build completed.' "$log_path"
+  else
+    operation_finish "$id" failed build_failed 'Runner image build failed.' "$log_path"
   fi
 }
