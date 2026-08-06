@@ -238,6 +238,7 @@ runner_api_fail_backend_unavailable() { runner_api_fail backend_unavailable "${1
 runner_api_fail_output_too_large() { runner_api_fail output_too_large "${1:-output too large}" 5 "${2:-}"; }
 runner_api_fail_unsupported_schema() { runner_api_fail unsupported_schema "${1:-unsupported schema}" 2 "${2:-}"; }
 runner_api_fail_invalid_runner() { runner_api_fail invalid_runner "${1:-invalid runner}" 4 "${2:-}"; }
+runner_api_fail_operation_not_found() { runner_api_fail operation_not_found "${1:-operation not found}" 4 "${2:-}"; }
 
 runner_api_result_file_create() {
   local prefix="$1" dir="$RUNDIR/api-results" path
@@ -496,6 +497,35 @@ runner_api_log() {
   return "$emit_rc"
 }
 
+runner_api_operation_read() {
+  local request_id="${RUNNER_API_FIELDS[0]}" id="${RUNNER_API_FIELDS[1]}" path result emit_rc
+  path="$(operation_record_path "$id")" || {
+    runner_api_fail_invalid_request 'operation ID is invalid' "$request_id"
+    return
+  }
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    runner_api_fail_operation_not_found 'operation was not found' "$request_id"
+    return
+  fi
+  result="$(runner_api_result_file_create operation-read.strict)" || {
+    runner_api_fail_backend_unavailable 'could not create operation buffer' "$request_id"
+    return
+  }
+  if ! operation_read_public "$id" >"$result"; then
+    runner_api_result_file_cleanup "$result" || true
+    runner_api_fail_backend_unavailable 'operation record is unavailable' "$request_id"
+    return
+  fi
+  if ! runner_api_private_file_valid "$result" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$result" || true
+    runner_api_fail_output_too_large 'operation output is too large' "$request_id"
+    return
+  fi
+  if runner_api_emit "$request_id" true ok 'operation' "$result"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$result" || true
+  return "$emit_rc"
+}
+
 runner_api_reject() {
   runner_api_fail_invalid_request 'unsupported API operation' ''
 }
@@ -510,6 +540,10 @@ runner_api_dispatch() {
     statistics) runner_api_auxiliary statistics ;;
     cache-usage) runner_api_auxiliary cache ;;
     image) runner_api_auxiliary image ;;
+    operation-read)
+      runner_api_prepare_request "$operation" || return $?
+      runner_api_operation_read
+      ;;
     runner-log|history-log|controller-log)
       runner_api_prepare_request "$operation" || return $?
       runner_api_log "$operation"

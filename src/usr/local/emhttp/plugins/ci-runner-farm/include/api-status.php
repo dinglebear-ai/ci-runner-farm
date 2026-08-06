@@ -110,6 +110,53 @@ function normalize_compatibility(array &$status): void {
     $status['compatibility'] = $compatibility;
 }
 
+function normalize_operation(array &$status): void {
+    $operation = required_key($status, 'operation');
+    if ($operation === null) return;
+    if (!is_array($operation)) status_fail('operation must be an object or null');
+    $keys = array_keys($operation);
+    sort($keys);
+    $expected = ['code', 'config_revision', 'created_at', 'finished_at', 'kind', 'message', 'operation_id', 'output', 'schema_version', 'state', 'updated_at'];
+    sort($expected);
+    if ($keys !== $expected) status_fail('operation has unknown or missing fields');
+    if (required_int($operation, 'schema_version') !== 1) status_fail('operation schema is unsupported', 6);
+    $id = required_string($operation, 'operation_id');
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $id)) status_fail('operation id is invalid');
+    $kind = required_string($operation, 'kind');
+    if (!in_array($kind, ['compatibility_test', 'provisioning_validation', 'image_build'], true)) status_fail('operation kind is invalid');
+    $state = required_string($operation, 'state');
+    if (!in_array($state, ['queued', 'running', 'succeeded', 'failed', 'cancelled'], true)) status_fail('operation state is invalid');
+    foreach (['code' => 128, 'message' => 4096] as $field => $maximum) {
+        $value = required_string($operation, $field);
+        if ($value === '' || strlen($value) > $maximum) status_fail('operation ' . $field . ' is invalid');
+    }
+    $configRevision = required_string($operation, 'config_revision');
+    validate_sha($configRevision, 'operation.config_revision');
+    $created = required_string($operation, 'created_at');
+    $updated = required_string($operation, 'updated_at');
+    $finished = required_key($operation, 'finished_at');
+    $createdEpoch = strtotime($created);
+    $updatedEpoch = strtotime($updated);
+    if ($createdEpoch === false || $updatedEpoch === false || $updatedEpoch < $createdEpoch) status_fail('operation timestamps are invalid');
+    $terminal = in_array($state, ['succeeded', 'failed', 'cancelled'], true);
+    if ($finished === null) {
+        if ($terminal) status_fail('terminal operation requires finished_at');
+    } else {
+        if (!is_string($finished) || preg_match('/[\x00-\x1f\x7f]/', $finished)) status_fail('operation finished_at is invalid');
+        $finishedEpoch = strtotime($finished);
+        if (!$terminal || $finishedEpoch === false || $finishedEpoch < $updatedEpoch) status_fail('operation finished_at is inconsistent');
+    }
+    $output = required_array($operation, 'output');
+    if (count($output) > 20) status_fail('operation output has too many lines');
+    $bytes = 0;
+    foreach ($output as $index => $line) {
+        if (!is_string($line) || strlen($line) > 512 || preg_match('/[\x00-\x1f\x7f]/', $line)) status_fail('operation output line is invalid');
+        $bytes += strlen($line) + ($index === 0 ? 0 : 1);
+    }
+    if ($bytes > 4096) status_fail('operation output is too large');
+    $status['operation'] = $operation;
+}
+
 function normalize_status(array $status, string $inventoryPath): array {
     if (required_int($status, 'schema_version') !== 2) status_fail('unsupported status schema', 6);
     $configRevision = required_string($status, 'config_revision');
@@ -119,6 +166,7 @@ function normalize_status(array $status, string $inventoryPath): array {
     if (required_int($status, 'observed_at') <= 0) status_fail('observed_at is invalid');
     required_array($status, 'backend');
     normalize_compatibility($status);
+    normalize_operation($status);
     if (($status['compatibility']['reason'] ?? '') === 'inventory_unavailable' || required_string($status, 'config_error') === 'Docker inventory unavailable') {
         status_fail('inventory is unavailable', 8);
     }
@@ -173,8 +221,7 @@ function normalize_readiness(array $status): array {
     if (required_int($status, 'schema_version') !== 2) status_fail('unsupported readiness schema', 6);
     required_array($status, 'backend');
     normalize_compatibility($status);
-    $operation = required_key($status, 'operation');
-    if ($operation !== null && !is_array($operation)) status_fail('operation must be an object or null');
+    normalize_operation($status);
     $count = required_key($status, 'count');
     if ($count !== null && (!is_int($count) || $count < 0 || $count > RUNNER_API_STATUS_MAX_RUNNERS)) status_fail('readiness count is invalid');
     return $status;

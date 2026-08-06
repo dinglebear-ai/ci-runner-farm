@@ -153,7 +153,7 @@ status_model_refresh() {
 
 status_backend_refresh() {
   local effective=invalid phase=invalid transition_id="" transition_revision="" ownership=""
-  local compat_reason=missing valid=false helper_json='{}' operation=null latest
+  local compat_reason=missing valid=false helper_json='{}' operation=null
   : "${SCALESET_STATE_DIR:=${RUNDIR:-/run/ci-runner-farm}/scalesets}"
   : "${SCALESET_COMPAT:=${CFGDIR:-/boot/config/plugins/ci-runner-farm}/scaleset-compatibility.json}"
   : "${SCALESET_HELPER:=${SCRIPT_DIR:-/usr/local/emhttp/plugins/ci-runner-farm/include}/../bin/crf-scaleset}"
@@ -220,12 +220,12 @@ status_backend_refresh() {
     fi
     STATUS_COMPATIBILITY_JSON="{\"valid\":false,\"reason\":\"$escaped_reason\",\"auth_mode\":\"$(printf '%s' "${AUTH_MODE:-pat}"|json_escape)\",\"private_key_configured\":$private_key_configured}"
   fi
-  latest="$(find "$SCALESET_STATE_DIR/operations" -maxdepth 1 -type f -name '*.json' -printf '%T@ %p\n' 2>/dev/null |
-    sort -nr | head -1 | cut -d' ' -f2- || true)"
-  if [ -n "$latest" ] && status_state_file_valid "$latest" 262144; then
-    operation="$(cat "$latest" 2>/dev/null)"
-    printf '%s' "$operation" | php -r 'exit(is_array(json_decode(stream_get_contents(STDIN),true))?0:1);' ||
-      operation=null
+  if declare -F operation_latest_public >/dev/null; then
+    operation="$(operation_latest_public 2>/dev/null)" || operation=null
+    printf '%s' "$operation" | php -r '
+      $j=json_decode(stream_get_contents(STDIN),true);
+      exit($j===null||is_array($j)?0:1);
+    ' || operation=null
   fi
   STATUS_OPERATION_JSON="$operation"
 }

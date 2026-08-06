@@ -63,6 +63,12 @@ grep -Fq 'operation_create_unique image_build' \
 grep -Fq 'image-build-operation-worker' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "durable image build worker dispatch is missing"
+grep -Fq 'operation_latest_public' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh ||
+  crf_fail "status does not project the generic durable operation journal"
+grep -Fq 'runner_api_operation_read' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict operation-read dispatch is missing"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -158,6 +164,7 @@ bash tests/operations.sh >/dev/null
 bash tests/compatibility-operations.sh >/dev/null
 bash tests/provisioning-operations.sh >/dev/null
 bash tests/image-build-operations.sh >/dev/null
+bash tests/operation-api.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
