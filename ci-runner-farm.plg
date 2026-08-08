@@ -35,6 +35,8 @@
 * Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Nashost runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
 * Document the final feasible 16-runner Nashost pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
+* Fail closed when the configured runner image is unavailable, recover a missing built-in image alias only from verified promotion metadata, and keep safe reconciliation retries alive after the drain timeout.
+* Scrub internal deployment hostnames and concrete network addresses from public documentation, deployment profiles, and test fixtures.
 </CHANGES>
 
 <!-- plugin package: Unraid downloads it to flash and verifies the MD5 -->

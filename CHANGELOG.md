@@ -23,7 +23,12 @@
 
 ### Bug Fixes
 
+* **runner:** fail closed when the configured image is unavailable, recover a missing built-in image alias from verified promotion metadata, and keep safe reconciliation retries alive ([#29](https://github.com/dinglebear-ai/ci-runner-farm/pull/29))
 * **ui:** isolate controls from Unraid button styles ([#27](https://github.com/dinglebear-ai/ci-runner-farm/issues/27)) ([ba73210](https://github.com/dinglebear-ai/ci-runner-farm/commit/ba732106fa6850a628552871844a8bc3651c3c85))
+
+### Changed
+
+* Scrub internal deployment hostnames and concrete network addresses from public documentation, deployment profiles, and test fixtures ([#17](https://github.com/dinglebear-ai/ci-runner-farm/pull/17)).
 
 ## [1.9.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.1...v1.9.0) (2026-08-05)
 
