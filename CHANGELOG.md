@@ -18,6 +18,13 @@
 * Document the final feasible 16-runner Tootie pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
 
+## [1.9.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.0...v1.9.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **ui:** isolate controls from Unraid button styles ([#27](https://github.com/dinglebear-ai/ci-runner-farm/issues/27)) ([ba73210](https://github.com/dinglebear-ai/ci-runner-farm/commit/ba732106fa6850a628552871844a8bc3651c3c85))
+
 ## [1.9.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.1...v1.9.0) (2026-08-05)
 
 
