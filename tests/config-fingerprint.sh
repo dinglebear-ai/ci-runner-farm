@@ -54,6 +54,7 @@ docker() {
   local calls=0
   [ ! -f "$docker_calls" ] || calls="$(cat "$docker_calls")"
   printf '%s\n' "$((calls+1))" > "$docker_calls"
+  [ -n "$CRF_TEST_IMAGE_ID" ] || return 1
   printf '%s\n' "$CRF_TEST_IMAGE_ID"
 }
 
@@ -62,6 +63,11 @@ baseline="$(crf_confgen rust 'org:dinglebear-ai')"
 repeat="$(crf_confgen rust 'org:dinglebear-ai')"
 [ "$baseline" = "$repeat" ] || crf_fail 'prepared fingerprint changed without config drift'
 [ "$(cat "$docker_calls")" = 1 ] || crf_fail 'prepared fingerprint repeated Docker image inspection'
+CRF_TEST_IMAGE_ID=""
+if crf_confgen_prepare; then crf_fail 'missing image produced a synthetic fingerprint identity'; fi
+grep -Fq "Runner image '$BUILTIN_IMAGE' is unavailable" <<<"$CRF_CONFGEN_ERROR" || crf_fail 'missing image error was not explicit'
+CRF_TEST_IMAGE_ID=sha256:image-v1
+crf_confgen_prepare
 CACHE_MOUNTS='cargo:/home/runner/.cargo kache-aws:/home/runner/.aws:ro'
 mount_changed="$(crf_confgen rust 'org:dinglebear-ai')"
 [ "$baseline" != "$mount_changed" ] || crf_fail 'v2 fingerprint ignored CACHE_MOUNTS'

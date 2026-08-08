@@ -647,7 +647,12 @@ busy_count() {
 # add a setting that build_args bakes into the container, add it here too.
 crf_confgen_prepare() {
   CRF_CONFGEN_IMAGE_REF="$(effective_image)"
-  CRF_CONFGEN_IMAGE_IDENTITY="$(docker image inspect "$CRF_CONFGEN_IMAGE_REF" -f '{{.Id}}' 2>/dev/null || printf '%s' "$CRF_CONFGEN_IMAGE_REF")"
+  CRF_CONFGEN_IMAGE_IDENTITY=""
+  CRF_CONFGEN_ERROR=""
+  CRF_CONFGEN_IMAGE_IDENTITY="$(docker image inspect "$CRF_CONFGEN_IMAGE_REF" -f '{{.Id}}' 2>/dev/null)" || {
+    CRF_CONFGEN_ERROR="Runner image '$CRF_CONFGEN_IMAGE_REF' is unavailable"
+    return 1
+  }
   CRF_CONFGEN_ENTRYPOINT_HASH="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
 }
 
@@ -660,7 +665,7 @@ crf_confgen() {
     entrypoint_hash="$CRF_CONFGEN_ENTRYPOINT_HASH"
   else
     image_ref="$(effective_image)"
-    image_identity="$(docker image inspect "$image_ref" -f '{{.Id}}' 2>/dev/null || printf '%s' "$image_ref")"
+    image_identity="$(docker image inspect "$image_ref" -f '{{.Id}}' 2>/dev/null)" || return 1
     entrypoint_hash="$(sha256sum "$SCRIPT_DIR/runner-entrypoint.sh" | cut -d' ' -f1)"
   fi
   if pool_mode_enabled; then
@@ -705,7 +710,7 @@ runner_confgen() {
 count_stale_runners() {
   local cur c n=0 pool target
   [ "$INVENTORY_ACTIVE" = 1 ] || fleet_inventory_refresh || return 1
-  crf_confgen_prepare
+  crf_confgen_prepare || return 1
   for c in $(managed_names); do
     [ -n "$c" ] || continue
     runner_identity_validate "$c" || continue
@@ -2053,7 +2058,7 @@ build_args() {
       else scope_target="repo:$(repo_for_index "$idx")"; fi
     fi
   fi
-  crf_confgen_prepare
+  crf_confgen_prepare || { err "${CRF_CONFGEN_ERROR:-runner image identity is unavailable}"; return 1; }
   ARGS=(
     # --restart=no (NOT unless-stopped): the registration token baked in below is
     # short-lived (~1h) and the runner re-runs config on start, so letting Docker
@@ -2237,7 +2242,7 @@ start_one() {
     else scope_target="repo:$(repo_for_index "$idx")"; fi
   fi
   expected_revision="$(pool_config_revision)" || return 1
-  crf_confgen_prepare
+  crf_confgen_prepare || { err "${CRF_CONFGEN_ERROR:-runner image identity is unavailable}"; return 1; }
   cpu_milli=0; memory_bytes=0
   if pool_mode_enabled && [ "$POOL_CONFIG_VERSION" = v2 ]; then
     cpu_milli="$(pool_cpu_milli "$pool")" || return 1
@@ -2439,6 +2444,11 @@ provision_base() {
   ensure_network || return 1
   ensure_mirror
   registry_login || return 1
+  if [ "$IMAGE_SOURCE" = builtin ]; then
+    restore_promoted_image_alias || return 1
+  elif [ -n "$IMAGE" ] && ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    docker pull "$IMAGE" >/dev/null 2>&1 || { err "remote runner image '$IMAGE' is unavailable"; return 1; }
+  fi
   strict_firewall_ensure || return 1
 }
 
@@ -2603,9 +2613,9 @@ cmd_mirror_up() {
 reconcile_stale_runners() {
   validate_runtime_config || { err "reconcile: $POOL_CONFIG_ERROR"; return 1; }
   cleanup_pool_runtime_state
-  local cur c gen pool scope state docker_state desired rec target
+  local cur c gen pool scope state docker_state desired rec target recycle_result
   fleet_inventory_refresh || { err "reconcile: could not inventory managed runners"; return 1; }
-  crf_confgen_prepare
+  crf_confgen_prepare || { err "reconcile: ${CRF_CONFGEN_ERROR:-runner image identity is unavailable}"; return 1; }
   if pool_mode_enabled && [ "$(count_pool_missing_capacity)" -gt 0 ]; then
     provision_base || { err "reconcile: provisioning preflight failed before capacity transition"; return 1; }
   fi
@@ -2725,7 +2735,9 @@ reconcile_stale_runners() {
     log "reconcile: $c predates a config change — recycling it onto the current config"
     local recycle_mode=graceful
     [ "$state" = error ] && recycle_mode=force
-    if ! recreate_runner "$c" "$recycle_mode" >/dev/null 2>&1; then
+    recycle_result=""
+    if ! recycle_result="$(recreate_runner "$c" "$recycle_mode" 2>&1)"; then
+      log "reconcile: recycle of $c failed: ${recycle_result:-unknown error}"
       if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
         # GitHub can briefly report an active runner as idle. A graceful recycle
         # correctly refuses in that case, so no mutation happened and this pass
@@ -2750,9 +2762,10 @@ reconcile_stale_runners() {
 # new config as each goes idle, except Docker-proven exited/dead/unhealthy runners may be
 # replaced immediately because no job can still be running there. Re-reads the cfg each
 # pass so an Apply made mid-drain retargets the SAME drain (the flock in the dispatch keeps
-# it to one). Gives up after IMAGE_DRAIN_TIMEOUT on runners whose job outlasts it — they
-# migrate on their next idle via the autoscale tick, or on the next Apply/recycle. Progress
-# is logged to autoscale.log, which the farm-log panel tails.
+# it to one). IMAGE_DRAIN_TIMEOUT only changes the retry cadence: after the bounded foreground
+# drain window expires, unresolved work remains protected and is retried every 120s until each
+# runner becomes safe to recycle. Progress is logged to autoscale.log, which the farm-log panel
+# tails.
 cmd_reconcile_drain() {
   trap 'rm -f "$RECONCILE_PID"' EXIT INT TERM
   if declare -F backend_classic_admission_allowed >/dev/null &&
@@ -2797,8 +2810,11 @@ cmd_reconcile_drain() {
         log "reconcile: capacity is still short by $missing runner(s) after the retry deadline — fix provisioning, then retry the pool Scale target (or use Start to reset to configured capacity)"
         break
       else
-        log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout — they'll migrate on their next Apply/Start"
-        break
+        if [ "$backoff_announced" -eq 0 ]; then
+          log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout — preserving jobs and retrying idle-safe recycling every 120s"
+          backoff_announced=1
+        fi
+        sleep_for=120
       fi
     fi
     sleep "$sleep_for"
@@ -3856,7 +3872,9 @@ cmd_status_json() {
   fi
   local config_error=""
   validate_runtime_config || config_error="$POOL_CONFIG_ERROR"
-  [ -n "$config_error" ] || crf_confgen_prepare
+  if [ -z "$config_error" ] && ! crf_confgen_prepare; then
+    config_error="${CRF_CONFGEN_ERROR:-Runner image is unavailable}"
+  fi
   # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
   # cmd_usage_refresh) so this 5s-per-tab call makes just TWO docker calls total (the
   # `docker ps` in managed_names + one batched inspect for live state and resource
@@ -4259,6 +4277,48 @@ cmd_history_log() {
 
 build_candidate_tag_valid() {
   [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$ ]]
+}
+
+promoted_image_state_load() {
+  PROMOTED_IMAGE_TAG=""; PROMOTED_IMAGE_ID=""; PROMOTED_IMAGE_DOCKERFILE_SHA=""; PROMOTED_IMAGE_PROMOTED_AT=""
+  [ -f "$PROMOTED_IMAGE_FILE" ] && [ ! -L "$PROMOTED_IMAGE_FILE" ] || return 1
+  [ "$(stat -c %a "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 600 ] || return 1
+  [ "$(stat -c %s "$PROMOTED_IMAGE_FILE" 2>/dev/null || echo 4097)" -le 4096 ] || return 1
+  local key
+  for key in schema candidate_tag image_id dockerfile_sha promoted_at; do
+    [ "$(grep -c "^${key}=" "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 1 ] || return 1
+  done
+  [ "$(sed -n 's/^schema=//p' "$PROMOTED_IMAGE_FILE")" = 1 ] || return 1
+  PROMOTED_IMAGE_TAG="$(sed -n 's/^candidate_tag=//p' "$PROMOTED_IMAGE_FILE")"
+  PROMOTED_IMAGE_ID="$(sed -n 's/^image_id=//p' "$PROMOTED_IMAGE_FILE")"
+  PROMOTED_IMAGE_DOCKERFILE_SHA="$(sed -n 's/^dockerfile_sha=//p' "$PROMOTED_IMAGE_FILE")"
+  PROMOTED_IMAGE_PROMOTED_AT="$(sed -n 's/^promoted_at=//p' "$PROMOTED_IMAGE_FILE")"
+  build_candidate_tag_valid "$PROMOTED_IMAGE_TAG" &&
+    [[ "$PROMOTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+    [[ "$PROMOTED_IMAGE_DOCKERFILE_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    resource_positive_uint_valid "$PROMOTED_IMAGE_PROMOTED_AT" 9999999999
+}
+
+restore_promoted_image_alias() {
+  local source actual
+  [ "$IMAGE_SOURCE" = builtin ] || return 1
+  docker image inspect "$BUILTIN_IMAGE" >/dev/null 2>&1 && return 0
+  promoted_image_state_load || { err "built-in runner image '$BUILTIN_IMAGE' is unavailable and no valid promotion metadata exists"; return 1; }
+  source="$PROMOTED_IMAGE_TAG"
+  actual="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null)" || {
+    source="$PROMOTED_IMAGE_ID"
+    actual="$(docker image inspect "$source" --format '{{.Id}}' 2>/dev/null)" || true
+  }
+  [ "$actual" = "$PROMOTED_IMAGE_ID" ] || {
+    err "promoted runner image $PROMOTED_IMAGE_ID is unavailable; refusing to reconstruct '$BUILTIN_IMAGE'"
+    return 1
+  }
+  docker tag "$source" "$BUILTIN_IMAGE" || { err "could not restore built-in runner image alias"; return 1; }
+  [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" = "$PROMOTED_IMAGE_ID" ] || {
+    err "restored built-in runner image alias failed verification"
+    return 1
+  }
+  log "restored missing built-in runner image alias '$BUILTIN_IMAGE' -> $PROMOTED_IMAGE_ID from verified promotion metadata"
 }
 
 build_candidate_state_load() {
