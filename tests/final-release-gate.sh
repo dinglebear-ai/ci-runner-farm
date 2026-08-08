@@ -120,7 +120,7 @@ bash tests/autoscale-locks.sh >/dev/null
 bash tests/mutation-ownership.sh >/dev/null
 bash tests/image-promotion.sh >/dev/null
 bash tests/resource-admission.sh >/dev/null
-bash tests/tootie-fleet-audit.sh >/dev/null
+bash tests/nashost-fleet-audit.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
 bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null

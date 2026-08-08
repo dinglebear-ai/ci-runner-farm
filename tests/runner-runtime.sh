@@ -117,16 +117,16 @@ GH_RESPONSE=""
 gh_api_request() {
   inc "$runner_calls"
   GH_STATUS=200
-  GH_RESPONSE='{"total_count":2,"runners":[{"id":11,"name":"dookie-ci-runner-python-1","os":"linux","status":"online","busy":false},{"id":12,"name":"dookie-ci-runner-rust-1","os":"linux","status":"online","busy":true}]}'
+  GH_RESPONSE='{"total_count":2,"runners":[{"id":11,"name":"devhost-ci-runner-python-1","os":"linux","status":"online","busy":false},{"id":12,"name":"devhost-ci-runner-rust-1","os":"linux","status":"online","busy":true}]}'
   return 0
 }
 first="$(github_runner_inventory org:acme)"
 second="$(github_runner_inventory org:acme)"
 assert_eq "$first" "$second" 'GitHub runner inventory cache changed content'
 assert_eq "$(cat "$runner_calls")" 1 'GitHub runner inventory was not reused per scope'
-assert_eq "$(github_runner_id org:acme dookie-ci-runner-rust-1)" 12 'runner name-to-id lookup failed'
+assert_eq "$(github_runner_id org:acme devhost-ci-runner-rust-1)" 12 'runner name-to-id lookup failed'
 github_runner_inventory_forget org:acme 11
-assert_eq "$(github_runner_id org:acme dookie-ci-runner-python-1)" '' 'deleted runner id remained in batch inventory'
+assert_eq "$(github_runner_id org:acme devhost-ci-runner-python-1)" '' 'deleted runner id remained in batch inventory'
 assert_eq "$(cat "$runner_calls")" 1 'forgetting one runner discarded the whole batch inventory'
 github_runner_inventory_invalidate org:acme
 github_runner_inventory org:acme >/dev/null

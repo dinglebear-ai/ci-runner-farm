@@ -43,7 +43,7 @@ RUN mkdir -p /home/runner/.config/kache \
   "[cache.remote]" \
   "type = \"s3\"" \
   "bucket = \"kache\"" \
-  "endpoint = \"http://10.1.0.2:9000\"" \
+  "endpoint = \"http://192.0.2.2:9000\"" \
   "region = \"us-east-1\"" \
   "prefix = \"rust\"" \
   "profile = \"kache\"" \

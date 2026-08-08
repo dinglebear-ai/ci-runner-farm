@@ -1141,7 +1141,7 @@ Confirm:
 Deploy only after local verification:
 
 ```bash
-./deploy.sh root@tootie
+./deploy.sh root@nashost
 ```
 
 Do not edit the live config into pool mode.
