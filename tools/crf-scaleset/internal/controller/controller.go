@@ -24,6 +24,8 @@ import (
 
 var (
 	identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	poolID     = regexp.MustCompile(`^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$`)
+	label      = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$`)
 	revision   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	workFolder = regexp.MustCompile(`^[_A-Za-z0-9][_A-Za-z0-9.-]{0,63}$`)
 	issuedKey  = regexp.MustCompile(`^[1-9][0-9]*:[1-9][0-9]*$`)
@@ -81,13 +83,32 @@ func (cfg RuntimeConfig) Validate() error {
 		len(cfg.Pools) == 0 || len(cfg.Pools) > 8 {
 		return errors.New("invalid_runtime_config")
 	}
-	seen := map[string]bool{}
+	seenPools := map[string]bool{}
+	routingLabels := map[string]bool{}
 	for _, pool := range cfg.Pools {
-		if !identifier.MatchString(pool.ID) || !identifier.MatchString(pool.RoutingLabel) ||
-			len(pool.Labels) == 0 || seen[pool.ID] {
+		if !poolID.MatchString(pool.ID) || !label.MatchString(pool.RoutingLabel) ||
+			len(pool.Labels) == 0 || seenPools[pool.ID] || routingLabels[pool.RoutingLabel] {
 			return errors.New("invalid_runtime_pool")
 		}
-		seen[pool.ID] = true
+		seenPools[pool.ID] = true
+		routingLabels[pool.RoutingLabel] = true
+	}
+	for _, pool := range cfg.Pools {
+		seenLabels := map[string]bool{}
+		routingFound := false
+		for _, candidate := range pool.Labels {
+			if !label.MatchString(candidate) || seenLabels[candidate] ||
+				(routingLabels[candidate] && candidate != pool.RoutingLabel) {
+				return errors.New("invalid_runtime_pool_labels")
+			}
+			seenLabels[candidate] = true
+			if candidate == pool.RoutingLabel {
+				routingFound = true
+			}
+		}
+		if !routingFound {
+			return errors.New("runtime_routing_label_missing")
+		}
 	}
 	return nil
 }
@@ -121,12 +142,20 @@ func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
 	return cfg, nil
 }
 
+type sessionPoller interface {
+	supervisor.Poller
+	HasHandle(int64, int64) bool
+	ConsumeHandle(int64, int64) bool
+	RetireHandle(int64, int64) error
+	Close(context.Context) error
+}
+
 type Control struct {
 	cfg       RuntimeConfig
 	api       crfgithub.ScaleSetAPI
 	ownership *ownership.Manager
 	mu        sync.Mutex
-	poller    *session.Poller
+	poller    sessionPoller
 	super     *supervisor.Supervisor
 	cancel    context.CancelFunc
 	superDone chan error
@@ -137,6 +166,13 @@ type Control struct {
 func New(cfg RuntimeConfig, api crfgithub.ScaleSetAPI) (*Control, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	if api == nil {
+		return nil, errors.New("scale_set_api_required")
+	}
+	cfg.Pools = slices.Clone(cfg.Pools)
+	for i := range cfg.Pools {
+		cfg.Pools[i].Labels = slices.Clone(cfg.Pools[i].Labels)
 	}
 	manager, err := ownership.New(ownership.Config{Path: cfg.OwnershipPath,
 		InstallationID: cfg.InstallationID, Owner: cfg.Owner,
@@ -224,12 +260,14 @@ func (c *Control) stopSessions(ctx context.Context) error {
 		c.cancel()
 		c.cancel = nil
 	}
+	var joinErr error
 	if c.superDone != nil {
 		select {
 		case err := <-c.superDone:
 			c.superDone = nil
+			c.super = nil
 			if err != nil {
-				return fmt.Errorf("join_previous_supervisor: %w", err)
+				joinErr = fmt.Errorf("join_previous_supervisor: %w", err)
 			}
 		case <-ctx.Done():
 			return fmt.Errorf("join_previous_supervisor: %w", ctx.Err())
@@ -237,11 +275,12 @@ func (c *Control) stopSessions(ctx context.Context) error {
 	}
 	if c.poller != nil {
 		if err := c.poller.Close(ctx); err != nil {
-			return fmt.Errorf("close_previous_sessions: %w", err)
+			return errors.Join(joinErr, fmt.Errorf("close_previous_sessions: %w", err))
 		}
+		c.poller = nil
 	}
-	c.poller, c.super = nil, nil
-	return nil
+	c.super = nil
+	return joinErr
 }
 
 func decodePayload(data []byte, target any) error {
@@ -254,7 +293,7 @@ func decodePayload(data []byte, target any) error {
 		return err
 	}
 	var trailing any
-	if err := dec.Decode(&trailing); err == nil {
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("payload_trailing_data")
 	}
 	return nil
@@ -342,7 +381,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if c.super == nil {
 			return failure(req, "sessions_not_applied", nil)
 		}
-		c.super.SetLeases(payload.Leases)
+		if err := c.super.SetLeases(payload.Leases); err != nil {
+			return failure(req, "invalid_leases", err)
+		}
 		return response(req, map[string]bool{"applied": true})
 	case "read_snapshot":
 		if c.super == nil {
@@ -398,6 +439,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			return failure(req, "jit_state_failed", err)
 		}
 		if !c.poller.ConsumeHandle(scaleSetID, payload.WorkHandle) {
+			if err := c.removeIssued(key); err != nil {
+				return failure(req, "jit_state_failed", err)
+			}
 			return failure(req, "work_handle_not_available_after_reservation", nil)
 		}
 		descriptor, err := c.api.GenerateJitRunnerConfig(ctx, scaleSetID,
@@ -443,9 +487,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err := c.poller.RetireHandle(scaleSetID, payload.WorkHandle); err != nil {
 			return failure(req, "jit_retirement_failed", err)
 		}
-		delete(c.issued, key)
-		if err := c.writeIssued(); err != nil {
-			c.issued[key] = "issued"
+		if err := c.removeIssued(key); err != nil {
 			return failure(req, "jit_state_failed", err)
 		}
 		return response(req, map[string]bool{"retired": true})
@@ -510,6 +552,19 @@ func (c *Control) loadIssued() error {
 		}
 	}
 	c.issued = issued
+	return nil
+}
+
+func (c *Control) removeIssued(key string) error {
+	state, ok := c.issued[key]
+	if !ok {
+		return nil
+	}
+	delete(c.issued, key)
+	if err := c.writeIssued(); err != nil {
+		c.issued[key] = state
+		return err
+	}
 	return nil
 }
 

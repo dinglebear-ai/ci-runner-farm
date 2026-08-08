@@ -28,12 +28,58 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
 # NOT wait for it to be ready. Wrap the runner CMD so it waits for docker before
 # the runner accepts jobs — otherwise 'Checking docker version'/services: race a
 # cold daemon.
+# The dockerd recovery body lives in its own root-only script rather than inline
+# in the supervisor: it keeps the restart out of two nested levels of quoting,
+# gives the pidfile guard and log cap somewhere to live, and lets a sudoers
+# grant be scoped to this one command instead of relying on NOPASSWD:ALL.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# supervise dockerd: it can die under the services: workload (nested overlay)' \
-  '( while true; do docker info >/dev/null 2>&1 || { rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1; }; sleep 3; done ) &' \
-  '# wait for first readiness before the runner accepts jobs' \
-  'for i in $(seq 1 90); do docker info >/dev/null 2>&1 && break; sleep 1; done' \
+  '# Recover a dead dockerd. Root only - invoked by the wait-docker.sh supervisor.' \
+  'log=/var/log/dockerd.log' \
+  '[ -d /var/log/dind ] && log=/var/log/dind/dockerd.log' \
+  '# Cap the log. This runs on every failed probe, and /var/log is the container' \
+  '# writable layer when the dind bind mount is absent - on Unraid that is the' \
+  '# shared docker.img, so an unrotated crashloop log is a host-wide disk vector.' \
+  '[ "$(stat -c%s "$log" 2>/dev/null || echo 0)" -gt 33554432 ] && : > "$log"' \
+  '# Never delete a LIVE daemon pidfile. dockerd refuses to start when this file' \
+  '# names a running process, so removing it disarms the duplicate-instance guard' \
+  '# and a later start can bring a second daemon up on the same data root -' \
+  '# concurrent boltdb writers, which corrupts it unrecoverably.' \
+  'pid=$(cat /var/run/docker.pid 2>/dev/null || true)' \
+  'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi' \
+  'rm -f /var/run/docker.pid' \
+  'logger -t crf-docker-supervise "restarting dockerd" 2>/dev/null || true' \
+  'service docker start >>"$log" 2>&1' \
+  > /usr/local/bin/crf-dockerd-restart \
+ && chmod +x /usr/local/bin/crf-dockerd-restart
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  '# Reach root at runtime rather than assuming a shape: the base image grants the' \
+  '# runner user passwordless sudo, RUN_AS_ROOT=true runs this as root already,' \
+  '# and a custom FROM may have neither. Say so instead of failing silently.' \
+  'crf_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi; }' \
+  'crf_can_root() { [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; }' \
+  '# Wait for first readiness before the runner accepts jobs. timeout guards a' \
+  '# daemon that accepts the connection but never answers - an untimed docker' \
+  '# info blocks this loop forever.' \
+  'for _ in $(seq 1 90); do timeout 10 docker info >/dev/null 2>&1 && break; sleep 1; done' \
+  '# Supervise dockerd for the container lifetime: it can die under the services:' \
+  '# workload (nested overlay). Start supervising only AFTER readiness resolves -' \
+  '# the entrypoint launches dockerd asynchronously just before this script runs,' \
+  '# so a supervisor started earlier fires a restart at a live, still-initialising' \
+  '# daemon on every single boot. Back off on repeated failure so a dockerd that' \
+  '# cannot start (ENOSPC, corrupt overlay) does not hot-loop forever.' \
+  'if crf_can_root; then' \
+  '  ( delay=3' \
+  '    while true; do' \
+  '      sleep "$delay"' \
+  '      if timeout 10 docker info >/dev/null 2>&1; then delay=3; continue; fi' \
+  '      crf_root /usr/local/bin/crf-dockerd-restart || true' \
+  '      [ "$delay" -lt 60 ] && delay=$(( delay * 2 ))' \
+  '    done ) &' \
+  'else' \
+  '  echo "crf: dockerd supervisor disabled (not root, no passwordless sudo)" >&2' \
+  'fi' \
   'exec "$@"' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh

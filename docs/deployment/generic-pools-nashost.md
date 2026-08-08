@@ -153,6 +153,39 @@ compatibility record is stale or invalid, stop migration and keep/restore
 classic through the explicit rollback path. Do not delete scale sets by name
 and do not use destructive fleet Stop as a deployment shortcut.
 
+## Production mutation and capacity guardrails
+
+Local image builds produce immutable candidates. Promotion is a separate step
+that requires the candidate tag and exact Docker image ID recorded at build
+time; ordinary builds never retag production `latest`. Treat promotion as a
+change-control boundary and verify image contents before moving the production
+tag.
+
+Use `mutation-owner-claim`, `mutation-owner-status`, and
+`mutation-owner-release` to fence an operator or automation session that spans
+multiple mutations. Supply the claimed token through `CRF_MUTATION_OWNER` on
+each guarded command. Competing manual mutations fail, while autoscale and
+reconcile ticks skip and retry after the lease clears. Leases are mode 0600,
+boot-bound, and time-bound.
+
+V2 Settings validation sums the configured baseline before saving: fixed
+capacity for fixed pools and minimum capacity for autoscaled pools. A baseline
+whose claim exceeds the post-reserve admission budget is rejected even when the
+host currently has idle capacity. Status JSON
+reports `configured` and `configured_headroom` beside runtime `reserved` and
+`admissible` values. Nashost's approved profile claims 74 CPUs and 114 GiB
+inside a 76-CPU/116-GiB admission envelope. Any additional runner currently
+requires reducing another pool or raising and revalidating the host budget.
+
+For Nashost, install `deployments/nashost/fleet-audit.sh` with
+`deployments/nashost/install-fleet-audit.sh`. The User Scripts job runs daily at
+06:30 and verifies the complete fleet identity, image/Kache integrity, plugin
+package identity, resource envelope, watchdog stability, and quiescent mutation
+state. It uses the existing mode-0600 User Scripts `gotify.env` for high-priority
+failure alerts and low-priority success receipts. Preserve a dated evidence
+bundle and SHA-256 manifest before deleting temporary diagnostics or forensic
+image tags.
+
 ## Diagnostics and retention
 
 Helper replay state and bounded logs live below

@@ -53,6 +53,16 @@ RUNNER_POOLS='v2|inherit|ci-inherit||1|1|2|0|inherit|inherit'
 [ "$(pool_cpu_milli inherit)" = 8000 ] && ok || bad 'inherited CPU claim did not resolve'
 [ "$(pool_memory_bytes inherit)" = 17179869184 ] && ok || bad 'inherited memory claim did not resolve'
 [ "$(pool_cpu_source inherit)" = inherit ] && ok || bad 'inherit CPU provenance was lost'
+RUNNER_CPUS=''
+[ "$(pool_cpu_milli inherit)" = 1000 ] && ok || bad 'blank inherited CPU did not use the one-core runtime default'
+RUNNER_MEMORY=bogus
+if pool_memory_bytes inherit >/dev/null 2>&1; then bad 'invalid inherited memory silently succeeded'; else ok; fi
+POOL_BACKEND=classic
+RUNNER_CPUS=bogus RUNNER_MEMORY=16g
+reject pools 'v2|inherit|ci-inherit||1|1|2|0|inherit|inherit' org
+RUNNER_CPUS=8 RUNNER_MEMORY=bogus
+reject pools 'v2|inherit|ci-inherit||1|1|2|0|inherit|inherit' org
+RUNNER_CPUS=8 RUNNER_MEMORY=16g
 
 POOL_BACKEND=scaleset RUNNER_POOLS='v2|zero|ci-zero||1|0|auto|0|1|1g'
 accept pools "$RUNNER_POOLS" org
@@ -62,6 +72,7 @@ reject pools "$RUNNER_POOLS" org
 
 RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true POOL_AUTOSCALE=inherit
 [ "$(pool_label python)" = 'ci-pool-python' ] && ok || bad 'routing label was not derived'
+[ "$(pool_effective_labels python)" = 'ci-pool-python' ] && ok || bad 'legacy pool effective labels failed'
 [ "$(pool_configured_target rust)" = 2 ] && ok || bad 'autoscale target is not pool min'
 [ "$(pool_autoscale_enabled rust; echo $?)" = 0 ] && ok || bad 'inherit did not enable every pool under the global master'
 POOL_AUTOSCALE=''
@@ -78,6 +89,10 @@ RUNNER_MODE=single RUNNER_COUNT=4 RUNNER_LABELS='self-hosted,unraid,build'
 AUTOSCALE_MIN=2 AUTOSCALE_MAX=16 AUTOSCALE_MIN_IDLE=2 GH_SCOPE=repo
 [ "$(pool_records)" = 'default|4|2|16|2' ] && ok || bad 'single mode did not synthesize the legacy pool'
 [ "$(pool_label default)" = "$RUNNER_LABELS" ] && ok || bad 'single mode did not preserve legacy labels'
+[ "$(pool_effective_labels default)" = "$RUNNER_LABELS" ] && ok || bad 'single mode effective labels failed'
+RUNNER_COUNT=5 RUNNER_LABELS='self-hosted,changed' AUTOSCALE_MIN=3 AUTOSCALE_MAX=9 AUTOSCALE_MIN_IDLE=1
+[ "$(pool_records)" = 'default|5|3|9|1' ] && ok || bad 'single-mode pool snapshot cache ignored changed capacity'
+[ "$(pool_effective_labels default)" = "$RUNNER_LABELS" ] && ok || bad 'single-mode pool snapshot cache ignored changed labels'
 
 reject broken "$valid" org
 reject pools '' org
@@ -118,6 +133,7 @@ reject pools 'v2|rust|ci-rust|build,build|1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust|ci-rust|1|1|2|1|1|1g' org
 reject pools 'v2|rust|ci-rust||1|1|2|1|0|1g' org
 reject pools 'v2|rust|ci-rust||1|1|2|1|1|1m' org
+accept pools 'v2|rust|ci-rust||1|1|2|1|1|6 GiB' org
 reject pools 'v2|rust|ci-rust||1|1|2|1|01|1g' org
 reject pools 'v2|rust|ci-rust||1|1|2|1|1.0000|1g' org
 reject pools 'v2|rust|ci-one|shared|1|1|2|1|1|1g;v2|python|ci-two|ci-one|1|1|2|1|1|1g' org
@@ -128,6 +144,8 @@ for id in a b c d e f g h; do
   large="${large}${large:+;}${rec}"
 done
 accept pools "$large" org
+if parse_cpu_milli 999999999999999999999 >/dev/null 2>&1; then bad 'overflowing CPU value was accepted'; else ok; fi
+if parse_memory_bytes 999999999999t >/dev/null 2>&1; then bad 'overflowing memory value was accepted'; else ok; fi
 if pool_config_validate pools "$valid" org ''; then bad 'empty organization owner was accepted'; else ok; fi
 if pool_config_validate pools "$valid" org 'bad/owner'; then bad 'unsafe organization owner was accepted'; else ok; fi
 for owner in . .. bad_owner -leading trailing- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
@@ -143,6 +161,10 @@ grep -q 'ci-pool-python' "$FLEET" "$POOLS_PAGE" "$ENGINE" && ok || bad 'derived 
 grep -q "action:'scale',pool,n" "$FLEET" && ok || bad 'Fleet does not send a pool-aware scale action'
 grep -q 'data-crf-mutation' "$FLEET" && ok || bad 'Fleet mutations cannot be disabled on invalid config'
 grep -q "case 'validate-pools'" "$EXEC" && ok || bad 'server pool validation endpoint missing'
+grep -q "post_scalar('backend', 16, true)" "$EXEC" && ok || bad 'pending backend is absent from server pool validation'
+grep -q "post_scalar('runner_cpus', 32, true)" "$EXEC" && ok || bad 'pending CPU default is absent from server pool validation'
+grep -q "post_scalar('runner_memory', 32, true)" "$EXEC" && ok || bad 'pending memory default is absent from server pool validation'
+grep -q "post_scalar('autoscale', 5, true)" "$EXEC" && ok || bad 'pending autoscale master is absent from server pool validation'
 grep -q 'scheduling routes, not trust boundaries' README.md && ok || bad 'routing/security boundary is undocumented'
 grep -q 'Deploy the plugin while.*Single fleet' README.md && ok || bad 'safe single-mode activation is undocumented'
 grep -q 'runs-on: ci-pool-rust' README.md && ok || bad 'Rust selector is undocumented'

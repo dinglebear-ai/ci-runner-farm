@@ -5,11 +5,19 @@ import (
 	"errors"
 	"log"
 	"maps"
+	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/protocol"
+)
+
+var (
+	supervisorIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	supervisorPoolID     = regexp.MustCompile(`^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$`)
+	supervisorRevision   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type Pool struct {
@@ -40,34 +48,57 @@ type Supervisor struct {
 	leases   map[string]int
 	snapshot atomic.Pointer[protocol.Snapshot]
 	sequence atomic.Uint64
+	running  atomic.Bool
 }
 
 func New(cfg Config, poller Poller) (*Supervisor, error) {
 	if cfg.DemandTTL == 0 {
 		cfg.DemandTTL = 90 * time.Second
 	}
-	if len(cfg.Pools) == 0 || len(cfg.Pools) > 8 || cfg.Heartbeat <= 0 || cfg.Heartbeat > 10*time.Second ||
+	if poller == nil || !supervisorIdentifier.MatchString(cfg.ControllerInstanceID) ||
+		!supervisorRevision.MatchString(cfg.ConfigRevision) ||
+		!supervisorRevision.MatchString(cfg.OwnershipRevision) ||
+		len(cfg.Pools) == 0 || len(cfg.Pools) > 8 || cfg.Heartbeat <= 0 || cfg.Heartbeat > 10*time.Second ||
 		cfg.DemandTTL < 2*cfg.Heartbeat || cfg.DemandTTL > 2*time.Minute {
 		return nil, errors.New("invalid_supervisor_config")
 	}
+	seenPools := map[string]bool{}
+	seenScaleSets := map[int64]bool{}
+	for _, pool := range cfg.Pools {
+		if !supervisorPoolID.MatchString(pool.ID) || pool.ScaleSetID <= 0 ||
+			seenPools[pool.ID] || seenScaleSets[pool.ScaleSetID] {
+			return nil, errors.New("invalid_supervisor_pool")
+		}
+		seenPools[pool.ID] = true
+		seenScaleSets[pool.ScaleSetID] = true
+	}
+	cfg.Pools = slices.Clone(cfg.Pools)
 	s := &Supervisor{cfg: cfg, poller: poller, leases: map[string]int{}}
 	return s, nil
 }
 
-func (s *Supervisor) SetLeases(leases map[string]int) {
+func (s *Supervisor) SetLeases(leases map[string]int) error {
+	if len(leases) > len(s.cfg.Pools) {
+		return errors.New("invalid_capacity_leases")
+	}
+	known := make(map[string]bool, len(s.cfg.Pools))
+	for _, pool := range s.cfg.Pools {
+		known[pool.ID] = true
+	}
 	copy := make(map[string]int, len(leases))
 	for pool, capacity := range leases {
-		if capacity < 0 {
-			capacity = 0
+		if !known[pool] || capacity < 0 || capacity > 64 {
+			return errors.New("invalid_capacity_leases")
 		}
 		copy[pool] = capacity
 	}
 	s.leaseMu.Lock()
 	defer s.leaseMu.Unlock()
 	if maps.Equal(s.leases, copy) {
-		return
+		return nil
 	}
 	s.leases = copy
+	return nil
 }
 
 func (s *Supervisor) leaseForPool(pool string) int {
@@ -76,14 +107,44 @@ func (s *Supervisor) leaseForPool(pool string) int {
 	return s.leases[pool]
 }
 
+func cloneSnapshot(snapshot protocol.Snapshot) protocol.Snapshot {
+	clone := snapshot
+	clone.Pools = slices.Clone(snapshot.Pools)
+	for i := range clone.Pools {
+		clone.Pools[i].AcquiredHandles = slices.Clone(snapshot.Pools[i].AcquiredHandles)
+	}
+	return clone
+}
+
+func validPollResult(result PollResult) bool {
+	if result.AssignedJobs < 0 || result.MessageID < 0 || len(result.AcquiredHandles) > 64 {
+		return false
+	}
+	seen := make(map[int64]bool, len(result.AcquiredHandles))
+	for _, handle := range result.AcquiredHandles {
+		if handle <= 0 || seen[handle] {
+			return false
+		}
+		seen[handle] = true
+	}
+	return true
+}
+
 func (s *Supervisor) Snapshot() protocol.Snapshot {
 	if p := s.snapshot.Load(); p != nil {
-		return *p
+		return cloneSnapshot(*p)
 	}
 	return protocol.Snapshot{}
 }
 
 func (s *Supervisor) Run(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("supervisor_context_required")
+	}
+	if !s.running.CompareAndSwap(false, true) {
+		return errors.New("supervisor_already_running")
+	}
+	defer s.running.Store(false)
 	var wg sync.WaitGroup
 	results := make(chan protocol.PoolSnapshot, len(s.cfg.Pools))
 	for _, pool := range s.cfg.Pools {
@@ -96,6 +157,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			for {
 				capacity := s.leaseForPool(pool.ID)
 				poll, err := s.poller.Poll(ctx, pool, capacity)
+				if err == nil && !validPollResult(poll) {
+					err = errors.New("invalid_poll_result")
+				}
 				if ctx.Err() != nil {
 					return
 				}
@@ -108,7 +172,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				now := time.Now().UTC()
 				result := protocol.PoolSnapshot{PoolID: pool.ID, ScaleSetID: pool.ScaleSetID,
 					AssignedJobs: poll.AssignedJobs, AdvertisedCapacity: capacity, LastMessageID: poll.MessageID,
-					SessionHealthy: err == nil, AcquiredHandles: poll.AcquiredHandles}
+					SessionHealthy: err == nil, AcquiredHandles: slices.Clone(poll.AcquiredHandles)}
 				if err == nil {
 					result.ObservedAt = now
 					result.ValidUntil = now.Add(s.cfg.DemandTTL)

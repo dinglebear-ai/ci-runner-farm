@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/protocol"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/supervisor"
 )
 
 type fakeAPI struct {
@@ -99,6 +101,39 @@ func request(cfg RuntimeConfig, operation string, sequence uint64, payload strin
 		ConfigRevision: cfg.ConfigRevision, OwnershipRevision: cfg.OwnershipRevision,
 		ControllerInstanceID: cfg.ControllerInstanceID, Sequence: sequence, Payload: []byte(payload)}
 }
+
+func validRuntimeConfig(root string) RuntimeConfig {
+	return RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64),
+		PluginDigest: strings.Repeat("1", 64), ImageDigest: strings.Repeat("2", 64),
+		DockerfileDigest: strings.Repeat("3", 64), EntrypointDigest: strings.Repeat("4", 64),
+		InstallationID: "installation", HostID: "host-1", Owner: "dinglebear-ai",
+		RunnerGroupID: 7, QuarantineRunnerGroupID: 8,
+		StateDir: filepath.Join(root, "state"), OwnershipPath: filepath.Join(root, "ownership.json"),
+		HeartbeatSeconds: 1, Pools: []PoolConfig{{ID: "python", RoutingLabel: "ci-pool-python",
+			Labels: []string{"self-hosted", "linux", "x64", "ci-pool-python"}}}}
+}
+
+type closeTrackingPoller struct {
+	consumeFailPoller
+	closed int
+	err    error
+}
+
+func (p *closeTrackingPoller) Close(context.Context) error {
+	p.closed++
+	return p.err
+}
+
+type consumeFailPoller struct{}
+
+func (*consumeFailPoller) Poll(context.Context, supervisor.Pool, int) (supervisor.PollResult, error) {
+	return supervisor.PollResult{}, nil
+}
+func (*consumeFailPoller) HasHandle(int64, int64) bool     { return true }
+func (*consumeFailPoller) ConsumeHandle(int64, int64) bool { return false }
+func (*consumeFailPoller) RetireHandle(int64, int64) error { return nil }
+func (*consumeFailPoller) Close(context.Context) error     { return nil }
 
 func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T) {
 	root := t.TempDir()
@@ -245,6 +280,110 @@ func TestApplySessionsRestoresEffectiveEligibilityAfterRestart(t *testing.T) {
 		if !slices.Contains(set.Labels, "python") {
 			t.Fatalf("restart silently made the effective backend ineligible: %#v", set.Labels)
 		}
+	}
+}
+
+func TestStopSessionsClosesPollerAfterSupervisorError(t *testing.T) {
+	poller := &closeTrackingPoller{}
+	done := make(chan error, 1)
+	done <- errors.New("supervisor failed")
+	control := &Control{poller: poller, superDone: done}
+	err := control.stopSessions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "join_previous_supervisor") {
+		t.Fatalf("supervisor error was lost: %v", err)
+	}
+	if poller.closed != 1 || control.poller != nil || control.superDone != nil {
+		t.Fatalf("completed supervisor did not release sessions: closed=%d poller=%#v done=%#v",
+			poller.closed, control.poller, control.superDone)
+	}
+}
+
+func TestStopSessionsRetainsPollerWhenCloseFails(t *testing.T) {
+	poller := &closeTrackingPoller{err: errors.New("close failed")}
+	control := &Control{poller: poller}
+	err := control.stopSessions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "close_previous_sessions") {
+		t.Fatalf("close error was lost: %v", err)
+	}
+	if poller.closed != 1 || control.poller != poller {
+		t.Fatalf("failed close was not retryable: closed=%d poller=%#v", poller.closed, control.poller)
+	}
+}
+
+func TestDecodePayloadRejectsEveryTrailingByteExceptWhitespace(t *testing.T) {
+	var payload struct {
+		Value int `json:"value"`
+	}
+	if err := decodePayload([]byte("{\"value\":1} \n\t"), &payload); err != nil || payload.Value != 1 {
+		t.Fatalf("valid payload rejected: value=%d err=%v", payload.Value, err)
+	}
+	for _, suffix := range []string{"{}", "garbage", "["} {
+		if err := decodePayload([]byte("{\"value\":1}"+suffix), &payload); err == nil {
+			t.Fatalf("accepted trailing payload %q", suffix)
+		}
+	}
+}
+
+func TestRuntimeConfigRejectsAmbiguousPoolLabels(t *testing.T) {
+	base := validRuntimeConfig(t.TempDir())
+	tests := []struct {
+		name  string
+		pools []PoolConfig
+	}{
+		{"invalid pool id", []PoolConfig{{ID: "Python", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python"}}}},
+		{"duplicate routing", []PoolConfig{
+			{ID: "python", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python"}},
+			{ID: "rust", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python"}},
+		}},
+		{"missing routing", []PoolConfig{{ID: "python", RoutingLabel: "ci-pool-python", Labels: []string{"self-hosted"}}}},
+		{"duplicate labels", []PoolConfig{{ID: "python", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python", "ci-pool-python"}}}},
+		{"foreign routing label", []PoolConfig{
+			{ID: "python", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python", "ci-pool-rust"}},
+			{ID: "rust", RoutingLabel: "ci-pool-rust", Labels: []string{"ci-pool-rust"}},
+		}},
+		{"uppercase label", []PoolConfig{{ID: "python", RoutingLabel: "ci-pool-python", Labels: []string{"ci-pool-python", "Linux"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Pools = tt.pools
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("accepted invalid pools: %#v", tt.pools)
+			}
+		})
+	}
+}
+
+func TestIssueJITRollsBackDurableReservationWhenConsumeLosesRace(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if got := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{}`)); !got.OK {
+		t.Fatalf("apply sessions failed: %#v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := control.stopSessions(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	control.poller = &consumeFailPoller{}
+	response := control.Handle(context.Background(), request(cfg, "issue_jit", 2,
+		`{"pool_id":"python","work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`))
+	if response.OK || response.Code != "work_handle_not_available_after_reservation" {
+		t.Fatalf("consume race was not reported: %#v", response)
+	}
+	if len(control.issued) != 0 || api.jitCalls != 0 {
+		t.Fatalf("failed reservation leaked state or issued JIT: issued=%#v calls=%d", control.issued, api.jitCalls)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
+	if err != nil || strings.TrimSpace(string(data)) != "{}" {
+		t.Fatalf("failed reservation tombstone remained durable: %q err=%v", data, err)
 	}
 }
 

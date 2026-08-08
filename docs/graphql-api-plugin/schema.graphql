@@ -1,0 +1,825 @@
+# CI Runner Farm GraphQL schema contract
+#
+# This file is the target public schema for unraid-api-plugin-ci-runner-farm.
+# The runtime implementation is code-first NestJS, so this SDL is generated-contract
+# documentation and a schema-diff fixture rather than the source compiled by NestJS.
+
+scalar BigInt
+scalar DateTime
+
+directive @usePermissions(action: String, resource: String) on FIELD_DEFINITION
+
+enum RunnerFarmBackend {
+  CLASSIC
+  SCALESET
+}
+
+enum RunnerFarmBackendStateValue {
+  CLASSIC
+  SCALESET
+  INVALID
+}
+
+enum RunnerFarmMode {
+  SINGLE
+  POOLS
+}
+
+enum RunnerFarmModeState {
+  SINGLE
+  POOLS
+  INVALID
+}
+
+enum RunnerFarmAuthMode {
+  PAT
+  GITHUB_APP
+}
+
+enum RunnerFarmAuthModeState {
+  PAT
+  GITHUB_APP
+  INVALID
+}
+
+enum RunnerFarmGitHubScope {
+  REPOSITORY
+  ORGANIZATION
+}
+
+enum RunnerFarmWorkspaceMode {
+  TMPFS
+  CACHE_BIND
+}
+
+enum RunnerFarmPoolAutoscaleMode {
+  INHERIT
+  EXPLICIT
+}
+
+enum RunnerFarmMemorySwapMode {
+  NONE
+  DOUBLE
+}
+
+enum RunnerFarmImageSource {
+  BUILTIN
+  REMOTE
+}
+
+enum RunnerFarmNetworkIsolation {
+  OFF
+  ISOLATE
+  STRICT
+}
+
+enum RunnerFarmOperationKind {
+  COMPATIBILITY_TEST
+  PROVISIONING_VALIDATION
+  IMAGE_BUILD
+}
+
+enum RunnerFarmOperationState {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum RunnerFarmConclusion {
+  SUCCESS
+  FAILURE
+  CANCELLED
+  UNKNOWN
+}
+
+enum RunnerFarmMaintenanceMode {
+  BEGIN
+  RESUME
+}
+
+type RunnerFarmReason {
+  code: String!
+  message: String
+}
+
+type RunnerFarmRevisionSet {
+  configRevision: String!
+  inventoryRevision: String!
+  transitionRevision: String!
+  ownershipRevision: String!
+  compatibilityRecordId: String!
+  credentialRevision: String
+}
+
+type RunnerFarmBackendState {
+  requested: RunnerFarmBackendStateValue!
+  effective: RunnerFarmBackendStateValue!
+  transitionPhase: String!
+  transitionId: ID
+  transitionRevision: String!
+  ownershipRevision: String!
+}
+
+type RunnerFarmCompatibility {
+  valid: Boolean!
+  reason: RunnerFarmReason!
+  recordId: String
+  testedAt: DateTime
+  ageSeconds: Int
+  helperDigest: String
+  pluginDigest: String
+  imageDigest: String
+  entrypointDigest: String
+  moduleRevision: String
+  goVersion: String
+  runnerGroupId: BigInt
+  runnerGroupPolicy: String
+  owner: String
+  authMode: RunnerFarmAuthModeState!
+  privateKeyConfigured: Boolean!
+}
+
+type RunnerFarmOperation {
+  id: ID!
+  kind: RunnerFarmOperationKind!
+  state: RunnerFarmOperationState!
+  code: String!
+  message: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  finishedAt: DateTime
+  output: [String!]!
+}
+
+type RunnerFarmResourceQuantity {
+  budget: BigInt!
+  reserve: BigInt!
+  reserved: BigInt!
+  admissible: BigInt!
+}
+
+type RunnerFarmResources {
+  available: Boolean!
+  reason: RunnerFarmReason
+  cpuMilli: RunnerFarmResourceQuantity!
+  memoryBytes: RunnerFarmResourceQuantity!
+}
+
+type RunnerFarmReservation {
+  operationId: ID!
+  poolId: String!
+  runnerName: String
+  cpuMilli: BigInt!
+  memoryBytes: BigInt!
+  deadline: DateTime!
+  phase: String!
+}
+
+type RunnerFarmRecentActivity {
+  schemaVersion: Int!
+  observedAt: DateTime!
+  completedAt: DateTime!
+  runnerName: String!
+  poolId: String!
+  workHandle: String!
+  job: String!
+  conclusion: RunnerFarmConclusion!
+}
+
+type RunnerFarmPool {
+  id: String!
+  label: String!
+  routingLabel: String!
+  additionalLabels: [String!]!
+  effectiveLabels: [String!]!
+  cpuMilli: BigInt!
+  memoryBytes: BigInt!
+  blockedReason: RunnerFarmReason
+  autoscaleEnabled: Boolean!
+  configuredTarget: Int!
+  effectiveTarget: Int!
+  count: Int!
+  up: Int!
+  busy: Int!
+  idle: Int!
+  starting: Int!
+  error: Int!
+  completed: Int!
+  stale: Int!
+  retiring: Int!
+  pending: Int!
+  min: Int!
+  max: Int
+  maxAutomatic: Boolean!
+  idleBuffer: Int!
+  assignedJobs: Int
+  demandFresh: Boolean!
+  desired: Int!
+  admitted: Int!
+  advertisedCapacity: Int!
+  leaseAgeSeconds: Int
+  sessionHealthy: Boolean!
+  ownershipState: String!
+  remoteScaleSetId: BigInt
+  tombstone: Boolean!
+  orphan: Boolean!
+}
+
+type RunnerFarmRunner {
+  name: String!
+  poolId: String!
+  routingLabel: String!
+  scopeTarget: String!
+  poolIndex: Int!
+  state: String!
+  phase: String!
+  job: String
+  jobStartedAt: DateTime
+  startedAt: DateTime
+  repository: String
+  pullRequest: Int
+  branch: String
+  workflowRunId: String
+  cpuLimitMilli: BigInt
+  memoryLimitBytes: BigInt
+  cpuPercent: Float
+  memoryUsedBytes: BigInt
+  completed: Boolean!
+  stale: Boolean!
+  retiring: Boolean!
+}
+
+type RunnerFarmCredentialPresence {
+  revision: String!
+  githubPat: Boolean!
+  githubAppPrivateKey: Boolean!
+  registryToken: Boolean!
+}
+
+type RunnerFarmStatus {
+  schemaVersion: Int!
+  configRevision: String!
+  observedAt: DateTime!
+  inventoryRevision: String!
+  backend: RunnerFarmBackendState!
+  compatibility: RunnerFarmCompatibility!
+  operation: RunnerFarmOperation
+  maintenance: Boolean!
+  resources: RunnerFarmResources!
+  reservations: [RunnerFarmReservation!]!
+  recentActivity: [RunnerFarmRecentActivity!]!
+  mode: RunnerFarmModeState!
+  configError: String
+  count: Int!
+  configured: Int!
+  credentials: RunnerFarmCredentialPresence!
+  autoscaleEnabled: Boolean!
+  autoscaleMax: Int!
+  autoscaleState: String!
+  imageAutoUpdateState: String!
+  warning: String
+  securityWarning: String
+  stale: Int!
+  retiring: Int!
+  blockedCapacity: Int!
+  pools: [RunnerFarmPool!]!
+  runners: [RunnerFarmRunner!]!
+}
+
+type RunnerFarmReadiness {
+  schemaVersion: Int!
+  backend: RunnerFarmBackendState!
+  compatibility: RunnerFarmCompatibility!
+  operation: RunnerFarmOperation
+  count: Int
+}
+
+type RunnerFarmQueueJob {
+  runId: String!
+  jobId: String!
+  repository: String!
+  workflow: String!
+  labels: [String!]!
+  poolId: String!
+  reason: String!
+  createdAt: DateTime
+  url: String
+}
+
+type RunnerFarmQueueSnapshot {
+  queued: Int
+  knownQueued: Int!
+  workflowRuns: Int
+  partial: Boolean!
+  truncated: Boolean!
+  detailComplete: Boolean!
+  ageSeconds: Int!
+  jobs: [RunnerFarmQueueJob!]!
+}
+
+type RunnerFarmRunStatistics {
+  succeeded: Int!
+  failed: Int!
+  cancelled: Int!
+  other: Int!
+  total: Int
+  ageSeconds: Int!
+}
+
+type RunnerFarmCacheUsage {
+  totalBytes: BigInt
+  packageBytes: BigInt!
+  ageSeconds: Int!
+}
+
+type RunnerFarmImageInfo {
+  exists: Boolean!
+  image: String!
+  source: RunnerFarmImageSource!
+  imageId: String
+  createdAt: DateTime
+  sizeBytes: BigInt
+  baseImage: String
+  runnersUsingImage: Int!
+  dockerfilePath: String
+}
+
+type RunnerFarmDockerfile {
+  content: String!
+  sha256: String!
+  defaultContent: String!
+}
+
+type RunnerFarmLog {
+  source: String!
+  content: String!
+  truncated: Boolean!
+}
+
+type RunnerFarmGitHubConfiguration {
+  scope: RunnerFarmGitHubScope!
+  owner: String!
+  repositories: [String!]!
+  runnerGroup: String
+  authMode: RunnerFarmAuthMode!
+  githubAppId: String
+  githubAppInstallationId: String
+}
+
+type RunnerFarmPoolConfiguration {
+  id: String!
+  routingLabel: String!
+  additionalLabels: [String!]!
+  fixed: Int!
+  min: Int!
+  max: Int
+  maxAutomatic: Boolean!
+  idleBuffer: Int!
+  cpuMilli: BigInt!
+  memoryBytes: BigInt!
+  autoscaleEnabled: Boolean!
+}
+
+type RunnerFarmPoolAutoscalePolicy {
+  mode: RunnerFarmPoolAutoscaleMode!
+  poolIds: [String!]!
+}
+
+type RunnerFarmRunnerConfiguration {
+  mode: RunnerFarmMode!
+  count: Int!
+  labels: [String!]!
+  poolBackend: RunnerFarmBackend!
+  pools: [RunnerFarmPoolConfiguration!]!
+  poolAutoscalePolicy: RunnerFarmPoolAutoscalePolicy!
+  defaultCpuMilli: BigInt
+  defaultMemoryBytes: BigInt
+  ephemeral: Boolean!
+  runAsRoot: Boolean!
+}
+
+type RunnerFarmResourceConfiguration {
+  cpuBudgetMilli: BigInt
+  memoryBudgetBytes: BigInt
+  cpuReserveMilli: BigInt!
+  memoryReserveBytes: BigInt!
+  cpuOvercommit: Float!
+  memorySwapMode: RunnerFarmMemorySwapMode!
+  pidsLimit: Int!
+}
+
+type RunnerFarmStorageConfiguration {
+  cacheRoot: String!
+  workspaceMode: RunnerFarmWorkspaceMode!
+  workspaceTmpfsBytes: BigInt
+  cacheMounts: [String!]!
+}
+
+type RunnerFarmImageConfiguration {
+  source: RunnerFarmImageSource!
+  image: String!
+  registryServer: String
+  registryUsername: String
+}
+
+type RunnerFarmDockerConfiguration {
+  shareDockerSocket: Boolean!
+  dockerInDocker: Boolean!
+  sharedImageCache: Boolean!
+  networkIsolation: RunnerFarmNetworkIsolation!
+  runnerNetwork: String!
+  mirrorPort: Int!
+}
+
+type RunnerFarmAutoscaleConfiguration {
+  enabled: Boolean!
+  min: Int!
+  max: Int!
+  minIdle: Int!
+  step: Int!
+  intervalSeconds: Int!
+  idleGraceSeconds: Int!
+}
+
+type RunnerFarmImageUpdateConfiguration {
+  enabled: Boolean!
+  intervalSeconds: Int!
+  drainTimeoutSeconds: Int!
+}
+
+type RunnerFarmConfiguration {
+  github: RunnerFarmGitHubConfiguration!
+  runners: RunnerFarmRunnerConfiguration!
+  resources: RunnerFarmResourceConfiguration!
+  storage: RunnerFarmStorageConfiguration!
+  image: RunnerFarmImageConfiguration!
+  docker: RunnerFarmDockerConfiguration!
+  autoscaling: RunnerFarmAutoscaleConfiguration!
+  imageUpdates: RunnerFarmImageUpdateConfiguration!
+  dashboardWidgetEnabled: Boolean!
+}
+
+type RunnerFarmRawSetting {
+  key: String!
+  value: String!
+}
+
+type RunnerFarmValidationIssue {
+  path: String!
+  code: String!
+  message: String!
+}
+
+type RunnerFarmConfigurationSnapshot {
+  revision: String!
+  valid: Boolean!
+  issues: [RunnerFarmValidationIssue!]!
+  configuration: RunnerFarmConfiguration
+  rawSettings: [RunnerFarmRawSetting!]!
+  credentials: RunnerFarmCredentialPresence!
+}
+
+type RunnerFarmConfigurationValidation {
+  valid: Boolean!
+  issues: [RunnerFarmValidationIssue!]!
+  normalized: RunnerFarmConfiguration
+}
+
+type RunnerFarmActionResult {
+  ok: Boolean!
+  code: String!
+  message: String!
+  revisions: RunnerFarmRevisionSet!
+  operation: RunnerFarmOperation
+}
+
+type RunnerFarmDockerfileSaveResult {
+  ok: Boolean!
+  code: String!
+  message: String!
+  sha256: String
+}
+
+input RunnerFarmConfigRevisionInput {
+  configRevision: String!
+}
+
+input RunnerFarmFleetRevisionInput {
+  configRevision: String!
+  inventoryRevision: String!
+}
+
+input RunnerFarmCredentialRevisionInput {
+  configRevision: String!
+  credentialRevision: String!
+}
+
+input RunnerFarmTransitionRevisionInput {
+  configRevision: String!
+  ownershipRevision: String!
+  compatibilityRecordId: String!
+  transitionRevision: String!
+}
+
+input RunnerFarmScaleInput {
+  poolId: String
+  target: Int!
+  expected: RunnerFarmFleetRevisionInput!
+}
+
+input RunnerFarmPrewarmInput {
+  poolId: String!
+  target: Int!
+  expectedConfigRevision: String!
+}
+
+input RunnerFarmRecycleInput {
+  runnerName: String!
+  expected: RunnerFarmFleetRevisionInput!
+}
+
+input RunnerFarmMaintenanceInput {
+  mode: RunnerFarmMaintenanceMode!
+  expectedConfigRevision: String!
+}
+
+input RunnerFarmQueueCancelInput {
+  repository: String!
+  runId: String!
+}
+
+input RunnerFarmLogInput {
+  runnerName: String!
+  lines: Int! = 150
+}
+
+input RunnerFarmPoolPatchInput {
+  id: String!
+  routingLabel: String!
+  additionalLabels: [String!]! = []
+  fixed: Int!
+  min: Int!
+  max: Int
+  maxAutomatic: Boolean! = false
+  idleBuffer: Int!
+  cpuMilli: BigInt!
+  memoryBytes: BigInt!
+  autoscaleEnabled: Boolean!
+}
+
+input RunnerFarmGitHubConfigurationPatchInput {
+  scope: RunnerFarmGitHubScope
+  owner: String
+  repositories: [String!]
+  runnerGroup: String
+  authMode: RunnerFarmAuthMode
+  githubAppId: String
+  githubAppInstallationId: String
+}
+
+input RunnerFarmPoolAutoscalePolicyInput {
+  mode: RunnerFarmPoolAutoscaleMode!
+  poolIds: [String!]! = []
+}
+
+input RunnerFarmRunnerConfigurationPatchInput {
+  mode: RunnerFarmMode
+  count: Int
+  labels: [String!]
+  poolBackend: RunnerFarmBackend
+  pools: [RunnerFarmPoolPatchInput!]
+  poolAutoscalePolicy: RunnerFarmPoolAutoscalePolicyInput
+  defaultCpuMilli: BigInt
+  defaultMemoryBytes: BigInt
+  ephemeral: Boolean
+  runAsRoot: Boolean
+}
+
+input RunnerFarmResourceConfigurationPatchInput {
+  cpuBudgetMilli: BigInt
+  memoryBudgetBytes: BigInt
+  cpuReserveMilli: BigInt
+  memoryReserveBytes: BigInt
+  cpuOvercommit: Float
+  memorySwapMode: RunnerFarmMemorySwapMode
+  pidsLimit: Int
+}
+
+input RunnerFarmStorageConfigurationPatchInput {
+  cacheRoot: String
+  workspaceMode: RunnerFarmWorkspaceMode
+  workspaceTmpfsBytes: BigInt
+  cacheMounts: [String!]
+}
+
+input RunnerFarmImageConfigurationPatchInput {
+  source: RunnerFarmImageSource
+  image: String
+  registryServer: String
+  registryUsername: String
+}
+
+input RunnerFarmDockerConfigurationPatchInput {
+  shareDockerSocket: Boolean
+  dockerInDocker: Boolean
+  sharedImageCache: Boolean
+  networkIsolation: RunnerFarmNetworkIsolation
+  runnerNetwork: String
+  mirrorPort: Int
+}
+
+input RunnerFarmAutoscaleConfigurationPatchInput {
+  enabled: Boolean
+  min: Int
+  max: Int
+  minIdle: Int
+  step: Int
+  intervalSeconds: Int
+  idleGraceSeconds: Int
+}
+
+input RunnerFarmImageUpdateConfigurationPatchInput {
+  enabled: Boolean
+  intervalSeconds: Int
+  drainTimeoutSeconds: Int
+}
+
+input RunnerFarmConfigurationPatchInput {
+  github: RunnerFarmGitHubConfigurationPatchInput
+  runners: RunnerFarmRunnerConfigurationPatchInput
+  resources: RunnerFarmResourceConfigurationPatchInput
+  storage: RunnerFarmStorageConfigurationPatchInput
+  image: RunnerFarmImageConfigurationPatchInput
+  docker: RunnerFarmDockerConfigurationPatchInput
+  autoscaling: RunnerFarmAutoscaleConfigurationPatchInput
+  imageUpdates: RunnerFarmImageUpdateConfigurationPatchInput
+  dashboardWidgetEnabled: Boolean
+}
+
+input RunnerFarmApplyConfigurationInput {
+  expectedConfigRevision: String!
+  patch: RunnerFarmConfigurationPatchInput!
+}
+
+input RunnerFarmValidateConfigurationInput {
+  expectedConfigRevision: String!
+  patch: RunnerFarmConfigurationPatchInput!
+}
+
+input RunnerFarmSetGithubPatInput {
+  expectedConfigRevision: String!
+  expectedCredentialRevision: String!
+  value: String!
+}
+
+input RunnerFarmSetGithubAppPrivateKeyInput {
+  expectedConfigRevision: String!
+  expectedCredentialRevision: String!
+  value: String!
+}
+
+input RunnerFarmSetRegistryTokenInput {
+  expectedConfigRevision: String!
+  expectedCredentialRevision: String!
+  value: String!
+}
+
+input RunnerFarmSaveDockerfileInput {
+  expectedDockerfileSha256: String!
+  content: String!
+}
+
+input RunnerFarmStartImageBuildInput {
+  dockerfileSha256: String!
+}
+
+input RunnerFarmStartProvisioningValidationInput {
+  expectedConfigRevision: String!
+}
+
+input RunnerFarmStartCompatibilityTestInput {
+  expectedConfigRevision: String!
+}
+
+input RunnerFarmOperationInput {
+  operationId: ID!
+}
+
+extend type Query {
+  runnerFarmStatus: RunnerFarmStatus!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmReadiness: RunnerFarmReadiness!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmConfiguration: RunnerFarmConfigurationSnapshot!
+    @usePermissions(action: "READ_ANY", resource: "CONFIG")
+
+  runnerFarmQueue: RunnerFarmQueueSnapshot!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmRunStatistics: RunnerFarmRunStatistics!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmCacheUsage: RunnerFarmCacheUsage!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmImage: RunnerFarmImageInfo!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmDockerfile: RunnerFarmDockerfile!
+    @usePermissions(action: "READ_ANY", resource: "CONFIG")
+
+  runnerFarmOperation(input: RunnerFarmOperationInput!): RunnerFarmOperation
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmRunnerLog(input: RunnerFarmLogInput!): RunnerFarmLog!
+    @usePermissions(action: "READ_ANY", resource: "LOGS")
+
+  runnerFarmHistoryLog(input: RunnerFarmLogInput!): RunnerFarmLog!
+    @usePermissions(action: "READ_ANY", resource: "LOGS")
+
+  runnerFarmControllerLog(lines: Int = 60): RunnerFarmLog!
+    @usePermissions(action: "READ_ANY", resource: "LOGS")
+}
+
+extend type Mutation {
+  runnerFarmStart(expected: RunnerFarmFleetRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmStop(expected: RunnerFarmFleetRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmRestart(expected: RunnerFarmFleetRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmScale(input: RunnerFarmScaleInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmPrewarm(input: RunnerFarmPrewarmInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmRecycle(input: RunnerFarmRecycleInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmSetMaintenance(input: RunnerFarmMaintenanceInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmApplyConfiguration(input: RunnerFarmApplyConfigurationInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmValidateConfiguration(input: RunnerFarmValidateConfigurationInput!): RunnerFarmConfigurationValidation!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmSetGithubPat(input: RunnerFarmSetGithubPatInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmClearGithubPat(expected: RunnerFarmCredentialRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmSetGithubAppPrivateKey(input: RunnerFarmSetGithubAppPrivateKeyInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmClearGithubAppPrivateKey(expected: RunnerFarmCredentialRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmSetRegistryToken(input: RunnerFarmSetRegistryTokenInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmClearRegistryToken(expected: RunnerFarmCredentialRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmSaveDockerfile(input: RunnerFarmSaveDockerfileInput!): RunnerFarmDockerfileSaveResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmStartImageBuild(input: RunnerFarmStartImageBuildInput!): RunnerFarmOperation!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmStartProvisioningValidation(input: RunnerFarmStartProvisioningValidationInput!): RunnerFarmOperation!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmStartCompatibilityTest(input: RunnerFarmStartCompatibilityTestInput!): RunnerFarmOperation!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmBeginBackendMigration(input: RunnerFarmTransitionRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmRollbackBackend(input: RunnerFarmTransitionRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "CONFIG")
+
+  runnerFarmCancelQueuedRun(input: RunnerFarmQueueCancelInput!): RunnerFarmActionResult!
+    @usePermissions(action: "UPDATE_ANY", resource: "DOCKER")
+
+  runnerFarmClearPackageCaches(expected: RunnerFarmConfigRevisionInput!): RunnerFarmActionResult!
+    @usePermissions(action: "DELETE_ANY", resource: "DOCKER")
+}
+
+extend type Subscription {
+  runnerFarmStatusUpdates: RunnerFarmStatus!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+
+  runnerFarmOperationUpdates(input: RunnerFarmOperationInput!): RunnerFarmOperation!
+    @usePermissions(action: "READ_ANY", resource: "DOCKER")
+}

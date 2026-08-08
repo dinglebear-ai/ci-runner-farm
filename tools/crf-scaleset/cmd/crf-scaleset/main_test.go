@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/actions/scaleset"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/controller"
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/probe"
 )
 
 func TestScaleSetClientFactoryBindsDistinctClientIdentities(t *testing.T) {
@@ -89,6 +92,51 @@ func TestNewScaleSetAPIAcceptsPrivateMultilineGitHubAppKey(t *testing.T) {
 			AppClientID: "1", InstallationID: 2, PrivateKeyFile: path}}
 	if _, err := newScaleSetAPI(cfg); err != nil {
 		t.Fatalf("private multiline app key rejected: %v", err)
+	}
+}
+
+func TestLoadProbeConfigRejectsTrailingDataAndInvalidRuntime(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "probe.json")
+	runtimeCfg := controller.RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64),
+		PluginDigest: strings.Repeat("1", 64), ImageDigest: strings.Repeat("2", 64),
+		DockerfileDigest: strings.Repeat("3", 64), EntrypointDigest: strings.Repeat("4", 64),
+		InstallationID: "installation", HostID: "host-1", Owner: "dinglebear-ai",
+		RunnerGroupID: 7, QuarantineRunnerGroupID: 8, StateDir: filepath.Join(root, "state"),
+		OwnershipPath: filepath.Join(root, "ownership.json"), HeartbeatSeconds: 1,
+		Pools: []controller.PoolConfig{{ID: "rust", RoutingLabel: "ci-pool-rust",
+			Labels: []string{"self-hosted", "linux", "x64", "ci-pool-rust"}}}}
+	cfg := probeConfig{Runtime: runtimeCfg, Live: probe.LiveConfig{Owner: runtimeCfg.Owner,
+		RunnerGroupName: "production", RunnerGroupPolicy: "selected_repositories"}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, []byte(" \n\t")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProbeConfig(path); err != nil {
+		t.Fatalf("valid probe config rejected: %v", err)
+	}
+	for _, suffix := range []string{"{}", "garbage", "["} {
+		if err := os.WriteFile(path, append(append([]byte{}, data...), suffix...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadProbeConfig(path); err == nil {
+			t.Fatalf("accepted trailing probe payload %q", suffix)
+		}
+	}
+	cfg.Runtime.Pools[0].Labels = []string{"self-hosted"}
+	invalid, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, invalid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProbeConfig(path); err == nil {
+		t.Fatal("probe accepted runtime config without its routing label")
 	}
 }
 

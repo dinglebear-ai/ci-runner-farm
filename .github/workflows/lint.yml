@@ -1,8 +1,9 @@
 name: Lint
 
-# Fast static gate for the plugin: shell syntax, PHP syntax, and the config-parity
-# guard (engine / default.cfg / UI $defaults must agree — see tests/config-parity.sh).
-# No build or runtime; complements package-plugins.yml.
+# Fast static gate for the plugin: shell syntax, PHP syntax, the config-parity
+# guard (engine / default.cfg / UI $defaults must agree — see tests/config-parity.sh),
+# and the crf-scaleset Go unit test suite. No build or runtime; complements
+# package-plugins.yml (which builds the crf-scaleset binary but does not test it).
 
 on:
   pull_request:
@@ -34,6 +35,10 @@ jobs:
         with:
           go-version: 1.25.3
           cache-dependency-path: tools/crf-scaleset/go.sum
+
+      - name: Go unit tests (crf-scaleset)
+        working-directory: tools/crf-scaleset
+        run: go test ./...
 
       - name: Shell syntax (bash -n)
         run: |

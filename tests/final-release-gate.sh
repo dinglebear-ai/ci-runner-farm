@@ -117,11 +117,17 @@ grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
 # budget in the deterministic maximum fixture.
 bash tests/performance-contracts.sh >/dev/null
 bash tests/autoscale-locks.sh >/dev/null
+bash tests/mutation-ownership.sh >/dev/null
+bash tests/image-promotion.sh >/dev/null
+bash tests/resource-admission.sh >/dev/null
+bash tests/nashost-fleet-audit.sh >/dev/null
 bash tests/flash-write-paths.sh >/dev/null
 bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
+bash tests/readiness-json.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
+bash tests/stalled-credential-handoff.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null
@@ -147,7 +153,8 @@ for executable in \
   [ -x "$tmp/package/$executable" ] ||
     crf_fail "packaged $executable is not executable"
 done
-file "$helper" | grep -Fq 'statically linked' || crf_fail "packaged helper is not static"
+helper_type="$(file "$helper")"
+grep -Fq 'statically linked' <<<"$helper_type" || crf_fail "packaged helper is not static"
 "$helper" version >"$tmp/version.json"
 php -r '
   $j=json_decode(file_get_contents($argv[1]),true);

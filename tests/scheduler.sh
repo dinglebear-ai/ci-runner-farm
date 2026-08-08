@@ -38,8 +38,8 @@ python|3|1|4|2|0|0|8|1000|2147483648|1|1
 rust|2|0|0|2|1|1|8|4000|8589934592|1|1
 EOF
 scheduler_plan "$tmp/charged" 8000 17179869184 0 1 >"$tmp/out"
-grep -q '^python|4|0|none|none|0|4|0$' "$tmp/out"
-grep -q '^rust|2|0|none|none|0|2|1$' "$tmp/out"
+grep -q '^python|4|0|none|none|0|4|0|0$' "$tmp/out"
+grep -q '^rust|2|0|none|none|0|2|1|0$' "$tmp/out"
 
 # Per-pool stale observations fail closed without blocking a fresh peer.
 awk -F'|' 'BEGIN{OFS=FS} $1=="rust"{$12=0} {print}' "$tmp/demand" >"$tmp/stale"
@@ -50,5 +50,14 @@ grep -Eq '^(python|typescript|go|ops)\\|.*\\|1\\|' "$tmp/out"
 # Hard fuse wins even if a caller asks for an unsafe burst.
 SCHEDULER_START_LIMIT=99 scheduler_plan "$tmp/demand" 64000 137438953472 0 1 >"$tmp/out"
 [ "$SCHEDULER_STARTS" = 4 ]
+[ "$(awk -F'|' '{n += $9} END {print n+0}' "$tmp/out")" -gt 0 ]
+
+# Hostile counts are rejected before Bash arithmetic can wrap them.
+printf 'rust|999999999999999999999|1|0|0|0|0|auto|4000|8589934592|1|1\n' >"$tmp/overflow"
+if scheduler_plan "$tmp/overflow" 8000 17179869184 0 1 >/dev/null; then
+  echo 'overflowing scheduler count was accepted' >&2
+  exit 1
+fi
+[ "$SCHEDULER_ERROR" = invalid_scheduler_count ]
 
 echo "scheduler: OK"

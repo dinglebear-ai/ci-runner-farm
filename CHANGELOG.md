@@ -4,12 +4,40 @@
 
 ### Changed
 
+* Build local runner images under immutable candidate tags and require an explicit exact-image-ID promotion before changing the production `ci-runner-farm-runner:latest` tag.
+* Add persistent mutation-owner leases that fence competing UI, CLI, reconcile, recycle, and daemon mutations across multi-command maintenance sessions.
+* Reject V2 configured baselines that exceed post-reserve CPU or memory admission budgets, using fixed capacity for fixed pools and minimum capacity for autoscaled pools, and expose configured claims plus remaining headroom in status JSON.
+* Add an idempotent Nashost fleet-audit installer and daily 06:30 audit covering exact GitHub identities and labels, runner image and Kache integrity, plugin identity, resource headroom, reconciliation state, watchdog stability, and Unraid/Gotify pass-fail notifications.
+* Make the package reproducibility assertion deterministic under `pipefail` by fully extracting the inspected file before searching it.
+
 * Move the canonical repository and scale-set helper module identity to `dinglebear-ai/ci-runner-farm`.
 * Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
 * Include PHP CLI, ripgrep, and file inspection tools in the Nashost runner image so the repository's syntax, behavioral, and release gates run on the farm.
 * Make the watchdog process-enumeration regression test independent of host PID ordering.
 * Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Nashost runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
+* Document the final feasible 16-runner Nashost pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
+
+## [1.9.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.1...v1.9.0) (2026-08-05)
+
+
+### Features
+
+* harden fleet change control ([5d9b02d](https://github.com/dinglebear-ai/ci-runner-farm/commit/5d9b02d6dff7c6ff7565be4ccf97bd362886c242))
+* harden fleet change control ([08c06e7](https://github.com/dinglebear-ai/ci-runner-farm/commit/08c06e760752addcf11e23330ba5dddf2cf7fb87))
+
+
+### Bug Fixes
+
+* **cache:** keep Cargo registries runner-local ([#23](https://github.com/dinglebear-ai/ci-runner-farm/issues/23)) ([2769fb0](https://github.com/dinglebear-ai/ci-runner-farm/commit/2769fb0f6277b1295eca134ed1d38e7d37caea1a))
+* **pools:** close lifecycle and readiness gaps ([a1410e1](https://github.com/dinglebear-ai/ci-runner-farm/commit/a1410e100c394e2ae49ac02d18ec9bb7a792d362))
+* **pools:** harden pool config validation against overflow and race conditions ([59f8349](https://github.com/dinglebear-ai/ci-runner-farm/commit/59f834943f4022673869528f838a8d1443133dab))
+* **queue:** recognize routed jobs and sample repos fairly ([#25](https://github.com/dinglebear-ai/ci-runner-farm/issues/25)) ([39bcf4c](https://github.com/dinglebear-ai/ci-runner-farm/commit/39bcf4ca375d3699efa5c408192addeb7ea98f32))
+* recover runners stalled at credential handoff ([86c31c2](https://github.com/dinglebear-ai/ci-runner-farm/commit/86c31c29f30391a9d0d5090f28b8491d1356486e))
+* **runner:** restart dockerd through sudo, not as the runner user ([#21](https://github.com/dinglebear-ai/ci-runner-farm/issues/21)) ([3869bd5](https://github.com/dinglebear-ai/ci-runner-farm/commit/3869bd5f4655b7c00a48dfc05b673ba0e6a40f6c))
+* **runners:** recover stalled credential handoffs ([2c1baa8](https://github.com/dinglebear-ai/ci-runner-farm/commit/2c1baa8a271b1c7b470735464604e0bea2df68d1))
+* **tests:** give the scale-set helper room to start before the deadline ([9570343](https://github.com/dinglebear-ai/ci-runner-farm/commit/95703437b4d317efe6851576d4fdd1a1b255b6c9))
+* **tests:** give the scale-set helper room to start before the deadline ([5b26296](https://github.com/dinglebear-ai/ci-runner-farm/commit/5b26296d6060863a0049ed957766113375b3b6b0))
 
 ## [1.8.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.0...v1.8.1) (2026-08-05)
 

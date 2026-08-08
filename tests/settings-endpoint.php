@@ -22,6 +22,11 @@ must(str_contains($exec, "tempnam(\$CFGDIR, '.apply.')"), 'staging is not same-d
 must(str_contains($exec, "chmod(\$staged, 0600)"), 'staging mode is not private');
 must(str_contains($exec, "function_exists('fsync')"), 'staging does not flush durable content');
 must(str_contains($engine, 'with_fleet_lock wait cmd_apply_config'), 'apply is not serialized');
+must(str_contains($engine, 'resource_v2_preflight'), 'apply validation omits resource admission');
+$applyStart = strpos($engine, 'cmd_apply_config()');
+$applyValidate = strpos($engine, 'validate_settings_config', $applyStart);
+$applyCommit = strpos($engine, 'mv -f "$staged" "$old_cfg"', $applyStart);
+must($applyStart !== false && $applyValidate !== false && $applyCommit !== false && $applyValidate < $applyCommit, 'apply commits before resource/settings validation');
 must(str_contains($engine, '"code":"stale_config"'), 'stale writes have no stable conflict code');
 must(str_contains($engine, 'mv -f "$staged" "$old_cfg"'), 'commit is not an atomic rename');
 must(str_contains($engine, 'chmod 0600 "$backup_tmp"'), 'backup is not private');
@@ -37,6 +42,12 @@ must(str_contains($engine, 'AUTH_MODE must be pat or github_app'), 'auth modes a
 must(str_contains($engine, 'GitHub App and installation IDs must be positive integers'), 'GitHub App IDs are not numeric');
 must(str_contains($page, 'requested intent only'), 'Settings does not explain requested versus effective backend');
 must(str_contains($page, "action:'readiness-json'"), 'Settings readiness still depends on the full Docker fleet snapshot');
+must(str_contains($engine, 'status_state_file_valid "$INVENTORY_FILE" 1048576'), 'readiness runner count does not use bounded private cached state');
+must(str_contains($engine, '"count":%s'), 'readiness runner count is absent');
+$readinessStart = strpos($engine, 'cmd_readiness_json()');
+$readinessEnd = strpos($engine, 'cmd_dashboard_json()', $readinessStart);
+$readinessBody = substr($engine, $readinessStart, $readinessEnd - $readinessStart);
+must(!str_contains($readinessBody, 'fleet_inventory_refresh'), 'readiness still refreshes Docker inventory');
 must(str_contains($page, "patBand.style.display=app?'none':'flex'"), 'GitHub App mode leaves PAT controls visible');
 must(!str_contains(substr($page, strpos($page, "action:'apply-config'"), 500), 'begin-migration'), 'Apply advances backend migration');
 

@@ -2,6 +2,7 @@
 const fs = require('fs');
 const vm = require('vm');
 const page = fs.readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page', 'utf8');
+const core = fs.readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php', 'utf8');
 const engine = fs.readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh', 'utf8');
 
 function must(condition, message) { if (!condition) throw new Error(message); }
@@ -13,6 +14,22 @@ function functionSource(name) {
 
 must(page.includes('Tracked repository run queue'), 'queue tile is not accurately named');
 must(page.includes('not pool demand'), 'queue tile lacks its demand limitation');
+must(core.includes(':is(button,input).crf-button{appearance:none;box-sizing:border-box;min-width:0') &&
+  core.includes('letter-spacing:normal;text-align:center;text-transform:none'),
+  'shared buttons do not override Unraid native-button sizing and typography');
+must(core.includes('.crf-button.crf-button-primary{') &&
+  core.includes('.crf-button.crf-button-dark{') &&
+  core.includes('.crf-button.crf-icon-button{width:34px;min-width:34px'),
+  'button variants are too weak to beat the Unraid native-button cascade');
+for (const control of ['cache-clear','pool-toggle','pool-scale-trigger','queue-close','queue-cancel']) {
+  must(page.includes('button.crf-' + control + '{appearance:none'),
+    control + ' does not reset the Unraid native-button cascade');
+}
+must(page.includes('button.crf-pool-toggle{appearance:none;box-sizing:border-box;width:22px;min-width:22px') &&
+  page.includes('button.crf-pool-scale-trigger{appearance:none;box-sizing:border-box;min-width:0;height:28px'),
+  'desktop pool controls do not preserve their reference dimensions');
+must(page.includes('button.crf-cache-clear{appearance:none;box-sizing:border-box;min-width:0;height:20px'),
+  "cache Clear still inherits Unraid's 86px minimum button width");
 must(page.includes('id="crf-s-assigned"'), 'Fleet has no assigned-job counter');
 must(page.includes('scale-set demand'), 'assigned-job counter is not identified as scale-set demand');
 must(page.includes('crfRenderActivity'), 'recent one-shot activity is not rendered');

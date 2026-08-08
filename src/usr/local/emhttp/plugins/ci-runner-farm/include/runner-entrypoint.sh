@@ -97,13 +97,20 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
     exit 1
   }
   umask 077
+  jit_allowed_files=(.runner .credentials .credentials_rsaparams)
   jit_tmp_files=()
+  jit_final_files=()
+  jit_committed=false
   crf_jit_tmp_cleanup() {
     local path
-    for path in "${jit_tmp_files[@]:-}"; do rm -f "$path"; done
+    for path in "${jit_tmp_files[@]:-}"; do rm -f -- "$path"; done
+    if [ "$jit_committed" != true ]; then
+      for path in "${jit_final_files[@]:-}"; do rm -f -- "$path"; done
+    fi
   }
   trap crf_jit_tmp_cleanup EXIT
-  for jit_file in .runner .credentials .credentials_rsaparams; do
+  for jit_file in "${jit_allowed_files[@]}"; do
+    rm -f -- "$jit_config_dir/$jit_file" || exit 1
     jit_tmp="$(mktemp "$jit_config_dir/.crf-jit.XXXXXX")" || exit 1
     jit_tmp_files+=("$jit_tmp")
     printf '%s' "$jit_json" | jq -er --arg key "$jit_file" '.[$key]' |
@@ -117,13 +124,15 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
     }
     chmod 0600 "$jit_tmp"
   done
-  for jit_index in 0 1 2; do
-    jit_file=(.runner .credentials .credentials_rsaparams)
-    mv -f "${jit_tmp_files[$jit_index]}" "$jit_config_dir/${jit_file[$jit_index]}"
+  for jit_index in "${!jit_allowed_files[@]}"; do
+    jit_final="$jit_config_dir/${jit_allowed_files[$jit_index]}"
+    mv -f -- "${jit_tmp_files[$jit_index]}" "$jit_final"
+    jit_final_files+=("$jit_final")
   done
+  jit_committed=true
   trap - EXIT
   jit_json=""
-  unset jit_json jit_tmp jit_tmp_files jit_file jit_index
+  unset jit_json jit_tmp jit_tmp_files jit_final_files jit_allowed_files jit_file jit_final jit_index jit_committed
   export RUNNER_ALLOW_RUNASROOT=1
   exec "$jit_runner"
 else

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rust runner-image preset guard.
 #
-# Keeps the one-click Rust toolchain, its pinned sccache binary, and the shared
-# Cargo cache defaults aligned. The preset is a nowdoc embedded in a PHP page.
+# Keeps the one-click Rust toolchain, its pinned sccache binary, and the safe
+# cache-mount defaults aligned. The preset is a nowdoc embedded in a PHP page.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -47,8 +47,12 @@ need '-o /tmp/rustup-init.sh'
 need 'sh /tmp/rustup-init.sh'
 
 for file in "$ENGINE" "$CFG" "$UI"; do
-  grep -Fq 'cargo-registry:/home/runner/.cargo/registry' "$file" || bad "$file lacks the Cargo registry cache mount"
-  grep -Fq 'cargo-git:/home/runner/.cargo/git' "$file" || bad "$file lacks the Cargo git cache mount"
+  if grep -Fq 'cargo-registry:/home/runner/.cargo/registry' "$file"; then
+    bad "$file shares one writable Cargo registry across concurrent runners"
+  fi
+  if grep -Fq 'cargo-git:/home/runner/.cargo/git' "$file"; then
+    bad "$file shares one writable Cargo git cache across concurrent runners"
+  fi
 done
 
 cache_default="$(grep -m1 '^CACHE_MOUNTS=' "$ENGINE")"
@@ -61,4 +65,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo 'rust-preset: OK: Rust toolchain, pinned sccache, and Cargo caches agree.'
+echo 'rust-preset: OK: Rust toolchain and cache defaults avoid shared writable Cargo state.'

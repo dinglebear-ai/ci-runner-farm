@@ -6,22 +6,32 @@
 STATUS_OBSERVED_AT=0
 STATUS_INVENTORY_REVISION=""
 STATUS_CONFIG_REVISION=""
-STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"reserved":0,"admissible":0}}'
+STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
 STATUS_RESERVATIONS_JSON='[]'
 STATUS_BACKEND_JSON='{"requested":"classic","effective":"classic","transition_phase":"classic_active","transition_id":"","transition_revision":"","ownership_revision":""}'
 STATUS_COMPATIBILITY_JSON='{"valid":false,"reason":"not_checked"}'
 STATUS_OPERATION_JSON='null'
 STATUS_RECENT_ACTIVITY_JSON='[]'
 
+status_state_file_valid() {
+  local path="$1" max="$2" size mode
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  size="$(stat -c %s "$path" 2>/dev/null || echo invalid)"
+  mode="$(stat -c %a "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le "$max" ] && [ "$mode" = 600 ]
+}
+
 status_scaleset_pool_tsv() {
   local pool="$1" snapshot="${SCALESET_SNAPSHOT:-${SCALESET_STATE_DIR:-$RUNDIR/scalesets}/snapshot.json}"
   local ownership="${SCALESET_OWNERSHIP:-${CFGDIR:-/boot/config/plugins/ci-runner-farm}/scale-set-ownership.json}"
   local plan="${SCALESET_STATE_DIR:-$RUNDIR/scalesets}/last-plan.tsv"
   case "$pool" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
-  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || {
+  status_state_file_valid "$snapshot" 262144 || {
     printf '%s\n' '-1|0|0|0|unknown|0|0|0|0|0'
     return
   }
+  status_state_file_valid "$ownership" 262144 || ownership=/nonexistent
+  status_state_file_valid "$plan" 65536 || plan=/nonexistent
   php -r '
     $pool=$argv[1];$snapshot=$argv[2];$ownership=$argv[3];$plan=$argv[4];
     $fallback=[-1,0,0,0,"unknown",0,0,0,0,0];
@@ -44,7 +54,10 @@ status_scaleset_pool_tsv() {
     $desired=0;$admitted=0;$blocked=0;
     if(is_file($plan)&&!is_link($plan))foreach(file($plan,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $line){
       $parts=explode("|",$line);if(($parts[0]??"")!==$pool)continue;
-      $desired=(int)($parts[1]??0);$admitted=(int)($parts[2]??0);$blocked=(int)($parts[3]??0);break;
+      $desired=max(0,(int)($parts[1]??0));$admitted=max(0,(int)($parts[2]??0));
+      if(isset($parts[8])&&preg_match("/^(0|[1-9][0-9]*)$/",$parts[8]))$blocked=(int)$parts[8];
+      elseif(isset($parts[3])&&preg_match("/^(0|[1-9][0-9]*)$/",$parts[3]))$blocked=(int)$parts[3];
+      break;
     }
     $out=[max(0,(int)($p["assigned_jobs"]??0)),max(0,(int)($p["advertised_capacity"]??0)),
       ($p["session_healthy"]??false)===true?1:0,max(0,$remote),$state,$tombstone,$orphan,
@@ -57,17 +70,29 @@ status_reservations_json() {
   local dir="${RESERVATION_DIR:-$RUNDIR/reservations}" file first=1
   printf '['
   for file in "$dir"/*.state; do
-    [ -f "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    if declare -F reservation_state_valid >/dev/null; then
+      reservation_state_valid "$file" || continue
+    fi
     local operation pool runner cpu memory deadline phase
-    operation="$(reservation_field "$file" operation_id)"
-    pool="$(reservation_field "$file" pool_id)"
-    runner="$(reservation_field "$file" runner_name)"
-    cpu="$(reservation_field "$file" cpu_milli)"
-    memory="$(reservation_field "$file" memory_bytes)"
-    deadline="$(reservation_field "$file" deadline)"
-    phase="$(reservation_field "$file" phase)"
-    case "$operation$pool$runner$phase" in *[!A-Za-z0-9._:-]*) continue ;; esac
+    operation="$(reservation_field "$file" operation_id 2>/dev/null)"
+    pool="$(reservation_field "$file" pool_id 2>/dev/null)"
+    runner="$(reservation_field "$file" runner_name 2>/dev/null)"
+    cpu="$(reservation_field "$file" cpu_milli 2>/dev/null)"
+    memory="$(reservation_field "$file" memory_bytes 2>/dev/null)"
+    deadline="$(reservation_field "$file" deadline 2>/dev/null)"
+    phase="$(reservation_field "$file" phase 2>/dev/null)"
+    case "$operation" in ''|*[!A-Za-z0-9._:-]*) continue ;; esac
+    case "$pool" in ''|*[!a-z0-9-]*) continue ;; esac
+    case "$runner" in ''|*[!A-Za-z0-9._:-]*) continue ;; esac
+    case "$phase" in reserved|offered|assigned|acting|observed|failed|expired) ;; *) continue ;; esac
     case "$cpu:$memory:$deadline" in *[!0-9:]*) continue ;; esac
+    [ -n "$cpu" ] && [ -n "$memory" ] && [ -n "$deadline" ] || continue
+    [ "${#operation}" -le 128 ] && [ "${#pool}" -le 24 ] && [ "${#runner}" -le 128 ] || continue
+    [ "${#cpu}" -le 6 ] && [ "${#memory}" -le 13 ] && [ "${#deadline}" -le 10 ] || continue
+    [ "$cpu" -gt 0 ] && [ "$cpu" -le 256000 ] &&
+      [ "$memory" -gt 0 ] && [ "$memory" -le 1099511627776 ] &&
+      [ "$deadline" -gt 0 ] || continue
     [ "$first" = 1 ] || printf ','
     first=0
     printf '{"operation_id":"%s","pool_id":"%s","runner_name":"%s","cpu_milli":%s,"memory_bytes":%s,"deadline":%s,"phase":"%s"}' \
@@ -105,9 +130,10 @@ status_recent_activity_json() {
 
 status_model_refresh() {
   local cpu_reserve=0 memory_reserve=0
+  STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
   STATUS_OBSERVED_AT="$(date +%s)"
   STATUS_CONFIG_REVISION="$(config_revision)"
-  if [ -f "$INVENTORY_FILE" ]; then
+  if [ -f "$INVENTORY_FILE" ] && [ ! -L "$INVENTORY_FILE" ]; then
     STATUS_INVENTORY_REVISION="$(sha256sum "$INVENTORY_FILE" | cut -d' ' -f1)"
   else
     STATUS_INVENTORY_REVISION="$(printf '' | sha256sum | cut -d' ' -f1)"
@@ -115,7 +141,7 @@ status_model_refresh() {
   if resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1; then
     cpu_reserve="$(parse_cpu_milli "${RESOURCE_CPU_RESERVE:-1}" 2>/dev/null || echo 0)"
     memory_reserve="$(parse_memory_bytes "${RESOURCE_MEMORY_RESERVE:-1g}" 2>/dev/null || echo 0)"
-    STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
+    STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"configured\":${RESOURCE_CONFIGURED_CPU_MILLI:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI:-0},\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"configured\":${RESOURCE_CONFIGURED_MEMORY_BYTES:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES:-0},\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
   fi
   STATUS_RESERVATIONS_JSON="$(status_reservations_json)"
   status_recent_activity_json || STATUS_RECENT_ACTIVITY_JSON='[]'
@@ -151,7 +177,7 @@ status_backend_refresh() {
     [ "$compat_reason" = valid ] && valid=true
   elif declare -F scaleset_record_valid >/dev/null && scaleset_record_valid; then
     valid=true; compat_reason=valid
-  elif [ -f "$SCALESET_COMPAT" ]; then compat_reason=invalid_compatibility_record
+  elif [ -f "$SCALESET_COMPAT" ] && [ ! -L "$SCALESET_COMPAT" ]; then compat_reason=invalid_compatibility_record
   fi
   if [ -x "$SCALESET_HELPER" ]; then
     helper_json="$("$SCALESET_HELPER" version 2>/dev/null)" || helper_json='{}'
@@ -160,7 +186,7 @@ status_backend_refresh() {
   else
     compat_reason=helper_unavailable; valid=false
   fi
-  if [ -f "$SCALESET_COMPAT" ]; then
+  if [ -f "$SCALESET_COMPAT" ] && [ ! -L "$SCALESET_COMPAT" ]; then
     STATUS_COMPATIBILITY_JSON="$(php -r '
       $j=json_decode(file_get_contents($argv[1]),true);if(!is_array($j))$j=[];
       $h=json_decode($argv[4],true);if(!is_array($h))$h=[];
@@ -178,16 +204,22 @@ status_backend_refresh() {
         "runner_group_policy"=>$j["runner_group_policy"]??"",
         "owner"=>$j["owner"]??"",
         "auth_mode"=>$argv[5],
-        "private_key_configured"=>is_file($argv[6])&&((fileperms($argv[6])&0777)===0600)];
+        "private_key_configured"=>is_file($argv[6])&&!is_link($argv[6])&&((fileperms($argv[6])&0777)===0600)];
       echo json_encode($out,JSON_UNESCAPED_SLASHES);
     ' "$SCALESET_COMPAT" "$valid" "$compat_reason" "$helper_json" "${AUTH_MODE:-pat}" \
       "${GITHUB_APP_KEY_FILE:-/nonexistent}")"
   else
-    STATUS_COMPATIBILITY_JSON="{\"valid\":false,\"reason\":\"$compat_reason\",\"auth_mode\":\"$(printf '%s' "${AUTH_MODE:-pat}"|json_escape)\",\"private_key_configured\":$([ -f "${GITHUB_APP_KEY_FILE:-/nonexistent}" ] && echo true || echo false)}"
+    local escaped_reason private_key_configured=false key_path="${GITHUB_APP_KEY_FILE:-/nonexistent}"
+    escaped_reason="$(printf '%s' "$compat_reason" | json_escape)"
+    if [ -f "$key_path" ] && [ ! -L "$key_path" ] &&
+       [ "$(stat -c %a "$key_path" 2>/dev/null || echo 0)" = 600 ]; then
+      private_key_configured=true
+    fi
+    STATUS_COMPATIBILITY_JSON="{\"valid\":false,\"reason\":\"$escaped_reason\",\"auth_mode\":\"$(printf '%s' "${AUTH_MODE:-pat}"|json_escape)\",\"private_key_configured\":$private_key_configured}"
   fi
   latest="$(find "$SCALESET_STATE_DIR/operations" -maxdepth 1 -type f -name '*.json' -printf '%T@ %p\n' 2>/dev/null |
     sort -nr | head -1 | cut -d' ' -f2- || true)"
-  if [ -n "$latest" ]; then
+  if [ -n "$latest" ] && status_state_file_valid "$latest" 262144; then
     operation="$(cat "$latest" 2>/dev/null)"
     printf '%s' "$operation" | php -r 'exit(is_array(json_decode(stream_get_contents(STDIN),true))?0:1);' ||
       operation=null

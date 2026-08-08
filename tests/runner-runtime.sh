@@ -60,6 +60,7 @@ EOF
 fleet_inventory_refresh || fail 'inventory refresh failed'
 assert_eq "$(cat "$ps_calls")" 1 'inventory did not use exactly one docker ps'
 assert_eq "$(cat "$inspect_calls")" 1 'inventory did not use exactly one batched inspect'
+assert_eq "$(stat -c %a "$INVENTORY_FILE")" 600 'inventory cache is not mode 0600'
 assert_eq "$(inventory_count)" 4 'inventory lost managed rows'
 assert_eq "$(inventory_count python)" 2 'pool filter did not use parsed metadata'
 assert_eq "$(inventory_field ci-runner-1 pool)" default 'legacy runner fallback was not preserved'
@@ -71,6 +72,13 @@ if runner_identity_validate ci-runner-rust-1; then fail 'invalid-managed pool id
 assert_eq "$(cat "$ps_calls")" 1 'inventory consumer rescanned docker ps'
 assert_eq "$(cat "$inspect_calls")" 1 'inventory consumer rescanned docker inspect'
 assert_eq "$(legacy_runner_scope_target ci-runner-1)" repo:acme/legacy 'legacy original scope was recomputed instead of recovered'
+
+# Discovery failure must preserve the last complete cache instead of publishing
+# an empty farm and authorizing duplicate provisioning or stale cleanup.
+inventory_before="$(sha256sum "$INVENTORY_FILE" | awk '{print $1}')"
+docker() { [ "$1" != ps ] || return 42; fail "unexpected docker call after failed ps: $*"; }
+if fleet_inventory_refresh; then fail 'failed Docker discovery was published as an empty inventory'; fi
+assert_eq "$(sha256sum "$INVENTORY_FILE" | awk '{print $1}')" "$inventory_before" 'failed discovery replaced the last complete inventory'
 
 # After one teardown invalidates the shared inventory, later JIT removals fall
 # back to direct labels. That path must recognize the bounded JIT identity too.
@@ -126,6 +134,8 @@ assert_eq "$(cat "$runner_calls")" 2 'GitHub runner inventory mutation invalidat
 
 # Source contracts for the remaining lifecycle and UI invariants.
 grep -Fq "pkill -f '[r]unner-farm.sh reconcile-drain'" "$ENGINE" || fail 'Stop cannot neutralize the reconcile worker'
+grep -Fq 'preserving jobs and retrying idle-safe recycling every 120s' "$ENGINE" || fail 'reconcile drain abandons stale runners after timeout'
+if grep -Fq "they'll migrate on their next Apply/Start" "$ENGINE"; then fail 'reconcile drain still strands stale runners after timeout'; fi
 grep -Fq 'fleet_inventory_refresh' "$ENGINE" || fail 'status/autoscale do not use the shared inventory'
 grep -Fq 'blocked_capacity' "$ENGINE" || fail 'blocked transition capacity is not reported'
 grep -Fq 'X-GitHub-Api-Version: 2026-03-10' "$ENGINE" || fail 'GitHub API version header missing'

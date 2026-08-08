@@ -128,6 +128,7 @@ fi
 [ "$(grep -Fc 'kache_watchdog_start || true' "$ENGINE")" -eq 2 ]
 sed -n '/^cmd_stop()/,/^}/p' "$ENGINE" | grep -Fq 'kache_watchdog_stop'
 grep -Fq 'kache-watchdog-daemon) kache_watchdog_daemon' "$ENGINE"
+grep -Fq 'with_fleet_lock try recover_stalled_credential_handoffs reuse' "$ENGINE"
 grep -Fq 'kache-watchdog-status) kache_watchdog_status' "$ENGINE"
 
 echo 'kache-supervisor-watchdog: OK'

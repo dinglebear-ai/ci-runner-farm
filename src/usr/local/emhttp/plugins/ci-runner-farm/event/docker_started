@@ -9,9 +9,10 @@
 # our runner containers. Docker's `--restart=unless-stopped` policy deliberately
 # does not resurrect explicitly-stopped containers when the daemon returns, so
 # the fleet would otherwise stay down until the next reboot. boot-autostart waits
-# for dockerd + the cache pool to be ready, restarts any stopped runners in place,
-# refills the fleet to its floor, and relaunches the autoscale/image-update
-# daemons. It is idempotent and a no-op until a GitHub token is configured.
+# for dockerd + the cache pool to be ready, recreates stopped runners with fresh
+# registration credentials, refills the fleet to its floor, and performs a delayed
+# recovery sweep for any running container stalled at protected credential handoff.
+# It is idempotent and a no-op until GitHub credentials are configured.
 #
 # Detached so we never block Unraid's start sequence.
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
