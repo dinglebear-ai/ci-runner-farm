@@ -22,6 +22,7 @@ mkdir -p "$CFGDIR" "$RUNDIR" "$tmp/images"
 BUILD_CANDIDATE_FILE="$CFGDIR/build-candidate.state"
 PROMOTED_IMAGE_FILE="$CFGDIR/promoted-image.state"
 BUILTIN_IMAGE='ci-runner-farm-runner:latest'
+IMAGE_SOURCE=builtin
 log() { printf '%s\n' "$*" >> "$TEST_ROOT/log"; }
 err() { printf '%s\n' "$*" >> "$TEST_ROOT/error"; }
 json_escape() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
@@ -82,6 +83,9 @@ grep -Fq '"ok":true' <<<"$promoted" || crf_fail "verified promotion did not repo
 crf_assert_eq "$candidate_image_id" "$(cat "$(image_path "$BUILTIN_IMAGE")")" "production image identity"
 crf_assert_file_mode "$PROMOTED_IMAGE_FILE" 600
 [ ! -e "$BUILD_CANDIDATE_FILE" ] || crf_fail "successful promotion left candidate metadata reusable"
+rm -f "$(image_path "$BUILTIN_IMAGE")"
+restore_promoted_image_alias || crf_fail "verified promotion metadata did not restore a missing production tag"
+crf_assert_eq "$candidate_image_id" "$(cat "$(image_path "$BUILTIN_IMAGE")")" "restored production image identity"
 
 printf '%s\n' "$wrong" > "$(image_path "$candidate_tag")"
 if cmd_promote_image "$candidate_tag" "$candidate_image_id" >/dev/null 2>&1; then
