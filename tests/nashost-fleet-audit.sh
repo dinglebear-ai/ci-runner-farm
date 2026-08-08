@@ -4,8 +4,8 @@ cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 . tests/lib/assert.sh
 
-AUDIT=deployments/tootie/fleet-audit.sh
-INSTALLER=deployments/tootie/install-fleet-audit.sh
+AUDIT=deployments/nashost/fleet-audit.sh
+INSTALLER=deployments/nashost/install-fleet-audit.sh
 bash -n "$AUDIT"
 bash -n "$INSTALLER"
 
@@ -92,4 +92,4 @@ jq -e '.["/existing/script"].id == "scheduleexisting"' "$user_root/schedule.json
 [ "$(find "$plugin_dir/audit-schedule-backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" -ge 2 ] ||
   crf_fail "installer did not preserve schedule backups"
 
-echo 'tootie-fleet-audit: OK'
+echo 'nashost-fleet-audit: OK'

@@ -1,6 +1,6 @@
 # Generic Runner Pools Deployment and Rollback
 
-This runbook stages code on `tootie` without changing the active runner-pool
+This runbook stages code on `nashost` without changing the active runner-pool
 configuration. It never publishes to, or pushes Git refs toward, the official
 `unraid/ci-runner-farm` repository.
 
@@ -56,7 +56,7 @@ endpoint. Wait for busy runners to drain before retiring temporary identities.
 
 ## 2026-07-30 code-only proof
 
-Commit `b1834cb` was staged on tootie under a unique plugin directory. The host
+Commit `b1834cb` was staged on nashost under a unique plugin directory. The host
 reported Linux 6.18.38-Unraid, Docker 29.5.3, cgroup v2, 24 online CPUs,
 131517828 KiB RAM, no swap, and ZFS at `/mnt/cache`. The active configuration
 was mode 0600 with SHA-256
@@ -173,12 +173,12 @@ capacity for fixed pools and minimum capacity for autoscaled pools. A baseline
 whose claim exceeds the post-reserve admission budget is rejected even when the
 host currently has idle capacity. Status JSON
 reports `configured` and `configured_headroom` beside runtime `reserved` and
-`admissible` values. Tootie's approved profile claims 74 CPUs and 114 GiB
+`admissible` values. Nashost's approved profile claims 74 CPUs and 114 GiB
 inside a 76-CPU/116-GiB admission envelope. Any additional runner currently
 requires reducing another pool or raising and revalidating the host budget.
 
-For Tootie, install `deployments/tootie/fleet-audit.sh` with
-`deployments/tootie/install-fleet-audit.sh`. The User Scripts job runs daily at
+For Nashost, install `deployments/nashost/fleet-audit.sh` with
+`deployments/nashost/install-fleet-audit.sh`. The User Scripts job runs daily at
 06:30 and verifies the complete fleet identity, image/Kache integrity, plugin
 package identity, resource envelope, watchdog stability, and quiescent mutation
 state. It uses the existing mode-0600 User Scripts `gotify.env` for high-priority

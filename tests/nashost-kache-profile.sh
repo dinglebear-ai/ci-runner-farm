@@ -2,9 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FULL=deployments/tootie/runner.Dockerfile
-OVERLAY=deployments/tootie/kache-overlay.Dockerfile
-SUPERVISOR=deployments/tootie/kache-supervise.sh
+FULL=deployments/nashost/runner.Dockerfile
+OVERLAY=deployments/nashost/kache-overlay.Dockerfile
+SUPERVISOR=deployments/nashost/kache-supervise.sh
 
 bash -n "$SUPERVISOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
@@ -30,4 +30,4 @@ grep -Fq 'KACHE_VERIFY_RESTORES=sampled' "$SUPERVISOR"
 grep -Fq 'daemon ready; speculative prefetch disabled, exact remote cache active' "$SUPERVISOR"
 grep -Fq 'pgrep -u' "$SUPERVISOR"
 
-echo 'tootie-kache-profile: OK'
+echo 'nashost-kache-profile: OK'

@@ -146,25 +146,25 @@ crf_assert_eq 4000 "$RESOURCE_CONFIGURED_CPU_MILLI" "autoscale minimum configure
 crf_assert_eq 4294967296 "$RESOURCE_CONFIGURED_MEMORY_BYTES" "autoscale minimum configured memory"
 AUTOSCALE=false POOL_AUTOSCALE=inherit
 
-# Tootie's fixed fleet must fit inside the explicit post-reserve 76 CPU / 116 GiB
+# Nashost's fixed fleet must fit inside the explicit post-reserve 76 CPU / 116 GiB
 # envelope. The present 74 CPU / 114 GiB shape leaves exactly 2 CPU / 2 GiB.
 RESOURCE_CPU_BUDGET=77 RESOURCE_CPU_RESERVE=1
 RESOURCE_MEMORY_BUDGET=124g RESOURCE_MEMORY_RESERVE=8g
 RUNNER_POOLS='v2|rust|ci-pool-rust|unraid|6|6|6|1|6|7g;v2|python|ci-pool-python||1|1|1|1|2|6g;v2|typescript|ci-pool-typescript|node|3|3|3|1|2|6g;v2|go|ci-pool-go||1|1|1|1|8|10g;v2|ops|ci-pool-ops|tailscale|3|3|3|1|2|6g;v2|system|ci-pool-system||1|1|1|1|8|10g;v2|residential-egress|ci-pool-residential-egress||1|1|1|1|8|10g'
 POOL_SNAPSHOT_INPUT=""; POOL_CONFIG_REVISION=""; pool_snapshot_load
 resource_v2_preflight
-crf_assert_eq 76000 "$RESOURCE_CPU_BUDGET_MILLI" "Tootie CPU admission budget"
-crf_assert_eq 74000 "$RESOURCE_CONFIGURED_CPU_MILLI" "Tootie configured CPU"
-crf_assert_eq 2000 "$RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI" "Tootie CPU headroom"
-crf_assert_eq 124554051584 "$RESOURCE_MEMORY_BUDGET_BYTES" "Tootie memory admission budget"
-crf_assert_eq 122406567936 "$RESOURCE_CONFIGURED_MEMORY_BYTES" "Tootie configured memory"
-crf_assert_eq 2147483648 "$RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES" "Tootie memory headroom"
+crf_assert_eq 76000 "$RESOURCE_CPU_BUDGET_MILLI" "Nashost CPU admission budget"
+crf_assert_eq 74000 "$RESOURCE_CONFIGURED_CPU_MILLI" "Nashost configured CPU"
+crf_assert_eq 2000 "$RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI" "Nashost CPU headroom"
+crf_assert_eq 124554051584 "$RESOURCE_MEMORY_BUDGET_BYTES" "Nashost memory admission budget"
+crf_assert_eq 122406567936 "$RESOURCE_CONFIGURED_MEMORY_BYTES" "Nashost configured memory"
+crf_assert_eq 2147483648 "$RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES" "Nashost memory headroom"
 
 # One more Python runner consumes the remaining CPU but exceeds memory headroom,
 # so the configuration must be rejected before it can be saved or reconciled.
 RUNNER_POOLS='v2|rust|ci-pool-rust|unraid|6|6|6|1|6|7g;v2|python|ci-pool-python||2|2|2|1|2|6g;v2|typescript|ci-pool-typescript|node|3|3|3|1|2|6g;v2|go|ci-pool-go||1|1|1|1|8|10g;v2|ops|ci-pool-ops|tailscale|3|3|3|1|2|6g;v2|system|ci-pool-system||1|1|1|1|8|10g;v2|residential-egress|ci-pool-residential-egress||1|1|1|1|8|10g'
 POOL_SNAPSHOT_INPUT=""; POOL_CONFIG_REVISION=""; pool_snapshot_load
-if resource_v2_preflight; then crf_fail "over-budget Tootie growth was accepted"; fi
-crf_assert_eq configured_memory_exceeds_budget "$RESOURCE_REASON" "Tootie growth failure reason"
+if resource_v2_preflight; then crf_fail "over-budget Nashost growth was accepted"; fi
+crf_assert_eq configured_memory_exceeds_budget "$RESOURCE_REASON" "Nashost growth failure reason"
 
 echo "resource-admission: OK"

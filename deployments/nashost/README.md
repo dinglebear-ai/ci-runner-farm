@@ -1,7 +1,7 @@
-# Tootie runner image profile
+# Nashost runner image profile
 
 This directory is the source of truth for the customized `ci-runner-farm-runner`
-image deployed on Tootie. It captures the fleet-specific Ubuntu 26.04, Rust,
+image deployed on Nashost. It captures the fleet-specific Ubuntu 26.04, Rust,
 Cargo-profile, MinIO, and Kache configuration that is intentionally more
 specialized than the plugin's generic starter Dockerfile.
 
@@ -16,7 +16,7 @@ ready and does not enumerate the complete MinIO prefix.
 
 ## Current resource envelope
 
-The persistent Tootie profile targets 16 runners: six Rust runners at 6 CPUs
+The persistent Nashost profile targets 16 runners: six Rust runners at 6 CPUs
 and 7 GiB, one Python runner at 2 CPUs and 6 GiB, three TypeScript runners at
 2 CPUs and 6 GiB, three Ops runners at 2 CPUs and 6 GiB, plus one 8-CPU/10-GiB
 runner for each of Go, System, and Residential Egress. The pools reserve 74 CPUs
@@ -38,12 +38,12 @@ fleet `latest`.
 Files:
 
 - `runner.Dockerfile` is the complete reproducible runner image recipe.
-- `kache-overlay.Dockerfile` upgrades the currently deployed Tootie image in a
+- `kache-overlay.Dockerfile` upgrades the currently deployed Nashost image in a
   small, rollback-friendly layer and is the normal fleet rollout path.
 - `kache-supervise.sh` owns the container-lifetime daemon without invoking the
   side-effectful `kache daemon status` command.
 
-Run `tests/tootie-kache-profile.sh` before deployment. Copy the full Dockerfile
+Run `tests/nashost-kache-profile.sh` before deployment. Copy the full Dockerfile
 and supervisor to `/boot/config/plugins/ci-runner-farm/` as the durable rebuild
 source. Build the overlay image, then drain and recycle one runner at a time.
 
@@ -63,7 +63,7 @@ a daemon tick cannot interleave a recycle or reconciliation:
 
 ```bash
 engine=/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
-owner="tootie-maintenance-$(date +%s)"
+owner="nashost-maintenance-$(date +%s)"
 $engine mutation-owner-claim "$owner" 1800
 CRF_MUTATION_OWNER="$owner" $engine reconcile-config
 # Additional guarded scale/recycle/start/stop commands go here.
@@ -80,7 +80,7 @@ Install the persistent Unraid User Scripts audit after installing the matching
 plugin release:
 
 ```bash
-cd deployments/tootie
+cd deployments/nashost
 sudo ./install-fleet-audit.sh
 ```
 

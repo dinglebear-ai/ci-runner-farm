@@ -33,7 +33,7 @@ Relevant files include `plugin.command.ts`, `plugin-management.service.ts`, `plu
 
 ### Raw specs do not match package identities
 
-A local tarball path is not the package name. npm saves the dependency under its canonical name. A DOOKIE fixture confirmed that `npm install --json --save-peer --save-exact /path/plugin.tgz` reports canonical name/version when the tree changes, while a no-op reinstall has empty `add` and `change` arrays.
+A local tarball path is not the package name. npm saves the dependency under its canonical name. A DEVHOST fixture confirmed that `npm install --json --save-peer --save-exact /path/plugin.tgz` reports canonical name/version when the tree changes, while a no-op reinstall has empty `add` and `change` arrays.
 
 ### Root-manifest edits are not reboot-persistent
 
@@ -137,7 +137,7 @@ Bundled packages remain config-only.
 
 ## Removal
 
-Removal accepts canonical package names only. It removes enablement, runs npm uninstall, rebuilds the archive, persists, and restarts once. Cover the post-reboot case where the package is restored but absent from the root manifest. A DOOKIE npm fixture confirmed `npm uninstall <canonical-name>` removes that extraneous top-level package even after the root dependency entry is removed; preserve that behavior with a regression test and verify exact absence afterward.
+Removal accepts canonical package names only. It removes enablement, runs npm uninstall, rebuilds the archive, persists, and restarts once. Cover the post-reboot case where the package is restored but absent from the root manifest. A DEVHOST npm fixture confirmed `npm uninstall <canonical-name>` removes that extraneous top-level package even after the root dependency entry is removed; preserve that behavior with a regression test and verify exact absence afterward.
 
 ## CLI and GraphQL management
 

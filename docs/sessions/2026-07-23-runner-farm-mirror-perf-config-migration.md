@@ -13,20 +13,20 @@ beads: none
 
 ## User Request
 
-Continuing the ci-runner-farm settings-page facelift, the user directed, across several turns: get the shared image cache (runner mirror) actually working by changing its port; address **all** remaining review performance findings (⑦–⑩); explain why the UI reported "no token configured yet" and "mirror still not working"; and then build — "the correct way" — automatic, drain-aware migration of runners onto config changes as they go idle. Finally: sync tootie to the branch tip, and save this session log.
+Continuing the ci-runner-farm settings-page facelift, the user directed, across several turns: get the shared image cache (runner mirror) actually working by changing its port; address **all** remaining review performance findings (⑦–⑩); explain why the UI reported "no token configured yet" and "mirror still not working"; and then build — "the correct way" — automatic, drain-aware migration of runners onto config changes as they go idle. Finally: sync nashost to the branch tip, and save this session log.
 
 ## Session Overview
 
-Fixed the runner mirror (port collision + an unloadable config key), landed four deferred performance improvements to the fleet-poll hot path and background sweeps, root-caused two stale-log UI confusions, and built a config-generation reconciler that recycles runners onto config changes only while idle (zero jobs killed). Everything was verified live against tootie's running CI fleet, then tootie was synced exactly to the branch tip. A second, concurrent Claude session was found working the same branch; this session did not push the feature branch.
+Fixed the runner mirror (port collision + an unloadable config key), landed four deferred performance improvements to the fleet-poll hot path and background sweeps, root-caused two stale-log UI confusions, and built a config-generation reconciler that recycles runners onto config changes only while idle (zero jobs killed). Everything was verified live against nashost's running CI fleet, then nashost was synced exactly to the branch tip. A second, concurrent Claude session was found working the same branch; this session did not push the feature branch.
 
 ## Sequence of Events
 
-- Made `MIRROR_PORT` loadable (it was absent from `CFG_KEYS`), added a `mirror-up` operator verb, set the port to 5100 on tootie, and brought the mirror up on `172.17.0.1:5100` (serving `/v2/ → 200`).
+- Made `MIRROR_PORT` loadable (it was absent from `CFG_KEYS`), added a `mirror-up` operator verb, set the port to 5100 on nashost, and brought the mirror up on `172.17.0.1:5100` (serving `/v2/ → 200`).
 - Implemented and live-verified the four remaining perf findings: ⑦ parallel per-repo API sweeps, ⑧ in-place fleet render, ⑨ parallel @unraid/ui loader, ⑩ inspect-row read-split.
 - Root-caused "no token configured yet" and "mirror still not working" as **stale boot-log lines**; recycled the two idle runners onto the `:5100` mirror and cleared the stale `autoscale.log`.
 - Explained the `EPHEMERAL="false"` persistent-runner lifecycle (no code change).
 - Built the drain-aware config-migration feature (config-generation stamp + reconciler + Apply hook + UI banner); verified live under real CI load.
-- Discovered a concurrent Claude session on the same checkout/branch; synced tootie's live plugin files to the branch tip (`4a515d3`) and confirmed zero drift plus a passing config-parity test.
+- Discovered a concurrent Claude session on the same checkout/branch; synced nashost's live plugin files to the branch tip (`4a515d3`) and confirmed zero drift plus a passing config-parity test.
 
 ## Key Findings
 
@@ -56,7 +56,7 @@ Files changed by **this session's** commits (the plugin source lives under `src/
 | modified | `RunnerFarmSettings.page` | Apply `#command` reconcile hook | d68db49 |
 | created | `docs/sessions/2026-07-23-runner-farm-mirror-perf-config-migration.md` | this session log | this commit |
 
-Note: `default.cfg`, `include/exec.php`, and `RunnerFarmImage.page` were **deployed** to tootie to sync it to the branch tip, but those file edits belong to the concurrent session's commit `561a3bb`, not to this session.
+Note: `default.cfg`, `include/exec.php`, and `RunnerFarmImage.page` were **deployed** to nashost to sync it to the branch tip, but those file edits belong to the concurrent session's commit `561a3bb`, not to this session.
 
 ## Beads Activity
 
@@ -72,9 +72,9 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 
 ## Tools and Skills Used
 
-- **Shell (Bash):** primary tool — all edits verified with `bash -n`, `shellcheck`, `php -l`, `node --check`; deploys and live tests over SSH to tootie; git inspection and the isolated-worktree landing.
+- **Shell (Bash):** primary tool — all edits verified with `bash -n`, `shellcheck`, `php -l`, `node --check`; deploys and live tests over SSH to nashost; git inspection and the isolated-worktree landing.
 - **Edit / Read / Write:** source edits to `runner-farm.sh`, `crf-core.php`, `RunnerFarmFleet.page`, `RunnerFarmSettings.page`.
-- **claude-in-chrome MCP:** live browser verification of the ⑧ in-place render and ⑨ loader on tootie's webGUI (reached via the `*.myunraid.net:31337` cert host). Degraded — the extension repeatedly froze/disconnected (CDP `Runtime.evaluate` timeouts, "renderer may be frozen"); worked around by treating backend `status-json`/`jq` output as the source of truth.
+- **claude-in-chrome MCP:** live browser verification of the ⑧ in-place render and ⑨ loader on nashost's webGUI (reached via the `*.myunraid.net:31337` cert host). Degraded — the extension repeatedly froze/disconnected (CDP `Runtime.evaluate` timeouts, "renderer may be frozen"); worked around by treating backend `status-json`/`jq` output as the source of truth.
 - **vibin:save-to-md skill:** this session log. Its injected git context was for the `soma` repo (the shell's CWD), so all repo facts were re-gathered from `ci-runner-farm`.
 - **Subagents:** none spawned in this (post-compaction) portion; a systematic-debugging agent was used earlier to root-cause the mirror startup failure.
 
@@ -82,12 +82,12 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 
 | command | result |
 |---|---|
-| `runner-farm.sh mirror-up` (tootie) | mirror up on `172.17.0.1:5100`; `/v2/ → 200` |
+| `runner-farm.sh mirror-up` (nashost) | mirror up on `172.17.0.1:5100`; `/v2/ → 200` |
 | serial vs parallel 21-repo sweep (timed) | serial 25203ms vs parallel ~4700ms |
 | `recycle ci-runner-1` / `ci-runner-2` (idle) | both rebaked to `:5100`; `REACHABLE` from inside the runners |
 | `reconcile-config` under live load | 4 busy runners untouched; `ci-runner-1` migrated the instant it went idle |
 | `crf_confgen` stability check | `278e72a04aab` twice; `eb9916dcfcae` when `MIRROR_PORT` changed |
-| full drift scan + `config-parity.sh` | tootie == `4a515d3` for all tracked files; parity `OK` |
+| full drift scan + `config-parity.sh` | nashost == `4a515d3` for all tracked files; parity `OK` |
 
 ## Errors Encountered
 
@@ -113,7 +113,7 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 | reconcile under real load | busy untouched, idle migrate | 4 busy held; `ci-runner-1` migrated on idle | pass |
 | migrated runner mirror | `:5100` + reachable | `registry-mirrors:[…5100]`, `REACHABLE` | pass |
 | ⑦ sweep latency | far under 25s serial | 4.7s | pass |
-| full drift scan | tootie == branch tip | zero drift | pass |
+| full drift scan | nashost == branch tip | zero drift | pass |
 | `config-parity.sh` | OK | OK (40/31/32) | pass |
 | `status-json` | token set, no stale | `{token:true,count:2,stale:0}` | pass |
 
@@ -121,7 +121,7 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 
 - Auto-migration recycles runners: idle-only + one-per-pass bounds the blast radius; a job outlasting `IMAGE_DRAIN_TIMEOUT` (default 3600s) is logged and migrates on its next idle. Rollback: revert `d68db49` — runners then keep old config until a manual Restart (prior behavior).
 - On deploy/update, unstamped (pre-feature) runners are treated as stale and migrate once — a one-time, drain-aware self-healing pass.
-- The running autoscale daemon must be restarted onto the new code to stamp newly created runners (done on tootie during testing).
+- The running autoscale daemon must be restarted onto the new code to stamp newly created runners (done on nashost during testing).
 
 ## Decisions Not Taken
 
@@ -133,7 +133,7 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 ## References
 
 - Branch `feat/settings-page-facelift`; this session's commits `2d85472`, `822580e`, `601bb38`, `458dcd7`, `9570901`, `d68db49`.
-- tootie webGUI: `http://…:6969` redirects to the `*.myunraid.net:31337` HTTPS cert host.
+- nashost webGUI: `http://…:6969` redirects to the `*.myunraid.net:31337` HTTPS cert host.
 
 ## Open Questions
 
@@ -142,6 +142,6 @@ No bead activity observed. `bd list --status open` and `bd ready` returned empty
 
 ## Next Steps
 
-- The concurrent session appears to own the feature branch and tootie deploys going forward — coordinate to avoid double-deploying to the same box.
+- The concurrent session appears to own the feature branch and nashost deploys going forward — coordinate to avoid double-deploying to the same box.
 - If desired, review `9e5f226`'s reconcile hardening against `d68db49` and reconcile any overlap.
 - No code push is pending from this session; the feature branch is already on `origin` at the concurrent session's tip, with this session's commits included. This session log lands on `main` independently.

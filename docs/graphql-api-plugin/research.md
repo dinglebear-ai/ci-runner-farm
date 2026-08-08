@@ -4,7 +4,7 @@
 
 This record identifies the source code reviewed, the behavior confirmed, the gaps found, and the design conclusions used by the schema, contracts, specification, and implementation plan in this directory.
 
-No proposed behavior in this package depends on an assumed undocumented remote service. Every controller requirement is derived from the checked-out Runner Farm code. Every Unraid API integration requirement is derived from the checked-out Unraid API code at the revision below. The local-tarball installer behavior was verified with npm on DOOKIE.
+No proposed behavior in this package depends on an assumed undocumented remote service. Every controller requirement is derived from the checked-out Runner Farm code. Every Unraid API integration requirement is derived from the checked-out Unraid API code at the revision below. The local-tarball installer behavior was verified with npm on DEVHOST.
 
 ## Repository state
 
@@ -259,7 +259,7 @@ Findings:
 
 The current service adds the raw install argument to `api.plugins` before npm runs. Discovery later matches configured names against root dependency keys. A local tarball path is enabled under the wrong identity, and even a corrected canonical entry can fail after reboot because the modified root manifest is not archived.
 
-A DOOKIE fixture proved:
+A DEVHOST fixture proved:
 
 - npm saves a local tarball under its canonical package name in `peerDependencies`;
 - `npm install --json` reports canonical name and version for a changed install;
