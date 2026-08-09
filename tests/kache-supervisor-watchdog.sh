@@ -12,6 +12,8 @@ trap 'jobs -pr | xargs -r kill 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
 sed -n '/^kache_supervisor_pids()/,/^}/p' "$ENGINE" >"$tmpdir/functions.sh"
 sed -n '/^kache_supervisor_running()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
 sed -n '/^kache_daemon_running()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
+sed -n '/^kache_daemon_identity_valid()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
+sed -n '/^kache_daemon_reset()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
 sed -n '/^kache_supervisor_reconcile()/,/^}/p' "$ENGINE" >>"$tmpdir/functions.sh"
 # shellcheck disable=SC1090
 . "$tmpdir/functions.sh"
@@ -22,23 +24,35 @@ declare -A supervisor=(
   [runner-stopped]=0
   [runner-invalid]=0
   [runner-no-script]=0
+  [runner-foreign]=1
+)
+declare -A daemon=(
+  [runner-ok]=1
+  [runner-missing]=1
+  [runner-stopped]=0
+  [runner-invalid]=0
+  [runner-no-script]=0
+  [runner-foreign]=1
 )
 launches="$tmpdir/launches"
+resets="$tmpdir/resets"
 logs="$tmpdir/logs"
 
 fleet_inventory_refresh() { return 0; }
-managed_names() { printf '%s\n' runner-ok runner-missing runner-stopped runner-invalid runner-no-script; }
+managed_names() { printf '%s\n' runner-ok runner-missing runner-stopped runner-invalid runner-no-script runner-foreign; }
 runner_identity_validate() { [ "$1" != runner-invalid ]; }
 log() { printf '%s\n' "$*" >>"$logs"; }
+kache_daemon_miss_reset() { :; }
+kache_daemon_miss_increment() { printf '1\n'; }
 docker() {
-  local cmd="$1" c
+  local cmd="$1" c operation
   shift
   case "$cmd" in
     top)
       c="$1"
       printf 'PID COMMAND\n'
       [ "${supervisor[$c]:-0}" = 1 ] && printf '123 bash /usr/local/bin/kache-supervise.sh   \n'
-      case "$c" in runner-ok|runner-missing) printf '900 /opt/hostedtoolcache/kache/0.13.0/x64/kache daemon run   \n' ;; esac
+      [ "${daemon[$c]:-0}" = 1 ] && printf '900 /opt/hostedtoolcache/kache/0.13.0/x64/kache daemon run   \n'
       ;;
     inspect)
       c="${@: -1}"
@@ -49,7 +63,17 @@ docker() {
         printf '%s\n' "$*" >>"$launches"
         c="${4:-}"
         supervisor[$c]=1
+        daemon[$c]=1
         return 0
+      fi
+      if [ "${1:-}" = -i ]; then
+        c="${2:-}"; operation="${6:-}"
+        case "$operation" in
+          identity) [ "$c" != runner-foreign ] ;;
+          reset) printf '%s\n' "$c" >>"$resets"; daemon[$c]=0 ;;
+          *) return 99 ;;
+        esac
+        return
       fi
       c="${1:-}"
       [ "$c" != runner-no-script ]
@@ -71,6 +95,13 @@ grep -Fxq -- '-d -u runner runner-missing env -i HOME=/home/runner PATH=/usr/loc
   exit 1
 }
 grep -Fxq 'kache-watchdog: restored supervisor in runner-missing' "$logs"
+crf_reset="$(cat "$resets" 2>/dev/null)"
+[ "$crf_reset" = runner-foreign ] || {
+  echo 'FAIL: foreign Kache daemon was not reset exactly once' >&2
+  cat "$resets" >&2 2>/dev/null || true
+  exit 1
+}
+grep -Fxq 'kache-watchdog: reset foreign or duplicate daemon in runner-foreign' "$logs"
 
 # A live PID is not enough to own the singleton PID file: argv must identify the
 # exact runner-farm watchdog action, preventing stale PID reuse from suppressing
@@ -130,5 +161,8 @@ sed -n '/^cmd_stop()/,/^}/p' "$ENGINE" | grep -Fq 'kache_watchdog_stop'
 grep -Fq 'kache-watchdog-daemon) kache_watchdog_daemon' "$ENGINE"
 grep -Fq 'with_fleet_lock try recover_stalled_credential_handoffs reuse' "$ENGINE"
 grep -Fq 'kache-watchdog-status) kache_watchdog_status' "$ENGINE"
+grep -Fq 'flock -w 10 7' "$ENGINE"
+grep -Fq '7>&- 8>&- 9>&-' "$ENGINE"
+grep -Fq 'chmod 0600 "$KACHE_WATCHDOG_PID"' "$ENGINE"
 
 echo 'kache-supervisor-watchdog: OK'

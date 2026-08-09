@@ -28,6 +28,10 @@ grep -Fq 'FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804' "$OVERLAY"
 ! grep -Fq 'daemon status' "$SUPERVISOR"
 grep -Fq 'KACHE_VERIFY_RESTORES=sampled' "$SUPERVISOR"
 grep -Fq 'daemon ready; speculative prefetch disabled, exact remote cache active' "$SUPERVISOR"
-grep -Fq 'pgrep -u' "$SUPERVISOR"
+grep -Fq 'KACHE_BIN=/usr/local/bin/kache' "$SUPERVISOR"
+grep -Fq 'EXPECTED_EXE=' "$SUPERVISOR"
+grep -Fq 'readlink -f "/proc/${pids[0]}/exe"' "$SUPERVISOR"
+grep -Fq 'reset_daemons' "$SUPERVISOR"
+grep -Fq 'env -i $KENV "$KACHE_BIN" daemon run' "$SUPERVISOR"
 
 echo 'tootie-kache-profile: OK'

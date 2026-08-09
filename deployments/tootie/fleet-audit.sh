@@ -136,6 +136,31 @@ tmp_log="$LOG_ROOT/.$stamp.log.tmp.$$"
 tmp_dir="$(mktemp -d /tmp/ci-runner-farm-audit.XXXXXX)"
 trap 'rm -rf "$tmp_dir" "$tmp_log"' EXIT
 
+watchdog_process_count() {
+  python3 - <<'PY'
+import os
+count = 0
+for entry in os.scandir('/proc'):
+    if not entry.name.isdigit():
+        continue
+    try:
+        raw = open(f'/proc/{entry.name}/cmdline', 'rb').read()
+    except OSError:
+        continue
+    argv = [part.decode(errors='replace') for part in raw.split(b'\0') if part]
+    if len(argv) < 3:
+        continue
+    if os.path.basename(argv[0]) not in {'bash', 'sh', 'zsh'}:
+        continue
+    if os.path.basename(argv[1]) != 'runner-farm.sh':
+        continue
+    if argv[2] != 'kache-watchdog-daemon':
+        continue
+    count += 1
+print(count)
+PY
+}
+
 audit_body() {
   local status_file="$tmp_dir/status.json"
   local github_file="$tmp_dir/github.json"
@@ -203,7 +228,7 @@ audit_body() {
     [ -n "$routing" ] || fail "$c has no routing label"
     assert_eq "$CRF_EXPECTED_AWS_MOUNT" "$aws_mount" "$c AWS mount"
 
-    details="$(docker exec -i "$c" sh -s -- \
+    if ! details="$(docker exec -i "$c" sh -s -- \
       "$CRF_EXPECTED_KACHE_VERSION" "$CRF_EXPECTED_KACHE_SHA256" \
       "$CRF_EXPECTED_KACHE_SOCKET" "$CRF_EXPECTED_KACHE_LOCAL_MAX" \
       "$CRF_EXPECTED_KACHE_ENDPOINT" "$CRF_EXPECTED_KACHE_BUCKET" \
@@ -237,7 +262,9 @@ tr -d '\r' < /home/runner/.aws/credentials | grep -Fxq "[$profile]"
 printf 'kache=%s sha256=%s supervisors=%s daemons=%s socket=%s remote=s3://%s/%s l1=%s' \
   "$version" "$binary_sha" "$supervisors" "$daemons" "$socket" "$bucket" "$prefix" "$local_max"
 INNER
-)"
+)"; then
+      fail "$c Kache daemon or configuration identity check failed"
+    fi
     printf '%s image=%s route=%s %s\n' "$c" "$image" "$routing" "$details"
   done
 
@@ -327,11 +354,11 @@ printf("github_online_exact=%d\n",count($current));
   assert_eq false "$(jq -r '.active' <<<"$mutation_status")" "mutation owner activity"
 
   watchdog_pid_before="$(cat /var/local/emhttp/ci-runner-farm/kache-watchdog.pid)"
-  watchdog_count_before="$(pgrep -af '[r]unner-farm.sh kache-watchdog-daemon' | wc -l)"
+  watchdog_count_before="$(watchdog_process_count)"
   watchdog_restarts_before="$(grep -c 'kache-watchdog: restarting unhealthy supervisor' /var/local/emhttp/ci-runner-farm/autoscale.log || true)"
   sleep "$WATCHDOG_SAMPLE_SECONDS"
   watchdog_pid_after="$(cat /var/local/emhttp/ci-runner-farm/kache-watchdog.pid)"
-  watchdog_count_after="$(pgrep -af '[r]unner-farm.sh kache-watchdog-daemon' | wc -l)"
+  watchdog_count_after="$(watchdog_process_count)"
   watchdog_restarts_after="$(grep -c 'kache-watchdog: restarting unhealthy supervisor' /var/local/emhttp/ci-runner-farm/autoscale.log || true)"
   watchdog_status="$("$ENGINE" kache-watchdog-status)"
   assert_eq "$watchdog_pid_before" "$watchdog_pid_after" "watchdog PID stability"

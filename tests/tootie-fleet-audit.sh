@@ -22,9 +22,14 @@ for needle in \
   'kache-watchdog-daemon' \
   'GOTIFY_ENV=' \
   'X-Gotify-Key:' \
-  'notify_success'; do
+  'notify_success' \
+  'Kache daemon or configuration identity check failed' \
+  'watchdog_process_count()'; do
   grep -Fq "$needle" "$AUDIT" || crf_fail "audit contract missing: $needle"
 done
+if grep -Fq "pgrep -af '[r]unner-farm.sh kache-watchdog-daemon'" "$AUDIT"; then
+  crf_fail "audit still uses loose pgrep watchdog counting"
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -69,7 +74,8 @@ crf_assert_file_mode "$config" 600
 crf_assert_file_mode "$wrapper" 755
 grep -Fq "CRF_EXPECTED_PLUGIN_VERSION='9.9.9'" "$config"
 grep -Fq "$(sha256sum "$plugin_dir/$package" | awk '{print $1}')" "$config"
-grep -Fq "exec '$installed'" "$wrapper"
+grep -Fq "exec /bin/bash '$installed'" "$wrapper"
+grep -Fq '/bin/bash "$AUDIT_INSTALL_PATH"' "$INSTALLER"
 jq -e --arg script "$wrapper" '
   .["/existing/script"].custom == "0 1 * * *" and
   .[$script].frequency == "custom" and

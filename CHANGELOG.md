@@ -4,20 +4,10 @@
 
 ### Changed
 
-* Build local runner images under immutable candidate tags and require an explicit exact-image-ID promotion before changing the production `ci-runner-farm-runner:latest` tag.
-* Add persistent mutation-owner leases that fence competing UI, CLI, reconcile, recycle, and daemon mutations across multi-command maintenance sessions.
-* Reject V2 configured baselines that exceed post-reserve CPU or memory admission budgets, using fixed capacity for fixed pools and minimum capacity for autoscaled pools, and expose configured claims plus remaining headroom in status JSON.
-* Add an idempotent Tootie fleet-audit installer and daily 06:30 audit covering exact GitHub identities and labels, runner image and Kache integrity, plugin identity, resource headroom, reconciliation state, watchdog stability, and Unraid/Gotify pass-fail notifications.
-* Make the package reproducibility assertion deterministic under `pipefail` by fully extracting the inspected file before searching it.
-
-* Move the canonical repository and scale-set helper module identity to `dinglebear-ai/ci-runner-farm`.
-* Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
-* Include PHP CLI, ripgrep, and file inspection tools in the Tootie runner image so the repository's syntax, behavioral, and release gates run on the farm.
-* Make the watchdog process-enumeration regression test independent of host PID ordering.
-* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Tootie runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
-* Document the final feasible 16-runner Tootie pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
-* Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
-
+* Quiesce exactly the highest fixed-pool surplus identities before waiting for busy jobs, preventing new assignments from refilling a drain and restoring configured labels if the target rises.
+* Run the flash-resident Tootie audit through `/bin/bash`, matching Unraid VFAT permission semantics where executable bits cannot persist.
+* Require the Kache supervisor and host watchdog to own exactly one daemon running from the immutable `/usr/local/bin/kache` target, resetting job-installed or duplicate daemons before they can masquerade as healthy.
+* Serialize watchdog startup behind a private lifecycle lock and make fleet audits count watchdogs by exact `/proc` argv identity instead of loose process matching.
 ## [1.9.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.8.1...v1.9.0) (2026-08-05)
 
 

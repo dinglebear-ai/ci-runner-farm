@@ -41,7 +41,9 @@ Files:
 - `kache-overlay.Dockerfile` upgrades the currently deployed Tootie image in a
   small, rollback-friendly layer and is the normal fleet rollout path.
 - `kache-supervise.sh` owns the container-lifetime daemon without invoking the
-  side-effectful `kache daemon status` command.
+  side-effectful `kache daemon status` command. It accepts exactly one daemon
+  whose `/proc/<pid>/exe` resolves to `/usr/local/bin/kache`; job-installed,
+  foreign, or duplicate daemons are terminated before the pinned daemon starts.
 
 Run `tests/tootie-kache-profile.sh` before deployment. Copy the full Dockerfile
 and supervisor to `/boot/config/plugins/ci-runner-farm/` as the durable rebuild
@@ -85,7 +87,9 @@ sudo ./install-fleet-audit.sh
 ```
 
 The installer preserves existing User Scripts schedules, registers a daily
-06:30 run, writes logs under `/mnt/user/logs/ci-runner-farm-audit`, and pins the
+06:30 run, and invokes the flash-resident audit through `/bin/bash` because
+Unraid VFAT mounts cannot persist executable bits. It writes logs under
+`/mnt/user/logs/ci-runner-farm-audit` and pins the
 installed plugin package SHA-256 in a mode-0600 audit environment. The audit
 requires exactly 16 online GitHub identities with exact labels, the approved
 runner image and Kache binary, one Kache supervisor and daemon per runner, the

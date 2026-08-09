@@ -166,7 +166,10 @@ Use `mutation-owner-claim`, `mutation-owner-status`, and
 multiple mutations. Supply the claimed token through `CRF_MUTATION_OWNER` on
 each guarded command. Competing manual mutations fail, while autoscale and
 reconcile ticks skip and retry after the lease clears. Leases are mode 0600,
-boot-bound, and time-bound.
+boot-bound, and time-bound. Fixed-pool shrink reconciliation designates only the
+highest surplus identities and replaces their custom GitHub labels with
+`crf-retiring` before waiting for active jobs, so the drain cannot refill. If the
+target rises before removal, the configured pool labels are restored.
 
 V2 Settings validation sums the configured baseline before saving: fixed
 capacity for fixed pools and minimum capacity for autoscaled pools. A baseline

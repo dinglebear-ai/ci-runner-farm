@@ -6,7 +6,7 @@ ENGINE=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 tmpdir="$(mktemp -d)"
 trap 'jobs -pr | xargs -r kill 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
 
-for fn in kache_supervisor_pids kache_daemon_running kache_daemon_miss_file kache_daemon_miss_reset kache_daemon_miss_increment kache_supervisor_reconcile; do
+for fn in kache_supervisor_pids kache_daemon_running kache_daemon_identity_valid kache_daemon_reset kache_daemon_miss_file kache_daemon_miss_reset kache_daemon_miss_increment kache_supervisor_reconcile; do
   sed -n "/^${fn}()/,/^}/p" "$ENGINE" >>"$tmpdir/health-functions.sh"
 done
 # shellcheck disable=SC1090

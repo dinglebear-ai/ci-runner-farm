@@ -1080,6 +1080,39 @@ kache_daemon_running() {
          $4 == "run" && NF == 4 { found=1 } END { exit !found }'
 }
 
+kache_daemon_identity_valid() {
+  local c="$1"
+  docker exec -i "$c" sh -s -- identity <<'INNER'
+set -eu
+expected=$(readlink -f /usr/local/bin/kache 2>/dev/null) || exit 1
+pids=$(ps -eo user=,pid=,args= |
+  awk '$1=="runner" && $0 ~ /[/]kache daemon run$/ {print $2}')
+set -- $pids
+[ "$#" -eq 1 ] || exit 1
+actual=$(readlink -f "/proc/$1/exe" 2>/dev/null) || exit 1
+[ "$actual" = "$expected" ]
+INNER
+}
+
+kache_daemon_reset() {
+  local c="$1"
+  docker exec -i "$c" sh -s -- reset <<'INNER'
+set -u
+pids=$(ps -eo user=,pid=,args= |
+  awk '$1=="runner" && $0 ~ /[/]kache daemon run$/ {print $2}')
+[ -n "$pids" ] || { rm -f /_work/.kache/daemon.sock; exit 0; }
+kill -TERM $pids 2>/dev/null || true
+for _ in $(seq 1 20); do
+  alive=0
+  for pid in $pids; do kill -0 "$pid" 2>/dev/null && alive=1; done
+  [ "$alive" = 0 ] && break
+  sleep 0.1
+done
+for pid in $pids; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
+rm -f /_work/.kache/daemon.sock
+INNER
+}
+
 kache_daemon_miss_file() {
   local c="$1" dir="${KACHE_WATCHDOG_MISS_DIR:-${RUNDIR}/kache-daemon-misses}"
   runner_identity_validate "$c" || return 1
@@ -1145,6 +1178,17 @@ kache_supervisor_reconcile() {
       daemon_running=true
     else
       daemon_running=false
+    fi
+
+    if [ "$daemon_running" = true ] && ! kache_daemon_identity_valid "$c"; then
+      if kache_daemon_reset "$c"; then
+        log "kache-watchdog: reset foreign or duplicate daemon in $c"
+        kache_daemon_miss_reset "$c" >/dev/null 2>&1 || true
+        daemon_running=false
+      else
+        log "kache-watchdog: could not reset invalid daemon identity in $c; preserving it"
+        continue
+      fi
     fi
 
     if [ "${#supervisors[@]}" -gt 1 ]; then
@@ -1254,11 +1298,23 @@ kache_watchdog_stop() {
 }
 
 kache_watchdog_start() {
-  kache_watchdog_pid_active && return 0
-  kache_watchdog_stop
-  nohup "$0" kache-watchdog-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
-  echo $! > "$KACHE_WATCHDOG_PID"
-  log "kache-watchdog: started (pid $(cat "$KACHE_WATCHDOG_PID"))"
+  local lock="$RUNDIR/kache-watchdog.lock" count
+  mkdir -p "$RUNDIR" || return 1
+  (
+    umask 077
+    exec 7>"$lock" || exit 1
+    chmod 0600 "$lock" || exit 1
+    flock -w 10 7 || { err "kache-watchdog: lifecycle lock is busy"; exit 1; }
+    count="$(kache_watchdog_daemon_pids | wc -l | tr -d '[:space:]')"
+    if kache_watchdog_pid_active && [ "${count:-0}" -eq 1 ]; then
+      exit 0
+    fi
+    kache_watchdog_stop
+    nohup "$0" kache-watchdog-daemon >>"${RUNDIR}/autoscale.log" 2>&1 7>&- 8>&- 9>&- &
+    printf '%s\n' "$!" > "$KACHE_WATCHDOG_PID"
+    chmod 0600 "$KACHE_WATCHDOG_PID" || exit 1
+    log "kache-watchdog: started (pid $(cat "$KACHE_WATCHDOG_PID"))"
+  )
 }
 
 kache_watchdog_status() {
@@ -1660,6 +1716,71 @@ github_runner_inventory_forget() {
 github_runner_id() {
   local target="$1" name="$2"
   github_runner_inventory "$target" | awk -F'|' -v want="$name" '$2 == want { print $1; exit }'
+}
+
+fixed_quiesce_dir_ensure() {
+  local dir="$CFGDIR/fixed-quiesced"
+  [ ! -L "$dir" ] || return 1
+  mkdir -p "$dir" || return 1
+  chmod 0700 "$dir"
+}
+
+fixed_quiesce_marker() {
+  local c="$1"
+  runner_identity_validate "$c" || return 1
+  printf '%s/fixed-quiesced/%s.state\n' "$CFGDIR" "$c"
+}
+
+github_runner_labels_replace() {
+  local c="$1" labels="$2" target base id rname body
+  [ -n "$ACCESS_TOKEN" ] && [ -n "$c" ] || return 1
+  case "$labels" in ''|*[!A-Za-z0-9,._-]*) return 1 ;; esac
+  target="$(runner_scope_target "$c")"
+  github_scope_validate "$target" || { err "runner $c lacks a valid stamped scope target"; return 1; }
+  base="$(github_scope_base "$target")" || return 1
+  rname="$(host)-${c}"
+  id="$(github_runner_id "$target" "$rname")" || return 1
+  [ -n "$id" ] || return 1
+  body="$(php -r '
+    $labels=array_values(array_filter(explode(",",$argv[1]),"strlen"));
+    echo json_encode(["labels"=>$labels],JSON_UNESCAPED_SLASHES);
+  ' "$labels")" || return 1
+  if gh_api_request PUT "${base}/actions/runners/${id}/labels" "$body" && [ "$GH_STATUS" = 200 ]; then
+    github_runner_inventory_invalidate "$target" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+fixed_quiesce_runner() {
+  local c="$1" marker tmp
+  marker="$(fixed_quiesce_marker "$c")" || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 0
+  fixed_quiesce_dir_ensure || return 1
+  github_runner_labels_replace "$c" crf-retiring || return 1
+  tmp="$marker.tmp.$$"
+  ( umask 077; printf 'schema=1\nrunner=%s\nquiesced_at=%s\n' "$c" "$(date +%s)" > "$tmp" ) || {
+    rm -f "$tmp"; return 1;
+  }
+  chmod 0600 "$tmp" && mv "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+  log "reconcile: quiesced excess runner $c from new GitHub assignments"
+}
+
+fixed_quiesce_restore() {
+  local c="$1" marker pool labels
+  marker="$(fixed_quiesce_marker "$c")" || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  pool="$(runner_pool "$c")"
+  labels="$(pool_effective_labels "$pool")" || return 1
+  github_runner_labels_replace "$c" "$labels" || return 1
+  rm -f "$marker"
+  log "reconcile: restored configured labels for $c"
+}
+
+fixed_quiesce_forget() {
+  local marker
+  marker="$(fixed_quiesce_marker "$1" 2>/dev/null)" || return 0
+  rm -f "$marker"
 }
 
 # Deregister a runner from GitHub host-side, by name, using the PAT. This replaces
@@ -2603,7 +2724,7 @@ cmd_mirror_up() {
 reconcile_stale_runners() {
   validate_runtime_config || { err "reconcile: $POOL_CONFIG_ERROR"; return 1; }
   cleanup_pool_runtime_state
-  local cur c gen pool scope state docker_state desired rec target
+  local cur c gen pool scope state docker_state desired rec target current excess selected
   fleet_inventory_refresh || { err "reconcile: could not inventory managed runners"; return 1; }
   crf_confgen_prepare
   if pool_mode_enabled && [ "$(count_pool_missing_capacity)" -gt 0 ]; then
@@ -2669,31 +2790,43 @@ reconcile_stale_runners() {
     fi
   done
 
-  # Pass 2: honor fixed-mode runtime targets persistently. Highest indexes drain
-  # first; a busy excess runner remains until a later worker pass sees it idle.
+  # Pass 2: honor fixed-mode runtime targets persistently. Designate exactly
+  # current-target highest identities as surplus, remove their routing labels so
+  # busy jobs can finish without accepting replacements, then drain them idle.
   if pool_mode_enabled; then
     while IFS= read -r rec; do
       pool="${rec%%|*}"
       pool_autoscale_enabled "$pool" && continue
       target="$(pool_effective_target "$pool")"
-      [ "$(current_count "$pool")" -gt "$target" ] || continue
+      current="$(current_count "$pool")"
+      excess=$((current - target))
+      [ "$excess" -gt 0 ] || excess=0
+      selected=0
       for c in $(managed_names "$pool" | sort -rV); do
-        [ "$(current_count "$pool")" -gt "$target" ] || break
-        state="$(runner_state "$c")"
-        case "$state" in
-          idle)
-            log "reconcile: draining idle excess runner $c to fixed target $target"
-            remove_runner "$c" && return 0
-            ;;
-          error)
-            if runner_authoritatively_failed "$c"; then
-              log "reconcile: force-removing authoritatively failed excess runner $c to fixed target $target"
-              remove_runner_force "$c" && return 0
-            fi
-            log "reconcile: $c has a non-authoritative error signal — preserving it"
-            ;;
-          *) log "reconcile: $c exceeds fixed target but is $state — waiting" ;;
-        esac
+        if [ "$selected" -lt "$excess" ]; then
+          selected=$((selected + 1))
+          if ! fixed_quiesce_runner "$c"; then
+            log "warning: could not quiesce excess runner $c; it remains eligible and will be retried"
+            continue
+          fi
+          state="$(runner_state "$c")"
+          case "$state" in
+            idle)
+              log "reconcile: draining idle excess runner $c to fixed target $target"
+              remove_runner "$c" && return 0
+              ;;
+            error)
+              if runner_authoritatively_failed "$c"; then
+                log "reconcile: force-removing authoritatively failed excess runner $c to fixed target $target"
+                remove_runner_force "$c" && return 0
+              fi
+              log "reconcile: $c has a non-authoritative error signal — preserving it"
+              ;;
+            *) log "reconcile: quiesced excess runner $c is $state — waiting" ;;
+          esac
+        elif ! fixed_quiesce_restore "$c"; then
+          log "warning: could not restore configured labels for $c; will retry"
+        fi
       done
     done < <(pool_records)
   fi
@@ -3060,6 +3193,7 @@ remove_runner_container() {
   docker stop -t 30 "$c" >/dev/null 2>&1
   docker rm "$c" >/dev/null 2>&1
   fleet_inventory_invalidate
+  fixed_quiesce_forget "$c" 2>/dev/null || true
   if [ -n "$root" ]; then
     rm -rf -- "${root:?}/docker/${c:?}" 2>/dev/null || true
   else
