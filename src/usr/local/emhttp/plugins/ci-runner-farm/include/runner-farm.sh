@@ -4540,7 +4540,19 @@ cmd_validate() {
   local name="${NAME_PREFIX}-validate"
   docker rm -f "$name" >/dev/null 2>&1
   local NO_REGISTER=1               # validate swaps the entrypoint for a sleep — never registers
-  build_args 99 "$name"
+  local validate_pool=default validate_scope="" rec
+  if pool_mode_enabled; then
+    while IFS= read -r rec; do
+      validate_pool="${rec%%|*}"
+      break
+    done < <(pool_records)
+    [ -n "$validate_pool" ] || { err "validate: no configured runner pool is available"; return 1; }
+    validate_scope="org:$GH_OWNER"
+  fi
+  build_args 99 "$name" "$validate_pool" "$validate_scope" || {
+    err "validate: could not build validation container arguments"
+    return 1
+  }
   # swap real entrypoint for an inert sleep so no registration is attempted
   local injected=(); local a; local eimg; eimg="$(effective_image)"
   for a in "${ARGS[@]}"; do
