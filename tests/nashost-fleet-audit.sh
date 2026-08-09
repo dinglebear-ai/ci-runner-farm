@@ -55,7 +55,189 @@ for needle in \
 done
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+gotify_server_pid=""
+hostile_server_pid=""
+cleanup() {
+  [ -z "$gotify_server_pid" ] || kill "$gotify_server_pid" 2>/dev/null || true
+  [ -z "$hostile_server_pid" ] || kill "$hostile_server_pid" 2>/dev/null || true
+  [ -z "$gotify_server_pid" ] || wait "$gotify_server_pid" 2>/dev/null || true
+  [ -z "$hostile_server_pid" ] || wait "$hostile_server_pid" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+# A configured token without an explicitly approved URL is a configuration
+# failure, not permission to fall back to a plausible hostname. It must fail
+# before curl can transmit anything and leave the reason in the audit log.
+mkdir -p "$tmp/bin" "$tmp/notify-logs"
+cat >"$tmp/bin/curl" <<'SH'
+#!/usr/bin/env bash
+: >"$CRF_FAKE_CURL_CALLED"
+exit 0
+SH
+chmod +x "$tmp/bin/curl"
+notify_secret='gotify-token-must-not-leak'
+set +e
+notify_output="$(env \
+  PATH="$tmp/bin:$PATH" \
+  CRF_FAKE_CURL_CALLED="$tmp/curl-called" \
+  CRF_ENGINE="$tmp/unavailable-engine" \
+  CRF_AUDIT_CONFIG="$tmp/no-audit-config" \
+  CRF_GOTIFY_ENV="$tmp/no-gotify-env" \
+  CRF_AUDIT_LOG_ROOT="$tmp/notify-logs" \
+  CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000' \
+  CRF_EXPECTED_PLUGIN_VERSION=9.9.9 \
+  CRF_EXPECTED_PLUGIN_PACKAGE_SHA256="$valid_hash" \
+  GOTIFY_URL='' GOTIFY_TOKEN="$notify_secret" \
+  bash "$AUDIT" 2>&1)"
+notify_status=$?
+set -e
+[ "$notify_status" -ne 0 ] || crf_fail 'token without GOTIFY_URL passed the fleet audit'
+[ ! -e "$tmp/curl-called" ] || crf_fail 'token without GOTIFY_URL attempted a network transmission'
+notify_log="$(find "$tmp/notify-logs" -maxdepth 1 -type f -name '*.log' -print -quit)"
+[ -n "$notify_log" ] || crf_fail 'Gotify configuration failure produced no audit log'
+grep -Fq 'GOTIFY_URL is required when GOTIFY_TOKEN is configured' "$notify_log" ||
+  crf_fail 'Gotify configuration failure was absent from the audit log'
+if grep -Fq "$notify_secret" "$notify_log" || grep -Fq "$notify_secret" <<<"$notify_output"; then
+  crf_fail 'Gotify token leaked into audit output or log'
+fi
+
+# Exercise delivery against a real local HTTP endpoint. A 2xx response passes;
+# an HTTP failure is observable and nonzero, and neither path prints the token.
+notify_functions="$tmp/notify-functions.sh"
+sed -n '/^require_gotify_url()/,/^}/p' "$AUDIT" >"$notify_functions"
+sed -n '/^notify_gotify()/,/^)/p' "$AUDIT" >>"$notify_functions"
+# shellcheck disable=SC1090
+. "$notify_functions"
+for allowed_gotify_url in \
+  'http://localhost' \
+  'http://localhost:1' \
+  'http://localhost:65535' \
+  'http://127.0.0.1' \
+  'http://127.0.0.1:8080' \
+  'https://gotify.internal' \
+  'https://gotify.internal:8443/base'; do
+  require_gotify_url "$allowed_gotify_url" ||
+    crf_fail "Gotify URL validation rejected approved target: $allowed_gotify_url"
+done
+for rejected_gotify_url in \
+  'http://gotify.internal:8080' \
+  'http://10.23.45.67:8080' \
+  'http://user@localhost:8080' \
+  'http://localhost@gotify.internal:8080' \
+  'http://LOCALHOST:8080' \
+  'http://localhost.:8080' \
+  'http://127.0.0.2:8080' \
+  'http://127.1:8080' \
+  'http://2130706433:8080' \
+  'http://0x7f000001:8080' \
+  'http://[::1]:8080' \
+  'http://localhost:' \
+  'http://localhost:65536'; do
+  if require_gotify_url "$rejected_gotify_url"; then
+    crf_fail "Gotify URL validation accepted ambiguous or plaintext target: $rejected_gotify_url"
+  fi
+done
+cat >"$tmp/gotify-server.py" <<'PY'
+import http.server, json, pathlib, sys, urllib.parse
+
+status_file, capture_file, port_file, count_file = map(pathlib.Path, sys.argv[1:])
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('content-length', '0')))
+        form = urllib.parse.parse_qs(body.decode(), strict_parsing=True)
+        capture_file.write_text(json.dumps({
+            'path': self.path,
+            'headers': dict(self.headers.items()),
+            'form': form,
+        }))
+        count = int(count_file.read_text()) if count_file.exists() else 0
+        count_file.write_text(str(count + 1))
+        status = int(status_file.read_text()) if self.path == '/message' else 404
+        if self.path == '/message' and (
+            form.get('title') != ['audit title'] or
+            form.get('message') != ['audit message'] or
+            form.get('priority') not in (['1'], ['8'])
+        ):
+            status = 422
+        self.send_response(status)
+        self.end_headers()
+        self.wfile.write(b'{}')
+    def log_message(self, *_):
+        pass
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+port_file.write_text(str(server.server_address[1]))
+server.serve_forever()
+PY
+printf '204\n' >"$tmp/gotify-status"
+python3 "$tmp/gotify-server.py" "$tmp/gotify-status" "$tmp/gotify-capture" "$tmp/gotify-port" "$tmp/gotify-count" &
+gotify_server_pid=$!
+for _ in $(seq 1 100); do [ -s "$tmp/gotify-port" ] && break; sleep 0.02; done
+[ -s "$tmp/gotify-port" ] || crf_fail 'local Gotify test endpoint did not start'
+printf '204\n' >"$tmp/hostile-status"
+python3 "$tmp/gotify-server.py" "$tmp/hostile-status" "$tmp/hostile-capture" "$tmp/hostile-port" "$tmp/hostile-count" &
+hostile_server_pid=$!
+for _ in $(seq 1 100); do [ -s "$tmp/hostile-port" ] && break; sleep 0.02; done
+[ -s "$tmp/hostile-port" ] || crf_fail 'hostile curl endpoint did not start'
+mkdir -p "$tmp/hostile-home"
+printf 'url = "http://127.0.0.1:%s/from-curlrc"\n' "$(cat "$tmp/hostile-port")" >"$tmp/hostile-home/.curlrc"
+# shellcheck disable=SC2034 # consumed by the sourced notify_gotify function
+GOTIFY_URL="http://127.0.0.1:$(cat "$tmp/gotify-port")"
+# shellcheck disable=SC2034 # consumed by the sourced notify_gotify function
+GOTIFY_TOKEN="$notify_secret"
+notify_ok="$(HOME="$tmp/hostile-home" \
+  http_proxy="http://127.0.0.1:$(cat "$tmp/hostile-port")" \
+  https_proxy="http://127.0.0.1:$(cat "$tmp/hostile-port")" \
+  HTTP_PROXY="http://127.0.0.1:$(cat "$tmp/hostile-port")" \
+  HTTPS_PROXY="http://127.0.0.1:$(cat "$tmp/hostile-port")" \
+  NO_PROXY='' no_proxy='' \
+  notify_gotify 'audit title' 'audit message' 1 2>&1)" ||
+  crf_fail "configured local Gotify endpoint failed: $notify_ok"
+for _ in $(seq 1 50); do [ -s "$tmp/gotify-count" ] && break; sleep 0.02; done
+crf_assert_eq 1 "$(cat "$tmp/gotify-count" 2>/dev/null || echo 0)" 'approved Gotify request count'
+crf_assert_eq 0 "$(cat "$tmp/hostile-count" 2>/dev/null || echo 0)" 'hostile curl request count'
+python3 - "$tmp/gotify-capture" 1 "$notify_secret" <<'PY' || crf_fail 'approved Gotify request path, header, or success form fields were incorrect'
+import json, pathlib, sys
+request = json.loads(pathlib.Path(sys.argv[1]).read_text())
+expected_priority = sys.argv[2]
+expected_token = sys.argv[3]
+assert request['path'] == '/message'
+assert request['headers']['X-Gotify-Key'] == expected_token
+assert request['form'] == {
+    'title': ['audit title'],
+    'message': ['audit message'],
+    'priority': [expected_priority],
+}
+PY
+[ -z "$notify_ok" ] || crf_fail 'successful Gotify delivery emitted unexpected output'
+printf '503\n' >"$tmp/gotify-status"
+if notify_failed="$(notify_gotify 'audit title' 'audit message' 8 2>&1)"; then
+  crf_fail 'Gotify HTTP failure was hidden as success'
+fi
+crf_assert_eq 2 "$(cat "$tmp/gotify-count" 2>/dev/null || echo 0)" 'approved Gotify request count after failure'
+python3 - "$tmp/gotify-capture" 8 <<'PY' || crf_fail 'failed Gotify request path or form fields were incorrect'
+import json, pathlib, sys
+request = json.loads(pathlib.Path(sys.argv[1]).read_text())
+expected_priority = sys.argv[2]
+assert request['path'] == '/message'
+assert request['form'] == {
+    'title': ['audit title'],
+    'message': ['audit message'],
+    'priority': [expected_priority],
+}
+PY
+grep -Fq 'Gotify notification delivery failed' <<<"$notify_failed" ||
+  crf_fail 'Gotify HTTP failure was not observable'
+if grep -Fq "$notify_secret" <<<"$notify_failed"; then
+  crf_fail 'Gotify delivery failure leaked the token'
+fi
+kill "$gotify_server_pid" 2>/dev/null || true
+wait "$gotify_server_pid" 2>/dev/null || true
+gotify_server_pid=""
+kill "$hostile_server_pid" 2>/dev/null || true
+wait "$hostile_server_pid" 2>/dev/null || true
+hostile_server_pid=""
+
 boot="$tmp/boot"
 plugin_dir="$boot/plugins/ci-runner-farm"
 user_root="$boot/plugins/user.scripts"
@@ -104,8 +286,68 @@ for unsafe_endpoint in '' 'http://192.0.2.2:9000'; do
   crf_assert_eq "$cron_before" "$(sha256sum "$user_root/customSchedule.cron" | awk '{print $1}')" "cron after rejected install"
 done
 
+# Installer preflight must independently enforce the plaintext boundary. This
+# catches drift between its duplicated parser and the audit's parser above.
+gotify_env="$user_root/gotify.env"
+for hostile_gotify_url in \
+  'http://gotify.internal:8080' \
+  'http://user@localhost:8080'; do
+  cat >"$gotify_env" <<EOF
+GOTIFY_URL='$hostile_gotify_url'
+GOTIFY_TOKEN='$notify_secret'
+EOF
+  chmod 0600 "$gotify_env"
+  schedule_before="$(sha256sum "$user_root/schedule.json" | awk '{print $1}')"
+  cron_before="$(sha256sum "$user_root/customSchedule.cron" | awk '{print $1}')"
+  set +e
+  env \
+    CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000' \
+    CRF_GOTIFY_ENV="$gotify_env" \
+    CRF_BOOT_CONFIG_ROOT="$boot" \
+    CRF_AUDIT_SOURCE="$PWD/$AUDIT" \
+    CRF_AUDIT_LOG_ROOT="$tmp/logs" \
+    CRF_UPDATE_CRON=0 CRF_INSTALL_RUN_AUDIT=0 \
+    bash "$INSTALLER" >"$tmp/gotify-hostile-install.out" 2>&1
+  gotify_install_status=$?
+  set -e
+  [ "$gotify_install_status" -ne 0 ] || crf_fail "installer accepted hostile Gotify URL: $hostile_gotify_url"
+  [ ! -e "$plugin_dir/fleet-audit.sh" ] || crf_fail 'rejected Gotify install wrote the fleet audit'
+  [ ! -e "$plugin_dir/fleet-audit.env" ] || crf_fail 'rejected Gotify install wrote the audit config'
+  [ ! -e "$plugin_dir/audit-schedule-backups" ] || crf_fail 'rejected Gotify install wrote schedule backups'
+  [ ! -e "$user_root/scripts/ci-runner-farm-audit" ] || crf_fail 'rejected Gotify install wrote the User Scripts wrapper'
+  crf_assert_eq "$schedule_before" "$(sha256sum "$user_root/schedule.json" | awk '{print $1}')" 'schedule after rejected Gotify install'
+  crf_assert_eq "$cron_before" "$(sha256sum "$user_root/customSchedule.cron" | awk '{print $1}')" 'cron after rejected Gotify install'
+done
+
+# A token-only environment is rejected by the same read-only preflight.
+printf "GOTIFY_TOKEN='%s'\n" "$notify_secret" >"$gotify_env"
+chmod 0600 "$gotify_env"
+set +e
+env \
+  CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000' \
+  CRF_GOTIFY_ENV="$gotify_env" \
+  CRF_BOOT_CONFIG_ROOT="$boot" \
+  CRF_AUDIT_SOURCE="$PWD/$AUDIT" \
+  CRF_AUDIT_LOG_ROOT="$tmp/logs" \
+  CRF_UPDATE_CRON=0 CRF_INSTALL_RUN_AUDIT=0 \
+  bash "$INSTALLER" >"$tmp/gotify-install-reject.out" 2>&1
+gotify_install_status=$?
+set -e
+[ "$gotify_install_status" -ne 0 ] || crf_fail 'installer accepted GOTIFY_TOKEN without GOTIFY_URL'
+[ ! -e "$plugin_dir/fleet-audit.sh" ] || crf_fail 'rejected Gotify install wrote the fleet audit'
+[ ! -e "$plugin_dir/fleet-audit.env" ] || crf_fail 'rejected Gotify install wrote the audit config'
+[ ! -e "$plugin_dir/audit-schedule-backups" ] || crf_fail 'rejected Gotify install wrote schedule backups'
+[ ! -e "$user_root/scripts/ci-runner-farm-audit" ] || crf_fail 'rejected Gotify install wrote the User Scripts wrapper'
+
+cat >"$gotify_env" <<EOF
+GOTIFY_URL='http://127.0.0.1:8080'
+GOTIFY_TOKEN='$notify_secret'
+EOF
+chmod 0600 "$gotify_env"
+
 env \
   CRF_EXPECTED_KACHE_ENDPOINT="http://10.23.45.67:9000" \
+  CRF_GOTIFY_ENV="$gotify_env" \
   CRF_BOOT_CONFIG_ROOT="$boot" \
   CRF_AUDIT_SOURCE="$PWD/$AUDIT" \
   CRF_AUDIT_LOG_ROOT="$tmp/logs" \
@@ -122,6 +364,9 @@ crf_assert_file_mode "$wrapper" 755
 grep -Fq "CRF_EXPECTED_PLUGIN_VERSION='9.9.9'" "$config"
 grep -Fq "$(sha256sum "$plugin_dir/$package" | awk '{print $1}')" "$config"
 grep -Fq "CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000'" "$config"
+if grep -Fq "$notify_secret" "$config" "$tmp/install.out"; then
+  crf_fail 'installer copied or printed the Gotify token'
+fi
 grep -Fq "exec '$installed'" "$wrapper"
 jq -e --arg script "$wrapper" '
   .["/existing/script"].custom == "0 1 * * *" and
@@ -134,6 +379,7 @@ crf_assert_eq 1 "$(grep -Fc "startCustom.php $wrapper " "$user_root/customSchedu
 # Reinstalling is idempotent and must preserve unrelated schedules.
 sleep 1
 env \
+  CRF_GOTIFY_ENV="$gotify_env" \
   CRF_BOOT_CONFIG_ROOT="$boot" \
   CRF_AUDIT_SOURCE="$PWD/$AUDIT" \
   CRF_AUDIT_LOG_ROOT="$tmp/logs" \

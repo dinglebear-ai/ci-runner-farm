@@ -651,6 +651,12 @@ crf_confgen_prepare() {
   CRF_CONFGEN_IMAGE_REF="$(effective_image)"
   CRF_CONFGEN_IMAGE_IDENTITY=""
   CRF_CONFGEN_ERROR=""
+  if [ "$IMAGE_SOURCE" = builtin ]; then
+    restore_promoted_image_alias || {
+      CRF_CONFGEN_ERROR="Runner image '$CRF_CONFGEN_IMAGE_REF' is unavailable and its promoted alias could not be restored"
+      return 1
+    }
+  fi
   CRF_CONFGEN_IMAGE_IDENTITY="$(docker image inspect "$CRF_CONFGEN_IMAGE_REF" -f '{{.Id}}' 2>/dev/null)" || {
     CRF_CONFGEN_ERROR="Runner image '$CRF_CONFGEN_IMAGE_REF' is unavailable"
     return 1
@@ -748,8 +754,8 @@ count_pool_desired_drift() {
 
 count_reconcile_work() {
   local stale drift
-  stale="$(count_stale_runners)" || stale=0
-  drift="$(count_pool_desired_drift)" || drift=0
+  stale="$(count_stale_runners)" || return 1
+  drift="$(count_pool_desired_drift)" || return 1
   echo $((stale+drift))
 }
 
@@ -2794,16 +2800,26 @@ cmd_reconcile_drain() {
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
   exec 8>&- 9>&- 2>/dev/null || true
-  local deadline announced=0 lost backoff_announced=0 sleep_for=15
+  local deadline announced=0 lost work backoff_announced=0 sleep_for=15
   rm -f "$RUNDIR/reconcile.shrink"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
   deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
   while :; do
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-    [ "$(count_reconcile_work)" -eq 0 ] && break
+    if ! work="$(count_reconcile_work)"; then
+      err "reconcile: could not prepare a trustworthy work count; retrying without declaring migration complete"
+      sleep "$sleep_for"
+      continue
+    fi
+    [ "$work" -eq 0 ] && break
     [ "$announced" = 0 ] && { log "reconcile: config changed — migrating runners onto it as they go idle"; announced=1; }
     with_fleet_lock wait reconcile_stale_runners
-    [ "$(count_reconcile_work)" -eq 0 ] && break
+    if ! work="$(count_reconcile_work)"; then
+      err "reconcile: work recount failed after a pass; retrying without declaring migration complete"
+      sleep "$sleep_for"
+      continue
+    fi
+    [ "$work" -eq 0 ] && break
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), so only enforce
     # the deadline when it's positive — matching drain_and_recreate's `limit -gt 0` guard.
     # Retiring identities (removed pools or mode transitions) must eventually
@@ -2840,12 +2856,12 @@ cmd_reconcile_drain() {
   lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
   if [ "$announced" = 1 ]; then
     if [ "${lost:-0}" -gt 0 ]; then
-      if [ "$(count_reconcile_work)" -eq 0 ]; then
+      if work="$(count_reconcile_work)" && [ "$work" -eq 0 ]; then
         log "reconcile: migration finished but $lost runner(s) were removed without a replacement — Start/Restart the fleet to restore capacity"
       else
         log "reconcile: migration incomplete, and $lost runner(s) were also removed without a replacement — Start/Restart the fleet to restore capacity"
       fi
-    elif [ "$(count_reconcile_work)" -eq 0 ]; then
+    elif work="$(count_reconcile_work)" && [ "$work" -eq 0 ]; then
       log "reconcile: fleet is now on the current config"
     fi
   fi

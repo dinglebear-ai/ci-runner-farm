@@ -12,6 +12,7 @@ AUDIT_INSTALL_PATH="${CRF_AUDIT_INSTALL_PATH:-$PLUGIN_CONFIG_DIR/fleet-audit.sh}
 AUDIT_CONFIG="${CRF_AUDIT_CONFIG:-$PLUGIN_CONFIG_DIR/fleet-audit.env}"
 AUDIT_LOG_ROOT="${CRF_AUDIT_LOG_ROOT:-/mnt/user/logs/ci-runner-farm-audit}"
 USER_SCRIPTS_ROOT="${CRF_USER_SCRIPTS_ROOT:-$BOOT_CONFIG_ROOT/plugins/user.scripts}"
+GOTIFY_ENV="${CRF_GOTIFY_ENV:-$USER_SCRIPTS_ROOT/gotify.env}"
 USER_SCRIPT_DIR="${CRF_USER_SCRIPT_DIR:-$USER_SCRIPTS_ROOT/scripts/ci-runner-farm-audit}"
 USER_SCRIPT_PATH="$USER_SCRIPT_DIR/script"
 SCHEDULE_JSON="${CRF_SCHEDULE_JSON:-$USER_SCRIPTS_ROOT/schedule.json}"
@@ -47,6 +48,36 @@ require_kache_endpoint() {
   return 0
 }
 
+require_gotify_url() {
+  local endpoint="${1:-}" scheme authority host port
+  [ -n "$endpoint" ] || return 1
+  [[ "$endpoint" =~ ^https?:// ]] || return 1
+  scheme="${endpoint%%://*}"
+  case "$endpoint" in
+    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
+    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
+  esac
+  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
+  authority="${endpoint#*://}"
+  authority="${authority%%/*}"
+  case "$authority" in
+    ''|*@*|*:*:*) return 4 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
+      ;;
+    *) host="$authority" ;;
+  esac
+  case "$host" in
+    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
+  esac
+  if [ "$scheme" = http ] && [ "$host" != localhost ] && [ "$host" != 127.0.0.1 ]; then
+    return 5
+  fi
+  return 0
+}
+
 [ -f "$AUDIT_SOURCE" ] && [ ! -L "$AUDIT_SOURCE" ] ||
   { echo "fleet audit source is unavailable: $AUDIT_SOURCE" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
@@ -57,6 +88,25 @@ if [ -e "$SCHEDULE_JSON" ]; then
     { echo "unsafe User Scripts schedule JSON: $SCHEDULE_JSON" >&2; exit 1; }
   jq -e 'type == "object"' "$SCHEDULE_JSON" >/dev/null ||
     { echo "invalid User Scripts schedule JSON" >&2; exit 1; }
+fi
+
+GOTIFY_URL="${GOTIFY_URL:-}"
+GOTIFY_TOKEN="${GOTIFY_TOKEN:-}"
+if [ -e "$GOTIFY_ENV" ]; then
+  [ -f "$GOTIFY_ENV" ] && [ ! -L "$GOTIFY_ENV" ] ||
+    { echo "unsafe Gotify config: $GOTIFY_ENV" >&2; exit 1; }
+  [ "$(stat -c %a "$GOTIFY_ENV")" = 600 ] ||
+    { echo "Gotify config must be mode 600: $GOTIFY_ENV" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  . "$GOTIFY_ENV"
+fi
+if [ -n "$GOTIFY_TOKEN" ]; then
+  [[ "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    { echo 'GOTIFY_TOKEN contains unsafe characters' >&2; exit 1; }
+  [ -n "$GOTIFY_URL" ] ||
+    { echo 'GOTIFY_URL is required when GOTIFY_TOKEN is configured' >&2; exit 1; }
+  require_gotify_url "$GOTIFY_URL" ||
+    { echo 'GOTIFY_URL must use HTTPS; HTTP is allowed only for exact localhost or 127.0.0.1 loopback targets' >&2; exit 1; }
 fi
 
 [ -f "$PLUGIN_PLG" ] || { echo "plugin registration is unavailable: $PLUGIN_PLG" >&2; exit 1; }

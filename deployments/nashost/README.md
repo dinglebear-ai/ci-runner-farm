@@ -115,6 +115,23 @@ environment. Later installer runs preserve that value when the environment
 variable is omitted. Export the approved Nashost endpoint before running either
 command; the repository deliberately provides no plausible fallback value.
 
+Gotify has no executable hostname fallback either. If notifications are enabled,
+create the shared environment with both the explicitly approved URL and token
+before installing the audit:
+
+```bash
+sudo install -m 0600 /dev/null /boot/config/plugins/user.scripts/gotify.env
+sudoedit /boot/config/plugins/user.scripts/gotify.env
+# GOTIFY_URL='https://approved-gotify.example'
+# GOTIFY_TOKEN='replace-with-the-dedicated-app-token'
+```
+
+A token without a URL, a non-HTTPS URL (except exact localhost/127.0.0.1
+loopback), an unsafe URL, or a failed HTTP delivery makes the audit
+nonzero and records `notification_result=FAIL` in its timestamped log. The token
+is carried only in a mode-0600 temporary curl configuration and is never written
+to audit output. Omitting the token disables Gotify without inventing a target.
+
 The installer preserves existing User Scripts schedules, registers a daily
 06:30 run, writes logs under `/mnt/user/logs/ci-runner-farm-audit`, and pins the
 installed plugin package SHA-256 in a mode-0600 audit environment. The audit

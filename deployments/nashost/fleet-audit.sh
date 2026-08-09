@@ -9,7 +9,7 @@ AUDIT_CONFIG="${CRF_AUDIT_CONFIG:-$PLUGIN_CONFIG_DIR/fleet-audit.env}"
 LOG_ROOT="${CRF_AUDIT_LOG_ROOT:-/mnt/user/logs/ci-runner-farm-audit}"
 WATCHDOG_SAMPLE_SECONDS="${CRF_WATCHDOG_SAMPLE_SECONDS:-30}"
 GOTIFY_ENV="${CRF_GOTIFY_ENV:-/boot/config/plugins/user.scripts/gotify.env}"
-GOTIFY_URL="${GOTIFY_URL:-https://gotify.nashost.tv}"
+GOTIFY_URL="${GOTIFY_URL:-}"
 GOTIFY_TOKEN="${GOTIFY_TOKEN:-}"
 CRF_NOTIFY_SUCCESS="${CRF_NOTIFY_SUCCESS:-true}"
 
@@ -91,6 +91,35 @@ require_kache_endpoint() {
   esac
   return 0
 }
+require_gotify_url() {
+  local endpoint="${1:-}" scheme authority host port
+  [ -n "$endpoint" ] || return 1
+  [[ "$endpoint" =~ ^https?:// ]] || return 1
+  scheme="${endpoint%%://*}"
+  case "$endpoint" in
+    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
+    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
+  esac
+  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
+  authority="${endpoint#*://}"
+  authority="${authority%%/*}"
+  case "$authority" in
+    ''|*@*|*:*:*) return 4 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
+      ;;
+    *) host="$authority" ;;
+  esac
+  case "$host" in
+    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
+  esac
+  if [ "$scheme" = http ] && [ "$host" != localhost ] && [ "$host" != 127.0.0.1 ]; then
+    return 5
+  fi
+  return 0
+}
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   return 1
@@ -103,19 +132,38 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"
 }
 notify_gotify() (
-  local title="$1" message="$2" priority="$3" config
-  [ -n "$GOTIFY_URL" ] && [ -n "$GOTIFY_TOKEN" ] || return 0
-  [[ "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  config="$(mktemp /tmp/ci-runner-farm-gotify.XXXXXX)" || return 0
+  local title="$1" message="$2" priority="$3" config allowed_proto='=https'
+  [ -n "$GOTIFY_TOKEN" ] || return 0
+  if [ -n "${GOTIFY_CONFIG_ERROR:-}" ] ||
+     [[ ! "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] ||
+     [ -z "$GOTIFY_URL" ] || ! require_gotify_url "$GOTIFY_URL"; then
+    printf 'Gotify notification configuration failed: %s\n' \
+      "${GOTIFY_CONFIG_ERROR:-GOTIFY_URL or GOTIFY_TOKEN is invalid}" >&2
+    return 2
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    echo 'Gotify notification delivery failed: curl is unavailable' >&2
+    return 1
+  }
+  config="$(mktemp /tmp/ci-runner-farm-gotify.XXXXXX)" || {
+    echo 'Gotify notification delivery failed: could not create protected curl config' >&2
+    return 1
+  }
   trap 'rm -f "$config"' EXIT
   chmod 0600 "$config"
   printf 'header = "X-Gotify-Key: %s"\n' "$GOTIFY_TOKEN" > "$config"
-  curl -fsS --max-time 15 --config "$config" --request POST \
+  case "$GOTIFY_URL" in http://*) allowed_proto='=http' ;; esac
+  env -u http_proxy -u https_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    curl --disable -fsS --max-time 15 --noproxy '*' \
+    --proto "$allowed_proto" --config "$config" --request POST \
     --url "${GOTIFY_URL%/}/message" \
     --data-urlencode "title=$title" \
     --data-urlencode "message=$message" \
-    --data-urlencode "priority=$priority" >/dev/null 2>&1 || true
+    --data-urlencode "priority=$priority" >/dev/null 2>&1 || {
+      echo 'Gotify notification delivery failed: endpoint rejected or did not receive the message' >&2
+      return 1
+    }
 )
 notify_failure() {
   local log_file="$1"
@@ -132,6 +180,17 @@ notify_success() {
   notify_gotify "CI Runner Farm Audit passed" \
     "16 runners verified with exact labels, Kache integrity, and 2 CPU / 2 GiB headroom. Log: $log_file" 1
 }
+
+GOTIFY_CONFIG_ERROR=""
+if [ -n "$GOTIFY_TOKEN" ]; then
+  if [[ ! "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_TOKEN contains unsafe characters'
+  elif [ -z "$GOTIFY_URL" ]; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_URL is required when GOTIFY_TOKEN is configured'
+  elif ! require_gotify_url "$GOTIFY_URL"; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_URL must use HTTPS; HTTP is allowed only for exact localhost or 127.0.0.1 loopback targets'
+  fi
+fi
 
 for value in \
   "$CRF_EXPECTED_COUNT" "$WATCHDOG_SAMPLE_SECONDS" \
@@ -186,6 +245,8 @@ audit_body() {
   local plugin_version package_name package_path package_hash
   local watchdog_pid_before watchdog_pid_after watchdog_count_before watchdog_count_after
   local watchdog_restarts_before watchdog_restarts_after watchdog_status mutation_status
+
+  [ -z "$GOTIFY_CONFIG_ERROR" ] || fail "$GOTIFY_CONFIG_ERROR"
 
   for cmd in jq php python3 docker sha256sum stat pgrep ps flock; do
     require_command "$cmd"
@@ -398,10 +459,32 @@ set -e
 mv "$tmp_log" "$log_file"
 chmod 0644 "$log_file"
 ln -sfn "$(basename "$log_file")" "$LOG_ROOT/latest.log"
-cat "$log_file"
 
 if [ "$rc" -ne 0 ]; then
-  notify_failure "$log_file"
+  set +e
+  notification_error="$(notify_failure "$log_file" 2>&1)"
+  notification_rc=$?
+  set -e
+  if [ -z "$GOTIFY_TOKEN" ]; then
+    printf 'notification_result=SKIPPED gotify=disabled\n' >>"$log_file"
+  elif [ "$notification_rc" -eq 0 ]; then
+    printf 'notification_result=PASS gotify=delivered\n' >>"$log_file"
+  else
+    printf 'notification_result=FAIL gotify=%s\n' "$notification_error" >>"$log_file"
+  fi
+  cat "$log_file"
   exit "$rc"
 fi
-notify_success "$log_file"
+set +e
+notification_error="$(notify_success "$log_file" 2>&1)"
+notification_rc=$?
+set -e
+if [ "$CRF_NOTIFY_SUCCESS" = false ] || [ -z "$GOTIFY_TOKEN" ]; then
+  printf 'notification_result=SKIPPED gotify=disabled\n' >>"$log_file"
+elif [ "$notification_rc" -eq 0 ]; then
+  printf 'notification_result=PASS gotify=delivered\n' >>"$log_file"
+else
+  printf 'notification_result=FAIL gotify=%s\n' "$notification_error" >>"$log_file"
+fi
+cat "$log_file"
+[ "$notification_rc" -eq 0 ] || exit 3
