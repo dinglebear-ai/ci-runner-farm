@@ -293,6 +293,117 @@ awk '
   capture && /^  [a-zA-Z0-9_-]+:/ && $1 != "verify-release-publication:" { exit }
   capture { print }
 ' .github/workflows/release-please.yml >"$verify_job"
+
+# Validate the permissions attached to this job, not permission-like text in a
+# step, comment, or another nested mapping. The workflow intentionally uses the
+# simple block-mapping form so this parser can fail closed without adding a YAML
+# package to the release test environment.
+verify_permissions_contract() {
+  python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+job_starts = [
+    index for index, line in enumerate(lines)
+    if re.fullmatch(r"  verify-release-publication:[ \t]*", line)
+]
+if len(job_starts) != 1:
+    raise SystemExit("expected exactly one verify-release-publication job")
+
+start = job_starts[0]
+end = len(lines)
+for index in range(start + 1, len(lines)):
+    if re.match(r"  [A-Za-z0-9_-]+:[ \t]*$", lines[index]):
+        end = index
+        break
+job = lines[start + 1:end]
+
+permission_rows = [
+    index for index, line in enumerate(job)
+    if re.match(r"^    permissions:", line)
+]
+if len(permission_rows) != 1:
+    raise SystemExit("job must declare exactly one permissions mapping")
+
+row = permission_rows[0]
+if not re.fullmatch(r"    permissions:[ \t]*", job[row]):
+    raise SystemExit("job permissions must use a block mapping")
+
+permissions = {}
+for line in job[row + 1:]:
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip(" "))
+    if indent <= 4:
+        break
+    match = re.fullmatch(r"      ([A-Za-z0-9_-]+):[ \t]*([^# \t]+)[ \t]*", line)
+    if match is None:
+        raise SystemExit("job permissions contains a nested or malformed entry")
+    key, value = match.groups()
+    if key in permissions:
+        raise SystemExit(f"job permissions repeats {key}")
+    permissions[key] = value
+
+if permissions != {"contents": "read"}:
+    raise SystemExit(
+        "job permissions must be exactly contents: read; "
+        f"found {permissions!r}"
+    )
+PY
+}
+
+# Regression fixtures: both hostile forms satisfied the former grep checks.
+# Structural validation must accept only the exact job-level mapping.
+cat >"$tmp/permissions-exact.yml" <<'YAML'
+  verify-release-publication:
+    permissions:
+      contents: read
+    steps: []
+YAML
+verify_permissions_contract "$tmp/permissions-exact.yml" ||
+  crf_fail "exact read-only publication permissions fixture was rejected"
+
+cat >"$tmp/permissions-extra.yml" <<'YAML'
+  verify-release-publication:
+    permissions:
+      contents: read
+      issues: write
+    steps: []
+YAML
+grep -Fq 'permissions:' "$tmp/permissions-extra.yml" &&
+  grep -Fq 'contents: read' "$tmp/permissions-extra.yml" ||
+  crf_fail "additional-permission fixture does not reproduce the former grep false green"
+if verify_permissions_contract "$tmp/permissions-extra.yml" 2>/dev/null; then
+  crf_fail "publication permission parser accepted an additional write permission"
+fi
+
+cat >"$tmp/permissions-contents-write.yml" <<'YAML'
+  verify-release-publication:
+    permissions:
+      contents: write
+    steps: []
+YAML
+if verify_permissions_contract "$tmp/permissions-contents-write.yml" 2>/dev/null; then
+  crf_fail "publication permission parser accepted contents: write"
+fi
+
+cat >"$tmp/permissions-decoy.yml" <<'YAML'
+  verify-release-publication:
+    permissions: write-all
+    steps:
+      - run: |
+          # permissions:
+          echo "contents: read"
+YAML
+grep -Fq 'permissions:' "$tmp/permissions-decoy.yml" &&
+  grep -Fq 'contents: read' "$tmp/permissions-decoy.yml" ||
+  crf_fail "step-decoy fixture does not reproduce the former grep false green"
+if verify_permissions_contract "$tmp/permissions-decoy.yml" 2>/dev/null; then
+  crf_fail "publication permission parser accepted write-all with step-text decoys"
+fi
+
 if [ ! -s "$verify_job" ]; then
   echo "FAIL: release publication verification is not a terminal job" >&2
   new_failures=$((new_failures + 1))
@@ -301,10 +412,8 @@ else
     crf_fail "release publication verification does not wait for artifact publication"
   grep -Fq 'ref: ${{ github.event.repository.default_branch }}' "$verify_job" ||
     crf_fail "workflow_dispatch publication verification can inspect a non-default ref"
-  grep -Fq 'permissions:' "$verify_job" ||
-    crf_fail "publication audit does not declare least-privilege permissions"
-  grep -Fq 'contents: read' "$verify_job" ||
-    crf_fail "publication audit has more than read-only release access"
+  verify_permissions_contract "$verify_job" ||
+    crf_fail "publication audit permissions are not exactly contents: read"
   grep -Fq 'GH_TOKEN: ${{ github.token }}' "$verify_job" ||
     crf_fail "publication audit exposes a broader token than github.token"
   if grep -Fq 'UNRAID_BOT_GITHUB_ADMIN_TOKEN' "$verify_job"; then

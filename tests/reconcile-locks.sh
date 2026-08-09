@@ -2,9 +2,28 @@
 # Regression for detached reconciliation launched while the caller owns fd 8.
 set -euo pipefail
 
-# reconcile_start launches "$0 reconcile-drain". This probe deliberately keeps
-# the outer child shell alive while an inner worker closes its inherited fd 8
-# and tries to acquire the same lock, matching the real dispatch structure.
+# Model the final-process activation-state handoff before the drain action. This
+# branch must terminate internally rather than fall through into the test body.
+if [ "${1:-}" = "reconcile-drain-ready" ] && [ -n "${CRF_RECONCILE_PROBE_DIR:-}" ]; then
+  ready="${2:-}"; cancel="${3:-}"; attempt=0
+  ready_tmp="$ready.tmp.$$"
+  ( umask 077; printf 'ready\n' >"$ready_tmp" ) && mv "$ready_tmp" "$ready"
+  while [ "$attempt" -lt 500 ] && [ "$(cat "$ready" 2>/dev/null)" != go ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1)); sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = go ] && [ ! -e "$cancel" ] || exit 1
+  printf 'active\n' >"$ready_tmp" && mv "$ready_tmp" "$ready"
+  attempt=0
+  while [ "$attempt" -lt 500 ] && [ "$(cat "$ready" 2>/dev/null)" != committed ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1)); sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = committed ] && [ ! -e "$cancel" ] || exit 1
+  rm -f "$ready" "$cancel"
+  exec "$0" reconcile-drain
+fi
+
+# The final drain closes inherited fd 8 and tries to acquire the same lock,
+# matching the real dispatch structure after the readiness handoff.
 if [ "${1:-}" = "reconcile-drain" ] && [ -n "${CRF_RECONCILE_PROBE_DIR:-}" ]; then
   (
     exec 8>&- 9>&-

@@ -39,21 +39,75 @@ CRF_RUNNER_NAME_PREFIX="${CRF_RUNNER_NAME_PREFIX:-nashost-}"
 CRF_EXPECTED_PLUGIN_VERSION="${CRF_EXPECTED_PLUGIN_VERSION:-}"
 CRF_EXPECTED_PLUGIN_PACKAGE_SHA256="${CRF_EXPECTED_PLUGIN_PACKAGE_SHA256:-}"
 
+# Both persistent inputs are data read by a scheduled root process, never shell
+# programs. Quotes delimit one literal value; they do not enable expansion.
+load_runtime_literals() {
+  local config="$1" kind="$2" line key raw value quote seen='|'
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    case "$line" in
+      *=*) key="${line%%=*}"; raw="${line#*=}" ;;
+      *) echo "$kind config contains an unknown or executable line" >&2; return 1 ;;
+    esac
+    case "$kind:$key" in
+      audit:WATCHDOG_SAMPLE_SECONDS|audit:CRF_NOTIFY_SUCCESS|\
+      audit:CRF_EXPECTED_COUNT|audit:CRF_EXPECTED_IMAGE_ID|\
+      audit:CRF_EXPECTED_KACHE_VERSION|audit:CRF_EXPECTED_KACHE_SHA256|\
+      audit:CRF_EXPECTED_KACHE_SOCKET|audit:CRF_EXPECTED_KACHE_LOCAL_MAX|\
+      audit:CRF_EXPECTED_KACHE_ENDPOINT|audit:CRF_EXPECTED_KACHE_BUCKET|\
+      audit:CRF_EXPECTED_KACHE_PREFIX|audit:CRF_EXPECTED_KACHE_REGION|\
+      audit:CRF_EXPECTED_KACHE_PROFILE|audit:CRF_EXPECTED_AWS_MOUNT|\
+      audit:CRF_EXPECTED_CPU_BUDGET_MILLI|audit:CRF_EXPECTED_CPU_RESERVE_MILLI|\
+      audit:CRF_EXPECTED_CPU_CONFIGURED_MILLI|audit:CRF_EXPECTED_CPU_HEADROOM_MILLI|\
+      audit:CRF_EXPECTED_MEMORY_BUDGET_BYTES|audit:CRF_EXPECTED_MEMORY_RESERVE_BYTES|\
+      audit:CRF_EXPECTED_MEMORY_CONFIGURED_BYTES|audit:CRF_EXPECTED_MEMORY_HEADROOM_BYTES|\
+      audit:CRF_RUNNER_NAME_PREFIX|audit:CRF_EXPECTED_PLUGIN_VERSION|\
+      audit:CRF_EXPECTED_PLUGIN_PACKAGE_SHA256|\
+      Gotify:GOTIFY_URL|Gotify:GOTIFY_TOKEN) ;;
+      *) echo "$kind config contains unsupported key: $key" >&2; return 1 ;;
+    esac
+    case "$seen" in
+      *"|$key|"*) echo "$kind config contains duplicate key: $key" >&2; return 1 ;;
+    esac
+    seen="${seen}${key}|"
+    [ "${#raw}" -ge 2 ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    quote="${raw:0:1}"
+    [ "$quote" = "'" ] || [ "$quote" = '"' ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    [ "${raw: -1}" = "$quote" ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    value="${raw:1:${#raw}-2}"
+    case "$value" in
+      *"$quote"*) echo "$kind config values must be simple literals" >&2; return 1 ;;
+      *\$\(*|*\`*) echo "$kind config substitutions are forbidden" >&2; return 1 ;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done <"$config"
+}
+
 if [ -e "$AUDIT_CONFIG" ]; then
   [ -f "$AUDIT_CONFIG" ] && [ ! -L "$AUDIT_CONFIG" ] ||
     { echo "unsafe audit config: $AUDIT_CONFIG" >&2; exit 2; }
   [ "$(stat -c %a "$AUDIT_CONFIG")" = 600 ] ||
     { echo "audit config must be mode 600: $AUDIT_CONFIG" >&2; exit 2; }
-  # shellcheck disable=SC1090
-  . "$AUDIT_CONFIG"
+  [ "$(stat -c %u "$AUDIT_CONFIG")" = "$EUID" ] ||
+    { echo "audit config must be owned by the audit user: $AUDIT_CONFIG" >&2; exit 2; }
+  load_runtime_literals "$AUDIT_CONFIG" audit || exit 2
 fi
 if [ -e "$GOTIFY_ENV" ]; then
   [ -f "$GOTIFY_ENV" ] && [ ! -L "$GOTIFY_ENV" ] ||
     { echo "unsafe Gotify config: $GOTIFY_ENV" >&2; exit 2; }
   [ "$(stat -c %a "$GOTIFY_ENV")" = 600 ] ||
     { echo "Gotify config must be mode 600: $GOTIFY_ENV" >&2; exit 2; }
-  # shellcheck disable=SC1090
-  . "$GOTIFY_ENV"
+  [ "$(stat -c %u "$GOTIFY_ENV")" = "$EUID" ] ||
+    { echo "Gotify config must be owned by the audit user: $GOTIFY_ENV" >&2; exit 2; }
+  load_runtime_literals "$GOTIFY_ENV" Gotify || exit 2
 fi
 case "$CRF_NOTIFY_SUCCESS" in true|false) ;; *) echo "CRF_NOTIFY_SUCCESS must be true or false" >&2; exit 2 ;; esac
 

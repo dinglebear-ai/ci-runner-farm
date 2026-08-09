@@ -2804,8 +2804,45 @@ reconcile_stale_runners() {
 # runner becomes safe to recycle. Progress is logged to autoscale.log, which the farm-log panel
 # tails.
 cmd_reconcile_drain() {
-  trap 'reconcile_identity_clear "$$"' EXIT
+  local activation_state="${CRF_RECONCILE_ACTIVATION_STATE:-}"
+  local activation_cancel="${CRF_RECONCILE_ACTIVATION_CANCEL:-}"
+  local activation_identity activation_pid activation_starttime activation_token activation_script
+  local activation_tmp activation_attempt=0 activation_attempts=500
+  trap 'if [ -n "${CRF_RECONCILE_ACTIVATION_STATE:-}" ]; then rm -f -- "$CRF_RECONCILE_ACTIVATION_STATE" "$CRF_RECONCILE_ACTIVATION_STATE".tmp.* "${CRF_RECONCILE_ACTIVATION_CANCEL:-}" 2>/dev/null || true; fi; reconcile_identity_clear "$$"' EXIT
   trap 'exit 0' INT TERM
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    activation_attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
+  if [ -n "$activation_state" ] || [ -n "$activation_cancel" ]; then
+    activation_identity="$(reconcile_identity_read)" || {
+      err "reconcile: final worker could not read its activation identity"; return 1;
+    }
+    read -r activation_pid activation_starttime activation_token activation_script <<EOF
+$activation_identity
+EOF
+    [ "$activation_pid" = "$$" ] &&
+      [ "$activation_state" = "$RUNDIR/reconcile.ready.$activation_token" ] &&
+      [ "$activation_cancel" = "$RUNDIR/reconcile.cancel.$activation_token" ] &&
+      [ "$(cat "$activation_state" 2>/dev/null)" = go ] &&
+      [ ! -e "$activation_cancel" ] || {
+        err "reconcile: final worker received an invalid activation handoff"; return 1;
+      }
+    activation_tmp="$activation_state.tmp.$$"
+    ( umask 077; printf 'active\n' >"$activation_tmp" ) &&
+      mv "$activation_tmp" "$activation_state" || {
+        rm -f "$activation_tmp"; return 1;
+      }
+    while [ "$activation_attempt" -lt "$activation_attempts" ] &&
+          [ "$(cat "$activation_state" 2>/dev/null)" != committed ] &&
+          [ ! -e "$activation_cancel" ]; do
+      activation_attempt=$((activation_attempt+1))
+      sleep 0.01
+    done
+    [ "$(cat "$activation_state" 2>/dev/null)" = committed ] &&
+      [ ! -e "$activation_cancel" ] || return 1
+    rm -f "$activation_state" "$activation_cancel"
+    unset CRF_RECONCILE_ACTIVATION_STATE CRF_RECONCILE_ACTIVATION_CANCEL
+  fi
   if declare -F backend_classic_admission_allowed >/dev/null &&
      ! backend_classic_admission_allowed; then
     log "classic reconcile paused by backend transition state"; return 0
@@ -2960,14 +2997,19 @@ EOF
     [ "$actual_starttime" = "$starttime" ] || return 1
   [ -r "/proc/$pid/cmdline" ] || return 1
   tr '\0' '\n' <"/proc/$pid/cmdline" | grep -Fxq -- "$script" || return 1
-  tr '\0' '\n' <"/proc/$pid/cmdline" | grep -Fxq reconcile-drain || return 1
+  tr '\0' '\n' <"/proc/$pid/cmdline" |
+    grep -Eq '^(reconcile-drain|reconcile-drain-ready)$' || return 1
   [ -r "/proc/$pid/environ" ] || return 1
   tr '\0' '\n' <"/proc/$pid/environ" |
     grep -Fxq -- "CRF_RECONCILE_SESSION_TOKEN=$token"
 }
 
 reconcile_start() {
-  local mode="${1:-launch}" script pid record state pgrp session starttime token identity identity_tmp attempt=0
+  local mode="${1:-launch}" script pid record state pgrp session starttime token identity identity_tmp
+  local bootstrap_ready bootstrap_cancel bootstrap_tmp attempt=0 ready_attempts=500
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    ready_attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
   case "$mode" in
     launch) ;;
     fence) ;;
@@ -3004,11 +3046,45 @@ EOF
     err "reconcile: could not create a process identity token"
     return 1
   }
-  # The tiny identity-file gate prevents a no-work drain from exiting before
-  # its launcher records the session leader identity used by Stop.
+  # The identity-file gate prevents a no-work drain from exiting before its
+  # launcher records the session leader identity used by Stop. It is bounded:
+  # if the launcher dies before publication, the detached token-bearing session
+  # cleans itself up instead of waiting forever without an ownership record.
+  bootstrap_ready="$RUNDIR/reconcile.ready.$token"
+  bootstrap_cancel="$RUNDIR/reconcile.cancel.$token"
+  rm -f "$bootstrap_ready" "$bootstrap_cancel"
   nohup setsid env "CRF_RECONCILE_SESSION_TOKEN=$token" \
-    sh -c 'identity="$1"; shift; while [ ! -s "$identity" ]; do sleep 0.01; done; exec "$@"' \
-    sh "$RECONCILE_IDENTITY" "$script" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
+    sh -c 'identity="$1"; state="$2"; cancel="$3"; shift 3; attempt=0; attempt_limit=500
+      launch_token="$CRF_RECONCILE_SESSION_TOKEN"
+      case "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" in
+        ""|*[!0-9]*|0) ;;
+        *) attempt_limit="$CRF_RECONCILE_TEST_READY_ATTEMPTS" ;;
+      esac
+      cleanup_gate() {
+        owner_pid=""; owner_starttime=""; owner_token=""; owner_script=""; owner_extra=""; cleanup_attempt=0
+        if [ "${CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP:-0}" = 1 ]; then
+          : >"$state.cleanup-paused"
+          while [ ! -e "$state.cleanup-release" ] && [ "$cleanup_attempt" -lt "$attempt_limit" ]; do
+            cleanup_attempt=$((cleanup_attempt + 1)); sleep 0.01
+          done
+        fi
+        if read -r owner_pid owner_starttime owner_token owner_script owner_extra <"$identity" 2>/dev/null &&
+           [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$launch_token" ] &&
+           [ -z "$owner_extra" ]; then
+          rm -f "$identity"
+        fi
+        rm -f "$state" "$state".tmp.* "$state".cleanup-* "$cancel"
+      }
+      trap cleanup_gate EXIT
+      while [ ! -s "$identity" ] && [ ! -e "$cancel" ]; do
+        attempt=$((attempt + 1)); [ "$attempt" -lt "$attempt_limit" ] || exit 1
+        sleep 0.01
+      done
+      [ -s "$identity" ] && [ ! -e "$cancel" ] || exit 1
+      exec "$@"' \
+    sh "$RECONCILE_IDENTITY" "$bootstrap_ready" "$bootstrap_cancel" \
+      "$script" reconcile-drain-ready "$bootstrap_ready" "$bootstrap_cancel" \
+      >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
   pid="$!"
   while [ "$attempt" -lt 50 ]; do
     record="$(reconcile_proc_record "$pid" 2>/dev/null)" || record=""
@@ -3022,7 +3098,7 @@ EOF
     sleep 0.01
   done
   [ -n "${starttime:-}" ] && [ "$pgrp" = "$pid" ] && [ "$session" = "$pid" ] || {
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    rm -f "$bootstrap_ready" "$bootstrap_cancel"
     err "reconcile: could not establish an owned worker session"
     return 1
   }
@@ -3030,11 +3106,100 @@ EOF
   ( umask 077; printf '%s %s %s %s\n' "$pid" "$starttime" "$token" "$script" >"$identity_tmp" ) &&
     mv "$identity_tmp" "$RECONCILE_IDENTITY" || {
       rm -f "$identity_tmp"
-      kill -KILL -- "-$pid" 2>/dev/null || true
+      rm -f "$bootstrap_ready" "$bootstrap_cancel"
       err "reconcile: could not persist worker identity"
       return 1
     }
-  ( umask 077; printf '%s\n' "$pid" >"$RECONCILE_PID" )
+  attempt=0
+  while [ "$attempt" -lt "$ready_attempts" ] && [ "$(cat "$bootstrap_ready" 2>/dev/null)" != ready ]; do
+    reconcile_group_live "$pid" || break
+    attempt=$((attempt+1))
+    sleep 0.01
+  done
+  if [ "$(cat "$bootstrap_ready" 2>/dev/null)" = ready ] && reconcile_pid_active; then
+    bootstrap_tmp="$bootstrap_ready.tmp.$$"
+    ( umask 077; printf 'go\n' >"$bootstrap_tmp" ) && mv "$bootstrap_tmp" "$bootstrap_ready" || {
+      rm -f "$bootstrap_tmp"; : >"$bootstrap_cancel" 2>/dev/null || true
+      reconcile_stop || return 1
+      rm -f "$bootstrap_ready" "$bootstrap_cancel"
+      return 1
+    }
+    attempt=0
+    while [ "$attempt" -lt "$ready_attempts" ] &&
+          [ "$(cat "$bootstrap_ready" 2>/dev/null)" != active ]; do
+      reconcile_group_live "$pid" || break
+      attempt=$((attempt+1))
+      sleep 0.01
+    done
+    if [ "$(cat "$bootstrap_ready" 2>/dev/null)" = active ] && reconcile_pid_active; then
+      ( umask 077; printf '%s\n' "$pid" >"$RECONCILE_PID" ) || {
+        : >"$bootstrap_cancel" 2>/dev/null || true
+        reconcile_stop || return 1
+        rm -f "$bootstrap_ready" "$bootstrap_cancel"
+        err "reconcile: could not publish worker PID"
+        return 1
+      }
+      bootstrap_tmp="$bootstrap_ready.tmp.$$"
+      ( umask 077; printf 'committed\n' >"$bootstrap_tmp" ) &&
+        mv "$bootstrap_tmp" "$bootstrap_ready" || {
+          rm -f "$bootstrap_tmp"; : >"$bootstrap_cancel" 2>/dev/null || true
+          reconcile_stop || return 1
+          rm -f "$bootstrap_ready" "$bootstrap_cancel"
+          return 1
+        }
+      attempt=0
+      while [ "$attempt" -lt "$ready_attempts" ] && [ -e "$bootstrap_ready" ]; do
+        reconcile_group_live "$pid" || break
+        attempt=$((attempt+1))
+        sleep 0.01
+      done
+      if [ ! -e "$bootstrap_ready" ]; then
+        return 0
+      fi
+    fi
+  fi
+  ( umask 077; : >"$bootstrap_cancel" ) || true
+  reconcile_stop || return 1
+  rm -f "$bootstrap_ready" "$bootstrap_cancel"
+  {
+    err "reconcile: worker did not acknowledge its ownership identity"
+    return 1
+  }
+}
+
+cmd_reconcile_drain_ready() {
+  local ready="$1" cancel="$2" identity pid starttime token script attempt=0 ready_tmp attempts=500
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
+  identity="$(reconcile_identity_read)" || return 1
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  [ "$pid" = "$$" ] && [ "$ready" = "$RUNDIR/reconcile.ready.$token" ] &&
+    [ "$cancel" = "$RUNDIR/reconcile.cancel.$token" ] && reconcile_pid_active || return 1
+  [ ! -e "$cancel" ] || return 1
+  ready_tmp="$ready.tmp.$$"
+  CRF_RECONCILE_HELPER_STATE="$ready"; CRF_RECONCILE_HELPER_CANCEL="$cancel"
+  trap 'rm -f -- "$CRF_RECONCILE_HELPER_STATE" "$CRF_RECONCILE_HELPER_STATE".tmp.* "$CRF_RECONCILE_HELPER_CANCEL" 2>/dev/null || true; reconcile_identity_clear "$$"' EXIT
+  ( umask 077; printf 'ready\n' >"$ready_tmp" ) && mv "$ready_tmp" "$ready" || {
+    rm -f "$ready_tmp"; return 1;
+  }
+  while [ "$attempt" -lt "$attempts" ] &&
+        [ "$(cat "$ready" 2>/dev/null)" != go ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1))
+    sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = go ] && [ ! -e "$cancel" ] || return 1
+  export CRF_RECONCILE_ACTIVATION_STATE="$ready" CRF_RECONCILE_ACTIVATION_CANCEL="$cancel"
+  shopt -s execfail
+  set +e
+  exec "$script" reconcile-drain
+  local rc=$?
+  set -e
+  rm -f -- "$ready" "$ready".tmp.* "$cancel"
+  reconcile_identity_clear "$$"
+  return "$rc"
 }
 
 reconcile_stop() {
@@ -4865,6 +5030,7 @@ case "${1:-status}" in
   mutation-owner-release) with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
   mutation-owner-status) cmd_mutation_owner_status ;;
   reconcile-config) with_fleet_lock wait cmd_reconcile_config ;;
+  reconcile-drain-ready) cmd_reconcile_drain_ready "${2:-}" "${3:-}" ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;

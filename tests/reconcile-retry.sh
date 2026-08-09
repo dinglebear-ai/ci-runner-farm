@@ -6,10 +6,28 @@ cd "$(dirname "$0")/.."
 ENGINE=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 extract_function() { sed -n "/^${1}()/,/^}/p" "$ENGINE" >>"$2"; }
 
+if [ "${1:-}" = reconcile-drain-ready ] && [ -n "${CRF_RETRY_TEST_DIR:-}" ]; then
+  probe="$CRF_RETRY_TEST_DIR"
+  functions="$probe/ready-functions.sh"
+  : >"$functions"
+  for fn in reconcile_proc_record reconcile_identity_read reconcile_identity_clear \
+    reconcile_pid_active cmd_reconcile_drain_ready; do
+    extract_function "$fn" "$functions"
+  done
+  # shellcheck disable=SC1090
+  . "$functions"
+  RUNDIR="$probe/run"
+  RECONCILE_PID="$RUNDIR/reconcile.pid"
+  RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+  cmd_reconcile_drain_ready "${2:-}" "${3:-}"
+  exit $?
+fi
+
 if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RETRY_TEST_DIR:-}" ]; then
   probe="$CRF_RETRY_TEST_DIR"
   functions="$probe/worker-functions.sh"
   : >"$functions"
+  extract_function reconcile_identity_read "$functions"
   extract_function count_reconcile_work_locked "$functions"
   extract_function cmd_reconcile_drain "$functions"
   # shellcheck disable=SC1090
@@ -57,6 +75,8 @@ if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RETRY_TEST_DIR:-}" ]; then
     fi
   }
   RUNDIR="$probe/run"
+  RECONCILE_PID="$RUNDIR/reconcile.pid"
+  RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
   TOKEN_FILE="$probe/token"
   ACCESS_TOKEN=test
   IMAGE_DRAIN_TIMEOUT=1

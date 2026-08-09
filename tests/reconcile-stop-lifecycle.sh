@@ -16,13 +16,14 @@ if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RECONCILE_STOP_TMPDIR:-}" ]; th
   : >"$worker_functions"
   extract_function with_fleet_lock "$worker_functions"
   extract_function count_reconcile_work_locked "$worker_functions"
+  extract_function reconcile_identity_read "$worker_functions"
   extract_function reconcile_identity_clear "$worker_functions"
   extract_function cmd_reconcile_drain "$worker_functions"
   # shellcheck disable=SC1090
   . "$worker_functions"
 
   load_cfg() { :; }
-  count_reconcile_work() { echo 1; }
+  count_reconcile_work() { [ "${CRF_RECONCILE_ZERO_WORK:-0}" = 1 ] && echo 0 || echo 1; }
   mutation_owner_guard() { return 0; }
   reconcile_stale_runners() {
     if [ "${CRF_RECONCILE_HOLD_FLEET_LOCK:-0}" = 1 ]; then
@@ -54,13 +55,37 @@ if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RECONCILE_STOP_TMPDIR:-}" ]; th
     fi
   }
 
-  RUNDIR="$tmpdir/run"
+  RUNDIR="${CRF_RECONCILE_TEST_RUNDIR:-$tmpdir/run}"
   RECONCILE_PID="$RUNDIR/reconcile.pid"
   RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
   ACCESS_TOKEN="test"
   IMAGE_DRAIN_TIMEOUT=1
   ( flock -w 5 7 || exit 1; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock"
   exit 0
+fi
+
+if [ "${1:-}" = reconcile-drain-ready ] && [ -n "${CRF_RECONCILE_STOP_TMPDIR:-}" ]; then
+  tmpdir="$CRF_RECONCILE_STOP_TMPDIR"
+  ready_functions="$tmpdir/reconcile-ready.sh"
+  : >"$ready_functions"
+  extract_function reconcile_proc_record "$ready_functions"
+  extract_function reconcile_identity_read "$ready_functions"
+  extract_function reconcile_identity_clear "$ready_functions"
+  extract_function reconcile_pid_active "$ready_functions"
+  extract_function cmd_reconcile_drain_ready "$ready_functions"
+  # shellcheck disable=SC1090
+  . "$ready_functions"
+  RUNDIR="${CRF_RECONCILE_TEST_RUNDIR:-$tmpdir/run}"
+  RECONCILE_PID="$RUNDIR/reconcile.pid"
+  RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+  if [ "${CRF_RECONCILE_PAUSE_READY:-0}" = 1 ]; then
+    mv() {
+      : >"$tmpdir/ready-publication-paused"
+      while :; do sleep 1; done
+    }
+  fi
+  cmd_reconcile_drain_ready "${2:-}" "${3:-}"
+  exit $?
 fi
 
 tmpdir="$(mktemp -d)"
@@ -123,6 +148,7 @@ RUNDIR="$tmpdir/run"
 RECONCILE_PID="$RUNDIR/reconcile.pid"
 RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
 mkdir -p "$RUNDIR"
+export CRF_RECONCILE_STOP_TMPDIR="$tmpdir"
 log() { :; }
 err() { printf '%s\n' "$*" >&2; }
 mutation_owner_guard() { return 0; }
@@ -156,9 +182,477 @@ fi
 
 [ "${CRF_RECONCILE_TEST_CASE:-all}" != exact-process ] || exit 0
 
+# The detached identity gate must not outlive a launcher that dies after the
+# child owns its session but before reconcile.identity is published. Pause the
+# real launcher at the atomic publication boundary, prove the exact child is a
+# token-bearing session leader, then crash only the launcher.
+bootstrap_dir="$tmpdir/bootstrap-launcher-death"
+mkdir -p "$bootstrap_dir/run"
+bootstrap_marker="$bootstrap_dir/before-identity-publication"
+(
+  RUNDIR="$bootstrap_dir/run"
+  RECONCILE_PID="$RUNDIR/reconcile.pid"
+  RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+  mv() {
+    if [ "${2:-}" = "$RECONCILE_IDENTITY" ]; then
+      : >"$bootstrap_marker"
+      while :; do sleep 1; done
+    fi
+    command mv "$@"
+  }
+  reconcile_start
+) &
+launcher_pid=$!
+for _ in $(seq 1 200); do
+  [ -e "$bootstrap_marker" ] && break
+  sleep 0.01
+done
+[ -e "$bootstrap_marker" ] || {
+  echo 'FAIL: launcher did not reach the pre-publication crash boundary' >&2
+  exit 1
+}
+
+bootstrap_pid=""
+for candidate in $(pgrep -P "$launcher_pid" 2>/dev/null || true); do
+  candidate_pgid="$(ps -o pgid= -p "$candidate" 2>/dev/null | tr -d '[:space:]')"
+  candidate_sid="$(ps -o sid= -p "$candidate" 2>/dev/null | tr -d '[:space:]')"
+  [ "$candidate_pgid" = "$candidate" ] && [ "$candidate_sid" = "$candidate" ] || continue
+  [ -r "/proc/$candidate/environ" ] || continue
+  tr '\0' '\n' <"/proc/$candidate/environ" 2>/dev/null |
+    grep -Eq '^CRF_RECONCILE_SESSION_TOKEN=[0-9a-f]{32}$' || continue
+  bootstrap_pid="$candidate"
+  break
+done
+[ -n "$bootstrap_pid" ] || {
+  echo 'FAIL: pre-publication child was not an isolated token-bearing session leader' >&2
+  exit 1
+}
+worker_pid="$bootstrap_pid"
+assert_worker_isolated "$bootstrap_pid"
+[ ! -e "$bootstrap_dir/run/reconcile.identity" ] || {
+  echo 'FAIL: crash probe ran after authoritative identity publication' >&2
+  exit 1
+}
+
+kill -KILL "$launcher_pid"
+wait "$launcher_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  reconcile_group_live "$bootstrap_pid" || break
+  sleep 0.02
+done
+if reconcile_group_live "$bootstrap_pid"; then
+  echo 'FAIL: launcher death leaked an untracked token-bearing reconcile session' >&2
+  exit 1
+fi
+wait "$bootstrap_pid" 2>/dev/null || true
+worker_pid=""
+
+echo 'reconcile-start-launcher-death-cleanup: OK'
+[ "${CRF_RECONCILE_TEST_CASE:-all}" != launcher-death ] || exit 0
+
+# Readiness must come from the final worker stage. An immediate, successful
+# zero-work drain may disappear, but it must clear both ownership files rather
+# than leave a PID published after the worker exited.
+zero_dir="$tmpdir/zero-work"
+mkdir -p "$zero_dir"
+RUNDIR="$zero_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_STOP_TMPDIR="$tmpdir" CRF_RECONCILE_TEST_RUNDIR="$zero_dir" CRF_RECONCILE_ZERO_WORK=1
+reconcile_start || { echo 'FAIL: zero-work final worker activation failed' >&2; exit 1; }
+zero_pid="$(cat "$RECONCILE_PID" 2>/dev/null || true)"
+for _ in $(seq 1 100); do
+  [ -z "$zero_pid" ] || reconcile_group_live "$zero_pid" || break
+  sleep 0.01
+done
+for _ in $(seq 1 100); do
+  [ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] && break
+  sleep 0.01
+done
+[ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] || {
+  echo 'FAIL: immediate zero-work exit left stale reconcile ownership' >&2
+  exit 1
+}
+unset CRF_RECONCILE_ZERO_WORK
+
+# If the final executable cannot start, reconcile_start must fail and retain no
+# compatibility or authoritative identity for the dead bootstrap session.
+exec_dir="$tmpdir/exec-failure"
+mkdir -p "$exec_dir"
+RUNDIR="$exec_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$exec_dir"
+if ( readlink() { printf '%s\n' "$exec_dir/missing-engine"; }; reconcile_start ); then
+  echo 'FAIL: reconcile_start reported success when final exec failed' >&2
+  exit 1
+fi
+[ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] || {
+  echo 'FAIL: final exec failure left stale reconcile ownership' >&2
+  exit 1
+}
+
+# Exec failure must be self-cleaning even if the launcher cannot perform its
+# own fallback. First fail the gate-to-helper exec after identity publication.
+gate_exec_dir="$tmpdir/gate-exec-failure"
+mkdir -p "$gate_exec_dir"
+rm -f "$tmpdir/gate-identity-published"
+RUNDIR="$gate_exec_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$gate_exec_dir"
+(
+  readlink() { printf '%s\n' "$gate_exec_dir/missing-engine"; }
+  mv() {
+    command mv "$@"
+    if [ "${2:-}" = "$RECONCILE_IDENTITY" ]; then
+      : >"$tmpdir/gate-identity-published"
+      while :; do sleep 1; done
+    fi
+  }
+  reconcile_start
+) &
+gate_launcher_pid=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/gate-identity-published" ] && break; sleep 0.01; done
+[ -e "$tmpdir/gate-identity-published" ] || { echo 'FAIL: gate exec fixture did not publish identity' >&2; exit 1; }
+kill -KILL "$gate_launcher_pid"
+wait "$gate_launcher_pid" 2>/dev/null || true
+for _ in $(seq 1 200); do [ ! -e "$RECONCILE_IDENTITY" ] && break; sleep 0.01; done
+[ ! -e "$RECONCILE_IDENTITY" ] && ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    echo 'FAIL: failed gate exec required its launcher to clean ownership' >&2; exit 1;
+  }
+
+# A gate that never received its own identity must not delete a newer launch's
+# shared identity when its bounded cleanup finally runs.
+stale_gate_dir="$tmpdir/stale-gate-cleanup"
+mkdir -p "$stale_gate_dir"
+rm -f "$tmpdir/stale-gate-before-identity"
+RUNDIR="$stale_gate_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$stale_gate_dir" CRF_RECONCILE_TEST_READY_ATTEMPTS=20
+export CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP=1
+(
+  mv() {
+    if [ "${2:-}" = "$RECONCILE_IDENTITY" ]; then
+      : >"$tmpdir/stale-gate-before-identity"
+      while :; do sleep 1; done
+    fi
+    command mv "$@"
+  }
+  reconcile_start
+) &
+stale_gate_launcher=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/stale-gate-before-identity" ] && break; sleep 0.01; done
+[ -e "$tmpdir/stale-gate-before-identity" ] || { echo 'FAIL: stale gate did not pause before identity' >&2; exit 1; }
+kill -KILL "$stale_gate_launcher"
+wait "$stale_gate_launcher" 2>/dev/null || true
+stale_cleanup_marker=""
+for _ in $(seq 1 200); do
+  stale_cleanup_marker="$(compgen -G "$RUNDIR/reconcile.ready.*.cleanup-paused" | head -n1 || true)"
+  [ -n "$stale_cleanup_marker" ] && break
+  sleep 0.01
+done
+[ -n "$stale_cleanup_marker" ] || { echo 'FAIL: stale gate did not pause inside cleanup' >&2; exit 1; }
+stale_cleanup_state="${stale_cleanup_marker%.cleanup-paused}"
+newer_token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+setsid env "CRF_RECONCILE_SESSION_TOKEN=$newer_token" sleep 30 &
+newer_pid=$!
+for _ in $(seq 1 100); do
+  newer_record="$(reconcile_proc_record "$newer_pid" 2>/dev/null || true)"
+  read -r _ newer_pgid newer_sid newer_starttime <<<"$newer_record"
+  [ "${newer_pgid:-}" = "$newer_pid" ] && [ "${newer_sid:-}" = "$newer_pid" ] && break
+  sleep 0.01
+done
+printf '%s %s %s %s\n' "$newer_pid" "$newer_starttime" "$newer_token" /bin/sleep >"$RECONCILE_IDENTITY"
+: >"$stale_cleanup_state.cleanup-release"
+for _ in $(seq 1 200); do
+  [ ! -e "$stale_cleanup_marker" ] && break
+  sleep 0.01
+done
+[ ! -e "$stale_cleanup_marker" ] || { echo 'FAIL: stale gate did not finish cleanup' >&2; exit 1; }
+[ -s "$RECONCILE_IDENTITY" ] && kill -0 "$newer_pid" 2>/dev/null || {
+  echo 'FAIL: stale gate cleanup deleted or disrupted the newer launch identity' >&2; exit 1;
+}
+read -r preserved_pid _ <"$RECONCILE_IDENTITY"
+[ "$preserved_pid" = "$newer_pid" ] || { echo 'FAIL: newer identity was replaced by stale gate cleanup' >&2; exit 1; }
+kill -KILL -- "-$newer_pid" 2>/dev/null || true
+wait "$newer_pid" 2>/dev/null || true
+rm -f "$RECONCILE_IDENTITY"
+unset CRF_RECONCILE_TEST_READY_ATTEMPTS CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP
+
+# The cleanup pause is itself bounded: an aborted fixture (or accidentally
+# inherited test hook) cannot strand an untracked gate forever.
+bounded_gate_dir="$tmpdir/bounded-gate-cleanup"
+mkdir -p "$bounded_gate_dir"
+rm -f "$tmpdir/bounded-gate-before-identity"
+RUNDIR="$bounded_gate_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$bounded_gate_dir" CRF_RECONCILE_TEST_READY_ATTEMPTS=20
+export CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP=1
+(
+  mv() {
+    if [ "${2:-}" = "$RECONCILE_IDENTITY" ]; then
+      : >"$tmpdir/bounded-gate-before-identity"
+      while :; do sleep 1; done
+    fi
+    command mv "$@"
+  }
+  reconcile_start
+) &
+bounded_gate_launcher=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/bounded-gate-before-identity" ] && break; sleep 0.01; done
+[ -e "$tmpdir/bounded-gate-before-identity" ] || { echo 'FAIL: bounded gate did not pause before identity' >&2; exit 1; }
+kill -KILL "$bounded_gate_launcher"
+wait "$bounded_gate_launcher" 2>/dev/null || true
+bounded_cleanup_seen=0
+for _ in $(seq 1 200); do
+  compgen -G "$RUNDIR/reconcile.ready.*.cleanup-paused" >/dev/null && { bounded_cleanup_seen=1; break; }
+  sleep 0.01
+done
+[ "$bounded_cleanup_seen" = 1 ] || { echo 'FAIL: bounded cleanup hook was not exercised' >&2; exit 1; }
+for _ in $(seq 1 200); do
+  compgen -G "$RUNDIR/reconcile.ready.*.cleanup-paused" >/dev/null || break
+  sleep 0.01
+done
+[ ! -e "$RECONCILE_IDENTITY" ] && ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    echo 'FAIL: unreleased cleanup hook stranded gate ownership or token state' >&2; exit 1;
+  }
+unset CRF_RECONCILE_TEST_READY_ATTEMPTS CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP
+
+# Then let the helper publish ready, remove the target before go, and kill the
+# launcher after go publication. The helper's retained EXIT trap owns cleanup.
+helper_exec_dir="$tmpdir/helper-exec-failure"
+mkdir -p "$helper_exec_dir/tests" "$helper_exec_dir/run"
+ln -s "$PWD/src" "$helper_exec_dir/src"
+helper_exec_script="$helper_exec_dir/tests/reconcile-stop-lifecycle.sh"
+cp "$0" "$helper_exec_script"; chmod +x "$helper_exec_script"
+rm -f "$tmpdir/helper-before-go" "$tmpdir/helper-target-removed" "$tmpdir/helper-go-published"
+RUNDIR="$helper_exec_dir/run"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$RUNDIR"
+(
+  readlink() { printf '%s\n' "$helper_exec_script"; }
+  mv() {
+    case "${2:-}:$(cat "${1:-}" 2>/dev/null)" in
+      "$RUNDIR"/reconcile.ready.*:go)
+        : >"$tmpdir/helper-before-go"
+        while [ ! -e "$tmpdir/helper-target-removed" ]; do sleep 0.01; done
+        command mv "$@"
+        : >"$tmpdir/helper-go-published"
+        while :; do sleep 1; done
+        ;;
+    esac
+    command mv "$@"
+  }
+  reconcile_start
+) &
+helper_launcher_pid=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/helper-before-go" ] && break; sleep 0.01; done
+[ -e "$tmpdir/helper-before-go" ] || {
+  cat "$RUNDIR/autoscale.log" >&2 || true
+  echo 'FAIL: helper exec fixture did not reach go' >&2; exit 1;
+}
+rm -f "$helper_exec_script"; : >"$tmpdir/helper-target-removed"
+for _ in $(seq 1 200); do [ -e "$tmpdir/helper-go-published" ] && break; sleep 0.01; done
+[ -e "$tmpdir/helper-go-published" ] || { echo 'FAIL: helper exec fixture did not publish go' >&2; exit 1; }
+kill -KILL "$helper_launcher_pid"
+wait "$helper_launcher_pid" 2>/dev/null || true
+for _ in $(seq 1 200); do [ ! -e "$RECONCILE_IDENTITY" ] && break; sleep 0.01; done
+[ ! -e "$RECONCILE_IDENTITY" ] && ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    find "$RUNDIR" -maxdepth 1 -printf 'helper-exec-leftover: %f\n' >&2 || true
+    cat "$RUNDIR/autoscale.log" >&2 || true
+    echo 'FAIL: failed helper exec required its launcher to clean ownership' >&2; exit 1;
+  }
+
+# Pause the final process after it validates the published identity but before
+# its ready rename. The launcher timeout must retain that identity while it
+# fences the exact token-owned session, then clear it only after the group dies.
+pause_dir="$tmpdir/paused-ready"
+mkdir -p "$pause_dir"
+rm -f "$tmpdir/ready-publication-paused" "$tmpdir/paused-launch-status"
+RUNDIR="$pause_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$pause_dir" CRF_RECONCILE_PAUSE_READY=1
+export CRF_RECONCILE_TEST_READY_ATTEMPTS=20
+(
+  # Keep the deterministic timeout bounded without changing production timing.
+  # This launch has only one session leader before acknowledgement; /proc state
+  # is therefore the exact liveness fact reconcile_start needs in this fixture.
+  reconcile_group_live() {
+    local stat rest state
+    [ -r "/proc/$1/stat" ] || return 1
+    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    rest="${stat##*) }"; state="${rest%% *}"
+    case "$state" in Z|X) return 1 ;; *) return 0 ;; esac
+  }
+  if reconcile_start; then printf '0\n' >"$tmpdir/paused-launch-status"
+  else printf '%s\n' "$?" >"$tmpdir/paused-launch-status"; fi
+) &
+paused_launcher_pid=$!
+for _ in $(seq 1 200); do
+  [ -e "$tmpdir/ready-publication-paused" ] && break
+  sleep 0.01
+done
+[ -e "$tmpdir/ready-publication-paused" ] && [ -s "$RECONCILE_IDENTITY" ] || {
+  echo 'FAIL: final worker did not pause after authoritative identity validation' >&2
+  exit 1
+}
+paused_identity="$(reconcile_identity_read)"
+read -r paused_pid paused_starttime paused_token _ <<<"$paused_identity"
+worker_pid="$paused_pid"
+reconcile_group_owned "$paused_pid" "$paused_starttime" "$paused_token" || {
+  echo 'FAIL: paused pre-ack session was not exactly token-owned' >&2
+  exit 1
+}
+for _ in $(seq 1 300); do
+  kill -0 "$paused_launcher_pid" 2>/dev/null || break
+  sleep 0.02
+done
+if kill -0 "$paused_launcher_pid" 2>/dev/null; then
+  echo 'FAIL: paused pre-ack launcher did not finish its bounded timeout cleanup' >&2
+  exit 1
+fi
+wait "$paused_launcher_pid" 2>/dev/null || true
+[ "$(cat "$tmpdir/paused-launch-status" 2>/dev/null)" != 0 ] || {
+  echo 'FAIL: paused pre-ack worker was reported as a successful launch' >&2
+  exit 1
+}
+if reconcile_group_live "$paused_pid"; then
+  echo 'FAIL: readiness timeout left the token-bearing session alive' >&2
+  exit 1
+fi
+[ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] || {
+  echo 'FAIL: readiness timeout cleared ownership before exact stop completed' >&2
+  exit 1
+}
+worker_pid=""
+unset CRF_RECONCILE_PAUSE_READY CRF_RECONCILE_TEST_RUNDIR CRF_RECONCILE_TEST_READY_ATTEMPTS
+
+# If the parent stalls after publishing go, the final process may time out and
+# clear ownership before the parent resumes. The parent must not convert that
+# expired handoff into success or leave a compatibility PID behind.
+expired_dir="$tmpdir/expired-after-go"
+mkdir -p "$expired_dir"
+rm -f "$tmpdir/go-published" "$tmpdir/release-go-launcher" "$tmpdir/expired-launch-status"
+RUNDIR="$expired_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$expired_dir" CRF_RECONCILE_TEST_READY_ATTEMPTS=20
+(
+  mv() {
+    case "${2:-}:$(cat "${1:-}" 2>/dev/null)" in
+      "$RUNDIR"/reconcile.ready.*:go)
+        command mv "$@"
+        : >"$tmpdir/go-published"
+        while [ ! -e "$tmpdir/release-go-launcher" ]; do sleep 0.01; done
+        return 0
+        ;;
+    esac
+    command mv "$@"
+  }
+  if reconcile_start; then printf '0\n' >"$tmpdir/expired-launch-status"
+  else printf '%s\n' "$?" >"$tmpdir/expired-launch-status"; fi
+) &
+expired_launcher_pid=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/go-published" ] && break; sleep 0.01; done
+[ -e "$tmpdir/go-published" ] || { echo 'FAIL: parent did not pause after publishing go' >&2; exit 1; }
+for _ in $(seq 1 700); do [ ! -e "$RECONCILE_IDENTITY" ] && break; sleep 0.01; done
+[ ! -e "$RECONCILE_IDENTITY" ] || { echo 'FAIL: expired final activation retained ownership' >&2; exit 1; }
+: >"$tmpdir/release-go-launcher"
+wait "$expired_launcher_pid" 2>/dev/null || true
+[ "$(cat "$tmpdir/expired-launch-status" 2>/dev/null)" != 0 ] || {
+  echo 'FAIL: parent reported success after the final activation expired' >&2; exit 1;
+}
+[ ! -e "$RECONCILE_PID" ] && ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    echo 'FAIL: expired activation left PID or handshake state' >&2; exit 1;
+  }
+
+# Killing the launcher after ready publication but before go must leave the
+# bounded helper responsible for removing every token-specific artifact.
+interrupt_dir="$tmpdir/interrupted-after-ready"
+mkdir -p "$interrupt_dir"
+rm -f "$tmpdir/before-go-publication"
+RUNDIR="$interrupt_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$interrupt_dir"
+(
+  mv() {
+    case "${2:-}:$(cat "${1:-}" 2>/dev/null)" in
+      "$RUNDIR"/reconcile.ready.*:go)
+        : >"$tmpdir/before-go-publication"
+        while :; do sleep 1; done
+        ;;
+    esac
+    command mv "$@"
+  }
+  reconcile_start
+) &
+interrupt_launcher_pid=$!
+for _ in $(seq 1 200); do [ -e "$tmpdir/before-go-publication" ] && break; sleep 0.01; done
+[ -e "$tmpdir/before-go-publication" ] || { echo 'FAIL: launcher did not pause before go publication' >&2; exit 1; }
+kill -KILL "$interrupt_launcher_pid"
+wait "$interrupt_launcher_pid" 2>/dev/null || true
+for _ in $(seq 1 700); do [ ! -e "$RECONCILE_IDENTITY" ] && break; sleep 0.01; done
+[ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] &&
+  ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    find "$RUNDIR" -maxdepth 1 -printf 'leftover: %f\n' >&2 || true
+    cat "$RUNDIR/autoscale.log" >&2 || true
+    if [ -s "$RECONCILE_IDENTITY" ]; then
+      read -r debug_pid _ <"$RECONCILE_IDENTITY" || true
+      ps -o pid=,ppid=,pgid=,sid=,stat=,args= -p "${debug_pid:-0}" >&2 || true
+    fi
+    echo 'FAIL: interrupted post-ready launcher left ownership or token artifacts' >&2; exit 1;
+  }
+
+# A failed compatibility-PID write occurs only after final-process activation.
+# It must cancel and fence that exact process rather than leave an incomplete
+# identity that a retry can mistake for a successful launch.
+pid_failure_dir="$tmpdir/pid-publication-failure"
+mkdir -p "$pid_failure_dir"
+RUNDIR="$pid_failure_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+export CRF_RECONCILE_TEST_RUNDIR="$pid_failure_dir" CRF_RECONCILE_ZERO_WORK=1
+rm -f "$tmpdir/pid-failure-status" "$tmpdir/pid-failure-armed"
+(
+  cat() {
+    local output
+    output="$(command cat "$@")" || return $?
+    case "${1:-}:$output" in
+      "$RUNDIR"/reconcile.ready.*:active)
+        if [ ! -e "$tmpdir/pid-failure-armed" ]; then
+          ln -s /dev/full "$RECONCILE_PID"
+          : >"$tmpdir/pid-failure-armed"
+        fi
+        ;;
+    esac
+    printf '%s\n' "$output"
+  }
+  if reconcile_start; then printf '0\n' >"$tmpdir/pid-failure-status"
+  else printf '%s\n' "$?" >"$tmpdir/pid-failure-status"; fi
+) &
+pid_failure_launcher=$!
+pid_failure_worker=""
+for _ in $(seq 1 200); do
+  if [ -s "$RECONCILE_IDENTITY" ]; then
+    read -r pid_failure_worker _ <"$RECONCILE_IDENTITY" || true
+    break
+  fi
+  sleep 0.01
+done
+wait "$pid_failure_launcher" 2>/dev/null || true
+[ "$(cat "$tmpdir/pid-failure-status" 2>/dev/null)" != 0 ] || {
+  echo 'FAIL: failed PID publication was reported as successful' >&2; exit 1;
+}
+[ -z "$pid_failure_worker" ] || ! reconcile_group_live "$pid_failure_worker" || {
+  echo 'FAIL: failed PID publication left its token-owned group alive' >&2; exit 1;
+}
+[ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] &&
+  ! compgen -G "$RUNDIR/reconcile.ready.*" >/dev/null &&
+  ! compgen -G "$RUNDIR/reconcile.cancel.*" >/dev/null || {
+    echo 'FAIL: failed PID publication left ownership or handshake state' >&2; exit 1;
+  }
+unset CRF_RECONCILE_ZERO_WORK CRF_RECONCILE_TEST_RUNDIR CRF_RECONCILE_TEST_READY_ATTEMPTS
+
+echo 'reconcile-start-final-stage-results: OK'
+[ "${CRF_RECONCILE_TEST_CASE:-all}" != final-stage ] || exit 0
+
+unset CRF_RECONCILE_TEST_RUNDIR
+RUNDIR="$tmpdir/run"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+rm -f "$tmpdir/date-called" "$tmpdir/post-timeout-retry" "$tmpdir/stop-issued"
+
 # Start through the production launcher and dispatch topology. The worker enters
 # a real external sleep while its descendants inherit reconcile.lock.
-export CRF_RECONCILE_STOP_TMPDIR="$tmpdir"
 reconcile_start
 worker_pid="$(cat "$RECONCILE_PID")"
 assert_worker_isolated "$worker_pid"

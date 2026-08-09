@@ -66,6 +66,138 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Neither runtime configuration file is executable shell input. The scheduled
+# audit runs as root, so every malformed or untrusted fixture must be rejected
+# before it can execute a payload or create the audit log/lock state.
+runtime_config_rejects_without_side_effects() {
+  local label="$1" audit_fixture="$2" gotify_fixture="$3"
+  local fake_path="${4:-$PATH}" audit_mode="${5:-0600}" gotify_mode="${6:-0600}"
+  local audit_env="$tmp/runtime-audit.env" gotify_runtime_env="$tmp/runtime-gotify.env"
+  local runtime_logs="$tmp/runtime-reject-logs" status
+  if [ "$audit_mode" != preserve ]; then
+    printf '%s' "$audit_fixture" >"$audit_env"
+    chmod "$audit_mode" "$audit_env"
+  fi
+  if [ "$gotify_mode" != preserve ]; then
+    printf '%s' "$gotify_fixture" >"$gotify_runtime_env"
+    chmod "$gotify_mode" "$gotify_runtime_env"
+  fi
+  rm -rf "$runtime_logs" "$tmp/runtime-payload-executed"
+  set +e
+  env \
+    PATH="$fake_path" \
+    CRF_ENGINE="$tmp/unavailable-engine" \
+    CRF_AUDIT_CONFIG="$audit_env" \
+    CRF_GOTIFY_ENV="$gotify_runtime_env" \
+    CRF_AUDIT_LOG_ROOT="$runtime_logs" \
+    CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000' \
+    CRF_EXPECTED_PLUGIN_VERSION=9.9.9 \
+    CRF_EXPECTED_PLUGIN_PACKAGE_SHA256="$valid_hash" \
+    bash "$AUDIT" >"$tmp/runtime-parser-reject.out" 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || crf_fail "runtime audit accepted $label config"
+  [ ! -e "$tmp/runtime-payload-executed" ] || crf_fail "runtime audit executed $label config"
+  [ ! -e "$runtime_logs" ] || crf_fail "runtime audit created log state for rejected $label config"
+}
+
+runtime_payload="touch '$tmp/runtime-payload-executed'"
+runtime_config_rejects_without_side_effects 'audit command-line' \
+  "$runtime_payload"$'\n' ''
+runtime_config_rejects_without_side_effects 'audit command-substitution' \
+  "CRF_EXPECTED_COUNT=\"\$(touch '$tmp/runtime-payload-executed')\""$'\n' ''
+runtime_config_rejects_without_side_effects 'audit duplicate-key' \
+  "CRF_EXPECTED_COUNT='16'"$'\n'"CRF_EXPECTED_COUNT='17'"$'\n' ''
+runtime_config_rejects_without_side_effects 'audit unknown-key' \
+  "CRF_EXPECTED_COUNT='16'"$'\n'"CRF_UNSUPPORTED_EXPECTATION='1'"$'\n' ''
+runtime_config_rejects_without_side_effects 'Gotify command-line' '' \
+  "$runtime_payload"$'\n'
+runtime_config_rejects_without_side_effects 'Gotify command-substitution' '' \
+  "GOTIFY_TOKEN=\"\$(touch '$tmp/runtime-payload-executed')\""$'\n'
+runtime_config_rejects_without_side_effects 'Gotify duplicate-key' '' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_URL='https://gotify.other.internal'"$'\n'
+runtime_config_rejects_without_side_effects 'Gotify unknown-key' '' \
+  "GOTIFY_PRIORITY='8'"$'\n'
+runtime_config_rejects_without_side_effects 'audit world-readable' \
+  "CRF_EXPECTED_COUNT='16'"$'\n' '' "$PATH" 0644 0600
+runtime_config_rejects_without_side_effects 'Gotify world-readable' '' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n' "$PATH" 0600 0644
+
+mkdir -p "$tmp/runtime-foreign-bin"
+runtime_real_stat="$(command -v stat)"
+cat >"$tmp/runtime-foreign-bin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -c ] && [ "${2:-}" = %u ] && [ "${3:-}" = "$CRF_RUNTIME_FOREIGN_FILE" ]; then
+  echo 65534
+  exit 0
+fi
+exec "$CRF_RUNTIME_REAL_STAT" "$@"
+SH
+chmod +x "$tmp/runtime-foreign-bin/stat"
+export CRF_RUNTIME_REAL_STAT="$runtime_real_stat"
+export CRF_RUNTIME_FOREIGN_FILE="$tmp/runtime-audit.env"
+runtime_config_rejects_without_side_effects 'foreign-owned audit' \
+  "CRF_EXPECTED_COUNT='16'"$'\n' '' "$tmp/runtime-foreign-bin:$PATH"
+export CRF_RUNTIME_FOREIGN_FILE="$tmp/runtime-gotify.env"
+runtime_config_rejects_without_side_effects 'foreign-owned Gotify' '' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n' "$tmp/runtime-foreign-bin:$PATH"
+unset CRF_RUNTIME_FOREIGN_FILE CRF_RUNTIME_REAL_STAT
+
+runtime_audit_real="$tmp/runtime-audit-real.env"
+printf "CRF_EXPECTED_COUNT='16'\n" >"$runtime_audit_real"; chmod 0600 "$runtime_audit_real"
+rm -f "$tmp/runtime-audit.env"; ln -s "$runtime_audit_real" "$tmp/runtime-audit.env"
+printf '' >"$tmp/runtime-gotify.env"; chmod 0600 "$tmp/runtime-gotify.env"
+runtime_config_rejects_without_side_effects 'symlinked audit' '' '' "$PATH" preserve preserve
+rm -f "$tmp/runtime-audit.env" "$runtime_audit_real"
+runtime_gotify_real="$tmp/runtime-gotify-real.env"
+printf "GOTIFY_URL='https://gotify.internal'\n" >"$runtime_gotify_real"; chmod 0600 "$runtime_gotify_real"
+printf '' >"$tmp/runtime-audit.env"; chmod 0600 "$tmp/runtime-audit.env"
+rm -f "$tmp/runtime-gotify.env"; ln -s "$runtime_gotify_real" "$tmp/runtime-gotify.env"
+runtime_config_rejects_without_side_effects 'symlinked Gotify' '' '' "$PATH" preserve preserve
+rm -f "$tmp/runtime-audit.env" "$tmp/runtime-gotify.env" "$runtime_gotify_real"
+
+# Every documented audit override remains accepted as literal data. Reaching the
+# unavailable-engine boundary (and creating its normal failure log) proves the
+# parser accepted the entire contract without executing it.
+cat >"$tmp/runtime-audit.env" <<EOF
+WATCHDOG_SAMPLE_SECONDS='1'
+CRF_NOTIFY_SUCCESS='false'
+CRF_EXPECTED_COUNT='16'
+CRF_EXPECTED_IMAGE_ID='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+CRF_EXPECTED_KACHE_VERSION='0.13.0'
+CRF_EXPECTED_KACHE_SHA256='$valid_hash'
+CRF_EXPECTED_KACHE_SOCKET='/_work/.kache/daemon.sock'
+CRF_EXPECTED_KACHE_LOCAL_MAX='80GiB'
+CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000'
+CRF_EXPECTED_KACHE_BUCKET='kache'
+CRF_EXPECTED_KACHE_PREFIX='rust'
+CRF_EXPECTED_KACHE_REGION='us-east-1'
+CRF_EXPECTED_KACHE_PROFILE='kache'
+CRF_EXPECTED_AWS_MOUNT='/mnt/cache/runner/kache-aws|false'
+CRF_EXPECTED_CPU_BUDGET_MILLI='76000'
+CRF_EXPECTED_CPU_RESERVE_MILLI='1000'
+CRF_EXPECTED_CPU_CONFIGURED_MILLI='74000'
+CRF_EXPECTED_CPU_HEADROOM_MILLI='2000'
+CRF_EXPECTED_MEMORY_BUDGET_BYTES='124554051584'
+CRF_EXPECTED_MEMORY_RESERVE_BYTES='8589934592'
+CRF_EXPECTED_MEMORY_CONFIGURED_BYTES='122406567936'
+CRF_EXPECTED_MEMORY_HEADROOM_BYTES='2147483648'
+CRF_RUNNER_NAME_PREFIX='nashost-'
+CRF_EXPECTED_PLUGIN_VERSION='9.9.9'
+CRF_EXPECTED_PLUGIN_PACKAGE_SHA256='$valid_hash'
+EOF
+printf 'GOTIFY_URL="https://gotify.internal"\nGOTIFY_TOKEN='"'"''"'"'\n' >"$tmp/runtime-gotify.env"
+chmod 0600 "$tmp/runtime-audit.env" "$tmp/runtime-gotify.env"
+rm -rf "$tmp/runtime-valid-logs"
+set +e
+env CRF_ENGINE="$tmp/unavailable-engine" \
+  CRF_AUDIT_CONFIG="$tmp/runtime-audit.env" CRF_GOTIFY_ENV="$tmp/runtime-gotify.env" \
+  CRF_AUDIT_LOG_ROOT="$tmp/runtime-valid-logs" bash "$AUDIT" >/dev/null 2>&1
+runtime_valid_status=$?
+set -e
+[ "$runtime_valid_status" -eq 1 ] && [ -d "$tmp/runtime-valid-logs" ] ||
+  crf_fail 'runtime parser rejected a supported quoted audit/Gotify literal'
+
 # A configured token without an explicitly approved URL is a configuration
 # failure, not permission to fall back to a plausible hostname. It must fail
 # before curl can transmit anything and leave the reason in the audit log.
