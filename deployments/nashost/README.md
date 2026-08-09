@@ -40,21 +40,56 @@ Files:
 - `runner.Dockerfile` is the complete reproducible runner image recipe.
 - `kache-overlay.Dockerfile` upgrades the currently deployed Nashost image in a
   small, rollback-friendly layer and is the normal fleet rollout path.
+- `endpoint-validation.sh` is the single Kache/Gotify endpoint contract used by
+  image builds, the installer, and the scheduled audit.
 - `kache-supervise.sh` owns the container-lifetime daemon without invoking the
   side-effectful `kache daemon status` command.
 
 Run `tests/nashost-kache-profile.sh` before deployment. Copy the full Dockerfile
-and supervisor to `/boot/config/plugins/ci-runner-farm/` as the durable rebuild
-source. Build the overlay image, then drain and recycle one runner at a time.
+and both supporting shell scripts to `/boot/config/plugins/ci-runner-farm/` as
+the durable rebuild source. The public recipes intentionally contain no private endpoint. Inject the
+approved endpoint explicitly when building either recipe. Persist it once for
+the plugin's **Save + Build Candidate** path as a protected, one-line input:
+
+```bash
+: "${KACHE_REMOTE_ENDPOINT:?set the approved Nashost Kache endpoint}"
+printf '%s\n' "$KACHE_REMOTE_ENDPOINT" | sudo install -m 0600 /dev/stdin \
+  /boot/config/plugins/ci-runner-farm/kache-endpoint
+```
+
+The candidate builder reads that file only for Dockerfiles that declare
+`ARG KACHE_REMOTE_ENDPOINT`; the value is not included in settings, status JSON,
+or engine log messages. For a direct command-line build, pass the same value:
+
+```bash
+: "${KACHE_REMOTE_ENDPOINT:?set the approved Nashost Kache endpoint}"
+docker build \
+  --build-arg KACHE_REMOTE_ENDPOINT="$KACHE_REMOTE_ENDPOINT" \
+  -f deployments/nashost/kache-overlay.Dockerfile \
+  deployments/nashost
+```
+
+Omitting the argument, supplying a documentation-only address, or including
+quotes, backslashes, whitespace, control characters, credentials, or a malformed
+authority fails the build before the Kache configuration is written. Build the
+overlay image, then drain and recycle one runner at a time.
 
 ## Safe image promotion
 
 Local image builds are candidates, not releases. **Save + Build Candidate** creates
-an immutable `candidate-<dockerfile-sha>-<time>-<pid>` tag and records the exact
-Docker image ID. **Promote Verified Candidate** rechecks both values before it can
-move `ci-runner-farm-runner:latest`. Experimental or compatibility builds must
-keep distinct tags; never call `docker tag ...:latest` outside this promotion
-path. Verify a pristine candidate's Kache version and SHA-256 before promotion.
+an immutable `candidate-<context-sha-prefix>-<time>-<pid>` tag. The full context
+SHA comes from a versioned manifest covering the exact Dockerfile bytes,
+`kache-supervise.sh` when the Dockerfile copies it,
+`endpoint-validation.sh` when the Dockerfile copies it, and a
+domain-separated digest of the protected Kache endpoint when the recipe declares
+that build argument. The endpoint itself is passed as a protected build argument
+and is not stored in candidate metadata.
+That metadata records the Dockerfile SHA, full context SHA, and exact image ID.
+**Promote Verified Candidate** rechecks the immutable tag and exact image ID
+before it can move `ci-runner-farm-runner:latest`. Experimental or compatibility
+builds must keep distinct tags; never call `docker tag ...:latest` outside this
+promotion path. Verify a pristine candidate's Kache version and SHA-256 before
+promotion.
 
 ## Exclusive fleet mutations
 
@@ -81,8 +116,31 @@ plugin release:
 
 ```bash
 cd deployments/nashost
-sudo ./install-fleet-audit.sh
+sudo CRF_EXPECTED_KACHE_ENDPOINT="$KACHE_REMOTE_ENDPOINT" \
+  ./install-fleet-audit.sh
 ```
+
+The endpoint is required on first install and is persisted in the mode-0600 audit
+environment. Later installer runs preserve that value when the environment
+variable is omitted. Export the approved Nashost endpoint before running either
+command; the repository deliberately provides no plausible fallback value.
+
+Gotify has no executable hostname fallback either. If notifications are enabled,
+create the shared environment with both the explicitly approved URL and token
+before installing the audit:
+
+```bash
+sudo install -m 0600 /dev/null /boot/config/plugins/user.scripts/gotify.env
+sudoedit /boot/config/plugins/user.scripts/gotify.env
+# GOTIFY_URL='https://approved-gotify.example'
+# GOTIFY_TOKEN='replace-with-the-dedicated-app-token'
+```
+
+A token without a URL, a non-HTTPS URL (except exact localhost/127.0.0.1
+loopback), an unsafe URL, or a failed HTTP delivery makes the audit
+nonzero and records `notification_result=FAIL` in its timestamped log. The token
+is carried only in a mode-0600 temporary curl configuration and is never written
+to audit output. Omitting the token disables Gotify without inventing a target.
 
 The installer preserves existing User Scripts schedules, registers a daily
 06:30 run, writes logs under `/mnt/user/logs/ci-runner-farm-audit`, and pins the

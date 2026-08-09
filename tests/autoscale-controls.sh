@@ -39,6 +39,7 @@ pool_mode_enabled() { return 1; }
 current_count() { echo 5; }
 called=''
 cmd_scale_internal() { called="$1"; }
+reconcile_start() { :; }
 RUNDIR="$(mktemp -d)"
 trap 'rm -f "$tmp"; rm -rf "$RUNDIR"' EXIT
 export AUTOSCALE=true

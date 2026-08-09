@@ -28,7 +28,12 @@ RUN set -euo pipefail \
  && test "$(sha256sum /usr/local/bin/kache | awk '{print $1}')" = "$KACHE_FLEET_BINARY_SHA256" \
  && /usr/local/bin/kache --version
 
-RUN mkdir -p /home/runner/.config/kache \
+COPY endpoint-validation.sh /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
+RUN chmod 0755 /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
+ARG KACHE_REMOTE_ENDPOINT
+RUN endpoint="${KACHE_REMOTE_ENDPOINT:-}" \
+ && /usr/local/libexec/ci-runner-farm/endpoint-validation.sh kache "$endpoint" \
+ && mkdir -p /home/runner/.config/kache \
  && printf '%s\n' \
   "[cache]" \
   "local_store = \"/_work/.kache\"" \
@@ -43,7 +48,7 @@ RUN mkdir -p /home/runner/.config/kache \
   "[cache.remote]" \
   "type = \"s3\"" \
   "bucket = \"kache\"" \
-  "endpoint = \"http://192.0.2.2:9000\"" \
+  "endpoint = \"${endpoint}\"" \
   "region = \"us-east-1\"" \
   "prefix = \"rust\"" \
   "profile = \"kache\"" \

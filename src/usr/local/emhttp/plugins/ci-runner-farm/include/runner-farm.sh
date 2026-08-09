@@ -191,6 +191,7 @@ fi
 AUTOSCALE_PID="${RUNDIR}/autoscale.pid"
 IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
 RECONCILE_PID="${RUNDIR}/reconcile.pid"
+RECONCILE_IDENTITY="${RUNDIR}/reconcile.identity"
 KACHE_WATCHDOG_PID="${RUNDIR}/kache-watchdog.pid"
 SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
@@ -198,6 +199,7 @@ MAINTENANCE_FILE="${RUNDIR}/maintenance.state"
 MUTATION_OWNER_FILE="${RUNDIR}/mutation-owner.state"
 BUILD_CANDIDATE_FILE="${CFGDIR}/build-candidate.state"
 PROMOTED_IMAGE_FILE="${CFGDIR}/promoted-image.state"
+KACHE_ENDPOINT_FILE="${CFGDIR}/kache-endpoint"
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
@@ -353,10 +355,17 @@ cmd_apply_config() {
   chmod 0600 "$old_cfg" || true
   CFG="$old_cfg"
   load_cfg
+  # Fence any existing reconcile session before changing live runtime state.
+  # The validated config is already committed, but overrides and admissions are
+  # untouched until exact worker ownership is observably stopped.
+  reconcile_start fence || {
+    printf '{"ok":false,"code":"reconcile_fence_failed","error":"configuration saved, but the existing reconciliation worker could not be fenced"}\n'
+    return 6
+  }
+  reconcile_start || return 1
   if [ "$old_capacity" != "$new_capacity" ]; then
     rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
   fi
-  reconcile_start
   # Apply is live for a running fleet. Enabling the daemon master must not wait
   # for a separate Start click; disabling it must stop admissions immediately.
   # Preserve the stopped state by only launching when classic runners or the
@@ -649,6 +658,12 @@ crf_confgen_prepare() {
   CRF_CONFGEN_IMAGE_REF="$(effective_image)"
   CRF_CONFGEN_IMAGE_IDENTITY=""
   CRF_CONFGEN_ERROR=""
+  if [ "$IMAGE_SOURCE" = builtin ]; then
+    restore_promoted_image_alias || {
+      CRF_CONFGEN_ERROR="Runner image '$CRF_CONFGEN_IMAGE_REF' is unavailable and its promoted alias could not be restored"
+      return 1
+    }
+  fi
   CRF_CONFGEN_IMAGE_IDENTITY="$(docker image inspect "$CRF_CONFGEN_IMAGE_REF" -f '{{.Id}}' 2>/dev/null)" || {
     CRF_CONFGEN_ERROR="Runner image '$CRF_CONFGEN_IMAGE_REF' is unavailable"
     return 1
@@ -746,9 +761,16 @@ count_pool_desired_drift() {
 
 count_reconcile_work() {
   local stale drift
-  stale="$(count_stale_runners)" || stale=0
-  drift="$(count_pool_desired_drift)" || drift=0
+  stale="$(count_stale_runners)" || return 1
+  drift="$(count_pool_desired_drift)" || return 1
   echo $((stale+drift))
+}
+
+# A caller may launch reconciliation while it still owns fleet.lock and before
+# committing its runtime mutations. Wait for that transaction before deciding
+# there is no work, otherwise the new worker can exit in the pre-mutation gap.
+count_reconcile_work_locked() {
+  ( flock -w 20 8 || return 1; count_reconcile_work ) 8>"$RUNDIR/fleet.lock"
 }
 
 # Effective autoscale floor: AUTOSCALE_MIN, clamped to AUTOSCALE_MAX so a floor
@@ -2566,6 +2588,19 @@ mutation_owner_guard() {
   fi
 }
 
+# Lease claim/release and Stop/Restart fencing share this lock. It is separate
+# from fleet.lock because reconciliation may legitimately hold fleet.lock while
+# Stop must first fence it; the fixed owner-lock -> fleet-lock order prevents a
+# competing lease from appearing between the guard and the fence.
+with_mutation_owner_lock() {
+  ( flock -w 20 6 || {
+      err "mutation ownership is busy — try again"
+      exit 1
+    }
+    "$@"
+  ) 6>"$RUNDIR/mutation-owner.lock"
+}
+
 # Serialize all fleet mutation (UI start/stop/restart/scale/recycle AND the autoscale
 # / image-update daemon ticks) behind one lock (fd 8), so a manual action and a daemon
 # tick can't race into a duplicate docker-run or a false "removed but not recreated"
@@ -2583,8 +2618,31 @@ with_fleet_lock() {
 }
 cmd_restart() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  cmd_stop
+  cmd_stop || return 1
   cmd_start
+}
+
+# Stop reconciliation before contending for fleet.lock. The worker owns that
+# lock around Docker/GitHub mutations, so taking it first can time out before
+# cmd_stop reaches reconcile_stop and leave teardown racing a live worker.
+cmd_stop_fenced() {
+  with_mutation_owner_lock cmd_stop_fenced_owned
+}
+
+cmd_stop_fenced_owned() {
+  mutation_owner_guard wait cmd_stop || return 1
+  reconcile_stop || return 1
+  with_fleet_lock wait cmd_stop
+}
+
+cmd_restart_fenced() {
+  with_mutation_owner_lock cmd_restart_fenced_owned
+}
+
+cmd_restart_fenced_owned() {
+  mutation_owner_guard wait cmd_restart || return 1
+  reconcile_stop || return 1
+  with_fleet_lock wait cmd_restart
 }
 
 # Operator convenience: (re)start the shared image cache + regenerate the runner DinD
@@ -2767,7 +2825,45 @@ reconcile_stale_runners() {
 # runner becomes safe to recycle. Progress is logged to autoscale.log, which the farm-log panel
 # tails.
 cmd_reconcile_drain() {
-  trap 'rm -f "$RECONCILE_PID"' EXIT INT TERM
+  local activation_state="${CRF_RECONCILE_ACTIVATION_STATE:-}"
+  local activation_cancel="${CRF_RECONCILE_ACTIVATION_CANCEL:-}"
+  local activation_identity activation_pid activation_starttime activation_token activation_script
+  local activation_tmp activation_attempt=0 activation_attempts=500
+  trap 'if [ -n "${CRF_RECONCILE_ACTIVATION_STATE:-}" ]; then rm -f -- "$CRF_RECONCILE_ACTIVATION_STATE" "$CRF_RECONCILE_ACTIVATION_STATE".tmp.* "${CRF_RECONCILE_ACTIVATION_CANCEL:-}" 2>/dev/null || true; fi; reconcile_identity_clear "$$"' EXIT
+  trap 'exit 0' INT TERM
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    activation_attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
+  if [ -n "$activation_state" ] || [ -n "$activation_cancel" ]; then
+    activation_identity="$(reconcile_identity_read)" || {
+      err "reconcile: final worker could not read its activation identity"; return 1;
+    }
+    read -r activation_pid activation_starttime activation_token activation_script <<EOF
+$activation_identity
+EOF
+    [ "$activation_pid" = "$$" ] &&
+      [ "$activation_state" = "$RUNDIR/reconcile.ready.$activation_token" ] &&
+      [ "$activation_cancel" = "$RUNDIR/reconcile.cancel.$activation_token" ] &&
+      [ "$(cat "$activation_state" 2>/dev/null)" = go ] &&
+      [ ! -e "$activation_cancel" ] || {
+        err "reconcile: final worker received an invalid activation handoff"; return 1;
+      }
+    activation_tmp="$activation_state.tmp.$$"
+    ( umask 077; printf 'active\n' >"$activation_tmp" ) &&
+      mv "$activation_tmp" "$activation_state" || {
+        rm -f "$activation_tmp"; return 1;
+      }
+    while [ "$activation_attempt" -lt "$activation_attempts" ] &&
+          [ "$(cat "$activation_state" 2>/dev/null)" != committed ] &&
+          [ ! -e "$activation_cancel" ]; do
+      activation_attempt=$((activation_attempt+1))
+      sleep 0.01
+    done
+    [ "$(cat "$activation_state" 2>/dev/null)" = committed ] &&
+      [ ! -e "$activation_cancel" ] || return 1
+    rm -f "$activation_state" "$activation_cancel"
+    unset CRF_RECONCILE_ACTIVATION_STATE CRF_RECONCILE_ACTIVATION_CANCEL
+  fi
   if declare -F backend_classic_admission_allowed >/dev/null &&
      ! backend_classic_admission_allowed; then
     log "classic reconcile paused by backend transition state"; return 0
@@ -2776,16 +2872,26 @@ cmd_reconcile_drain() {
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
   exec 8>&- 9>&- 2>/dev/null || true
-  local deadline announced=0 lost backoff_announced=0 sleep_for=15
+  local deadline announced=0 lost work backoff_announced=0 sleep_for=15
   rm -f "$RUNDIR/reconcile.shrink"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
   deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
   while :; do
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-    [ "$(count_reconcile_work)" -eq 0 ] && break
+    if ! work="$(count_reconcile_work_locked)"; then
+      err "reconcile: could not prepare a trustworthy work count; retrying without declaring migration complete"
+      sleep "$sleep_for"
+      continue
+    fi
+    [ "$work" -eq 0 ] && break
     [ "$announced" = 0 ] && { log "reconcile: config changed — migrating runners onto it as they go idle"; announced=1; }
     with_fleet_lock wait reconcile_stale_runners
-    [ "$(count_reconcile_work)" -eq 0 ] && break
+    if ! work="$(count_reconcile_work_locked)"; then
+      err "reconcile: work recount failed after a pass; retrying without declaring migration complete"
+      sleep "$sleep_for"
+      continue
+    fi
+    [ "$work" -eq 0 ] && break
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), so only enforce
     # the deadline when it's positive — matching drain_and_recreate's `limit -gt 0` guard.
     # Retiring identities (removed pools or mode transitions) must eventually
@@ -2822,42 +2928,351 @@ cmd_reconcile_drain() {
   lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
   if [ "$announced" = 1 ]; then
     if [ "${lost:-0}" -gt 0 ]; then
-      if [ "$(count_reconcile_work)" -eq 0 ]; then
+      if work="$(count_reconcile_work)" && [ "$work" -eq 0 ]; then
         log "reconcile: migration finished but $lost runner(s) were removed without a replacement — Start/Restart the fleet to restore capacity"
       else
         log "reconcile: migration incomplete, and $lost runner(s) were also removed without a replacement — Start/Restart the fleet to restore capacity"
       fi
-    elif [ "$(count_reconcile_work)" -eq 0 ]; then
+    elif work="$(count_reconcile_work)" && [ "$work" -eq 0 ]; then
       log "reconcile: fleet is now on the current config"
     fi
   fi
   rm -f "$RUNDIR/reconcile.shrink"
-  rm -f "$RECONCILE_PID"
+  reconcile_identity_clear "$$"
+}
+
+reconcile_proc_record() {
+  local pid="$1" stat rest state pgrp session starttime
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  rest="${stat##*) }"
+  set -- $rest
+  state="${1:-}"; pgrp="${3:-}"; session="${4:-}"; starttime="${20:-}"
+  [ -n "$state" ] && [ -n "$pgrp" ] && [ -n "$session" ] && [ -n "$starttime" ] || return 1
+  printf '%s %s %s %s\n' "$state" "$pgrp" "$session" "$starttime"
+}
+
+reconcile_identity_read() {
+  local pid starttime token script extra
+  [ -r "$RECONCILE_IDENTITY" ] || return 1
+  read -r pid starttime token script extra <"$RECONCILE_IDENTITY" || return 1
+  case "$pid:$starttime" in *[!0-9:]*) return 1 ;; esac
+  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
+  [ -n "$pid" ] && [ -n "$starttime" ] && [ -n "$script" ] && [ -z "${extra:-}" ] || return 1
+  printf '%s %s %s %s\n' "$pid" "$starttime" "$token" "$script"
+}
+
+reconcile_group_live() {
+  local group="$1"
+  ps -eo pgid=,stat= 2>/dev/null | awk -v group="$group" '$1 == group && $2 !~ /^[ZX]/ { found=1; exit } END { exit !found }'
+}
+
+reconcile_group_owned() {
+  local group="$1" expected_starttime="$2" token="$3" record state pgrp session starttime
+  local member member_pgrp member_session
+  record="$(reconcile_proc_record "$group" 2>/dev/null)" || record=""
+  if [ -n "$record" ]; then
+    read -r state pgrp session starttime <<EOF
+$record
+EOF
+    [ "$pgrp" = "$group" ] && [ "$session" = "$group" ] &&
+      [ "$starttime" = "$expected_starttime" ] && return 0
+    return 1
+  fi
+  # PGID/SID alone is insufficient once the leader was reaped: after PID reuse,
+  # an unrelated session can acquire the same numeric identity. Every owned
+  # descendant inherits a per-launch token, so require it before signalling an
+  # orphaned process group.
+  while read -r member member_pgrp member_session; do
+    [ "$member_pgrp" = "$group" ] && [ "$member_session" = "$group" ] || continue
+    [ -r "/proc/$member/environ" ] || continue
+    tr '\0' '\n' <"/proc/$member/environ" 2>/dev/null |
+      grep -Fxq -- "CRF_RECONCILE_SESSION_TOKEN=$token" && return 0
+  done < <(ps -eo pid=,pgid=,sid= 2>/dev/null)
+  return 1
+}
+
+reconcile_identity_clear() {
+  local owner_pid="$1" identity pid starttime token script
+  identity="$(reconcile_identity_read 2>/dev/null)" || return 0
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  [ "$pid" = "$owner_pid" ] || return 0
+  rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
 }
 
 reconcile_pid_active() {
-  local pid state
-  [ -f "$RECONCILE_PID" ] || return 1
-  pid="$(cat "$RECONCILE_PID" 2>/dev/null)"
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
-  case "$state" in ''|Z*) return 1 ;; esac
+  local identity pid starttime token script record state pgrp session actual_starttime
+  identity="$(reconcile_identity_read)" || return 1
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  record="$(reconcile_proc_record "$pid")" || return 1
+  read -r state pgrp session actual_starttime <<EOF
+$record
+EOF
+  case "$state" in Z|X) return 1 ;; esac
+  [ "$pgrp" = "$pid" ] && [ "$session" = "$pid" ] &&
+    [ "$actual_starttime" = "$starttime" ] || return 1
   [ -r "/proc/$pid/cmdline" ] || return 1
-  tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq reconcile-drain
+  tr '\0' '\n' <"/proc/$pid/cmdline" | grep -Fxq -- "$script" || return 1
+  tr '\0' '\n' <"/proc/$pid/cmdline" |
+    grep -Eq '^(reconcile-drain|reconcile-drain-ready)$' || return 1
+  [ -r "/proc/$pid/environ" ] || return 1
+  tr '\0' '\n' <"/proc/$pid/environ" |
+    grep -Fxq -- "CRF_RECONCILE_SESSION_TOKEN=$token"
+}
+
+cmd_reconcile_status() {
+  local identity pid starttime token script
+  if [ ! -e "$RECONCILE_IDENTITY" ] && [ ! -L "$RECONCILE_IDENTITY" ]; then
+    printf '{"ok":true,"active":false}\n'
+    return 0
+  fi
+  identity="$(reconcile_identity_read 2>/dev/null)" || {
+    printf '{"ok":false,"active":true,"error":"invalid reconciliation ownership identity"}\n'
+    return 1
+  }
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  if reconcile_pid_active || reconcile_group_owned "$pid" "$starttime" "$token"; then
+    printf '{"ok":true,"active":true,"pid":%s}\n' "$pid"
+  else
+    printf '{"ok":true,"active":false,"stale":true,"pid":%s}\n' "$pid"
+  fi
 }
 
 reconcile_start() {
-  reconcile_pid_active && return 0
-  rm -f "$RECONCILE_PID"
-  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
-  printf '%s\n' "$!" > "$RECONCILE_PID"
+  local mode="${1:-launch}" script pid record state pgrp session starttime token identity identity_tmp
+  local bootstrap_ready bootstrap_cancel bootstrap_tmp attempt=0 ready_attempts=500
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    ready_attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
+  case "$mode" in
+    launch) ;;
+    fence) ;;
+    *) err "reconcile: invalid start mode '$mode'"; return 2 ;;
+  esac
+  if reconcile_pid_active; then
+    # reconcile.identity is the authoritative process record. Recreate the
+    # compatibility PID file if it was lost; never replace a proven live worker
+    # merely because this secondary pointer is absent or stale.
+    identity="$(reconcile_identity_read)"
+    read -r pid starttime token script <<EOF
+$identity
+EOF
+    ( umask 077; printf '%s\n' "$pid" >"$RECONCILE_PID" )
+    return 0
+  fi
+  # If the leader died but a token-bearing descendant still owns the recorded
+  # session, fence that orphan before replacing it. Otherwise its inherited
+  # fleet lock or in-flight mutation would become permanently untracked.
+  identity="$(reconcile_identity_read 2>/dev/null)" || identity=""
+  if [ -n "$identity" ]; then
+    read -r pid starttime token script <<EOF
+$identity
+EOF
+    if reconcile_group_owned "$pid" "$starttime" "$token"; then
+      reconcile_stop || return 1
+    fi
+  fi
+  rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
+  [ "$mode" = fence ] && return 0
+  script="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+  token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || {
+    err "reconcile: could not create a process identity token"
+    return 1
+  }
+  # The identity-file gate prevents a no-work drain from exiting before its
+  # launcher records the session leader identity used by Stop. It is bounded:
+  # if the launcher dies before publication, the detached token-bearing session
+  # cleans itself up instead of waiting forever without an ownership record.
+  bootstrap_ready="$RUNDIR/reconcile.ready.$token"
+  bootstrap_cancel="$RUNDIR/reconcile.cancel.$token"
+  rm -f "$bootstrap_ready" "$bootstrap_cancel"
+  nohup setsid env "CRF_RECONCILE_SESSION_TOKEN=$token" \
+    sh -c 'identity="$1"; state="$2"; cancel="$3"; shift 3; attempt=0; attempt_limit=500
+      launch_token="$CRF_RECONCILE_SESSION_TOKEN"
+      case "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" in
+        ""|*[!0-9]*|0) ;;
+        *) attempt_limit="$CRF_RECONCILE_TEST_READY_ATTEMPTS" ;;
+      esac
+      cleanup_gate() {
+        owner_pid=""; owner_starttime=""; owner_token=""; owner_script=""; owner_extra=""; cleanup_attempt=0
+        if [ "${CRF_RECONCILE_TEST_PAUSE_GATE_CLEANUP:-0}" = 1 ]; then
+          : >"$state.cleanup-paused"
+          while [ ! -e "$state.cleanup-release" ] && [ "$cleanup_attempt" -lt "$attempt_limit" ]; do
+            cleanup_attempt=$((cleanup_attempt + 1)); sleep 0.01
+          done
+        fi
+        if read -r owner_pid owner_starttime owner_token owner_script owner_extra <"$identity" 2>/dev/null &&
+           [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$launch_token" ] &&
+           [ -z "$owner_extra" ]; then
+          rm -f "$identity"
+        fi
+        rm -f "$state" "$state".tmp.* "$state".cleanup-* "$cancel"
+      }
+      trap cleanup_gate EXIT
+      while [ ! -s "$identity" ] && [ ! -e "$cancel" ]; do
+        attempt=$((attempt + 1)); [ "$attempt" -lt "$attempt_limit" ] || exit 1
+        sleep 0.01
+      done
+      [ -s "$identity" ] && [ ! -e "$cancel" ] || exit 1
+      exec "$@"' \
+    sh "$RECONCILE_IDENTITY" "$bootstrap_ready" "$bootstrap_cancel" \
+      "$script" reconcile-drain-ready "$bootstrap_ready" "$bootstrap_cancel" \
+      >>"$RUNDIR/autoscale.log" 2>&1 8>&- 9>&- &
+  pid="$!"
+  while [ "$attempt" -lt 50 ]; do
+    record="$(reconcile_proc_record "$pid" 2>/dev/null)" || record=""
+    if [ -n "$record" ]; then
+      read -r state pgrp session starttime <<EOF
+$record
+EOF
+      [ "$pgrp" = "$pid" ] && [ "$session" = "$pid" ] && break
+    fi
+    attempt=$((attempt+1))
+    sleep 0.01
+  done
+  [ -n "${starttime:-}" ] && [ "$pgrp" = "$pid" ] && [ "$session" = "$pid" ] || {
+    rm -f "$bootstrap_ready" "$bootstrap_cancel"
+    err "reconcile: could not establish an owned worker session"
+    return 1
+  }
+  identity_tmp="$RECONCILE_IDENTITY.tmp.$$"
+  ( umask 077; printf '%s %s %s %s\n' "$pid" "$starttime" "$token" "$script" >"$identity_tmp" ) &&
+    mv "$identity_tmp" "$RECONCILE_IDENTITY" || {
+      rm -f "$identity_tmp"
+      rm -f "$bootstrap_ready" "$bootstrap_cancel"
+      err "reconcile: could not persist worker identity"
+      return 1
+    }
+  attempt=0
+  while [ "$attempt" -lt "$ready_attempts" ] && [ "$(cat "$bootstrap_ready" 2>/dev/null)" != ready ]; do
+    reconcile_group_live "$pid" || break
+    attempt=$((attempt+1))
+    sleep 0.01
+  done
+  if [ "$(cat "$bootstrap_ready" 2>/dev/null)" = ready ] && reconcile_pid_active; then
+    bootstrap_tmp="$bootstrap_ready.tmp.$$"
+    ( umask 077; printf 'go\n' >"$bootstrap_tmp" ) && mv "$bootstrap_tmp" "$bootstrap_ready" || {
+      rm -f "$bootstrap_tmp"; : >"$bootstrap_cancel" 2>/dev/null || true
+      reconcile_stop || return 1
+      rm -f "$bootstrap_ready" "$bootstrap_cancel"
+      return 1
+    }
+    attempt=0
+    while [ "$attempt" -lt "$ready_attempts" ] &&
+          [ "$(cat "$bootstrap_ready" 2>/dev/null)" != active ]; do
+      reconcile_group_live "$pid" || break
+      attempt=$((attempt+1))
+      sleep 0.01
+    done
+    if [ "$(cat "$bootstrap_ready" 2>/dev/null)" = active ] && reconcile_pid_active; then
+      ( umask 077; printf '%s\n' "$pid" >"$RECONCILE_PID" ) || {
+        : >"$bootstrap_cancel" 2>/dev/null || true
+        reconcile_stop || return 1
+        rm -f "$bootstrap_ready" "$bootstrap_cancel"
+        err "reconcile: could not publish worker PID"
+        return 1
+      }
+      bootstrap_tmp="$bootstrap_ready.tmp.$$"
+      ( umask 077; printf 'committed\n' >"$bootstrap_tmp" ) &&
+        mv "$bootstrap_tmp" "$bootstrap_ready" || {
+          rm -f "$bootstrap_tmp"; : >"$bootstrap_cancel" 2>/dev/null || true
+          reconcile_stop || return 1
+          rm -f "$bootstrap_ready" "$bootstrap_cancel"
+          return 1
+        }
+      attempt=0
+      while [ "$attempt" -lt "$ready_attempts" ] && [ -e "$bootstrap_ready" ]; do
+        reconcile_group_live "$pid" || break
+        attempt=$((attempt+1))
+        sleep 0.01
+      done
+      if [ ! -e "$bootstrap_ready" ]; then
+        return 0
+      fi
+    fi
+  fi
+  ( umask 077; : >"$bootstrap_cancel" ) || true
+  reconcile_stop || return 1
+  rm -f "$bootstrap_ready" "$bootstrap_cancel"
+  {
+    err "reconcile: worker did not acknowledge its ownership identity"
+    return 1
+  }
+}
+
+cmd_reconcile_drain_ready() {
+  local ready="$1" cancel="$2" identity pid starttime token script attempt=0 ready_tmp attempts=500
+  if [[ "${CRF_RECONCILE_TEST_READY_ATTEMPTS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    attempts="$CRF_RECONCILE_TEST_READY_ATTEMPTS"
+  fi
+  identity="$(reconcile_identity_read)" || return 1
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  [ "$pid" = "$$" ] && [ "$ready" = "$RUNDIR/reconcile.ready.$token" ] &&
+    [ "$cancel" = "$RUNDIR/reconcile.cancel.$token" ] && reconcile_pid_active || return 1
+  [ ! -e "$cancel" ] || return 1
+  ready_tmp="$ready.tmp.$$"
+  CRF_RECONCILE_HELPER_STATE="$ready"; CRF_RECONCILE_HELPER_CANCEL="$cancel"
+  trap 'rm -f -- "$CRF_RECONCILE_HELPER_STATE" "$CRF_RECONCILE_HELPER_STATE".tmp.* "$CRF_RECONCILE_HELPER_CANCEL" 2>/dev/null || true; reconcile_identity_clear "$$"' EXIT
+  ( umask 077; printf 'ready\n' >"$ready_tmp" ) && mv "$ready_tmp" "$ready" || {
+    rm -f "$ready_tmp"; return 1;
+  }
+  while [ "$attempt" -lt "$attempts" ] &&
+        [ "$(cat "$ready" 2>/dev/null)" != go ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1))
+    sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = go ] && [ ! -e "$cancel" ] || return 1
+  export CRF_RECONCILE_ACTIVATION_STATE="$ready" CRF_RECONCILE_ACTIVATION_CANCEL="$cancel"
+  shopt -s execfail
+  set +e
+  exec "$script" reconcile-drain
+  local rc=$?
+  set -e
+  rm -f -- "$ready" "$ready".tmp.* "$cancel"
+  reconcile_identity_clear "$$"
+  return "$rc"
 }
 
 reconcile_stop() {
-  [ -f "$RECONCILE_PID" ] && kill "$(cat "$RECONCILE_PID" 2>/dev/null)" 2>/dev/null || true
-  rm -f "$RECONCILE_PID"
-  pkill -f '[r]unner-farm.sh reconcile-drain' 2>/dev/null || true
+  local identity pid starttime token script attempt=0
+  identity="$(reconcile_identity_read 2>/dev/null)" || {
+    rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
+    return 0
+  }
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  if reconcile_pid_active || reconcile_group_owned "$pid" "$starttime" "$token"; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    while [ "$attempt" -lt 50 ] && reconcile_group_live "$pid"; do
+      attempt=$((attempt+1))
+      sleep 0.1
+    done
+    if reconcile_group_live "$pid" && reconcile_group_owned "$pid" "$starttime" "$token"; then
+      log "warning: reconcile worker group ignored TERM during Stop; forcing termination"
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      attempt=0
+      while [ "$attempt" -lt 20 ] && reconcile_group_live "$pid"; do
+        attempt=$((attempt+1))
+        sleep 0.05
+      done
+    fi
+    if reconcile_group_live "$pid" && reconcile_group_owned "$pid" "$starttime" "$token"; then
+      err "reconcile worker group remains live after forced termination; preserving its ownership identity"
+      return 1
+    fi
+  fi
+  rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
 }
 
 # Kick off the drain detached so the Settings Apply returns immediately (recycling is
@@ -2865,9 +3280,10 @@ reconcile_stop() {
 # shows in the Apply progress frame — human text, not JSON.
 cmd_reconcile_config() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
+  reconcile_start fence || return 1
+  reconcile_start || return 1
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$RUNDIR"/autoscale.*.state 2>/dev/null || true
-  reconcile_start
   local msg="Configuration saved. Any runner on a previous config will migrate as it goes idle (busy jobs finish first)."
   # A NETWORK_ISOLATION change applies per-runner only as each recycles — so running
   # jobs keep their OLD network until they finish. Say so plainly: a gradual, background
@@ -2885,9 +3301,10 @@ cmd_maintenance() {
       printf '{"ok":true,"maintenance":true,"message":"New admissions are paused; busy runners continue."}\n'
       ;;
     resume)
+      reconcile_start fence || return 1
+      reconcile_start || return 1
       rm -f "$MAINTENANCE_FILE"
       [ "$AUTOSCALE" = true ] && autoscale_start >/dev/null
-      reconcile_start
       printf '{"ok":true,"maintenance":false,"message":"Admissions resumed."}\n'
       ;;
     status)
@@ -2977,6 +3394,8 @@ cmd_start() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
   auth_credentials_configured ||
     { err "no valid GitHub credentials configured (set them in the web UI). Use 'validate' to test provisioning without credentials."; return 1; }
+  reconcile_start fence || return 1
+  reconcile_start || return 1
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp orgp; secp="$(public_repo_problem)"; orgp="$(org_runner_group_problem)"
@@ -3023,7 +3442,7 @@ cmd_start() {
   for c in $(managed_names); do
     [ -n "$c" ] && ! on_expected_network "$c" && { need_migrate=1; break; }
   done
-  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; reconcile_start; }
+  [ "$need_migrate" = 1 ] && log "network mode changed -> migrating runners onto the new network in the background as they go idle"
   local start_rc=0
   # bring back any runners Unraid/Docker left exited (array stop, daemon restart)
   start_stopped_managed || start_rc=1
@@ -3040,7 +3459,6 @@ cmd_start() {
         start_one "$i" "$pool" || start_rc=1
       done
     done < <(pool_records)
-    reconcile_start
   else
     [ "$AUTOSCALE" = "true" ] && startn="$AUTOSCALE_MIN"
     initial="$(current_count)"; ceiling="$startn"
@@ -3050,7 +3468,6 @@ cmd_start() {
       [ "$(current_count)" -lt "$ceiling" ] || break
       start_one "$i" || start_rc=1
     done
-    reconcile_start
   fi
   log "fleet up: $(managed_names | wc -l) runner(s)"
   [ "$AUTOSCALE" = "true" ] && autoscale_start || true
@@ -3111,10 +3528,14 @@ remove_runner_force() {
 # token — so a later Start rebuilds the container with its cache warm; only the
 # container is removed here, not the cached layers.
 cmd_stop() {
+  # Stop/Restart may only mutate the rest of the fleet after the reconcile
+  # session is observably gone. In particular, retain its authoritative identity
+  # and fail closed when a descendant remains in uninterruptible kernel I/O even
+  # after SIGKILL; a later Stop can then retry the exact owned group.
+  reconcile_stop || return 1
   kache_watchdog_stop
   autoscale_stop
   imageupdate_stop
-  reconcile_stop
   if declare -F backend_effective >/dev/null &&
      [ "$(backend_effective 2>/dev/null)" = scaleset ]; then
     if migration_load && [ "$MIGRATION_PHASE" = scaleset_active ]; then
@@ -3226,7 +3647,6 @@ cmd_scale() {
     current="$(current_count "$pool")"
     [ "$target" -gt "$current" ] || { err "manual scale with Autoscaling on can only add runners (currently $current)"; return 1; }
     [ "$target" -le "$max" ] || { err "manual scale target ($target) exceeds autoscale max ($max); raise it in Settings first"; return 1; }
-    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
   elif pool_mode_enabled; then
     local rec other aggregate="$target" override tmp
     while IFS= read -r rec; do
@@ -3234,6 +3654,12 @@ cmd_scale() {
       aggregate=$((aggregate + $(pool_effective_target "$other")))
     done < <(pool_records)
     [ "$aggregate" -le 64 ] || { err "manual pool targets would exceed the fleet hard maximum (64)"; return 1; }
+  fi
+  reconcile_start fence || return 1
+  reconcile_start || return 1
+  if [ "$autoscaled" = true ]; then
+    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
+  elif pool_mode_enabled; then
     override="$RUNDIR/scale-override.${pool}.$(pool_state_generation "$pool")"
     tmp="${override}.tmp.$$"
     printf '%s\n' "$target" > "$tmp" && mv "$tmp" "$override"
@@ -3243,7 +3669,7 @@ cmd_scale() {
   else cmd_scale_internal "$target" || rc=$?; fi
   if pool_mode_enabled && [ "$autoscaled" != true ] && [ "$(current_count "$pool")" -ne "$target" ]; then
     log "scale: pool $pool has pending capacity work; reconciliation will continue as runners become idle"
-    reconcile_start
+    :
   fi
   actual="$(current_count "$pool")"
   if pool_mode_enabled && [ "$actual" -ne "$target" ]; then
@@ -4176,7 +4602,7 @@ cmd_build_async() {
   # Log + lock on tmpfs (RUNDIR), NOT flash: a docker build streams thousands of
   # lines and appending each to /boot would hammer the USB stick. The log is only
   # needed for the current session's build, so losing it on reboot is fine.
-  local expected="${1:-}" log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner source snapshot actual
+  local expected="${1:-}" log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner source snapshot companion companion_snapshot validator validator_snapshot endpoint_snapshot actual
   [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo '{"ok":false,"error":"valid saved Dockerfile hash required"}'; return 0; }
   umask 077
   mkdir -p "$RUNDIR" 2>/dev/null
@@ -4190,16 +4616,48 @@ cmd_build_async() {
     if ! cp "$source" "$snapshot" || ! chmod 0600 "$snapshot"; then
       rm -f "$snapshot"; echo '{"ok":false,"error":"could not snapshot Dockerfile"}'; return 0
     fi
+    companion_snapshot="${snapshot}.kache-supervise.sh"
+    if build_context_needs_kache_supervisor "$snapshot"; then
+      companion="${source%/*}/kache-supervise.sh"
+      if ! build_context_copy_kache_supervisor "$companion" "$companion_snapshot"; then
+        rm -f "$snapshot" "$companion_snapshot"
+        echo '{"ok":false,"error":"Dockerfile requires a safe kache-supervise.sh beside the saved Dockerfile"}'
+        return 0
+      fi
+    fi
+    validator_snapshot="${snapshot}.endpoint-validation.sh"
+    if build_context_needs_endpoint_validator "$snapshot"; then
+      validator="${source%/*}/endpoint-validation.sh"
+      if ! build_context_copy_companion "$validator" "$validator_snapshot"; then
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot"
+        echo '{"ok":false,"error":"Dockerfile requires a safe endpoint-validation.sh beside the saved Dockerfile"}'
+        return 0
+      fi
+    fi
+    endpoint_snapshot="${snapshot}.kache-endpoint"
+    if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$snapshot"; then
+      if ! kache_endpoint_load ||
+         ! ( umask 077; printf '%s\n' "$KACHE_REMOTE_ENDPOINT" >"$endpoint_snapshot" ); then
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
+        echo '{"ok":false,"error":"Dockerfile requires a valid protected Kache endpoint"}'
+        return 0
+      fi
+      chmod 0600 "$endpoint_snapshot" || {
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
+        echo '{"ok":false,"error":"could not secure the Kache endpoint snapshot"}'
+        return 0
+      }
+    fi
     actual="$(sha256sum "$snapshot" 2>/dev/null | awk '{print $1}')"
     if [ "$actual" != "$expected" ]; then
-      rm -f "$snapshot"
+      rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
       echo '{"ok":false,"code":"stale_dockerfile","error":"Dockerfile changed after it was saved; review and save again"}'
       return 0
     fi
     if ! : > "$log" || ! chmod 0600 "$log"; then
-      rm -f "$snapshot"; echo '{"ok":false,"error":"could not secure the build log"}'; return 0
+      rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"; echo '{"ok":false,"error":"could not secure the build log"}'; return 0
     fi
-    inner="'$0' build-image '$snapshot' >> '$log' 2>&1; build_rc=\$?; rm -f '$snapshot'; echo \"__BUILD_RC__=\$build_rc\" >> '$log'"
+    inner="'$0' build-image '$snapshot' >> '$log' 2>&1; build_rc=\$?; rm -f '$snapshot' '$companion_snapshot' '$validator_snapshot' '$endpoint_snapshot'; echo \"__BUILD_RC__=\$build_rc\" >> '$log'"
     nohup sh -c "$inner" </dev/null >/dev/null 2>&1 &
     printf '{"ok":true,"action":"build-image","dockerfile_sha":"%s"}\n' "$actual"
   elif [ "$rc" -eq 1 ]; then
@@ -4279,23 +4737,104 @@ build_candidate_tag_valid() {
   [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$ ]]
 }
 
+# The plugin image builder intentionally creates a minimal context. Nashost's
+# supported deployment recipes need a small allowlisted set of companions; do
+# not copy the Dockerfile's
+# directory wholesale (it can live on persistent flash beside credentials).
+build_context_needs_kache_supervisor() {
+  grep -Eq '^[[:space:]]*COPY[[:space:]]+kache-supervise\.sh[[:space:]]+/usr/local/bin/kache-supervise\.sh[[:space:]]*$' "$1"
+}
+
+build_context_copy_kache_supervisor() {
+  build_context_copy_companion "$@"
+}
+
+build_context_needs_endpoint_validator() {
+  grep -Eq '^[[:space:]]*COPY[[:space:]]+endpoint-validation\.sh[[:space:]]+/usr/local/libexec/ci-runner-farm/endpoint-validation\.sh[[:space:]]*$' "$1"
+}
+
+build_context_copy_companion() {
+  local source="$1" destination="$2" size
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  size="$(stat -c %s "$source" 2>/dev/null)" || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le 1048576 ] || return 1
+  cp "$source" "$destination" && chmod 0600 "$destination"
+}
+
+# Load the private endpoint used only by deployment-specific Dockerfiles that
+# explicitly declare ARG KACHE_REMOTE_ENDPOINT. Keep it outside the ordinary
+# settings/config surfaces so status JSON and build logs never serialize it.
+kache_endpoint_load() {
+  local endpoint_file="${1:-$KACHE_ENDPOINT_FILE}" endpoint authority host port size
+  KACHE_REMOTE_ENDPOINT=""
+  [ -f "$endpoint_file" ] && [ ! -L "$endpoint_file" ] || return 1
+  [ "$(stat -c %a "$endpoint_file" 2>/dev/null)" = 600 ] || return 1
+  size="$(stat -c %s "$endpoint_file" 2>/dev/null)" || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le 2048 ] || return 1
+  endpoint="$(cat "$endpoint_file" 2>/dev/null)" || return 1
+  # Command substitution removes trailing newlines. Accept exactly the endpoint
+  # bytes with one optional final newline, never extra records or hidden data.
+  if [ "$size" -eq "${#endpoint}" ]; then
+    cmp -s "$endpoint_file" <(printf '%s' "$endpoint") || return 1
+  elif [ "$size" -eq "$(( ${#endpoint} + 1 ))" ]; then
+    cmp -s "$endpoint_file" <(printf '%s\n' "$endpoint") || return 1
+  else
+    return 1
+  fi
+  [[ "$endpoint" =~ ^https?:// ]] || return 1
+  case "$endpoint" in
+    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 1 ;;
+    *\"*|*\'*|*\\*|*[[:space:]]*) return 1 ;;
+  esac
+  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 1
+  authority="${endpoint#*://}"
+  authority="${authority%%/*}"
+  case "$authority" in
+    ''|*@*|*:*:*) return 1 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 1
+      ;;
+    *) host="$authority" ;;
+  esac
+  case "$host" in
+    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 1 ;;
+  esac
+  KACHE_REMOTE_ENDPOINT="$endpoint"
+}
+
 promoted_image_state_load() {
-  PROMOTED_IMAGE_TAG=""; PROMOTED_IMAGE_ID=""; PROMOTED_IMAGE_DOCKERFILE_SHA=""; PROMOTED_IMAGE_PROMOTED_AT=""
+  local key schema
+  PROMOTED_IMAGE_TAG=""; PROMOTED_IMAGE_ID=""; PROMOTED_IMAGE_DOCKERFILE_SHA=""; PROMOTED_IMAGE_CONTEXT_SHA=""; PROMOTED_IMAGE_PROMOTED_AT=""
   [ -f "$PROMOTED_IMAGE_FILE" ] && [ ! -L "$PROMOTED_IMAGE_FILE" ] || return 1
   [ "$(stat -c %a "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 600 ] || return 1
   [ "$(stat -c %s "$PROMOTED_IMAGE_FILE" 2>/dev/null || echo 4097)" -le 4096 ] || return 1
-  local key
+  schema="$(sed -n 's/^schema=//p' "$PROMOTED_IMAGE_FILE")"
+  case "$schema" in 1|2) ;; *) return 1 ;; esac
   for key in schema candidate_tag image_id dockerfile_sha promoted_at; do
     [ "$(grep -c "^${key}=" "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 1 ] || return 1
   done
-  [ "$(sed -n 's/^schema=//p' "$PROMOTED_IMAGE_FILE")" = 1 ] || return 1
+  if [ "$schema" = 2 ]; then
+    [ "$(grep -c '^context_sha=' "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 1 ] || return 1
+  else
+    [ "$(grep -c '^context_sha=' "$PROMOTED_IMAGE_FILE" 2>/dev/null)" = 0 ] || return 1
+  fi
   PROMOTED_IMAGE_TAG="$(sed -n 's/^candidate_tag=//p' "$PROMOTED_IMAGE_FILE")"
   PROMOTED_IMAGE_ID="$(sed -n 's/^image_id=//p' "$PROMOTED_IMAGE_FILE")"
   PROMOTED_IMAGE_DOCKERFILE_SHA="$(sed -n 's/^dockerfile_sha=//p' "$PROMOTED_IMAGE_FILE")"
+  if [ "$schema" = 2 ]; then
+    PROMOTED_IMAGE_CONTEXT_SHA="$(sed -n 's/^context_sha=//p' "$PROMOTED_IMAGE_FILE")"
+  else
+    # Schema 1 predates companion contexts; its complete identity was the
+    # Dockerfile hash. Keep existing verified promotions recoverable after upgrade.
+    PROMOTED_IMAGE_CONTEXT_SHA="$PROMOTED_IMAGE_DOCKERFILE_SHA"
+  fi
   PROMOTED_IMAGE_PROMOTED_AT="$(sed -n 's/^promoted_at=//p' "$PROMOTED_IMAGE_FILE")"
   build_candidate_tag_valid "$PROMOTED_IMAGE_TAG" &&
     [[ "$PROMOTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] &&
     [[ "$PROMOTED_IMAGE_DOCKERFILE_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$PROMOTED_IMAGE_CONTEXT_SHA" =~ ^[0-9a-f]{64}$ ]] &&
     resource_positive_uint_valid "$PROMOTED_IMAGE_PROMOTED_AT" 9999999999
 }
 
@@ -4322,20 +4861,22 @@ restore_promoted_image_alias() {
 }
 
 build_candidate_state_load() {
-  BUILD_CANDIDATE_TAG=""; BUILD_CANDIDATE_IMAGE_ID=""; BUILD_CANDIDATE_DOCKERFILE_SHA=""; BUILD_CANDIDATE_BUILT_AT=""
+  BUILD_CANDIDATE_TAG=""; BUILD_CANDIDATE_IMAGE_ID=""; BUILD_CANDIDATE_DOCKERFILE_SHA=""; BUILD_CANDIDATE_CONTEXT_SHA=""; BUILD_CANDIDATE_BUILT_AT=""
   [ -f "$BUILD_CANDIDATE_FILE" ] && [ ! -L "$BUILD_CANDIDATE_FILE" ] || return 1
   [ "$(stat -c %a "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 600 ] || return 1
   [ "$(stat -c %s "$BUILD_CANDIDATE_FILE" 2>/dev/null || echo 4097)" -le 4096 ] || return 1
   local key
-  for key in schema dockerfile_sha candidate_tag image_id built_at; do
+  for key in schema dockerfile_sha context_sha candidate_tag image_id built_at; do
     [ "$(grep -c "^${key}=" "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 1 ] || return 1
   done
-  [ "$(sed -n 's/^schema=//p' "$BUILD_CANDIDATE_FILE")" = 1 ] || return 1
+  [ "$(sed -n 's/^schema=//p' "$BUILD_CANDIDATE_FILE")" = 2 ] || return 1
   BUILD_CANDIDATE_DOCKERFILE_SHA="$(sed -n 's/^dockerfile_sha=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_CONTEXT_SHA="$(sed -n 's/^context_sha=//p' "$BUILD_CANDIDATE_FILE")"
   BUILD_CANDIDATE_TAG="$(sed -n 's/^candidate_tag=//p' "$BUILD_CANDIDATE_FILE")"
   BUILD_CANDIDATE_IMAGE_ID="$(sed -n 's/^image_id=//p' "$BUILD_CANDIDATE_FILE")"
   BUILD_CANDIDATE_BUILT_AT="$(sed -n 's/^built_at=//p' "$BUILD_CANDIDATE_FILE")"
   [[ "$BUILD_CANDIDATE_DOCKERFILE_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$BUILD_CANDIDATE_CONTEXT_SHA" =~ ^[0-9a-f]{64}$ ]] &&
     build_candidate_tag_valid "$BUILD_CANDIDATE_TAG" &&
     [[ "$BUILD_CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] &&
     resource_positive_uint_valid "$BUILD_CANDIDATE_BUILT_AT" 9999999999
@@ -4358,7 +4899,8 @@ cmd_promote_image() {
     err "production tag verification failed"; return 1;
   }
   now="$(date +%s)"; tmp="$PROMOTED_IMAGE_FILE.tmp.$$"
-  ( umask 077; printf 'schema=1\ncandidate_tag=%s\nimage_id=%s\ndockerfile_sha=%s\npromoted_at=%s\n'       "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  ( umask 077; printf 'schema=2\ncandidate_tag=%s\nimage_id=%s\ndockerfile_sha=%s\ncontext_sha=%s\npromoted_at=%s\n' \
+      "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$BUILD_CANDIDATE_CONTEXT_SHA" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$PROMOTED_IMAGE_FILE" || { rm -f "$tmp"; return 1; }
   rm -f "$BUILD_CANDIDATE_FILE"
@@ -4376,13 +4918,58 @@ cmd_build_image() {
     [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
     [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   fi
-  local ctx df_sha candidate_repo candidate_tag image_id now tmp rc
+  local ctx companion_source validator_source endpoint_source endpoint_digest df_sha supervisor_sha validator_sha context_sha candidate_repo candidate_tag image_id now tmp rc
+  local -a build_args=()
   ctx="$(mktemp -d)" || return 1
   cp "$df" "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
+  if build_context_needs_kache_supervisor "$ctx/Dockerfile"; then
+    if [ -n "${1:-}" ]; then companion_source="${df}.kache-supervise.sh"
+    else companion_source="${df%/*}/kache-supervise.sh"
+    fi
+    build_context_copy_kache_supervisor "$companion_source" "$ctx/kache-supervise.sh" || {
+      rm -rf "$ctx"
+      err "Dockerfile requires a safe kache-supervise.sh companion"
+      return 1
+    }
+  fi
+  if build_context_needs_endpoint_validator "$ctx/Dockerfile"; then
+    if [ -n "${1:-}" ]; then validator_source="${df}.endpoint-validation.sh"
+    else validator_source="${df%/*}/endpoint-validation.sh"
+    fi
+    build_context_copy_companion "$validator_source" "$ctx/endpoint-validation.sh" || {
+      rm -rf "$ctx"
+      err "Dockerfile requires a safe endpoint-validation.sh companion"
+      return 1
+    }
+  fi
+  if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$ctx/Dockerfile"; then
+    if [ -n "${1:-}" ]; then endpoint_source="${df}.kache-endpoint"
+    else endpoint_source="$KACHE_ENDPOINT_FILE"
+    fi
+    kache_endpoint_load "$endpoint_source" || {
+      rm -rf "$ctx"
+      err "custom Dockerfile requires a valid mode-0600 Kache endpoint file at $KACHE_ENDPOINT_FILE"
+      return 1
+    }
+    build_args=(--build-arg "KACHE_REMOTE_ENDPOINT=$KACHE_REMOTE_ENDPOINT")
+  fi
   df_sha="$(sha256sum "$ctx/Dockerfile" | awk '{print $1}')"
+  supervisor_sha=""
+  [ ! -f "$ctx/kache-supervise.sh" ] || supervisor_sha="$(sha256sum "$ctx/kache-supervise.sh" | awk '{print $1}')"
+  validator_sha=""
+  [ ! -f "$ctx/endpoint-validation.sh" ] || validator_sha="$(sha256sum "$ctx/endpoint-validation.sh" | awk '{print $1}')"
+  endpoint_digest=""
+  [ -z "${KACHE_REMOTE_ENDPOINT:-}" ] || endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$KACHE_REMOTE_ENDPOINT" | sha256sum | awk '{print $1}')"
+  context_sha="$({
+    printf 'ci-runner-farm:build-input:v3\n'
+    printf 'dockerfile=%s\n' "$df_sha"
+    [ -z "$supervisor_sha" ] || printf 'kache_supervisor=%s\n' "$supervisor_sha"
+    [ -z "$validator_sha" ] || printf 'endpoint_validator=%s\n' "$validator_sha"
+    [ -z "$endpoint_digest" ] || printf 'kache_endpoint=%s\n' "$endpoint_digest"
+  } | sha256sum | awk '{print $1}')"
   candidate_repo="${BUILTIN_IMAGE%:*}"
   now="$(date +%s)"
-  candidate_tag="${candidate_repo}:candidate-${df_sha:0:12}-${now}-$$"
+  candidate_tag="${candidate_repo}:candidate-${context_sha:0:12}-${now}-$$"
   build_candidate_tag_valid "$candidate_tag" || { rm -rf "$ctx"; err "could not derive safe candidate tag"; return 1; }
   if docker image inspect "$candidate_tag" >/dev/null 2>&1; then
     rm -rf "$ctx"
@@ -4390,13 +4977,14 @@ cmd_build_image() {
     return 1
   fi
   log "building immutable candidate '$candidate_tag' from $df"
-  docker build -t "$candidate_tag" "$ctx"; rc=$?
+  docker build -t "$candidate_tag" "${build_args[@]}" "$ctx"; rc=$?
   rm -rf "$ctx"
   if [ "$rc" -ne 0 ]; then err "build failed (rc=$rc)"; return "$rc"; fi
   image_id="$(docker image inspect "$candidate_tag" --format '{{.Id}}' 2>/dev/null)"
   [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "candidate image id verification failed"; return 1; }
   tmp="$BUILD_CANDIDATE_FILE.tmp.$$"
-  ( umask 077; printf 'schema=1\ndockerfile_sha=%s\ncandidate_tag=%s\nimage_id=%s\nbuilt_at=%s\n'       "$df_sha" "$candidate_tag" "$image_id" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  ( umask 077; printf 'schema=2\ndockerfile_sha=%s\ncontext_sha=%s\ncandidate_tag=%s\nimage_id=%s\nbuilt_at=%s\n' \
+      "$df_sha" "$context_sha" "$candidate_tag" "$image_id" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$BUILD_CANDIDATE_FILE" || { rm -f "$tmp"; return 1; }
   log "candidate verified: $candidate_tag ($image_id)"
@@ -4479,8 +5067,8 @@ migration_continue_guarded() {
 case "${1:-status}" in
   start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   cmd_boot_autostart ;;
-  stop)         with_fleet_lock wait cmd_stop ;;
-  restart)      with_fleet_lock wait cmd_restart ;;
+  stop)         cmd_stop_fenced ;;
+  restart)      cmd_restart_fenced ;;
   mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
   scale)
     if [ -n "${3:-}" ]; then with_fleet_lock wait cmd_scale "${2}" "${3}"
@@ -4510,10 +5098,12 @@ case "${1:-status}" in
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
   maintenance)  with_fleet_lock wait cmd_maintenance "${2:-status}" ;;
-  mutation-owner-claim) with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
-  mutation-owner-release) with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
-  mutation-owner-status) cmd_mutation_owner_status ;;
+  mutation-owner-claim) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
+  mutation-owner-release) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
+  mutation-owner-status) with_mutation_owner_lock cmd_mutation_owner_status ;;
+  reconcile-status) cmd_reconcile_status ;;
   reconcile-config) with_fleet_lock wait cmd_reconcile_config ;;
+  reconcile-drain-ready) cmd_reconcile_drain_ready "${2:-}" "${3:-}" ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;

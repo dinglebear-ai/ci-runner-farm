@@ -49,6 +49,9 @@ docker_calls="$tmpdir/docker.calls"
 pool_mode_enabled() { return 0; }
 pool_snapshot_load() { POOL_CONFIG_VERSION=v2; return 0; }
 pool_runner_spec_hash() { printf '%s\n' pool-spec-v1; }
+# Model the production alias repair prerequisite: an already-available built-in
+# image succeeds, while a missing image with no promotion fixture fails closed.
+restore_promoted_image_alias() { [ -n "$CRF_TEST_IMAGE_ID" ]; }
 docker() {
   [ "${1:-}" = image ] && [ "${2:-}" = inspect ] || return 1
   local calls=0

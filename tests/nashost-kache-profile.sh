@@ -5,8 +5,11 @@ cd "$(dirname "$0")/.."
 FULL=deployments/nashost/runner.Dockerfile
 OVERLAY=deployments/nashost/kache-overlay.Dockerfile
 SUPERVISOR=deployments/nashost/kache-supervise.sh
+VALIDATOR=deployments/nashost/endpoint-validation.sh
 
-bash -n "$SUPERVISOR"
+bash -n "$SUPERVISOR" "$VALIDATOR"
+grep -Fq '%s contains unsafe characters' "$VALIDATOR"
+grep -Fq 'valid authority and optional port from 1 through 65535' "$VALIDATOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq 'php-cli ripgrep file' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_TAG=v0.13.0' "$dockerfile"
@@ -21,6 +24,41 @@ for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq '"[cc]"' "$dockerfile"
   grep -Fq '"extra_allowlist_flags = [\"-fmerge-all-constants\"]"' "$dockerfile"
   ! grep -Fq 'prefetch_max_bytes' "$dockerfile"
+  # Public profiles must fail closed until the operator injects the real
+  # private endpoint. Documentation-only addresses must never become a
+  # plausible-looking, silently broken production configuration.
+  grep -Eq '^ARG KACHE_REMOTE_ENDPOINT$' "$dockerfile"
+  grep -Fq 'COPY endpoint-validation.sh /usr/local/libexec/ci-runner-farm/endpoint-validation.sh' "$dockerfile"
+  # shellcheck disable=SC2016
+  grep -Fq '/usr/local/libexec/ci-runner-farm/endpoint-validation.sh kache "$endpoint"' "$dockerfile"
+  # This is a literal Dockerfile contract.
+  # shellcheck disable=SC2016
+  grep -Fq 'endpoint = \"${endpoint}\"' "$dockerfile"
+  ! grep -Fq '*192.0.2.*' "$dockerfile"
+  ! grep -Eq 'endpoint = .*192\.0\.2\.|endpoint = .*198\.51\.100\.|endpoint = .*203\.0\.113\.' "$dockerfile"
+
+  # Parse the exact printf arguments from the Dockerfile, substitute a safe
+  # endpoint, and prove the emitted document is valid TOML with one endpoint.
+  python3 - "$dockerfile" <<'PY'
+import ast
+import pathlib
+import re
+import sys
+import tomllib
+
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+start = next(i for i, line in enumerate(lines) if line.strip() == '"[cache]" \\')
+end = next(i for i in range(start, len(lines)) if '> /home/runner/.config/kache/config.toml' in lines[i])
+rendered = []
+for line in lines[start:end]:
+    match = re.fullmatch(r'\s+(".*") \\', line)
+    if match:
+        rendered.append(ast.literal_eval(match.group(1)).replace('${endpoint}', 'https://cache.internal:9000'))
+document = '\n'.join(rendered) + '\n'
+parsed = tomllib.loads(document)
+assert parsed['cache']['remote']['endpoint'] == 'https://cache.internal:9000'
+assert document.count('endpoint = ') == 1
+PY
 done
 
 grep -Fq 'FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804' "$OVERLAY"

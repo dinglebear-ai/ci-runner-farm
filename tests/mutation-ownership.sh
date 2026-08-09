@@ -13,6 +13,9 @@ awk '
   copy {print}
 ' "$ENGINE" > "$tmp/functions.sh"
 awk '/^with_fleet_lock\(\)/ {copy=1} copy {print} copy && /^}$/ {exit}' "$ENGINE" >> "$tmp/functions.sh"
+for fn in cmd_stop_fenced cmd_stop_fenced_owned cmd_restart_fenced cmd_restart_fenced_owned; do
+  sed -n "/^${fn}()/,/^}/p" "$ENGINE" >>"$tmp/functions.sh"
+done
 # shellcheck disable=SC1091
 . "$tmp/functions.sh"
 
@@ -66,6 +69,99 @@ cmd_mutation_owner_release session-a >/dev/null
 with_fleet_lock wait record_action released
 crf_assert_eq released "$(cat "$tmp/action")" "unleased mutation execution"
 
+# Status is not read-only: loading an expired record removes it. It must hold
+# the same owner lock as claim so stale cleanup cannot unlink a newly moved
+# claim file after the claimant has returned success.
+(
+  race="$tmp/status-claim-race"
+  mkdir -p "$race/run"
+  RUNDIR="$race/run"
+  MUTATION_OWNER_FILE="$RUNDIR/mutation-owner.state"
+  : >"$MUTATION_OWNER_FILE"
+  mutation_owner_state_load() {
+    if [ "${CRF_STATUS_RACE_PROBE:-0}" = 1 ]; then
+      : >"$race/status-loaded-expired"
+      while [ ! -e "$race/release-status" ]; do sleep 0.01; done
+      rm -f "$MUTATION_OWNER_FILE"
+    fi
+    return 1
+  }
+  (
+    export CRF_STATUS_RACE_PROBE=1
+    with_mutation_owner_lock cmd_mutation_owner_status >"$race/status.out"
+  ) &
+  status_pid=$!
+  for _ in $(seq 1 200); do [ -e "$race/status-loaded-expired" ] && break; sleep 0.01; done
+  [ -e "$race/status-loaded-expired" ] || crf_fail "status did not reach stale-state cleanup boundary"
+  (
+    unset CRF_STATUS_RACE_PROBE
+    with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_claim session-new 300 >"$race/claim.out"
+    : >"$race/claim-complete"
+  ) &
+  claim_pid=$!
+  sleep 0.1
+  [ ! -e "$race/claim-complete" ] || crf_fail "claim bypassed in-progress stale status cleanup"
+  : >"$race/release-status"
+  wait "$status_pid"
+  wait "$claim_pid"
+  grep -Fq 'owner=session-new' "$MUTATION_OWNER_FILE" ||
+    crf_fail "stale status cleanup deleted the newer lease"
+)
+
+# Stop/Restart must coordinate their pre-fleet-lock reconciliation fence with
+# lease acquisition. A claimant cannot enter between the guard and fence; if a
+# claimant wins first, Stop must refuse before signalling reconciliation.
+(
+  race="$tmp/stop-lease-race"
+  mkdir -p "$race/run"
+  RUNDIR="$race/run"
+  mutation_owner_guard() {
+    if [ -e "$race/pause-guard" ] && [ ! -e "$race/guard-entered" ]; then
+      : >"$race/guard-entered"
+      while [ ! -e "$race/release-guard" ]; do sleep 0.01; done
+    fi
+    [ ! -e "$race/lease-active" ]
+  }
+  reconcile_stop() { : >"$race/reconcile-signalled"; }
+  cmd_stop() { : >"$race/stop-ran"; }
+  with_fleet_lock() { shift; "$@"; }
+
+  : >"$race/pause-guard"
+  cmd_stop_fenced &
+  stop_pid=$!
+  for _ in $(seq 1 200); do [ -e "$race/guard-entered" ] && break; sleep 0.01; done
+  [ -e "$race/guard-entered" ] || crf_fail "Stop did not reach the guarded fence boundary"
+  with_mutation_owner_lock sh -c ': >"$1"' sh "$race/claim-entered" &
+  claim_pid=$!
+  sleep 0.1
+  [ ! -e "$race/claim-entered" ] || crf_fail "lease claimant entered between Stop guard and fence"
+  : >"$race/release-guard"
+  wait "$stop_pid"
+  wait "$claim_pid"
+  [ -e "$race/reconcile-signalled" ] && [ -e "$race/stop-ran" ] && [ -e "$race/claim-entered" ] ||
+    crf_fail "serialized Stop/claim sequence did not complete"
+
+  rm -f "$race/guard-entered" "$race/release-guard" "$race/reconcile-signalled" \
+    "$race/stop-ran" "$race/claim-entered" "$race/pause-guard"
+  with_mutation_owner_lock sh -c '
+    : >"$1"; : >"$2"
+    while [ ! -e "$3" ]; do sleep 0.01; done
+  ' sh "$race/lease-active" "$race/claim-locked" "$race/release-claim" &
+  claim_pid=$!
+  for _ in $(seq 1 200); do [ -e "$race/claim-locked" ] && break; sleep 0.01; done
+  [ -e "$race/claim-locked" ] || crf_fail "competing claimant did not acquire owner lock"
+  ( set +e; cmd_stop_fenced; printf '%s\n' "$?" >"$race/blocked-stop-status" ) &
+  stop_pid=$!
+  sleep 0.1
+  [ ! -e "$race/reconcile-signalled" ] || crf_fail "Stop signalled reconciliation while claimant owned coordination"
+  : >"$race/release-claim"
+  wait "$claim_pid"
+  wait "$stop_pid"
+  [ "$(cat "$race/blocked-stop-status")" -ne 0 ] || crf_fail "Stop ignored the winning mutation lease"
+  [ ! -e "$race/reconcile-signalled" ] && [ ! -e "$race/stop-ran" ] ||
+    crf_fail "refused Stop mutated after a competing lease won"
+)
+
 cmd_mutation_owner_claim session-a 300 >/dev/null
 sed -i 's/^expires_at=.*/expires_at=1/' "$MUTATION_OWNER_FILE"
 status="$(cmd_mutation_owner_status)"
@@ -89,6 +185,9 @@ chmod 0600 "$MUTATION_OWNER_FILE"
 rm -f "$MUTATION_OWNER_FILE"
 
 for guarded in \
+  "mutation-owner-claim) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_claim" \
+  "mutation-owner-release) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_release" \
+  "mutation-owner-status) with_mutation_owner_lock cmd_mutation_owner_status" \
   "autoscale-tick)   with_fleet_lock wait autoscale_tick" \
   "imageupdate-tick)   with_fleet_lock wait imageupdate_tick" \
   "begin-migration)  with_fleet_lock wait migration_start" \

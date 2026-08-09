@@ -3,13 +3,19 @@ set -Eeuo pipefail
 umask 077
 
 PLUGIN=ci-runner-farm
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VALIDATION_SOURCE="${CRF_ENDPOINT_VALIDATION_SOURCE:-$SCRIPT_DIR/endpoint-validation.sh}"
+[ -f "$VALIDATION_SOURCE" ] && [ ! -L "$VALIDATION_SOURCE" ] ||
+  { echo "endpoint validation library is unavailable: $VALIDATION_SOURCE" >&2; exit 2; }
+# shellcheck source=deployments/nashost/endpoint-validation.sh
+. "$VALIDATION_SOURCE"
 ENGINE="${CRF_ENGINE:-/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh}"
 PLUGIN_CONFIG_DIR="${CRF_PLUGIN_CONFIG_DIR:-/boot/config/plugins/$PLUGIN}"
 AUDIT_CONFIG="${CRF_AUDIT_CONFIG:-$PLUGIN_CONFIG_DIR/fleet-audit.env}"
 LOG_ROOT="${CRF_AUDIT_LOG_ROOT:-/mnt/user/logs/ci-runner-farm-audit}"
 WATCHDOG_SAMPLE_SECONDS="${CRF_WATCHDOG_SAMPLE_SECONDS:-30}"
 GOTIFY_ENV="${CRF_GOTIFY_ENV:-/boot/config/plugins/user.scripts/gotify.env}"
-GOTIFY_URL="${GOTIFY_URL:-https://gotify.nashost.tv}"
+GOTIFY_URL="${GOTIFY_URL:-}"
 GOTIFY_TOKEN="${GOTIFY_TOKEN:-}"
 CRF_NOTIFY_SUCCESS="${CRF_NOTIFY_SUCCESS:-true}"
 
@@ -21,7 +27,7 @@ CRF_EXPECTED_KACHE_VERSION="${CRF_EXPECTED_KACHE_VERSION:-0.13.0}"
 CRF_EXPECTED_KACHE_SHA256="${CRF_EXPECTED_KACHE_SHA256:-5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972}"
 CRF_EXPECTED_KACHE_SOCKET="${CRF_EXPECTED_KACHE_SOCKET:-/_work/.kache/daemon.sock}"
 CRF_EXPECTED_KACHE_LOCAL_MAX="${CRF_EXPECTED_KACHE_LOCAL_MAX:-80GiB}"
-CRF_EXPECTED_KACHE_ENDPOINT="${CRF_EXPECTED_KACHE_ENDPOINT:-http://192.0.2.2:9000}"
+CRF_EXPECTED_KACHE_ENDPOINT="${CRF_EXPECTED_KACHE_ENDPOINT:-}"
 CRF_EXPECTED_KACHE_BUCKET="${CRF_EXPECTED_KACHE_BUCKET:-kache}"
 CRF_EXPECTED_KACHE_PREFIX="${CRF_EXPECTED_KACHE_PREFIX:-rust}"
 CRF_EXPECTED_KACHE_REGION="${CRF_EXPECTED_KACHE_REGION:-us-east-1}"
@@ -39,21 +45,75 @@ CRF_RUNNER_NAME_PREFIX="${CRF_RUNNER_NAME_PREFIX:-nashost-}"
 CRF_EXPECTED_PLUGIN_VERSION="${CRF_EXPECTED_PLUGIN_VERSION:-}"
 CRF_EXPECTED_PLUGIN_PACKAGE_SHA256="${CRF_EXPECTED_PLUGIN_PACKAGE_SHA256:-}"
 
+# Both persistent inputs are data read by a scheduled root process, never shell
+# programs. Quotes delimit one literal value; they do not enable expansion.
+load_runtime_literals() {
+  local config="$1" kind="$2" line key raw value quote seen='|'
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    case "$line" in
+      *=*) key="${line%%=*}"; raw="${line#*=}" ;;
+      *) echo "$kind config contains an unknown or executable line" >&2; return 1 ;;
+    esac
+    case "$kind:$key" in
+      audit:WATCHDOG_SAMPLE_SECONDS|audit:CRF_NOTIFY_SUCCESS|\
+      audit:CRF_EXPECTED_COUNT|audit:CRF_EXPECTED_IMAGE_ID|\
+      audit:CRF_EXPECTED_KACHE_VERSION|audit:CRF_EXPECTED_KACHE_SHA256|\
+      audit:CRF_EXPECTED_KACHE_SOCKET|audit:CRF_EXPECTED_KACHE_LOCAL_MAX|\
+      audit:CRF_EXPECTED_KACHE_ENDPOINT|audit:CRF_EXPECTED_KACHE_BUCKET|\
+      audit:CRF_EXPECTED_KACHE_PREFIX|audit:CRF_EXPECTED_KACHE_REGION|\
+      audit:CRF_EXPECTED_KACHE_PROFILE|audit:CRF_EXPECTED_AWS_MOUNT|\
+      audit:CRF_EXPECTED_CPU_BUDGET_MILLI|audit:CRF_EXPECTED_CPU_RESERVE_MILLI|\
+      audit:CRF_EXPECTED_CPU_CONFIGURED_MILLI|audit:CRF_EXPECTED_CPU_HEADROOM_MILLI|\
+      audit:CRF_EXPECTED_MEMORY_BUDGET_BYTES|audit:CRF_EXPECTED_MEMORY_RESERVE_BYTES|\
+      audit:CRF_EXPECTED_MEMORY_CONFIGURED_BYTES|audit:CRF_EXPECTED_MEMORY_HEADROOM_BYTES|\
+      audit:CRF_RUNNER_NAME_PREFIX|audit:CRF_EXPECTED_PLUGIN_VERSION|\
+      audit:CRF_EXPECTED_PLUGIN_PACKAGE_SHA256|\
+      Gotify:GOTIFY_URL|Gotify:GOTIFY_TOKEN) ;;
+      *) echo "$kind config contains unsupported key: $key" >&2; return 1 ;;
+    esac
+    case "$seen" in
+      *"|$key|"*) echo "$kind config contains duplicate key: $key" >&2; return 1 ;;
+    esac
+    seen="${seen}${key}|"
+    [ "${#raw}" -ge 2 ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    quote="${raw:0:1}"
+    [ "$quote" = "'" ] || [ "$quote" = '"' ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    [ "${raw: -1}" = "$quote" ] || {
+      echo "$kind config values must be quoted literals" >&2; return 1;
+    }
+    value="${raw:1:${#raw}-2}"
+    case "$value" in
+      *"$quote"*) echo "$kind config values must be simple literals" >&2; return 1 ;;
+      *\$\(*|*\`*) echo "$kind config substitutions are forbidden" >&2; return 1 ;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done <"$config"
+}
+
 if [ -e "$AUDIT_CONFIG" ]; then
   [ -f "$AUDIT_CONFIG" ] && [ ! -L "$AUDIT_CONFIG" ] ||
     { echo "unsafe audit config: $AUDIT_CONFIG" >&2; exit 2; }
   [ "$(stat -c %a "$AUDIT_CONFIG")" = 600 ] ||
     { echo "audit config must be mode 600: $AUDIT_CONFIG" >&2; exit 2; }
-  # shellcheck disable=SC1090
-  . "$AUDIT_CONFIG"
+  [ "$(stat -c %u "$AUDIT_CONFIG")" = "$EUID" ] ||
+    { echo "audit config must be owned by the audit user: $AUDIT_CONFIG" >&2; exit 2; }
+  load_runtime_literals "$AUDIT_CONFIG" audit || exit 2
 fi
 if [ -e "$GOTIFY_ENV" ]; then
   [ -f "$GOTIFY_ENV" ] && [ ! -L "$GOTIFY_ENV" ] ||
     { echo "unsafe Gotify config: $GOTIFY_ENV" >&2; exit 2; }
   [ "$(stat -c %a "$GOTIFY_ENV")" = 600 ] ||
     { echo "Gotify config must be mode 600: $GOTIFY_ENV" >&2; exit 2; }
-  # shellcheck disable=SC1090
-  . "$GOTIFY_ENV"
+  [ "$(stat -c %u "$GOTIFY_ENV")" = "$EUID" ] ||
+    { echo "Gotify config must be owned by the audit user: $GOTIFY_ENV" >&2; exit 2; }
+  load_runtime_literals "$GOTIFY_ENV" Gotify || exit 2
 fi
 case "$CRF_NOTIFY_SUCCESS" in true|false) ;; *) echo "CRF_NOTIFY_SUCCESS must be true or false" >&2; exit 2 ;; esac
 
@@ -78,19 +138,38 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"
 }
 notify_gotify() (
-  local title="$1" message="$2" priority="$3" config
-  [ -n "$GOTIFY_URL" ] && [ -n "$GOTIFY_TOKEN" ] || return 0
-  [[ "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  config="$(mktemp /tmp/ci-runner-farm-gotify.XXXXXX)" || return 0
+  local title="$1" message="$2" priority="$3" config allowed_proto='=https'
+  [ -n "$GOTIFY_TOKEN" ] || return 0
+  if [ -n "${GOTIFY_CONFIG_ERROR:-}" ] ||
+     [[ ! "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] ||
+     [ -z "$GOTIFY_URL" ] || ! require_gotify_url "$GOTIFY_URL"; then
+    printf 'Gotify notification configuration failed: %s\n' \
+      "${GOTIFY_CONFIG_ERROR:-GOTIFY_URL or GOTIFY_TOKEN is invalid}" >&2
+    return 2
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    echo 'Gotify notification delivery failed: curl is unavailable' >&2
+    return 1
+  }
+  config="$(mktemp /tmp/ci-runner-farm-gotify.XXXXXX)" || {
+    echo 'Gotify notification delivery failed: could not create protected curl config' >&2
+    return 1
+  }
   trap 'rm -f "$config"' EXIT
   chmod 0600 "$config"
   printf 'header = "X-Gotify-Key: %s"\n' "$GOTIFY_TOKEN" > "$config"
-  curl -fsS --max-time 15 --config "$config" --request POST \
+  case "$GOTIFY_URL" in http://*) allowed_proto='=http' ;; esac
+  env -u http_proxy -u https_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    curl --disable -fsS --max-time 15 --noproxy '*' \
+    --proto "$allowed_proto" --config "$config" --request POST \
     --url "${GOTIFY_URL%/}/message" \
     --data-urlencode "title=$title" \
     --data-urlencode "message=$message" \
-    --data-urlencode "priority=$priority" >/dev/null 2>&1 || true
+    --data-urlencode "priority=$priority" >/dev/null 2>&1 || {
+      echo 'Gotify notification delivery failed: endpoint rejected or did not receive the message' >&2
+      return 1
+    }
 )
 notify_failure() {
   local log_file="$1"
@@ -108,6 +187,17 @@ notify_success() {
     "16 runners verified with exact labels, Kache integrity, and 2 CPU / 2 GiB headroom. Log: $log_file" 1
 }
 
+GOTIFY_CONFIG_ERROR=""
+if [ -n "$GOTIFY_TOKEN" ]; then
+  if [[ ! "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_TOKEN contains unsafe characters'
+  elif [ -z "$GOTIFY_URL" ]; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_URL is required when GOTIFY_TOKEN is configured'
+  elif ! require_gotify_url "$GOTIFY_URL"; then
+    GOTIFY_CONFIG_ERROR='GOTIFY_URL must use HTTPS; HTTP is allowed only for exact localhost or 127.0.0.1 loopback targets'
+  fi
+fi
+
 for value in \
   "$CRF_EXPECTED_COUNT" "$WATCHDOG_SAMPLE_SECONDS" \
   "$CRF_EXPECTED_CPU_BUDGET_MILLI" "$CRF_EXPECTED_CPU_RESERVE_MILLI" \
@@ -120,6 +210,23 @@ require_image_id "$CRF_EXPECTED_IMAGE_ID" ||
   { echo "invalid expected image id" >&2; exit 2; }
 require_sha256 "$CRF_EXPECTED_KACHE_SHA256" ||
   { echo "invalid expected Kache hash" >&2; exit 2; }
+if require_kache_endpoint "$CRF_EXPECTED_KACHE_ENDPOINT"; then
+  :
+else
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must not use a documentation-only address" >&2
+  elif [ "$status" -eq 3 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT contains unsafe characters" >&2
+  elif [ "$status" -eq 4 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must contain a valid authority" >&2
+  elif [ -z "$CRF_EXPECTED_KACHE_ENDPOINT" ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT is required in $AUDIT_CONFIG" >&2
+  else
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must be an HTTP or HTTPS URL" >&2
+  fi
+  exit 2
+fi
 [ -n "$CRF_EXPECTED_PLUGIN_VERSION" ] ||
   { echo "CRF_EXPECTED_PLUGIN_VERSION is required in $AUDIT_CONFIG" >&2; exit 2; }
 require_sha256 "$CRF_EXPECTED_PLUGIN_PACKAGE_SHA256" ||
@@ -144,6 +251,8 @@ audit_body() {
   local plugin_version package_name package_path package_hash
   local watchdog_pid_before watchdog_pid_after watchdog_count_before watchdog_count_after
   local watchdog_restarts_before watchdog_restarts_after watchdog_status mutation_status
+
+  [ -z "$GOTIFY_CONFIG_ERROR" ] || fail "$GOTIFY_CONFIG_ERROR"
 
   for cmd in jq php python3 docker sha256sum stat pgrep ps flock; do
     require_command "$cmd"
@@ -321,8 +430,10 @@ printf("github_online_exact=%d\n",count($current));
   assert_eq "$CRF_EXPECTED_PLUGIN_VERSION" "$plugin_version" "plugin version"
   assert_eq "$CRF_EXPECTED_PLUGIN_PACKAGE_SHA256" "$package_hash" "plugin package hash"
 
-  [ -z "$(pgrep -f '[r]unner-farm.sh reconcile-drain' || true)" ] ||
-    fail "reconciliation worker is still running"
+  reconcile_status="$("$ENGINE" reconcile-status)" ||
+    fail "reconciliation ownership status is invalid"
+  assert_eq true "$(jq -r '.ok' <<<"$reconcile_status")" "reconciliation ownership status"
+  assert_eq false "$(jq -r '.active' <<<"$reconcile_status")" "reconciliation worker activity"
   mutation_status="$("$ENGINE" mutation-owner-status)"
   assert_eq false "$(jq -r '.active' <<<"$mutation_status")" "mutation owner activity"
 
@@ -356,10 +467,32 @@ set -e
 mv "$tmp_log" "$log_file"
 chmod 0644 "$log_file"
 ln -sfn "$(basename "$log_file")" "$LOG_ROOT/latest.log"
-cat "$log_file"
 
 if [ "$rc" -ne 0 ]; then
-  notify_failure "$log_file"
+  set +e
+  notification_error="$(notify_failure "$log_file" 2>&1)"
+  notification_rc=$?
+  set -e
+  if [ -z "$GOTIFY_TOKEN" ]; then
+    printf 'notification_result=SKIPPED gotify=disabled\n' >>"$log_file"
+  elif [ "$notification_rc" -eq 0 ]; then
+    printf 'notification_result=PASS gotify=delivered\n' >>"$log_file"
+  else
+    printf 'notification_result=FAIL gotify=%s\n' "$notification_error" >>"$log_file"
+  fi
+  cat "$log_file"
   exit "$rc"
 fi
-notify_success "$log_file"
+set +e
+notification_error="$(notify_success "$log_file" 2>&1)"
+notification_rc=$?
+set -e
+if [ "$CRF_NOTIFY_SUCCESS" = false ] || [ -z "$GOTIFY_TOKEN" ]; then
+  printf 'notification_result=SKIPPED gotify=disabled\n' >>"$log_file"
+elif [ "$notification_rc" -eq 0 ]; then
+  printf 'notification_result=PASS gotify=delivered\n' >>"$log_file"
+else
+  printf 'notification_result=FAIL gotify=%s\n' "$notification_error" >>"$log_file"
+fi
+cat "$log_file"
+[ "$notification_rc" -eq 0 ] || exit 3

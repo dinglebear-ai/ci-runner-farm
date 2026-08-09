@@ -118,6 +118,10 @@ grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
 bash tests/performance-contracts.sh >/dev/null
 bash tests/autoscale-locks.sh >/dev/null
 bash tests/mutation-ownership.sh >/dev/null
+bash tests/reconcile-status.sh >/dev/null
+bash tests/endpoint-validation.sh >/dev/null
+bash tests/nashost-kache-profile.sh >/dev/null
+bash tests/nashost-candidate-docs.sh >/dev/null
 bash tests/image-promotion.sh >/dev/null
 bash tests/resource-admission.sh >/dev/null
 bash tests/nashost-fleet-audit.sh >/dev/null
@@ -127,7 +131,11 @@ bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
 bash tests/readiness-json.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
+bash tests/release-publication-guard.sh >/dev/null
 bash tests/stalled-credential-handoff.sh >/dev/null
+bash tests/reconcile-stop-lifecycle.sh >/dev/null
+bash tests/reconcile-retry.sh >/dev/null
+bash tests/runner-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
 bash tests/package-reproducible.sh >/dev/null

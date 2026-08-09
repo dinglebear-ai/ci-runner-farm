@@ -114,7 +114,12 @@ RUN mkdir -p /home/runner/.cargo && printf '%s\n' \
 # runner's PRIVATE persistent host mount, so the store survives jobs AND
 # recycles without ever being shared across containers (the forbidden case is
 # cross-OS-boundary sharing, not cross-repo: one store dedups all 19 repos).
-RUN mkdir -p /home/runner/.config/kache && printf '%s\n' \
+COPY endpoint-validation.sh /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
+RUN chmod 0755 /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
+ARG KACHE_REMOTE_ENDPOINT
+RUN endpoint="${KACHE_REMOTE_ENDPOINT:-}" \
+ && /usr/local/libexec/ci-runner-farm/endpoint-validation.sh kache "$endpoint" \
+ && mkdir -p /home/runner/.config/kache && printf '%s\n' \
   "[cache]" \
   "local_store = \"/_work/.kache\"" \
   "daemon_idle_timeout_secs = 0" \
@@ -128,7 +133,7 @@ RUN mkdir -p /home/runner/.config/kache && printf '%s\n' \
   "[cache.remote]" \
   "type = \"s3\"" \
   "bucket = \"kache\"" \
-  "endpoint = \"http://192.0.2.2:9000\"" \
+  "endpoint = \"${endpoint}\"" \
   "region = \"us-east-1\"" \
   "prefix = \"rust\"" \
   "profile = \"kache\"" \

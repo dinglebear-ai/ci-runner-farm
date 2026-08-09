@@ -2,9 +2,28 @@
 # Regression for detached reconciliation launched while the caller owns fd 8.
 set -euo pipefail
 
-# reconcile_start launches "$0 reconcile-drain". This probe deliberately keeps
-# the outer child shell alive while an inner worker closes its inherited fd 8
-# and tries to acquire the same lock, matching the real dispatch structure.
+# Model the final-process activation-state handoff before the drain action. This
+# branch must terminate internally rather than fall through into the test body.
+if [ "${1:-}" = "reconcile-drain-ready" ] && [ -n "${CRF_RECONCILE_PROBE_DIR:-}" ]; then
+  ready="${2:-}"; cancel="${3:-}"; attempt=0
+  ready_tmp="$ready.tmp.$$"
+  ( umask 077; printf 'ready\n' >"$ready_tmp" ) && mv "$ready_tmp" "$ready"
+  while [ "$attempt" -lt 500 ] && [ "$(cat "$ready" 2>/dev/null)" != go ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1)); sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = go ] && [ ! -e "$cancel" ] || exit 1
+  printf 'active\n' >"$ready_tmp" && mv "$ready_tmp" "$ready"
+  attempt=0
+  while [ "$attempt" -lt 500 ] && [ "$(cat "$ready" 2>/dev/null)" != committed ] && [ ! -e "$cancel" ]; do
+    attempt=$((attempt+1)); sleep 0.01
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = committed ] && [ ! -e "$cancel" ] || exit 1
+  rm -f "$ready" "$cancel"
+  exec "$0" reconcile-drain
+fi
+
+# The final drain closes inherited fd 8 and tries to acquire the same lock,
+# matching the real dispatch structure after the readiness handoff.
 if [ "${1:-}" = "reconcile-drain" ] && [ -n "${CRF_RECONCILE_PROBE_DIR:-}" ]; then
   (
     exec 8>&- 9>&-
@@ -20,16 +39,23 @@ fi
 cd "$(dirname "$0")/.."
 ENGINE="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"
 tmpdir="$(mktemp -d)"
-trap 'if [ -f "$tmpdir/reconcile.pid" ]; then kill "$(cat "$tmpdir/reconcile.pid")" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
+trap 'if [ -f "$tmpdir/reconcile.pid" ]; then pid="$(cat "$tmpdir/reconcile.pid")"; kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
 
-sed -n '/^reconcile_pid_active()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_proc_record()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_identity_read()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_group_live()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_group_owned()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_pid_active()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
 sed -n '/^reconcile_start()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
+sed -n '/^reconcile_stop()/,/^}/p' "$ENGINE" >> "$tmpdir/reconcile-start.sh"
 # shellcheck disable=SC1090,SC1091 # extracted from the tested engine above
 . "$tmpdir/reconcile-start.sh"
 
 export CRF_RECONCILE_PROBE_DIR="$tmpdir"
 RUNDIR="$tmpdir"
 RECONCILE_PID="$tmpdir/reconcile.pid"
+RECONCILE_IDENTITY="$tmpdir/reconcile.identity"
+err() { printf '%s\n' "$*" >&2; }
 
 # Model with_fleet_lock: the caller owns fd 8 when reconcile_start detaches its
 # child, then returns and closes its own descriptor. The detached child must not
@@ -70,11 +96,6 @@ done
   echo 'FAIL: stale/reused reconcile PID prevented a replacement worker' >&2
   exit 1
 }
-grep -Fq "trap 'rm -f \"\$RECONCILE_PID\"' EXIT INT TERM" "$ENGINE" || {
-  echo 'FAIL: reconcile worker does not clean its PID file on abnormal exit' >&2
-  exit 1
-}
-
 echo 'reconcile-pid-identity: OK'
 
 # The resource-aware start path must release fd 8 around slow Docker/GitHub
@@ -187,51 +208,3 @@ echo 'reconcile-retiring-fairness: OK'
 }
 
 echo 'reconcile-stale-refusal-fairness: OK'
-
-
-# A stale, reused, or unrelated PID must not suppress reconciliation. Only a
-# live process whose argv contains the exact reconcile-drain subcommand owns the
-# PID file.
-sed -n '/^reconcile_pid_active()/,/^}/p' "$ENGINE" > "$tmpdir/reconcile-pid-active.sh"
-# shellcheck disable=SC1090
-. "$tmpdir/reconcile-pid-active.sh"
-RECONCILE_PID="$tmpdir/reconcile.pid"
-
-printf '99999999\n' > "$RECONCILE_PID"
-if reconcile_pid_active; then
-  echo "FAIL: dead reconcile PID was accepted" >&2
-  exit 1
-fi
-
-sleep 30 &
-unrelated_pid=$!
-printf '%s\n' "$unrelated_pid" > "$RECONCILE_PID"
-if reconcile_pid_active; then
-  kill "$unrelated_pid" 2>/dev/null || true
-  echo "FAIL: unrelated live PID was accepted as reconcile worker" >&2
-  exit 1
-fi
-kill "$unrelated_pid" 2>/dev/null || true
-wait "$unrelated_pid" 2>/dev/null || true
-
-bash -c 'exec -a reconcile-drain sleep 30' &
-worker_pid=$!
-printf '%s\n' "$worker_pid" > "$RECONCILE_PID"
-for _ in 1 2 3 4 5; do
-  reconcile_pid_active && break
-  sleep 0.05
-done
-if ! reconcile_pid_active; then
-  kill "$worker_pid" 2>/dev/null || true
-  echo "FAIL: live reconcile worker was rejected" >&2
-  exit 1
-fi
-kill "$worker_pid" 2>/dev/null || true
-wait "$worker_pid" 2>/dev/null || true
-
-grep -Fq 'trap '\''rm -f "$RECONCILE_PID"'\'' EXIT INT TERM' "$ENGINE" || {
-  echo "FAIL: reconcile drain does not clean its PID file on every exit" >&2
-  exit 1
-}
-
-echo 'reconcile-pid-ownership: OK'
