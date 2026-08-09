@@ -166,7 +166,7 @@ mv "$config_tmp" "$AUDIT_CONFIG"
 wrapper_tmp="$USER_SCRIPT_PATH.tmp.$$"
 cat > "$wrapper_tmp" <<EOF
 #!/bin/bash
-exec '$AUDIT_INSTALL_PATH'
+exec /bin/bash '$AUDIT_INSTALL_PATH'
 EOF
 chmod 0755 "$wrapper_tmp"
 mv "$wrapper_tmp" "$USER_SCRIPT_PATH"
@@ -206,5 +206,5 @@ printf 'audit=%s\nconfig=%s\nwrapper=%s\nschedule=%s\nbackup=%s\nplugin=%s\npack
   "$plugin_version" "$package_hash"
 
 if [ "$RUN_AUDIT" = 1 ]; then
-  "$AUDIT_INSTALL_PATH"
+  bash "$AUDIT_INSTALL_PATH"
 fi
