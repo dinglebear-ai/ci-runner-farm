@@ -28,6 +28,7 @@ err() { printf '%s\n' "$*" >>"$tmp/errors"; }
 build_args() {
   printf '%s|%s|%s|%s\n' "$1" "$2" "${3:-}" "${4:-}" >"$tmp/build-args"
   [ "${3:-}" = rust ] && [ "${4:-}" = org:acme ] || return 1
+  mkdir -p "$CACHE_ROOT/docker/$2" "$CACHE_ROOT/work/$2" "$CACHE_ROOT/dind-logs/$2"
   ARGS=(--name "$2" test-image)
 }
 docker() {
@@ -48,5 +49,9 @@ crf_assert_eq '99|ci-runner-validate|rust|org:acme' "$(cat "$tmp/build-args")" \
   'runtime validation did not select the first configured pool and its organization scope'
 crf_assert_contains "$(cat "$tmp/docker-run")" '--entrypoint' \
   'runtime validation did not replace the runner entrypoint'
+for artifact in docker work dind-logs; do
+  [ ! -e "$CACHE_ROOT/$artifact/ci-runner-validate" ] ||
+    crf_fail "runtime validation left its $artifact artifact behind"
+done
 
 echo 'validate-runtime: OK'
