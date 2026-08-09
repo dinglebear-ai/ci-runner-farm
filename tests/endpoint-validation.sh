@@ -41,6 +41,7 @@ for implementation in "${implementations[@]}"; do
   executable="${implementation#*:}"
   while IFS=$'\t' read -r kind expectation endpoint || [ -n "${kind:-}" ]; do
     case "${kind:-}" in ''|'#'*) continue ;; esac
+    [ "${endpoint:-}" != '<empty>' ] || endpoint=''
     status=0
     "$executable" "$kind" "${endpoint:-}" >/dev/null 2>&1 || status=$?
     case "$expectation:$status" in
