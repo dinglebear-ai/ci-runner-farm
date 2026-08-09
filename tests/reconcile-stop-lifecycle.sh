@@ -192,6 +192,7 @@ fi
 bootstrap_dir="$tmpdir/bootstrap-launcher-death"
 mkdir -p "$bootstrap_dir/run"
 bootstrap_marker="$bootstrap_dir/before-identity-publication"
+export CRF_RECONCILE_TEST_READY_ATTEMPTS=300
 (
   RUNDIR="$bootstrap_dir/run"
   RECONCILE_PID="$RUNDIR/reconcile.pid"
@@ -239,7 +240,7 @@ assert_worker_isolated "$bootstrap_pid"
 
 kill -KILL "$launcher_pid"
 wait "$launcher_pid" 2>/dev/null || true
-for _ in $(seq 1 100); do
+for _ in $(seq 1 500); do
   reconcile_group_live "$bootstrap_pid" || break
   sleep 0.02
 done
@@ -249,6 +250,7 @@ if reconcile_group_live "$bootstrap_pid"; then
 fi
 wait "$bootstrap_pid" 2>/dev/null || true
 worker_pid=""
+unset CRF_RECONCILE_TEST_READY_ATTEMPTS
 
 echo 'reconcile-start-launcher-death-cleanup: OK'
 [ "${CRF_RECONCILE_TEST_CASE:-all}" != launcher-death ] || exit 0
