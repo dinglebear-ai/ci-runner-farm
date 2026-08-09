@@ -4573,7 +4573,11 @@ cmd_validate() {
   echo "--- docker.sock reachable inside container ---"
   docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
   docker rm -f "$name" >/dev/null 2>&1
-  [ -n "$name" ] && [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || true
+  local artifact
+  for artifact in docker work dind-logs; do
+    [ -n "$name" ] && [ -n "$CACHE_ROOT" ] &&
+      rm -rf "${CACHE_ROOT:?}/${artifact:?}/${name:?}" 2>/dev/null || true
+  done
   log "validate: OK (container removed). Provisioning mechanics verified on this host."
 }
 
