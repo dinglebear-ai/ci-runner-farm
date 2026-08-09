@@ -125,3 +125,27 @@ jobs:
           [[ "$plg_md5" == "$tgz_md5" ]] || { echo "::error::rebuilt package md5 ($tgz_md5) != committed .plg packageMD5 ($plg_md5)" >&2; exit 1; }
           cp ci-runner-farm.tgz "$asset"
           gh release upload "$RELEASE_TAG" ci-runner-farm.plg "$asset" --clobber
+
+  # This terminal audit also runs when no release was created. That makes a rerun
+  # catch an existing partial release instead of skipping publication as complete.
+  verify-release-publication:
+    needs:
+      - release-please
+      - publish-plugin-release
+    if: ${{ always() && needs.release-please.result == 'success' }}
+    permissions:
+      contents: read
+    # Trusted org runs use the isolated ops pool; public fork PRs stay GitHub-hosted.
+    runs-on: ${{ (github.repository_owner == 'dinglebear-ai' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","ci-pool-ops"]') || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout default-branch publication state
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Verify manifest version and required assets are published
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: scripts/verify-release-publication.sh

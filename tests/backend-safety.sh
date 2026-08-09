@@ -11,6 +11,26 @@ if [ "${1:-}" = build-image ]; then
   snapshot="${2:-}"
   [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || exit 21
   [ "$(stat -c %a "$snapshot")" = 600 ] || exit 22
+  if grep -Eq '^[[:space:]]*COPY[[:space:]]+kache-supervise\.sh[[:space:]]+/usr/local/bin/kache-supervise\.sh[[:space:]]*$' "$snapshot"; then
+    companion="${snapshot}.kache-supervise.sh"
+    [ -f "$companion" ] && [ ! -L "$companion" ] || exit 23
+    [ "$(stat -c %a "$companion")" = 600 ] || exit 24
+    printf 'build probe consumed companion %s\n' "$(sha256sum "$companion" | awk '{print $1}')"
+  fi
+  if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$snapshot"; then
+    endpoint_snapshot="${snapshot}.kache-endpoint"
+    [ -f "$endpoint_snapshot" ] && [ ! -L "$endpoint_snapshot" ] || exit 25
+    [ "$(stat -c %a "$endpoint_snapshot")" = 600 ] || exit 26
+    if [ -n "${CRF_ASYNC_ENDPOINT_GATE:-}" ]; then
+      : >"${CRF_ASYNC_ENDPOINT_GATE}.ready"
+      for _ in $(seq 1 200); do
+        [ -e "${CRF_ASYNC_ENDPOINT_GATE}.continue" ] && break
+        sleep 0.01
+      done
+      [ -e "${CRF_ASYNC_ENDPOINT_GATE}.continue" ] || exit 27
+    fi
+    printf 'build probe consumed endpoint %s\n' "$(sha256sum "$endpoint_snapshot" | awk '{print $1}')"
+  fi
   printf 'build probe consumed %s\n' "$(sha256sum "$snapshot" | awk '{print $1}')"
   exit 0
 fi
@@ -25,7 +45,7 @@ TEST_ROOT="$tmp"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_candidate_state_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_context_needs_kache_supervisor build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -80,10 +100,19 @@ pool_autoscale_tick fixed
 CFGDIR="$TEST_ROOT/cfg" RUNDIR="$TEST_ROOT/run" BUILTIN_IMAGE=ci-runner-farm-runner:latest
 BUILD_CANDIDATE_FILE="$CFGDIR/build-candidate.state"
 PROMOTED_IMAGE_FILE="$CFGDIR/promoted-image.state"
+KACHE_ENDPOINT_FILE="$CFGDIR/kache-endpoint"
 mkdir -p "$CFGDIR" "$RUNDIR" "$TEST_ROOT/images"
-printf 'FROM scratch\nLABEL source=canonical\n' > "$CFGDIR/Dockerfile"
+cp deployments/nashost/runner.Dockerfile "$CFGDIR/Dockerfile"
+cp deployments/nashost/kache-supervise.sh "$CFGDIR/kache-supervise.sh"
+printf 'must-not-enter-build-context\n' > "$CFGDIR/unrelated-secret"
+kache_endpoint='https://cache.internal:9000'
+printf '%s\n' "$kache_endpoint" > "$KACHE_ENDPOINT_FILE"
+chmod 0600 "$KACHE_ENDPOINT_FILE"
 docker_capture="$TEST_ROOT/dockerfile.seen"
-log(){ :; }
+supervisor_capture="$TEST_ROOT/kache-supervise.seen"
+docker_args="$TEST_ROOT/docker.args"
+engine_log="$TEST_ROOT/engine.log"
+log(){ printf '%s\n' "$*" >> "$engine_log"; }
 err(){ printf '%s\n' "$*" > "$TEST_ROOT/error"; }
 resource_positive_uint_valid(){ [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] && [ "$1" -le "${2:-9000000000000000000}" ]; }
 image_path(){ printf '%s/images/%s\n' "$TEST_ROOT" "$(printf '%s' "$1" | sha256sum | awk '{print $1}')"; }
@@ -95,7 +124,11 @@ docker(){
       [ "${4:-}" != --format ] || cat "$path"
       ;;
     build:-t)
-      cp "$4/Dockerfile" "$docker_capture"
+      printf '%s\n' "$@" > "$docker_args"
+      local context="${!#}"
+      [ ! -e "$context/unrelated-secret" ] || return 32
+      cp "$context/Dockerfile" "$docker_capture"
+      [ ! -e "$context/kache-supervise.sh" ] || cp "$context/kache-supervise.sh" "$supervisor_capture"
       printf 'sha256:%064d\n' 0 | tr 0 a > "$(image_path "$3")"
       ;;
     tag:) cp "$(image_path "$2")" "$(image_path "$3")" ;;
@@ -104,27 +137,126 @@ docker(){
 }
 cmd_build_image "" || crf_fail 'empty dispatcher argument rejected the canonical Dockerfile'
 cmp -s "$CFGDIR/Dockerfile" "$docker_capture" || crf_fail 'build did not receive canonical Dockerfile content'
+cmp -s "$CFGDIR/kache-supervise.sh" "$supervisor_capture" || crf_fail 'Nashost build context omitted or changed kache-supervise.sh'
+grep -Fxq -- '--build-arg' "$docker_args" || crf_fail 'Nashost candidate build omitted its Kache build argument'
+grep -Fxq "KACHE_REMOTE_ENDPOINT=$kache_endpoint" "$docker_args" || crf_fail 'Nashost candidate build lost the persisted Kache endpoint'
+if grep -Fq "$kache_endpoint" "$engine_log" "$TEST_ROOT/error" 2>/dev/null; then
+  crf_fail 'candidate build exposed the private Kache endpoint through engine logging'
+fi
 build_candidate_state_load || crf_fail 'direct build did not preserve verified candidate metadata'
 [ "$BUILD_CANDIDATE_TAG" != "$BUILTIN_IMAGE" ] || crf_fail 'direct build targeted the production image tag'
+expected_df_sha="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
+expected_supervisor_sha="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
+expected_endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$kache_endpoint" | sha256sum | awk '{print $1}')"
+expected_context_sha="$({
+  printf 'ci-runner-farm:build-input:v2\n'
+  printf 'dockerfile=%s\n' "$expected_df_sha"
+  printf 'kache_supervisor=%s\n' "$expected_supervisor_sha"
+  printf 'kache_endpoint=%s\n' "$expected_endpoint_digest"
+} | sha256sum | awk '{print $1}')"
+crf_assert_eq "$expected_context_sha" "$BUILD_CANDIDATE_CONTEXT_SHA" 'candidate context identity'
+first_context_sha="$BUILD_CANDIDATE_CONTEXT_SHA"
+first_candidate_tag="$BUILD_CANDIDATE_TAG"
+printf '\n# context identity probe\n' >> "$CFGDIR/kache-supervise.sh"
+cmd_build_image "" || crf_fail 'companion-only rebuild failed'
+build_candidate_state_load || crf_fail 'companion-only rebuild lost candidate metadata'
+[ "$BUILD_CANDIDATE_CONTEXT_SHA" != "$first_context_sha" ] || crf_fail 'companion change was absent from candidate context identity'
+[ "$BUILD_CANDIDATE_TAG" != "$first_candidate_tag" ] || crf_fail 'companion change reused the prior immutable candidate tag'
+rm -f "$CFGDIR/kache-supervise.sh"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build accepted a missing companion'; fi
+ln -s "$PWD/deployments/nashost/kache-supervise.sh" "$CFGDIR/kache-supervise.sh"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build followed a symlinked companion'; fi
+rm -f "$CFGDIR/kache-supervise.sh"
+cp deployments/nashost/kache-supervise.sh "$CFGDIR/kache-supervise.sh"
+
+# The persisted input is trusted only when it is a small, mode-0600 regular
+# file containing one endpoint that meets the Dockerfile/audit URL contract.
+chmod 0644 "$KACHE_ENDPOINT_FILE"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'candidate build accepted a world-readable Kache endpoint file'; fi
+chmod 0600 "$KACHE_ENDPOINT_FILE"
+printf 'https://cache.internal:9000\\escaped\n' > "$KACHE_ENDPOINT_FILE"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'candidate build accepted an unsafe Kache endpoint'; fi
+rm -f "$KACHE_ENDPOINT_FILE"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build did not fail closed without its endpoint file'; fi
+printf '%s\n' "$kache_endpoint" > "$TEST_ROOT/endpoint.real"
+chmod 0600 "$TEST_ROOT/endpoint.real"
+ln -s "$TEST_ROOT/endpoint.real" "$KACHE_ENDPOINT_FILE"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'candidate build followed a symlinked Kache endpoint file'; fi
+rm -f "$KACHE_ENDPOINT_FILE"
+
+# Drive the extracted production build path with the exact snapshot naming used
+# by Save + Build. Changing the live endpoint afterward must not affect Docker's
+# build argument or the immutable candidate context identity.
+snapshot_df="$RUNDIR/build.Dockerfile.endpoint-snapshot"
+snapshot_companion="${snapshot_df}.kache-supervise.sh"
+snapshot_endpoint_file="${snapshot_df}.kache-endpoint"
+snapshot_endpoint='https://snapshot-cache.internal:9000'
+live_endpoint='https://changed-before-build.internal:9443'
+cp "$CFGDIR/Dockerfile" "$snapshot_df"
+cp "$CFGDIR/kache-supervise.sh" "$snapshot_companion"
+printf '%s\n' "$snapshot_endpoint" >"$snapshot_endpoint_file"
+chmod 0600 "$snapshot_df" "$snapshot_companion" "$snapshot_endpoint_file"
+printf '%s\n' "$live_endpoint" >"$KACHE_ENDPOINT_FILE"
+chmod 0600 "$KACHE_ENDPOINT_FILE"
+cmd_build_image "$snapshot_df" || crf_fail 'production snapshot build rejected valid Nashost inputs'
+grep -Fxq "KACHE_REMOTE_ENDPOINT=$snapshot_endpoint" "$docker_args" ||
+  crf_fail 'production snapshot build reread the live Kache endpoint'
+if grep -Fxq "KACHE_REMOTE_ENDPOINT=$live_endpoint" "$docker_args"; then
+  crf_fail 'production snapshot build passed the changed live endpoint to Docker'
+fi
+build_candidate_state_load || crf_fail 'production snapshot build lost candidate metadata'
+snapshot_df_sha="$(sha256sum "$snapshot_df" | awk '{print $1}')"
+snapshot_supervisor_sha="$(sha256sum "$snapshot_companion" | awk '{print $1}')"
+snapshot_endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$snapshot_endpoint" | sha256sum | awk '{print $1}')"
+snapshot_context_sha="$({
+  printf 'ci-runner-farm:build-input:v2\n'
+  printf 'dockerfile=%s\n' "$snapshot_df_sha"
+  printf 'kache_supervisor=%s\n' "$snapshot_supervisor_sha"
+  printf 'kache_endpoint=%s\n' "$snapshot_endpoint_digest"
+} | sha256sum | awk '{print $1}')"
+crf_assert_eq "$snapshot_context_sha" "$BUILD_CANDIDATE_CONTEXT_SHA" 'production snapshot candidate context identity'
+rm -f "$snapshot_df" "$snapshot_companion" "$snapshot_endpoint_file"
+
+# Restore the approved endpoint for the async snapshot race below.
+printf '%s\n' "$kache_endpoint" >"$KACHE_ENDPOINT_FILE"
+chmod 0600 "$KACHE_ENDPOINT_FILE"
 
 # A stale save identity must fail before launch. A matching identity launches
 # only the private snapshot, and both runtime build files remain mode 0600.
 expected="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
+expected_companion="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
+expected_endpoint="$(sha256sum "$KACHE_ENDPOINT_FILE" | awk '{print $1}')"
 stale="$(printf stale | sha256sum | awk '{print $1}')"
 reply="$(cmd_build_async "$stale")"
 crf_assert_contains "$reply" '"code":"stale_dockerfile"' 'stale Dockerfile identity was not rejected'
 [ ! -e "$RUNDIR/build.log" ] || crf_fail 'stale Dockerfile launch truncated or created a build log'
 crf_assert_file_mode "$RUNDIR/build.lock" 600
 
+endpoint_gate="$TEST_ROOT/endpoint-gate"
+export CRF_ASYNC_ENDPOINT_GATE="$endpoint_gate"
 reply="$(cmd_build_async "$expected")"
 crf_assert_contains "$reply" '"ok":true' 'matching Dockerfile identity did not launch'
 crf_assert_contains "$reply" "\"dockerfile_sha\":\"$expected\"" 'build response lost Dockerfile identity'
+for _ in $(seq 1 100); do
+  [ -e "${endpoint_gate}.ready" ] && break
+  sleep 0.02
+done
+[ -e "${endpoint_gate}.ready" ] || crf_fail 'Save + Build child did not receive a protected endpoint snapshot'
+printf 'https://changed-after-launch.internal:9443\n' >"$KACHE_ENDPOINT_FILE"
+chmod 0600 "$KACHE_ENDPOINT_FILE"
+: >"${endpoint_gate}.continue"
 for _ in $(seq 1 100); do
   grep -q '__BUILD_RC__=' "$RUNDIR/build.log" 2>/dev/null && break
   sleep 0.02
 done
 grep -Fq "build probe consumed $expected" "$RUNDIR/build.log" || crf_fail 'build child did not consume the verified snapshot'
+grep -Fq "build probe consumed companion $expected_companion" "$RUNDIR/build.log" || crf_fail 'Save + Build child did not consume the snapshotted Nashost companion'
+grep -Fq "build probe consumed endpoint $expected_endpoint" "$RUNDIR/build.log" || crf_fail 'Save + Build child reread the live Kache endpoint after launch'
+if grep -Fq 'changed-after-launch' "$RUNDIR/build.log"; then
+  crf_fail 'Save + Build log exposed or consumed the post-launch endpoint value'
+fi
 grep -Fq '__BUILD_RC__=0' "$RUNDIR/build.log" || crf_fail 'build completion sentinel is missing'
+unset CRF_ASYNC_ENDPOINT_GATE
 crf_assert_file_mode "$RUNDIR/build.lock" 600
 crf_assert_file_mode "$RUNDIR/build.log" 600
 status="$(cmd_build_status)"

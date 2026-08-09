@@ -87,6 +87,14 @@ rm -f "$(image_path "$BUILTIN_IMAGE")"
 restore_promoted_image_alias || crf_fail "verified promotion metadata did not restore a missing production tag"
 crf_assert_eq "$candidate_image_id" "$(cat "$(image_path "$BUILTIN_IMAGE")")" "restored production image identity"
 
+# Upgrade compatibility: schema 1 promotions had no companion context because
+# the Dockerfile was the complete context. They remain valid recovery records,
+# while every new candidate/promotion above is written as schema 2.
+sed -i 's/^schema=2$/schema=1/; /^context_sha=/d' "$PROMOTED_IMAGE_FILE"
+rm -f "$(image_path "$BUILTIN_IMAGE")"
+restore_promoted_image_alias || crf_fail "legacy schema-1 promotion metadata stopped restoring after context identities"
+crf_assert_eq "$candidate_image_id" "$(cat "$(image_path "$BUILTIN_IMAGE")")" "legacy restored production image identity"
+
 printf '%s\n' "$wrong" > "$(image_path "$candidate_tag")"
 if cmd_promote_image "$candidate_tag" "$candidate_image_id" >/dev/null 2>&1; then
   crf_fail "promotion reused retired candidate metadata"

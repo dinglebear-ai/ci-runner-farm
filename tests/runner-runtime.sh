@@ -132,8 +132,8 @@ github_runner_inventory_invalidate org:acme
 github_runner_inventory org:acme >/dev/null
 assert_eq "$(cat "$runner_calls")" 2 'GitHub runner inventory mutation invalidation did not force a refresh'
 
-# Source contracts for the remaining lifecycle and UI invariants.
-grep -Fq "pkill -f '[r]unner-farm.sh reconcile-drain'" "$ENGINE" || fail 'Stop cannot neutralize the reconcile worker'
+# Source contracts for the remaining UI invariants. Reconcile Stop behavior is
+# exercised against real process groups and locks by reconcile-stop-lifecycle.sh.
 grep -Fq 'preserving jobs and retrying idle-safe recycling every 120s' "$ENGINE" || fail 'reconcile drain abandons stale runners after timeout'
 if grep -Fq "they'll migrate on their next Apply/Start" "$ENGINE"; then fail 'reconcile drain still strands stale runners after timeout'; fi
 grep -Fq 'fleet_inventory_refresh' "$ENGINE" || fail 'status/autoscale do not use the shared inventory'

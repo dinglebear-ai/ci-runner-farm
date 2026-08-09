@@ -45,7 +45,32 @@ Files:
 
 Run `tests/nashost-kache-profile.sh` before deployment. Copy the full Dockerfile
 and supervisor to `/boot/config/plugins/ci-runner-farm/` as the durable rebuild
-source. Build the overlay image, then drain and recycle one runner at a time.
+source. The public recipes intentionally contain no private endpoint. Inject the
+approved endpoint explicitly when building either recipe. Persist it once for
+the plugin's **Save + Build Candidate** path as a protected, one-line input:
+
+```bash
+: "${KACHE_REMOTE_ENDPOINT:?set the approved Nashost Kache endpoint}"
+printf '%s\n' "$KACHE_REMOTE_ENDPOINT" | sudo install -m 0600 /dev/stdin \
+  /boot/config/plugins/ci-runner-farm/kache-endpoint
+```
+
+The candidate builder reads that file only for Dockerfiles that declare
+`ARG KACHE_REMOTE_ENDPOINT`; the value is not included in settings, status JSON,
+or engine log messages. For a direct command-line build, pass the same value:
+
+```bash
+: "${KACHE_REMOTE_ENDPOINT:?set the approved Nashost Kache endpoint}"
+docker build \
+  --build-arg KACHE_REMOTE_ENDPOINT="$KACHE_REMOTE_ENDPOINT" \
+  -f deployments/nashost/kache-overlay.Dockerfile \
+  deployments/nashost
+```
+
+Omitting the argument, supplying a documentation-only address, or including
+quotes, backslashes, whitespace, control characters, credentials, or a malformed
+authority fails the build before the Kache configuration is written. Build the
+overlay image, then drain and recycle one runner at a time.
 
 ## Safe image promotion
 
@@ -81,8 +106,14 @@ plugin release:
 
 ```bash
 cd deployments/nashost
-sudo ./install-fleet-audit.sh
+sudo CRF_EXPECTED_KACHE_ENDPOINT="$KACHE_REMOTE_ENDPOINT" \
+  ./install-fleet-audit.sh
 ```
+
+The endpoint is required on first install and is persisted in the mode-0600 audit
+environment. Later installer runs preserve that value when the environment
+variable is omitted. Export the approved Nashost endpoint before running either
+command; the repository deliberately provides no plausible fallback value.
 
 The installer preserves existing User Scripts schedules, registers a daily
 06:30 run, writes logs under `/mnt/user/logs/ci-runner-farm-audit`, and pins the

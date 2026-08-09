@@ -21,7 +21,7 @@ CRF_EXPECTED_KACHE_VERSION="${CRF_EXPECTED_KACHE_VERSION:-0.13.0}"
 CRF_EXPECTED_KACHE_SHA256="${CRF_EXPECTED_KACHE_SHA256:-5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972}"
 CRF_EXPECTED_KACHE_SOCKET="${CRF_EXPECTED_KACHE_SOCKET:-/_work/.kache/daemon.sock}"
 CRF_EXPECTED_KACHE_LOCAL_MAX="${CRF_EXPECTED_KACHE_LOCAL_MAX:-80GiB}"
-CRF_EXPECTED_KACHE_ENDPOINT="${CRF_EXPECTED_KACHE_ENDPOINT:-http://192.0.2.2:9000}"
+CRF_EXPECTED_KACHE_ENDPOINT="${CRF_EXPECTED_KACHE_ENDPOINT:-}"
 CRF_EXPECTED_KACHE_BUCKET="${CRF_EXPECTED_KACHE_BUCKET:-kache}"
 CRF_EXPECTED_KACHE_PREFIX="${CRF_EXPECTED_KACHE_PREFIX:-rust}"
 CRF_EXPECTED_KACHE_REGION="${CRF_EXPECTED_KACHE_REGION:-us-east-1}"
@@ -65,6 +65,31 @@ require_sha256() {
 }
 require_image_id() {
   [[ "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+require_kache_endpoint() {
+  local endpoint="${1:-}" authority host port
+  [ -n "$endpoint" ] || return 1
+  [[ "$endpoint" =~ ^https?:// ]] || return 1
+  case "$endpoint" in
+    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
+    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
+  esac
+  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
+  authority="${endpoint#*://}"
+  authority="${authority%%/*}"
+  case "$authority" in
+    ''|*@*|*:*:*) return 4 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
+      ;;
+    *) host="$authority" ;;
+  esac
+  case "$host" in
+    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
+  esac
+  return 0
 }
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -120,6 +145,23 @@ require_image_id "$CRF_EXPECTED_IMAGE_ID" ||
   { echo "invalid expected image id" >&2; exit 2; }
 require_sha256 "$CRF_EXPECTED_KACHE_SHA256" ||
   { echo "invalid expected Kache hash" >&2; exit 2; }
+if require_kache_endpoint "$CRF_EXPECTED_KACHE_ENDPOINT"; then
+  :
+else
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must not use a documentation-only address" >&2
+  elif [ "$status" -eq 3 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT contains unsafe characters" >&2
+  elif [ "$status" -eq 4 ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must contain a valid authority" >&2
+  elif [ -z "$CRF_EXPECTED_KACHE_ENDPOINT" ]; then
+    echo "CRF_EXPECTED_KACHE_ENDPOINT is required in $AUDIT_CONFIG" >&2
+  else
+    echo "CRF_EXPECTED_KACHE_ENDPOINT must be an HTTP or HTTPS URL" >&2
+  fi
+  exit 2
+fi
 [ -n "$CRF_EXPECTED_PLUGIN_VERSION" ] ||
   { echo "CRF_EXPECTED_PLUGIN_VERSION is required in $AUDIT_CONFIG" >&2; exit 2; }
 require_sha256 "$CRF_EXPECTED_PLUGIN_PACKAGE_SHA256" ||
