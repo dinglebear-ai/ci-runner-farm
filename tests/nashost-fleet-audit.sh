@@ -585,7 +585,7 @@ grep -Fq "CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000'" "$config"
 if grep -Fq "$notify_secret" "$config" "$tmp/install.out"; then
   crf_fail 'installer copied or printed the Gotify token'
 fi
-grep -Fq "exec '$installed'" "$wrapper"
+grep -Fq "exec /bin/bash '$installed'" "$wrapper"
 jq -e --arg script "$wrapper" '
   .["/existing/script"].custom == "0 1 * * *" and
   .[$script].frequency == "custom" and
@@ -609,5 +609,15 @@ jq -e '.["/existing/script"].id == "scheduleexisting"' "$user_root/schedule.json
 grep -Fq "CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000'" "$config"
 [ "$(find "$plugin_dir/audit-schedule-backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" -ge 2 ] ||
   crf_fail "installer did not preserve schedule backups"
+
+# Unraid's boot flash is commonly mounted with fmask=0177, so scripts stored
+# there remain mode 0600 even after chmod/install requests. The User Scripts
+# wrapper must still run the audit through Bash instead of direct exec.
+printf '#!/bin/bash\nprintf "noexec-audit-ok\\n"\n' > "$installed"
+chmod 0600 "$installed"
+crf_assert_eq 'noexec-audit-ok' "$(bash "$wrapper")" "noexec audit wrapper"
+
+grep -Fq 'bash "$AUDIT_INSTALL_PATH"' "$INSTALLER" ||
+  crf_fail 'installer run-audit path does not use Bash'
 
 echo 'nashost-fleet-audit: OK'
