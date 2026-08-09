@@ -243,6 +243,18 @@ tmp_log="$LOG_ROOT/.$stamp.log.tmp.$$"
 tmp_dir="$(mktemp -d /tmp/ci-runner-farm-audit.XXXXXX)"
 trap 'rm -rf "$tmp_dir" "$tmp_log"' EXIT
 
+watchdog_daemon_count() {
+  local owner_pid="$1" proc_root="${CRF_WATCHDOG_PROC_ROOT:-/proc}"
+  local owner_namespace pid process_namespace count=0
+  owner_namespace="$(readlink "$proc_root/$owner_pid/ns/mnt")" || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    process_namespace="$(readlink "$proc_root/$pid/ns/mnt" 2>/dev/null)" || continue
+    [ "$process_namespace" = "$owner_namespace" ] && count=$((count + 1))
+  done < <(pgrep -f '[r]unner-farm.sh kache-watchdog-daemon' || true)
+  printf '%s\n' "$count"
+}
+
 audit_body() {
   local status_file="$tmp_dir/status.json"
   local github_file="$tmp_dir/github.json"
@@ -438,11 +450,11 @@ printf("github_online_exact=%d\n",count($current));
   assert_eq false "$(jq -r '.active' <<<"$mutation_status")" "mutation owner activity"
 
   watchdog_pid_before="$(cat /var/local/emhttp/ci-runner-farm/kache-watchdog.pid)"
-  watchdog_count_before="$(pgrep -af '[r]unner-farm.sh kache-watchdog-daemon' | wc -l)"
+  watchdog_count_before="$(watchdog_daemon_count "$watchdog_pid_before")"
   watchdog_restarts_before="$(grep -c 'kache-watchdog: restarting unhealthy supervisor' /var/local/emhttp/ci-runner-farm/autoscale.log || true)"
   sleep "$WATCHDOG_SAMPLE_SECONDS"
   watchdog_pid_after="$(cat /var/local/emhttp/ci-runner-farm/kache-watchdog.pid)"
-  watchdog_count_after="$(pgrep -af '[r]unner-farm.sh kache-watchdog-daemon' | wc -l)"
+  watchdog_count_after="$(watchdog_daemon_count "$watchdog_pid_after")"
   watchdog_restarts_after="$(grep -c 'kache-watchdog: restarting unhealthy supervisor' /var/local/emhttp/ci-runner-farm/autoscale.log || true)"
   watchdog_status="$("$ENGINE" kache-watchdog-status)"
   assert_eq "$watchdog_pid_before" "$watchdog_pid_after" "watchdog PID stability"

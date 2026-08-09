@@ -72,6 +72,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A hosted CI regression test may expose its watchdog-shaped process in the
+# host PID namespace. Only processes sharing the production watchdog's mount
+# namespace are production duplicates.
+watchdog_function="$(sed -n '/^watchdog_daemon_count()/,/^}/p' "$AUDIT")"
+[ -n "$watchdog_function" ] || crf_fail 'audit watchdog namespace counter is missing'
+eval "$watchdog_function"
+mkdir -p "$tmp/ns-bin" "$tmp/proc/101/ns" "$tmp/proc/202/ns" "$tmp/proc/303/ns"
+ln -s 'mnt:[host]' "$tmp/proc/101/ns/mnt"
+ln -s 'mnt:[ci-container]' "$tmp/proc/202/ns/mnt"
+ln -s 'mnt:[host]' "$tmp/proc/303/ns/mnt"
+printf '#!/bin/bash\nprintf "101\\n202\\n303\\n"\n' > "$tmp/ns-bin/pgrep"
+chmod 0755 "$tmp/ns-bin/pgrep"
+original_path="$PATH"
+PATH="$tmp/ns-bin:$PATH"
+CRF_WATCHDOG_PROC_ROOT="$tmp/proc"
+crf_assert_eq 2 "$(watchdog_daemon_count 101)" "host watchdog namespace count"
+PATH="$original_path"
+unset CRF_WATCHDOG_PROC_ROOT
+
 # Neither runtime configuration file is executable shell input. The scheduled
 # audit runs as root, so every malformed or untrusted fixture must be rejected
 # before it can execute a payload or create the audit log/lock state.
