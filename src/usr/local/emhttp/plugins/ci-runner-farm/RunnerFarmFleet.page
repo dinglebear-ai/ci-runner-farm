@@ -29,8 +29,8 @@ Tag="server"
   <uui-button variant="secondary" size="xs" onclick="crfAction('stop')">Stop</uui-button>
   <uui-button variant="secondary" size="xs" onclick="crfAction('restart')">Restart</uui-button>
   <uui-button variant="outline" size="xs" onclick="crfAction('validate')">Validate (no token)</uui-button>
-  <span class="crf-scale">Scale to <input type="number" id="crf-n" min="0" max="20" value="4">
-  <uui-button variant="secondary" size="xs" onclick="crfScale()">Scale</uui-button></span>
+  <span class="crf-scale" id="crf-scale-wrap"><span id="crf-scale-label">Scale to</span> <input type="number" id="crf-n" min="0" max="20" value="" aria-label="Scale fleet to this runner count" disabled>
+  <uui-button id="crf-scale-button" size="xs" onclick="crfScale()" disabled>Scale</uui-button></span>
 </div>
 
 <div class="crf-bays">
@@ -153,7 +153,13 @@ function crfAction(a){
   }
   crfDoAction(a);
 }
-function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
+function crfScale(){
+  const n=document.getElementById('crf-n').value;
+  const autoscale=!!((window.CRF_LAST||{}).autoscale_enabled);
+  const action=autoscale?'autoscale-set-max':'scale';
+  const success=autoscale?'Autoscale maximum set to ':'Scaled to ';
+  crfPost({action,n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(success+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); });
+}
 
 function crfElapsed(iso){
   const t=Date.parse(iso); if(isNaN(t)) return null;
@@ -204,6 +210,23 @@ function crfRefresh(){
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
+    // The manual scale target must start from the live fleet size, rather than a
+    // stale template default. Do not replace a value while the operator is typing.
+    const scale=document.getElementById('crf-n');
+    if(scale && document.activeElement!==scale) scale.value=d.autoscale_enabled?d.autoscale_max:d.count;
+    const scaleButton=document.getElementById('crf-scale-button');
+    const scaleWrap=document.getElementById('crf-scale-wrap');
+    const scaleLabel=document.getElementById('crf-scale-label');
+    if(scale){
+      scale.disabled=false;
+      scale.min=d.autoscale_enabled?1:0;
+      scale.max=d.autoscale_enabled?40:20;
+      scale.setAttribute('aria-label',d.autoscale_enabled?'Set autoscale maximum runner count':'Scale fleet to this runner count');
+      scale.title=d.autoscale_enabled?'Sets the autoscale ceiling. The autoscaler still chooses the live fleet size within its configured range.':'';
+    }
+    if(scaleButton){ scaleButton.disabled=false; scaleButton.title=scale&&scale.title; }
+    if(scaleLabel) scaleLabel.textContent=d.autoscale_enabled?'Autoscale max':'Scale to';
+    if(scaleWrap) scaleWrap.title=scale&&scale.title;
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the

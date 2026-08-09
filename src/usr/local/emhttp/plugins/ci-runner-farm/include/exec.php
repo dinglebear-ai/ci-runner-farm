@@ -59,6 +59,12 @@ switch ($action) {
     echo json_encode(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
     break;
 
+  case 'autoscale-set-max':
+    $n = max(1, min(40, (int)($_REQUEST['n'] ?? 0)));
+    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' autoscale-set-max ' . escapeshellarg((string)$n));
+    echo json_encode(['ok' => $rc === 0, 'action' => "autoscale max $n", 'log' => $out]);
+    break;
+
   case 'set-token':
     $tok = trim($_REQUEST['token'] ?? '');
     if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }

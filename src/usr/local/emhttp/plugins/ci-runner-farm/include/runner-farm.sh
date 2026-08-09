@@ -276,14 +276,14 @@ autoscale_tick() {
   floor="$(autoscale_floor)"
   if [ "$cur" -lt "$floor" ]; then
     log "autoscale: count $cur < floor $floor -> grow to $floor"
-    cmd_scale "$floor" >/dev/null; echo 0 > "$statef"
+    cmd_scale_internal "$floor" >/dev/null; echo 0 > "$statef"
     return 0
   fi
 
   if [ "$idle" -lt "$AUTOSCALE_MIN_IDLE" ] && [ "$cur" -lt "$AUTOSCALE_MAX" ]; then
     target=$(( cur + AUTOSCALE_STEP )); [ "$target" -gt "$AUTOSCALE_MAX" ] && target=$AUTOSCALE_MAX
     log "autoscale: idle=$idle/$cur < buffer $AUTOSCALE_MIN_IDLE -> grow to $target"
-    cmd_scale "$target" >/dev/null; echo 0 > "$statef"
+    cmd_scale_internal "$target" >/dev/null; echo 0 > "$statef"
   elif [ "$idle" -gt $(( AUTOSCALE_MIN_IDLE + AUTOSCALE_STEP )) ] && [ "$cur" -gt "$floor" ]; then
     over=$(( over + 1 )); echo "$over" > "$statef"
     if [ "$over" -ge "$AUTOSCALE_IDLE_GRACE" ]; then
@@ -1226,7 +1226,7 @@ cmd_stop() {
   fi
 }
 
-cmd_scale() {
+cmd_scale_internal() {
   local target="$1"
   # Server-side validate + clamp. The form's max="20" is presentation-only, so a
   # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
@@ -1255,6 +1255,30 @@ cmd_scale() {
     done
   fi
   log "scaled to $(managed_names | wc -l) runner(s)"
+}
+
+cmd_scale() {
+  # The autoscaler uses cmd_scale_internal above. A manual target while it owns
+  # the fleet would be silently undone by the next demand check.
+  [ "$AUTOSCALE" != "true" ] || { err "manual scale is unavailable while Autoscaling is on; adjust its min, max, or warm idle buffer"; return 1; }
+  cmd_scale_internal "$1"
+}
+
+# A compact Fleet-tab adjustment for autoscaling. It persists only the ceiling;
+# the daemon reloads the cfg on its next tick and continues to own fleet sizing.
+cmd_autoscale_set_max() {
+  local target="$1" min="$AUTOSCALE_MIN"
+  [ "$AUTOSCALE" = "true" ] || { err "autoscale maximum can only be changed while Autoscaling is on"; return 1; }
+  case "$target" in ''|*[!0-9]*) err "autoscale max must be a positive integer"; return 1 ;; esac
+  [ "$target" -ge 1 ] && [ "$target" -le 40 ] || { err "autoscale max must be between 1 and 40"; return 1; }
+  case "$min" in ''|*[!0-9]*) min=2 ;; esac
+  [ "$target" -ge "$min" ] || { err "autoscale max ($target) cannot be below autoscale min ($min)"; return 1; }
+  mkdir -p "$CFGDIR" || { err "could not create configuration directory"; return 1; }
+  # Do not replace the Settings form's entire config file: update only this key.
+  # load_cfg applies assignments in order, so the final line is authoritative; a
+  # later Settings Apply remains the normal last-writer-wins configuration action.
+  printf '\nAUTOSCALE_MAX="%s"\n' "$target" >> "$CFG" || { err "could not save autoscale maximum"; return 1; }
+  log "autoscale maximum updated to $target (takes effect on the next demand check)"
 }
 
 cmd_status() {
@@ -1724,7 +1748,9 @@ cmd_status_json() {
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
+  local autoscale_max="$AUTOSCALE_MAX"
+  case "$autoscale_max" in ''|*[!0-9]*) autoscale_max=16 ;; esac
+  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale_enabled\":$([ "$AUTOSCALE" = "true" ] && echo true || echo false),\"autoscale_max\":${autoscale_max},\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -1922,6 +1948,7 @@ case "${1:-status}" in
   restart)      with_fleet_lock wait cmd_restart ;;
   mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
   scale)        with_fleet_lock wait cmd_scale "${2:?usage: scale <N>}" ;;
+  autoscale-set-max) with_fleet_lock wait cmd_autoscale_set_max "${2:?usage: autoscale-set-max <N>}" ;;
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   dashboard-json) cmd_dashboard_json ;;
