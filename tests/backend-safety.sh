@@ -17,6 +17,12 @@ if [ "${1:-}" = build-image ]; then
     [ "$(stat -c %a "$companion")" = 600 ] || exit 24
     printf 'build probe consumed companion %s\n' "$(sha256sum "$companion" | awk '{print $1}')"
   fi
+  if grep -Eq '^[[:space:]]*COPY[[:space:]]+endpoint-validation\.sh[[:space:]]+/usr/local/libexec/ci-runner-farm/endpoint-validation\.sh[[:space:]]*$' "$snapshot"; then
+    validator="${snapshot}.endpoint-validation.sh"
+    [ -f "$validator" ] && [ ! -L "$validator" ] || exit 28
+    [ "$(stat -c %a "$validator")" = 600 ] || exit 29
+    printf 'build probe consumed validator %s\n' "$(sha256sum "$validator" | awk '{print $1}')"
+  fi
   if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$snapshot"; then
     endpoint_snapshot="${snapshot}.kache-endpoint"
     [ -f "$endpoint_snapshot" ] && [ ! -L "$endpoint_snapshot" ] || exit 25
@@ -45,7 +51,7 @@ TEST_ROOT="$tmp"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_context_needs_kache_supervisor build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -104,12 +110,14 @@ KACHE_ENDPOINT_FILE="$CFGDIR/kache-endpoint"
 mkdir -p "$CFGDIR" "$RUNDIR" "$TEST_ROOT/images"
 cp deployments/nashost/runner.Dockerfile "$CFGDIR/Dockerfile"
 cp deployments/nashost/kache-supervise.sh "$CFGDIR/kache-supervise.sh"
+cp deployments/nashost/endpoint-validation.sh "$CFGDIR/endpoint-validation.sh"
 printf 'must-not-enter-build-context\n' > "$CFGDIR/unrelated-secret"
 kache_endpoint='https://cache.internal:9000'
 printf '%s\n' "$kache_endpoint" > "$KACHE_ENDPOINT_FILE"
 chmod 0600 "$KACHE_ENDPOINT_FILE"
 docker_capture="$TEST_ROOT/dockerfile.seen"
 supervisor_capture="$TEST_ROOT/kache-supervise.seen"
+validator_capture="$TEST_ROOT/endpoint-validation.seen"
 docker_args="$TEST_ROOT/docker.args"
 engine_log="$TEST_ROOT/engine.log"
 log(){ printf '%s\n' "$*" >> "$engine_log"; }
@@ -129,6 +137,7 @@ docker(){
       [ ! -e "$context/unrelated-secret" ] || return 32
       cp "$context/Dockerfile" "$docker_capture"
       [ ! -e "$context/kache-supervise.sh" ] || cp "$context/kache-supervise.sh" "$supervisor_capture"
+      [ ! -e "$context/endpoint-validation.sh" ] || cp "$context/endpoint-validation.sh" "$validator_capture"
       printf 'sha256:%064d\n' 0 | tr 0 a > "$(image_path "$3")"
       ;;
     tag:) cp "$(image_path "$2")" "$(image_path "$3")" ;;
@@ -138,6 +147,7 @@ docker(){
 cmd_build_image "" || crf_fail 'empty dispatcher argument rejected the canonical Dockerfile'
 cmp -s "$CFGDIR/Dockerfile" "$docker_capture" || crf_fail 'build did not receive canonical Dockerfile content'
 cmp -s "$CFGDIR/kache-supervise.sh" "$supervisor_capture" || crf_fail 'Nashost build context omitted or changed kache-supervise.sh'
+cmp -s "$CFGDIR/endpoint-validation.sh" "$validator_capture" || crf_fail 'Nashost build context omitted or changed endpoint-validation.sh'
 grep -Fxq -- '--build-arg' "$docker_args" || crf_fail 'Nashost candidate build omitted its Kache build argument'
 grep -Fxq "KACHE_REMOTE_ENDPOINT=$kache_endpoint" "$docker_args" || crf_fail 'Nashost candidate build lost the persisted Kache endpoint'
 if grep -Fq "$kache_endpoint" "$engine_log" "$TEST_ROOT/error" 2>/dev/null; then
@@ -147,11 +157,13 @@ build_candidate_state_load || crf_fail 'direct build did not preserve verified c
 [ "$BUILD_CANDIDATE_TAG" != "$BUILTIN_IMAGE" ] || crf_fail 'direct build targeted the production image tag'
 expected_df_sha="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
 expected_supervisor_sha="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
+expected_validator_sha="$(sha256sum "$CFGDIR/endpoint-validation.sh" | awk '{print $1}')"
 expected_endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$kache_endpoint" | sha256sum | awk '{print $1}')"
 expected_context_sha="$({
-  printf 'ci-runner-farm:build-input:v2\n'
+  printf 'ci-runner-farm:build-input:v3\n'
   printf 'dockerfile=%s\n' "$expected_df_sha"
   printf 'kache_supervisor=%s\n' "$expected_supervisor_sha"
+  printf 'endpoint_validator=%s\n' "$expected_validator_sha"
   printf 'kache_endpoint=%s\n' "$expected_endpoint_digest"
 } | sha256sum | awk '{print $1}')"
 crf_assert_eq "$expected_context_sha" "$BUILD_CANDIDATE_CONTEXT_SHA" 'candidate context identity'
@@ -168,6 +180,13 @@ ln -s "$PWD/deployments/nashost/kache-supervise.sh" "$CFGDIR/kache-supervise.sh"
 if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build followed a symlinked companion'; fi
 rm -f "$CFGDIR/kache-supervise.sh"
 cp deployments/nashost/kache-supervise.sh "$CFGDIR/kache-supervise.sh"
+
+rm -f "$CFGDIR/endpoint-validation.sh"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build accepted a missing endpoint validator'; fi
+ln -s "$PWD/deployments/nashost/endpoint-validation.sh" "$CFGDIR/endpoint-validation.sh"
+if cmd_build_image "" >/dev/null 2>&1; then crf_fail 'Nashost candidate build followed a symlinked endpoint validator'; fi
+rm -f "$CFGDIR/endpoint-validation.sh"
+cp deployments/nashost/endpoint-validation.sh "$CFGDIR/endpoint-validation.sh"
 
 # The persisted input is trusted only when it is a small, mode-0600 regular
 # file containing one endpoint that meets the Dockerfile/audit URL contract.
@@ -189,13 +208,15 @@ rm -f "$KACHE_ENDPOINT_FILE"
 # build argument or the immutable candidate context identity.
 snapshot_df="$RUNDIR/build.Dockerfile.endpoint-snapshot"
 snapshot_companion="${snapshot_df}.kache-supervise.sh"
+snapshot_validator="${snapshot_df}.endpoint-validation.sh"
 snapshot_endpoint_file="${snapshot_df}.kache-endpoint"
 snapshot_endpoint='https://snapshot-cache.internal:9000'
 live_endpoint='https://changed-before-build.internal:9443'
 cp "$CFGDIR/Dockerfile" "$snapshot_df"
 cp "$CFGDIR/kache-supervise.sh" "$snapshot_companion"
+cp "$CFGDIR/endpoint-validation.sh" "$snapshot_validator"
 printf '%s\n' "$snapshot_endpoint" >"$snapshot_endpoint_file"
-chmod 0600 "$snapshot_df" "$snapshot_companion" "$snapshot_endpoint_file"
+chmod 0600 "$snapshot_df" "$snapshot_companion" "$snapshot_validator" "$snapshot_endpoint_file"
 printf '%s\n' "$live_endpoint" >"$KACHE_ENDPOINT_FILE"
 chmod 0600 "$KACHE_ENDPOINT_FILE"
 cmd_build_image "$snapshot_df" || crf_fail 'production snapshot build rejected valid Nashost inputs'
@@ -207,15 +228,17 @@ fi
 build_candidate_state_load || crf_fail 'production snapshot build lost candidate metadata'
 snapshot_df_sha="$(sha256sum "$snapshot_df" | awk '{print $1}')"
 snapshot_supervisor_sha="$(sha256sum "$snapshot_companion" | awk '{print $1}')"
+snapshot_validator_sha="$(sha256sum "$snapshot_validator" | awk '{print $1}')"
 snapshot_endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$snapshot_endpoint" | sha256sum | awk '{print $1}')"
 snapshot_context_sha="$({
-  printf 'ci-runner-farm:build-input:v2\n'
+  printf 'ci-runner-farm:build-input:v3\n'
   printf 'dockerfile=%s\n' "$snapshot_df_sha"
   printf 'kache_supervisor=%s\n' "$snapshot_supervisor_sha"
+  printf 'endpoint_validator=%s\n' "$snapshot_validator_sha"
   printf 'kache_endpoint=%s\n' "$snapshot_endpoint_digest"
 } | sha256sum | awk '{print $1}')"
 crf_assert_eq "$snapshot_context_sha" "$BUILD_CANDIDATE_CONTEXT_SHA" 'production snapshot candidate context identity'
-rm -f "$snapshot_df" "$snapshot_companion" "$snapshot_endpoint_file"
+rm -f "$snapshot_df" "$snapshot_companion" "$snapshot_validator" "$snapshot_endpoint_file"
 
 # Restore the approved endpoint for the async snapshot race below.
 printf '%s\n' "$kache_endpoint" >"$KACHE_ENDPOINT_FILE"
@@ -225,6 +248,7 @@ chmod 0600 "$KACHE_ENDPOINT_FILE"
 # only the private snapshot, and both runtime build files remain mode 0600.
 expected="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
 expected_companion="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
+expected_validator="$(sha256sum "$CFGDIR/endpoint-validation.sh" | awk '{print $1}')"
 expected_endpoint="$(sha256sum "$KACHE_ENDPOINT_FILE" | awk '{print $1}')"
 stale="$(printf stale | sha256sum | awk '{print $1}')"
 reply="$(cmd_build_async "$stale")"
@@ -251,6 +275,7 @@ for _ in $(seq 1 100); do
 done
 grep -Fq "build probe consumed $expected" "$RUNDIR/build.log" || crf_fail 'build child did not consume the verified snapshot'
 grep -Fq "build probe consumed companion $expected_companion" "$RUNDIR/build.log" || crf_fail 'Save + Build child did not consume the snapshotted Nashost companion'
+grep -Fq "build probe consumed validator $expected_validator" "$RUNDIR/build.log" || crf_fail 'Save + Build child did not consume the snapshotted endpoint validator'
 grep -Fq "build probe consumed endpoint $expected_endpoint" "$RUNDIR/build.log" || crf_fail 'Save + Build child reread the live Kache endpoint after launch'
 if grep -Fq 'changed-after-launch' "$RUNDIR/build.log"; then
   crf_fail 'Save + Build log exposed or consumed the post-launch endpoint value'

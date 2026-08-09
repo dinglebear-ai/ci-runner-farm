@@ -850,7 +850,7 @@ echo 'reconcile-stop-pid-reuse: OK'
   RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
   stubborn_pid=4242
   stubborn_starttime=123456
-  stubborn_token=0123456789abcdef0123456789abcdef
+  stubborn_token=cccccccccccccccccccccccccccccccc
   stubborn_script="$PWD/$ENGINE"
   ( umask 077
     printf '%s\n' "$stubborn_pid" >"$RECONCILE_PID"

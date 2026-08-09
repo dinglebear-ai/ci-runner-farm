@@ -118,8 +118,10 @@ grep -Fq 'runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"' \
 bash tests/performance-contracts.sh >/dev/null
 bash tests/autoscale-locks.sh >/dev/null
 bash tests/mutation-ownership.sh >/dev/null
+bash tests/reconcile-status.sh >/dev/null
 bash tests/endpoint-validation.sh >/dev/null
 bash tests/nashost-kache-profile.sh >/dev/null
+bash tests/nashost-candidate-docs.sh >/dev/null
 bash tests/image-promotion.sh >/dev/null
 bash tests/resource-admission.sh >/dev/null
 bash tests/nashost-fleet-audit.sh >/dev/null

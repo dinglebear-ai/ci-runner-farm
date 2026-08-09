@@ -3025,6 +3025,26 @@ EOF
     grep -Fxq -- "CRF_RECONCILE_SESSION_TOKEN=$token"
 }
 
+cmd_reconcile_status() {
+  local identity pid starttime token script
+  if [ ! -e "$RECONCILE_IDENTITY" ] && [ ! -L "$RECONCILE_IDENTITY" ]; then
+    printf '{"ok":true,"active":false}\n'
+    return 0
+  fi
+  identity="$(reconcile_identity_read 2>/dev/null)" || {
+    printf '{"ok":false,"active":true,"error":"invalid reconciliation ownership identity"}\n'
+    return 1
+  }
+  read -r pid starttime token script <<EOF
+$identity
+EOF
+  if reconcile_pid_active || reconcile_group_owned "$pid" "$starttime" "$token"; then
+    printf '{"ok":true,"active":true,"pid":%s}\n' "$pid"
+  else
+    printf '{"ok":true,"active":false,"stale":true,"pid":%s}\n' "$pid"
+  fi
+}
+
 reconcile_start() {
   local mode="${1:-launch}" script pid record state pgrp session starttime token identity identity_tmp
   local bootstrap_ready bootstrap_cancel bootstrap_tmp attempt=0 ready_attempts=500
@@ -4582,7 +4602,7 @@ cmd_build_async() {
   # Log + lock on tmpfs (RUNDIR), NOT flash: a docker build streams thousands of
   # lines and appending each to /boot would hammer the USB stick. The log is only
   # needed for the current session's build, so losing it on reboot is fine.
-  local expected="${1:-}" log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner source snapshot companion companion_snapshot endpoint_snapshot actual
+  local expected="${1:-}" log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner source snapshot companion companion_snapshot validator validator_snapshot endpoint_snapshot actual
   [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo '{"ok":false,"error":"valid saved Dockerfile hash required"}'; return 0; }
   umask 077
   mkdir -p "$RUNDIR" 2>/dev/null
@@ -4605,30 +4625,39 @@ cmd_build_async() {
         return 0
       fi
     fi
+    validator_snapshot="${snapshot}.endpoint-validation.sh"
+    if build_context_needs_endpoint_validator "$snapshot"; then
+      validator="${source%/*}/endpoint-validation.sh"
+      if ! build_context_copy_companion "$validator" "$validator_snapshot"; then
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot"
+        echo '{"ok":false,"error":"Dockerfile requires a safe endpoint-validation.sh beside the saved Dockerfile"}'
+        return 0
+      fi
+    fi
     endpoint_snapshot="${snapshot}.kache-endpoint"
     if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$snapshot"; then
       if ! kache_endpoint_load ||
          ! ( umask 077; printf '%s\n' "$KACHE_REMOTE_ENDPOINT" >"$endpoint_snapshot" ); then
-        rm -f "$snapshot" "$companion_snapshot" "$endpoint_snapshot"
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
         echo '{"ok":false,"error":"Dockerfile requires a valid protected Kache endpoint"}'
         return 0
       fi
       chmod 0600 "$endpoint_snapshot" || {
-        rm -f "$snapshot" "$companion_snapshot" "$endpoint_snapshot"
+        rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
         echo '{"ok":false,"error":"could not secure the Kache endpoint snapshot"}'
         return 0
       }
     fi
     actual="$(sha256sum "$snapshot" 2>/dev/null | awk '{print $1}')"
     if [ "$actual" != "$expected" ]; then
-      rm -f "$snapshot" "$companion_snapshot" "$endpoint_snapshot"
+      rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"
       echo '{"ok":false,"code":"stale_dockerfile","error":"Dockerfile changed after it was saved; review and save again"}'
       return 0
     fi
     if ! : > "$log" || ! chmod 0600 "$log"; then
-      rm -f "$snapshot" "$companion_snapshot" "$endpoint_snapshot"; echo '{"ok":false,"error":"could not secure the build log"}'; return 0
+      rm -f "$snapshot" "$companion_snapshot" "$validator_snapshot" "$endpoint_snapshot"; echo '{"ok":false,"error":"could not secure the build log"}'; return 0
     fi
-    inner="'$0' build-image '$snapshot' >> '$log' 2>&1; build_rc=\$?; rm -f '$snapshot' '$companion_snapshot' '$endpoint_snapshot'; echo \"__BUILD_RC__=\$build_rc\" >> '$log'"
+    inner="'$0' build-image '$snapshot' >> '$log' 2>&1; build_rc=\$?; rm -f '$snapshot' '$companion_snapshot' '$validator_snapshot' '$endpoint_snapshot'; echo \"__BUILD_RC__=\$build_rc\" >> '$log'"
     nohup sh -c "$inner" </dev/null >/dev/null 2>&1 &
     printf '{"ok":true,"action":"build-image","dockerfile_sha":"%s"}\n' "$actual"
   elif [ "$rc" -eq 1 ]; then
@@ -4709,13 +4738,22 @@ build_candidate_tag_valid() {
 }
 
 # The plugin image builder intentionally creates a minimal context. Nashost's
-# two supported recipes need exactly one companion; do not copy the Dockerfile's
+# supported deployment recipes need a small allowlisted set of companions; do
+# not copy the Dockerfile's
 # directory wholesale (it can live on persistent flash beside credentials).
 build_context_needs_kache_supervisor() {
   grep -Eq '^[[:space:]]*COPY[[:space:]]+kache-supervise\.sh[[:space:]]+/usr/local/bin/kache-supervise\.sh[[:space:]]*$' "$1"
 }
 
 build_context_copy_kache_supervisor() {
+  build_context_copy_companion "$@"
+}
+
+build_context_needs_endpoint_validator() {
+  grep -Eq '^[[:space:]]*COPY[[:space:]]+endpoint-validation\.sh[[:space:]]+/usr/local/libexec/ci-runner-farm/endpoint-validation\.sh[[:space:]]*$' "$1"
+}
+
+build_context_copy_companion() {
   local source="$1" destination="$2" size
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
   size="$(stat -c %s "$source" 2>/dev/null)" || return 1
@@ -4880,7 +4918,7 @@ cmd_build_image() {
     [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
     [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   fi
-  local ctx companion_source endpoint_source endpoint_digest df_sha supervisor_sha context_sha candidate_repo candidate_tag image_id now tmp rc
+  local ctx companion_source validator_source endpoint_source endpoint_digest df_sha supervisor_sha validator_sha context_sha candidate_repo candidate_tag image_id now tmp rc
   local -a build_args=()
   ctx="$(mktemp -d)" || return 1
   cp "$df" "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
@@ -4891,6 +4929,16 @@ cmd_build_image() {
     build_context_copy_kache_supervisor "$companion_source" "$ctx/kache-supervise.sh" || {
       rm -rf "$ctx"
       err "Dockerfile requires a safe kache-supervise.sh companion"
+      return 1
+    }
+  fi
+  if build_context_needs_endpoint_validator "$ctx/Dockerfile"; then
+    if [ -n "${1:-}" ]; then validator_source="${df}.endpoint-validation.sh"
+    else validator_source="${df%/*}/endpoint-validation.sh"
+    fi
+    build_context_copy_companion "$validator_source" "$ctx/endpoint-validation.sh" || {
+      rm -rf "$ctx"
+      err "Dockerfile requires a safe endpoint-validation.sh companion"
       return 1
     }
   fi
@@ -4908,12 +4956,15 @@ cmd_build_image() {
   df_sha="$(sha256sum "$ctx/Dockerfile" | awk '{print $1}')"
   supervisor_sha=""
   [ ! -f "$ctx/kache-supervise.sh" ] || supervisor_sha="$(sha256sum "$ctx/kache-supervise.sh" | awk '{print $1}')"
+  validator_sha=""
+  [ ! -f "$ctx/endpoint-validation.sh" ] || validator_sha="$(sha256sum "$ctx/endpoint-validation.sh" | awk '{print $1}')"
   endpoint_digest=""
   [ -z "${KACHE_REMOTE_ENDPOINT:-}" ] || endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$KACHE_REMOTE_ENDPOINT" | sha256sum | awk '{print $1}')"
   context_sha="$({
-    printf 'ci-runner-farm:build-input:v2\n'
+    printf 'ci-runner-farm:build-input:v3\n'
     printf 'dockerfile=%s\n' "$df_sha"
     [ -z "$supervisor_sha" ] || printf 'kache_supervisor=%s\n' "$supervisor_sha"
+    [ -z "$validator_sha" ] || printf 'endpoint_validator=%s\n' "$validator_sha"
     [ -z "$endpoint_digest" ] || printf 'kache_endpoint=%s\n' "$endpoint_digest"
   } | sha256sum | awk '{print $1}')"
   candidate_repo="${BUILTIN_IMAGE%:*}"
@@ -5050,6 +5101,7 @@ case "${1:-status}" in
   mutation-owner-claim) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
   mutation-owner-release) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
   mutation-owner-status) with_mutation_owner_lock cmd_mutation_owner_status ;;
+  reconcile-status) cmd_reconcile_status ;;
   reconcile-config) with_fleet_lock wait cmd_reconcile_config ;;
   reconcile-drain-ready) cmd_reconcile_drain_ready "${2:-}" "${3:-}" ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;

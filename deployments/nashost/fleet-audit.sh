@@ -430,8 +430,10 @@ printf("github_online_exact=%d\n",count($current));
   assert_eq "$CRF_EXPECTED_PLUGIN_VERSION" "$plugin_version" "plugin version"
   assert_eq "$CRF_EXPECTED_PLUGIN_PACKAGE_SHA256" "$package_hash" "plugin package hash"
 
-  [ -z "$(pgrep -f '[r]unner-farm.sh reconcile-drain' || true)" ] ||
-    fail "reconciliation worker is still running"
+  reconcile_status="$("$ENGINE" reconcile-status)" ||
+    fail "reconciliation ownership status is invalid"
+  assert_eq true "$(jq -r '.ok' <<<"$reconcile_status")" "reconciliation ownership status"
+  assert_eq false "$(jq -r '.active' <<<"$reconcile_status")" "reconciliation worker activity"
   mutation_status="$("$ENGINE" mutation-owner-status)"
   assert_eq false "$(jq -r '.active' <<<"$mutation_status")" "mutation owner activity"
 

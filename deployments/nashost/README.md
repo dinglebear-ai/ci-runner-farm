@@ -77,11 +77,19 @@ overlay image, then drain and recycle one runner at a time.
 ## Safe image promotion
 
 Local image builds are candidates, not releases. **Save + Build Candidate** creates
-an immutable `candidate-<dockerfile-sha>-<time>-<pid>` tag and records the exact
-Docker image ID. **Promote Verified Candidate** rechecks both values before it can
-move `ci-runner-farm-runner:latest`. Experimental or compatibility builds must
-keep distinct tags; never call `docker tag ...:latest` outside this promotion
-path. Verify a pristine candidate's Kache version and SHA-256 before promotion.
+an immutable `candidate-<context-sha-prefix>-<time>-<pid>` tag. The full context
+SHA comes from a versioned manifest covering the exact Dockerfile bytes,
+`kache-supervise.sh` when the Dockerfile copies it,
+`endpoint-validation.sh` when the Dockerfile copies it, and a
+domain-separated digest of the protected Kache endpoint when the recipe declares
+that build argument. The endpoint itself is passed as a protected build argument
+and is not stored in candidate metadata.
+That metadata records the Dockerfile SHA, full context SHA, and exact image ID.
+**Promote Verified Candidate** rechecks the immutable tag and exact image ID
+before it can move `ci-runner-farm-runner:latest`. Experimental or compatibility
+builds must keep distinct tags; never call `docker tag ...:latest` outside this
+promotion path. Verify a pristine candidate's Kache version and SHA-256 before
+promotion.
 
 ## Exclusive fleet mutations
 

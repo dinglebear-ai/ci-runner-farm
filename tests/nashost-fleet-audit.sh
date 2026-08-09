@@ -48,6 +48,7 @@ for needle in \
   'CRF_EXPECTED_MEMORY_CONFIGURED_BYTES="${CRF_EXPECTED_MEMORY_CONFIGURED_BYTES:-122406567936}"' \
   'CRF_EXPECTED_MEMORY_HEADROOM_BYTES="${CRF_EXPECTED_MEMORY_HEADROOM_BYTES:-2147483648}"' \
   'github_online_exact=' \
+  'reconcile-status' \
   'mutation-owner-status' \
   'kache-watchdog-daemon' \
   'GOTIFY_ENV=' \
@@ -55,6 +56,9 @@ for needle in \
   'notify_success'; do
   grep -Fq "$needle" "$AUDIT" || crf_fail "audit contract missing: $needle"
 done
+if grep -Fq "pgrep -f '[r]unner-farm.sh reconcile-drain'" "$AUDIT"; then
+  crf_fail 'audit still uses broad process-name matching for reconciliation ownership'
+fi
 
 tmp="$(mktemp -d)"
 gotify_server_pid=""
