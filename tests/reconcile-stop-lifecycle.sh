@@ -138,9 +138,12 @@ extract_function reconcile_identity_clear "$controller_functions"
 extract_function reconcile_pid_active "$controller_functions"
 extract_function reconcile_start "$controller_functions"
 extract_function reconcile_stop "$controller_functions"
+extract_function with_mutation_owner_lock "$controller_functions"
 extract_function with_fleet_lock "$controller_functions"
 extract_function cmd_stop_fenced "$controller_functions"
+extract_function cmd_stop_fenced_owned "$controller_functions"
 extract_function cmd_restart_fenced "$controller_functions"
+extract_function cmd_restart_fenced_owned "$controller_functions"
 # shellcheck disable=SC1090
 . "$controller_functions"
 

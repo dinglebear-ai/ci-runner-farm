@@ -40,12 +40,14 @@ Files:
 - `runner.Dockerfile` is the complete reproducible runner image recipe.
 - `kache-overlay.Dockerfile` upgrades the currently deployed Nashost image in a
   small, rollback-friendly layer and is the normal fleet rollout path.
+- `endpoint-validation.sh` is the single Kache/Gotify endpoint contract used by
+  image builds, the installer, and the scheduled audit.
 - `kache-supervise.sh` owns the container-lifetime daemon without invoking the
   side-effectful `kache daemon status` command.
 
 Run `tests/nashost-kache-profile.sh` before deployment. Copy the full Dockerfile
-and supervisor to `/boot/config/plugins/ci-runner-farm/` as the durable rebuild
-source. The public recipes intentionally contain no private endpoint. Inject the
+and both supporting shell scripts to `/boot/config/plugins/ci-runner-farm/` as
+the durable rebuild source. The public recipes intentionally contain no private endpoint. Inject the
 approved endpoint explicitly when building either recipe. Persist it once for
 the plugin's **Save + Build Candidate** path as a protected, one-line input:
 

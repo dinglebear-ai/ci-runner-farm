@@ -134,7 +134,7 @@ controller="$tmp/controller-functions.sh"
 : >"$controller"
 for fn in reconcile_proc_record reconcile_identity_read reconcile_group_live reconcile_group_owned \
   reconcile_identity_clear reconcile_pid_active reconcile_start reconcile_stop with_fleet_lock \
-  cmd_stop_fenced cmd_reconcile_config; do
+  with_mutation_owner_lock cmd_stop_fenced cmd_stop_fenced_owned cmd_reconcile_config; do
   extract_function "$fn" "$controller"
 done
 # shellcheck disable=SC1090

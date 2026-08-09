@@ -3,6 +3,12 @@ set -Eeuo pipefail
 umask 077
 
 PLUGIN=ci-runner-farm
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VALIDATION_SOURCE="${CRF_ENDPOINT_VALIDATION_SOURCE:-$SCRIPT_DIR/endpoint-validation.sh}"
+[ -f "$VALIDATION_SOURCE" ] && [ ! -L "$VALIDATION_SOURCE" ] ||
+  { echo "endpoint validation library is unavailable: $VALIDATION_SOURCE" >&2; exit 2; }
+# shellcheck source=deployments/nashost/endpoint-validation.sh
+. "$VALIDATION_SOURCE"
 ENGINE="${CRF_ENGINE:-/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh}"
 PLUGIN_CONFIG_DIR="${CRF_PLUGIN_CONFIG_DIR:-/boot/config/plugins/$PLUGIN}"
 AUDIT_CONFIG="${CRF_AUDIT_CONFIG:-$PLUGIN_CONFIG_DIR/fleet-audit.env}"
@@ -119,60 +125,6 @@ require_sha256() {
 }
 require_image_id() {
   [[ "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]
-}
-require_kache_endpoint() {
-  local endpoint="${1:-}" authority host port
-  [ -n "$endpoint" ] || return 1
-  [[ "$endpoint" =~ ^https?:// ]] || return 1
-  case "$endpoint" in
-    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
-    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
-  esac
-  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
-  authority="${endpoint#*://}"
-  authority="${authority%%/*}"
-  case "$authority" in
-    ''|*@*|*:*:*) return 4 ;;
-    *:*)
-      host="${authority%:*}"
-      port="${authority##*:}"
-      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
-      ;;
-    *) host="$authority" ;;
-  esac
-  case "$host" in
-    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
-  esac
-  return 0
-}
-require_gotify_url() {
-  local endpoint="${1:-}" scheme authority host port
-  [ -n "$endpoint" ] || return 1
-  [[ "$endpoint" =~ ^https?:// ]] || return 1
-  scheme="${endpoint%%://*}"
-  case "$endpoint" in
-    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
-    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
-  esac
-  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
-  authority="${endpoint#*://}"
-  authority="${authority%%/*}"
-  case "$authority" in
-    ''|*@*|*:*:*) return 4 ;;
-    *:*)
-      host="${authority%:*}"
-      port="${authority##*:}"
-      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
-      ;;
-    *) host="$authority" ;;
-  esac
-  case "$host" in
-    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
-  esac
-  if [ "$scheme" = http ] && [ "$host" != localhost ] && [ "$host" != 127.0.0.1 ]; then
-    return 5
-  fi
-  return 0
 }
 fail() {
   printf 'FAIL: %s\n' "$*" >&2

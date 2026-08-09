@@ -2588,6 +2588,19 @@ mutation_owner_guard() {
   fi
 }
 
+# Lease claim/release and Stop/Restart fencing share this lock. It is separate
+# from fleet.lock because reconciliation may legitimately hold fleet.lock while
+# Stop must first fence it; the fixed owner-lock -> fleet-lock order prevents a
+# competing lease from appearing between the guard and the fence.
+with_mutation_owner_lock() {
+  ( flock -w 20 6 || {
+      err "mutation ownership is busy — try again"
+      exit 1
+    }
+    "$@"
+  ) 6>"$RUNDIR/mutation-owner.lock"
+}
+
 # Serialize all fleet mutation (UI start/stop/restart/scale/recycle AND the autoscale
 # / image-update daemon ticks) behind one lock (fd 8), so a manual action and a daemon
 # tick can't race into a duplicate docker-run or a false "removed but not recreated"
@@ -2613,12 +2626,20 @@ cmd_restart() {
 # lock around Docker/GitHub mutations, so taking it first can time out before
 # cmd_stop reaches reconcile_stop and leave teardown racing a live worker.
 cmd_stop_fenced() {
+  with_mutation_owner_lock cmd_stop_fenced_owned
+}
+
+cmd_stop_fenced_owned() {
   mutation_owner_guard wait cmd_stop || return 1
   reconcile_stop || return 1
   with_fleet_lock wait cmd_stop
 }
 
 cmd_restart_fenced() {
+  with_mutation_owner_lock cmd_restart_fenced_owned
+}
+
+cmd_restart_fenced_owned() {
   mutation_owner_guard wait cmd_restart || return 1
   reconcile_stop || return 1
   with_fleet_lock wait cmd_restart
@@ -5026,9 +5047,9 @@ case "${1:-status}" in
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
   maintenance)  with_fleet_lock wait cmd_maintenance "${2:-status}" ;;
-  mutation-owner-claim) with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
-  mutation-owner-release) with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
-  mutation-owner-status) cmd_mutation_owner_status ;;
+  mutation-owner-claim) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_claim "${2:?usage: mutation-owner-claim <owner> [ttl]}" "${3:-1800}" ;;
+  mutation-owner-release) with_mutation_owner_lock with_fleet_lock wait cmd_mutation_owner_release "${2:?usage: mutation-owner-release <owner>}" ;;
+  mutation-owner-status) with_mutation_owner_lock cmd_mutation_owner_status ;;
   reconcile-config) with_fleet_lock wait cmd_reconcile_config ;;
   reconcile-drain-ready) cmd_reconcile_drain_ready "${2:-}" "${3:-}" ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;

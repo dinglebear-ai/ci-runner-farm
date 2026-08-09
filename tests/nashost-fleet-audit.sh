@@ -6,8 +6,10 @@ cd "$(dirname "$0")/.."
 
 AUDIT=deployments/nashost/fleet-audit.sh
 INSTALLER=deployments/nashost/install-fleet-audit.sh
-bash -n "$AUDIT"
-bash -n "$INSTALLER"
+VALIDATOR=deployments/nashost/endpoint-validation.sh
+bash -n "$AUDIT" "$INSTALLER" "$VALIDATOR"
+# shellcheck source=deployments/nashost/endpoint-validation.sh
+. "$VALIDATOR"
 
 valid_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 audit_rejects_endpoint() {
@@ -237,8 +239,7 @@ fi
 # Exercise delivery against a real local HTTP endpoint. A 2xx response passes;
 # an HTTP failure is observable and nonzero, and neither path prints the token.
 notify_functions="$tmp/notify-functions.sh"
-sed -n '/^require_gotify_url()/,/^}/p' "$AUDIT" >"$notify_functions"
-sed -n '/^notify_gotify()/,/^)/p' "$AUDIT" >>"$notify_functions"
+sed -n '/^notify_gotify()/,/^)/p' "$AUDIT" >"$notify_functions"
 # shellcheck disable=SC1090
 . "$notify_functions"
 for allowed_gotify_url in \
@@ -566,9 +567,12 @@ env \
   bash "$INSTALLER" > "$tmp/install.out"
 
 installed="$plugin_dir/fleet-audit.sh"
+installed_validator="$plugin_dir/endpoint-validation.sh"
 config="$plugin_dir/fleet-audit.env"
 wrapper="$user_root/scripts/ci-runner-farm-audit/script"
 crf_assert_file_mode "$installed" 755
+crf_assert_file_mode "$installed_validator" 755
+cmp -s "$VALIDATOR" "$installed_validator" || crf_fail 'installer changed the canonical endpoint validator'
 crf_assert_file_mode "$config" 600
 crf_assert_file_mode "$wrapper" 755
 grep -Fq "CRF_EXPECTED_PLUGIN_VERSION='9.9.9'" "$config"

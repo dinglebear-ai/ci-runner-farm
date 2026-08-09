@@ -4,11 +4,13 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUDIT_SOURCE="${CRF_AUDIT_SOURCE:-$SCRIPT_DIR/fleet-audit.sh}"
+VALIDATION_SOURCE="${CRF_ENDPOINT_VALIDATION_SOURCE:-$SCRIPT_DIR/endpoint-validation.sh}"
 BOOT_CONFIG_ROOT="${CRF_BOOT_CONFIG_ROOT:-/boot/config}"
 PLUGIN=ci-runner-farm
 PLUGIN_CONFIG_DIR="${CRF_PLUGIN_CONFIG_DIR:-$BOOT_CONFIG_ROOT/plugins/$PLUGIN}"
 PLUGIN_PLG="${CRF_PLUGIN_PLG:-$PLUGIN_CONFIG_DIR.plg}"
 AUDIT_INSTALL_PATH="${CRF_AUDIT_INSTALL_PATH:-$PLUGIN_CONFIG_DIR/fleet-audit.sh}"
+VALIDATION_INSTALL_PATH="${CRF_ENDPOINT_VALIDATION_INSTALL_PATH:-$PLUGIN_CONFIG_DIR/endpoint-validation.sh}"
 AUDIT_CONFIG="${CRF_AUDIT_CONFIG:-$PLUGIN_CONFIG_DIR/fleet-audit.env}"
 AUDIT_LOG_ROOT="${CRF_AUDIT_LOG_ROOT:-/mnt/user/logs/ci-runner-farm-audit}"
 USER_SCRIPTS_ROOT="${CRF_USER_SCRIPTS_ROOT:-$BOOT_CONFIG_ROOT/plugins/user.scripts}"
@@ -22,61 +24,10 @@ SCHEDULE_ID="${CRF_AUDIT_SCHEDULE_ID:-scheduleci-runner-farm-audit}"
 UPDATE_CRON="${CRF_UPDATE_CRON:-1}"
 RUN_AUDIT="${CRF_INSTALL_RUN_AUDIT:-0}"
 
-require_kache_endpoint() {
-  local endpoint="${1:-}" authority host port
-  [ -n "$endpoint" ] || return 1
-  [[ "$endpoint" =~ ^https?:// ]] || return 1
-  case "$endpoint" in
-    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
-    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
-  esac
-  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
-  authority="${endpoint#*://}"
-  authority="${authority%%/*}"
-  case "$authority" in
-    ''|*@*|*:*:*) return 4 ;;
-    *:*)
-      host="${authority%:*}"
-      port="${authority##*:}"
-      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
-      ;;
-    *) host="$authority" ;;
-  esac
-  case "$host" in
-    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
-  esac
-  return 0
-}
-
-require_gotify_url() {
-  local endpoint="${1:-}" scheme authority host port
-  [ -n "$endpoint" ] || return 1
-  [[ "$endpoint" =~ ^https?:// ]] || return 1
-  scheme="${endpoint%%://*}"
-  case "$endpoint" in
-    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 2 ;;
-    *\"*|*\'*|*\\*|*[[:space:]]*) return 3 ;;
-  esac
-  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 3
-  authority="${endpoint#*://}"
-  authority="${authority%%/*}"
-  case "$authority" in
-    ''|*@*|*:*:*) return 4 ;;
-    *:*)
-      host="${authority%:*}"
-      port="${authority##*:}"
-      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 4
-      ;;
-    *) host="$authority" ;;
-  esac
-  case "$host" in
-    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 4 ;;
-  esac
-  if [ "$scheme" = http ] && [ "$host" != localhost ] && [ "$host" != 127.0.0.1 ]; then
-    return 5
-  fi
-  return 0
-}
+[ -f "$VALIDATION_SOURCE" ] && [ ! -L "$VALIDATION_SOURCE" ] ||
+  { echo "endpoint validation library is unavailable: $VALIDATION_SOURCE" >&2; exit 1; }
+# shellcheck source=deployments/nashost/endpoint-validation.sh
+. "$VALIDATION_SOURCE"
 
 # gotify.env is operator-controlled configuration read by this root installer,
 # never a shell program. Accept only one literal assignment for each allowlisted
@@ -199,6 +150,7 @@ mkdir -p "$backup_dir"
 [ ! -e "$SCHEDULE_JSON" ] || cp -a "$SCHEDULE_JSON" "$backup_dir/schedule.json"
 [ ! -e "$CUSTOM_CRON" ] || cp -a "$CUSTOM_CRON" "$backup_dir/customSchedule.cron"
 
+install -m 0755 "$VALIDATION_SOURCE" "$VALIDATION_INSTALL_PATH"
 install -m 0755 "$AUDIT_SOURCE" "$AUDIT_INSTALL_PATH"
 
 config_tmp="$AUDIT_CONFIG.tmp.$$"

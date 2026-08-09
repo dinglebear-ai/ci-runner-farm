@@ -5,8 +5,11 @@ cd "$(dirname "$0")/.."
 FULL=deployments/nashost/runner.Dockerfile
 OVERLAY=deployments/nashost/kache-overlay.Dockerfile
 SUPERVISOR=deployments/nashost/kache-supervise.sh
+VALIDATOR=deployments/nashost/endpoint-validation.sh
 
-bash -n "$SUPERVISOR"
+bash -n "$SUPERVISOR" "$VALIDATOR"
+grep -Fq '%s contains unsafe characters' "$VALIDATOR"
+grep -Fq 'valid authority and optional port from 1 through 65535' "$VALIDATOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq 'php-cli ripgrep file' "$dockerfile"
   grep -Fq 'ARG KACHE_FLEET_TAG=v0.13.0' "$dockerfile"
@@ -25,11 +28,13 @@ for dockerfile in "$FULL" "$OVERLAY"; do
   # private endpoint. Documentation-only addresses must never become a
   # plausible-looking, silently broken production configuration.
   grep -Eq '^ARG KACHE_REMOTE_ENDPOINT$' "$dockerfile"
-  # shellcheck disable=SC2016 -- this is a literal Dockerfile contract.
+  grep -Fq 'COPY endpoint-validation.sh /usr/local/libexec/ci-runner-farm/endpoint-validation.sh' "$dockerfile"
+  # shellcheck disable=SC2016
+  grep -Fq '/usr/local/libexec/ci-runner-farm/endpoint-validation.sh kache "$endpoint"' "$dockerfile"
+  # This is a literal Dockerfile contract.
+  # shellcheck disable=SC2016
   grep -Fq 'endpoint = \"${endpoint}\"' "$dockerfile"
-  grep -Fq '*192.0.2.*' "$dockerfile"
-  grep -Fq 'KACHE_REMOTE_ENDPOINT contains unsafe characters' "$dockerfile"
-  grep -Fq 'KACHE_REMOTE_ENDPOINT must contain a valid authority' "$dockerfile"
+  ! grep -Fq '*192.0.2.*' "$dockerfile"
   ! grep -Eq 'endpoint = .*192\.0\.2\.|endpoint = .*198\.51\.100\.|endpoint = .*203\.0\.113\.' "$dockerfile"
 
   # Parse the exact printf arguments from the Dockerfile, substitute a safe

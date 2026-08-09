@@ -1,0 +1,40 @@
+# kind	expect	endpoint
+kache	accept	http://10.23.45.67:9000
+kache	accept	https://cache.internal
+kache	accept	https://cache.internal:1
+kache	accept	https://cache.internal:65535/rust
+kache	reject	
+kache	reject	ftp://cache.internal:9000
+kache	reject	http://192.0.2.2:9000
+kache	reject	http://builder@192.0.2.2:9000
+kache	reject	http://cache.internal:9000 path
+kache	reject	http://cache.internal:9000\escaped
+kache	reject	http://user@cache.internal:9000
+kache	reject	http://:9000
+kache	reject	http://cache..internal:9000
+kache	reject	http://cache.internal:
+kache	reject	http://cache.internal:0
+kache	reject	http://cache.internal:000001
+kache	reject	http://cache.internal:65536
+kache	reject	http://cache.internal:not-a-port
+gotify	accept	https://gotify.internal
+gotify	accept	https://gotify.internal:8443/base
+gotify	accept	http://localhost
+gotify	accept	http://localhost:1
+gotify	accept	http://localhost:65535/base
+gotify	accept	http://127.0.0.1:8080
+gotify	reject	
+gotify	reject	http://gotify.internal:8080
+gotify	reject	http://10.23.45.67:8080
+gotify	reject	http://user@localhost:8080
+gotify	reject	http://LOCALHOST:8080
+gotify	reject	http://localhost.:8080
+gotify	reject	http://127.0.0.2:8080
+gotify	reject	http://127.1:8080
+gotify	reject	http://2130706433:8080
+gotify	reject	http://0x7f000001:8080
+gotify	reject	http://[::1]:8080
+gotify	reject	http://localhost:
+gotify	reject	http://localhost:0
+gotify	reject	http://localhost:000001
+gotify	reject	http://localhost:65536

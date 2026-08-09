@@ -114,33 +114,11 @@ RUN mkdir -p /home/runner/.cargo && printf '%s\n' \
 # runner's PRIVATE persistent host mount, so the store survives jobs AND
 # recycles without ever being shared across containers (the forbidden case is
 # cross-OS-boundary sharing, not cross-repo: one store dedups all 19 repos).
+COPY endpoint-validation.sh /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
+RUN chmod 0755 /usr/local/libexec/ci-runner-farm/endpoint-validation.sh
 ARG KACHE_REMOTE_ENDPOINT
 RUN endpoint="${KACHE_REMOTE_ENDPOINT:-}" \
- && case "$endpoint" in \
-      '') echo 'KACHE_REMOTE_ENDPOINT build argument is required' >&2; exit 2 ;; \
-      *192.0.2.*|*198.51.100.*|*203.0.113.*) \
-        echo 'KACHE_REMOTE_ENDPOINT must not use an RFC 5737 documentation-only address' >&2; exit 2 ;; \
-      http://*|https://*) ;; \
-      *) echo 'KACHE_REMOTE_ENDPOINT must be an HTTP or HTTPS URL' >&2; exit 2 ;; \
-    esac \
- && case "$endpoint" in \
-      *\"*|*\'*|*\\*|*[[:space:]]*) echo 'KACHE_REMOTE_ENDPOINT contains unsafe characters' >&2; exit 2 ;; \
-    esac \
- && test -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" \
-    || { echo 'KACHE_REMOTE_ENDPOINT contains unsafe characters' >&2; exit 2; } \
- && authority="${endpoint#*://}" \
- && authority="${authority%%/*}" \
- && case "$authority" in \
-      ''|*@*|*:*:*) echo 'KACHE_REMOTE_ENDPOINT must contain a valid authority' >&2; exit 2 ;; \
-      *:*) host="${authority%:*}"; port="${authority##*:}"; \
-        case "$port" in ''|*[!0-9]*) echo 'KACHE_REMOTE_ENDPOINT must contain a valid authority' >&2; exit 2 ;; esac; \
-        test "$port" -le 65535 || { echo 'KACHE_REMOTE_ENDPOINT must contain a valid authority' >&2; exit 2; } ;; \
-      *) host="$authority" ;; \
-    esac \
- && case "$host" in \
-      ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) \
-        echo 'KACHE_REMOTE_ENDPOINT must contain a valid authority' >&2; exit 2 ;; \
-    esac \
+ && /usr/local/libexec/ci-runner-farm/endpoint-validation.sh kache "$endpoint" \
  && mkdir -p /home/runner/.config/kache && printf '%s\n' \
   "[cache]" \
   "local_store = \"/_work/.kache\"" \
