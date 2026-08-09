@@ -355,10 +355,17 @@ cmd_apply_config() {
   chmod 0600 "$old_cfg" || true
   CFG="$old_cfg"
   load_cfg
+  # Fence any existing reconcile session before changing live runtime state.
+  # The validated config is already committed, but overrides and admissions are
+  # untouched until exact worker ownership is observably stopped.
+  reconcile_start fence || {
+    printf '{"ok":false,"code":"reconcile_fence_failed","error":"configuration saved, but the existing reconciliation worker could not be fenced"}\n'
+    return 6
+  }
+  reconcile_start || return 1
   if [ "$old_capacity" != "$new_capacity" ]; then
     rm -f "$RUNDIR"/scale-override.* "$RUNDIR"/autoscale.*.state 2>/dev/null || true
   fi
-  reconcile_start
   # Apply is live for a running fleet. Enabling the daemon master must not wait
   # for a separate Start click; disabling it must stop admissions immediately.
   # Preserve the stopped state by only launching when classic runners or the
@@ -757,6 +764,13 @@ count_reconcile_work() {
   stale="$(count_stale_runners)" || return 1
   drift="$(count_pool_desired_drift)" || return 1
   echo $((stale+drift))
+}
+
+# A caller may launch reconciliation while it still owns fleet.lock and before
+# committing its runtime mutations. Wait for that transaction before deciding
+# there is no work, otherwise the new worker can exit in the pre-mutation gap.
+count_reconcile_work_locked() {
+  ( flock -w 20 8 || return 1; count_reconcile_work ) 8>"$RUNDIR/fleet.lock"
 }
 
 # Effective autoscale floor: AUTOSCALE_MIN, clamped to AUTOSCALE_MAX so a floor
@@ -2591,7 +2605,7 @@ with_fleet_lock() {
 }
 cmd_restart() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  cmd_stop
+  cmd_stop || return 1
   cmd_start
 }
 
@@ -2600,13 +2614,13 @@ cmd_restart() {
 # cmd_stop reaches reconcile_stop and leave teardown racing a live worker.
 cmd_stop_fenced() {
   mutation_owner_guard wait cmd_stop || return 1
-  reconcile_stop
+  reconcile_stop || return 1
   with_fleet_lock wait cmd_stop
 }
 
 cmd_restart_fenced() {
   mutation_owner_guard wait cmd_restart || return 1
-  reconcile_stop
+  reconcile_stop || return 1
   with_fleet_lock wait cmd_restart
 }
 
@@ -2806,7 +2820,7 @@ cmd_reconcile_drain() {
   while :; do
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-    if ! work="$(count_reconcile_work)"; then
+    if ! work="$(count_reconcile_work_locked)"; then
       err "reconcile: could not prepare a trustworthy work count; retrying without declaring migration complete"
       sleep "$sleep_for"
       continue
@@ -2814,7 +2828,7 @@ cmd_reconcile_drain() {
     [ "$work" -eq 0 ] && break
     [ "$announced" = 0 ] && { log "reconcile: config changed — migrating runners onto it as they go idle"; announced=1; }
     with_fleet_lock wait reconcile_stale_runners
-    if ! work="$(count_reconcile_work)"; then
+    if ! work="$(count_reconcile_work_locked)"; then
       err "reconcile: work recount failed after a pass; retrying without declaring migration complete"
       sleep "$sleep_for"
       continue
@@ -2953,7 +2967,12 @@ EOF
 }
 
 reconcile_start() {
-  local script pid record state pgrp session starttime token identity identity_tmp attempt=0
+  local mode="${1:-launch}" script pid record state pgrp session starttime token identity identity_tmp attempt=0
+  case "$mode" in
+    launch) ;;
+    fence) ;;
+    *) err "reconcile: invalid start mode '$mode'"; return 2 ;;
+  esac
   if reconcile_pid_active; then
     # reconcile.identity is the authoritative process record. Recreate the
     # compatibility PID file if it was lost; never replace a proven live worker
@@ -2974,10 +2993,11 @@ EOF
 $identity
 EOF
     if reconcile_group_owned "$pid" "$starttime" "$token"; then
-      reconcile_stop
+      reconcile_stop || return 1
     fi
   fi
   rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
+  [ "$mode" = fence ] && return 0
   script="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
   token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
   [[ "$token" =~ ^[0-9a-f]{32}$ ]] || {
@@ -3041,6 +3061,10 @@ EOF
         sleep 0.05
       done
     fi
+    if reconcile_group_live "$pid" && reconcile_group_owned "$pid" "$starttime" "$token"; then
+      err "reconcile worker group remains live after forced termination; preserving its ownership identity"
+      return 1
+    fi
   fi
   rm -f "$RECONCILE_PID" "$RECONCILE_IDENTITY"
 }
@@ -3050,9 +3074,10 @@ EOF
 # shows in the Apply progress frame — human text, not JSON.
 cmd_reconcile_config() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
+  reconcile_start fence || return 1
+  reconcile_start || return 1
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$RUNDIR"/autoscale.*.state 2>/dev/null || true
-  reconcile_start
   local msg="Configuration saved. Any runner on a previous config will migrate as it goes idle (busy jobs finish first)."
   # A NETWORK_ISOLATION change applies per-runner only as each recycles — so running
   # jobs keep their OLD network until they finish. Say so plainly: a gradual, background
@@ -3070,9 +3095,10 @@ cmd_maintenance() {
       printf '{"ok":true,"maintenance":true,"message":"New admissions are paused; busy runners continue."}\n'
       ;;
     resume)
+      reconcile_start fence || return 1
+      reconcile_start || return 1
       rm -f "$MAINTENANCE_FILE"
       [ "$AUTOSCALE" = true ] && autoscale_start >/dev/null
-      reconcile_start
       printf '{"ok":true,"maintenance":false,"message":"Admissions resumed."}\n'
       ;;
     status)
@@ -3162,6 +3188,8 @@ cmd_start() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
   auth_credentials_configured ||
     { err "no valid GitHub credentials configured (set them in the web UI). Use 'validate' to test provisioning without credentials."; return 1; }
+  reconcile_start fence || return 1
+  reconcile_start || return 1
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp orgp; secp="$(public_repo_problem)"; orgp="$(org_runner_group_problem)"
@@ -3208,7 +3236,7 @@ cmd_start() {
   for c in $(managed_names); do
     [ -n "$c" ] && ! on_expected_network "$c" && { need_migrate=1; break; }
   done
-  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; reconcile_start; }
+  [ "$need_migrate" = 1 ] && log "network mode changed -> migrating runners onto the new network in the background as they go idle"
   local start_rc=0
   # bring back any runners Unraid/Docker left exited (array stop, daemon restart)
   start_stopped_managed || start_rc=1
@@ -3225,7 +3253,6 @@ cmd_start() {
         start_one "$i" "$pool" || start_rc=1
       done
     done < <(pool_records)
-    reconcile_start
   else
     [ "$AUTOSCALE" = "true" ] && startn="$AUTOSCALE_MIN"
     initial="$(current_count)"; ceiling="$startn"
@@ -3235,7 +3262,6 @@ cmd_start() {
       [ "$(current_count)" -lt "$ceiling" ] || break
       start_one "$i" || start_rc=1
     done
-    reconcile_start
   fi
   log "fleet up: $(managed_names | wc -l) runner(s)"
   [ "$AUTOSCALE" = "true" ] && autoscale_start || true
@@ -3296,10 +3322,14 @@ remove_runner_force() {
 # token — so a later Start rebuilds the container with its cache warm; only the
 # container is removed here, not the cached layers.
 cmd_stop() {
+  # Stop/Restart may only mutate the rest of the fleet after the reconcile
+  # session is observably gone. In particular, retain its authoritative identity
+  # and fail closed when a descendant remains in uninterruptible kernel I/O even
+  # after SIGKILL; a later Stop can then retry the exact owned group.
+  reconcile_stop || return 1
   kache_watchdog_stop
   autoscale_stop
   imageupdate_stop
-  reconcile_stop
   if declare -F backend_effective >/dev/null &&
      [ "$(backend_effective 2>/dev/null)" = scaleset ]; then
     if migration_load && [ "$MIGRATION_PHASE" = scaleset_active ]; then
@@ -3411,7 +3441,6 @@ cmd_scale() {
     current="$(current_count "$pool")"
     [ "$target" -gt "$current" ] || { err "manual scale with Autoscaling on can only add runners (currently $current)"; return 1; }
     [ "$target" -le "$max" ] || { err "manual scale target ($target) exceeds autoscale max ($max); raise it in Settings first"; return 1; }
-    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
   elif pool_mode_enabled; then
     local rec other aggregate="$target" override tmp
     while IFS= read -r rec; do
@@ -3419,6 +3448,12 @@ cmd_scale() {
       aggregate=$((aggregate + $(pool_effective_target "$other")))
     done < <(pool_records)
     [ "$aggregate" -le 64 ] || { err "manual pool targets would exceed the fleet hard maximum (64)"; return 1; }
+  fi
+  reconcile_start fence || return 1
+  reconcile_start || return 1
+  if [ "$autoscaled" = true ]; then
+    rm -f "$RUNDIR"/autoscale."$pool".*.state 2>/dev/null || true
+  elif pool_mode_enabled; then
     override="$RUNDIR/scale-override.${pool}.$(pool_state_generation "$pool")"
     tmp="${override}.tmp.$$"
     printf '%s\n' "$target" > "$tmp" && mv "$tmp" "$override"
@@ -3428,7 +3463,7 @@ cmd_scale() {
   else cmd_scale_internal "$target" || rc=$?; fi
   if pool_mode_enabled && [ "$autoscaled" != true ] && [ "$(current_count "$pool")" -ne "$target" ]; then
     log "scale: pool $pool has pending capacity work; reconciliation will continue as runners become idle"
-    reconcile_start
+    :
   fi
   actual="$(current_count "$pool")"
   if pool_mode_enabled && [ "$actual" -ne "$target" ]; then

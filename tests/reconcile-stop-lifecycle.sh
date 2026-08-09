@@ -15,6 +15,7 @@ if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RECONCILE_STOP_TMPDIR:-}" ]; th
   worker_functions="$tmpdir/reconcile-worker.sh"
   : >"$worker_functions"
   extract_function with_fleet_lock "$worker_functions"
+  extract_function count_reconcile_work_locked "$worker_functions"
   extract_function reconcile_identity_clear "$worker_functions"
   extract_function cmd_reconcile_drain "$worker_functions"
   # shellcheck disable=SC1090
@@ -114,6 +115,7 @@ extract_function reconcile_start "$controller_functions"
 extract_function reconcile_stop "$controller_functions"
 extract_function with_fleet_lock "$controller_functions"
 extract_function cmd_stop_fenced "$controller_functions"
+extract_function cmd_restart_fenced "$controller_functions"
 # shellcheck disable=SC1090
 . "$controller_functions"
 
@@ -337,3 +339,307 @@ wait "$unrelated_pid" 2>/dev/null || true
 unrelated_pid=""
 
 echo 'reconcile-stop-pid-reuse: OK'
+
+# A bounded signal wait is not proof that an owned process group terminated.
+# Model a token-proven group that remains live after both TERM and KILL (for
+# example, a descendant blocked in uninterruptible I/O). Stop and Restart must
+# retain the authoritative identity and abort before any fleet mutation. A new
+# reconcile launch must likewise refuse to replace the still-owned group.
+(
+  stubborn_dir="$tmpdir/stubborn"
+  mkdir -p "$stubborn_dir"
+  RUNDIR="$stubborn_dir"
+  RECONCILE_PID="$RUNDIR/reconcile.pid"
+  RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+  stubborn_pid=4242
+  stubborn_starttime=123456
+  stubborn_token=0123456789abcdef0123456789abcdef
+  stubborn_script="$PWD/$ENGINE"
+  ( umask 077
+    printf '%s\n' "$stubborn_pid" >"$RECONCILE_PID"
+    printf '%s %s %s %s\n' "$stubborn_pid" "$stubborn_starttime" \
+      "$stubborn_token" "$stubborn_script" >"$RECONCILE_IDENTITY"
+  )
+
+  group_stubborn=1
+  reconcile_pid_active() { return 0; }
+  reconcile_group_owned() { return 0; }
+  reconcile_group_live() { [ "$group_stubborn" = 1 ]; }
+  reconcile_proc_record() { printf 'S %s %s %s\n' "$1" "$1" "$stubborn_starttime"; }
+  kill() { :; }
+  sleep() { :; }
+  nohup() { : >"$stubborn_dir/replacement-launched"; }
+  mutation_owner_guard() { return 0; }
+  cmd_stop() { : >"$stubborn_dir/stop-ran"; }
+  cmd_restart() { : >"$stubborn_dir/restart-ran"; }
+
+  if reconcile_stop; then
+    echo 'FAIL: reconcile_stop succeeded while its owned process group remained live' >&2
+    exit 1
+  fi
+  [ -s "$RECONCILE_PID" ] && [ -s "$RECONCILE_IDENTITY" ] || {
+    echo 'FAIL: failed reconcile_stop discarded authoritative ownership files' >&2
+    exit 1
+  }
+  [ "$(stat -c %a "$RECONCILE_PID")" = 600 ] &&
+    [ "$(stat -c %a "$RECONCILE_IDENTITY")" = 600 ] || {
+      echo 'FAIL: failed reconcile_stop weakened ownership-file permissions' >&2
+      exit 1
+    }
+
+  if cmd_stop_fenced || [ -e "$stubborn_dir/stop-ran" ]; then
+    echo 'FAIL: fenced Stop continued after reconcile fencing failed' >&2
+    exit 1
+  fi
+  if cmd_restart_fenced || [ -e "$stubborn_dir/restart-ran" ]; then
+    echo 'FAIL: fenced Restart continued after reconcile fencing failed' >&2
+    exit 1
+  fi
+  # Exercise the real inner Stop/Restart functions too: callers inside the
+  # engine must not be able to bypass the outer dispatch fence.
+  (
+    stop_functions="$stubborn_dir/stop-functions.sh"
+    : >"$stop_functions"
+    extract_function cmd_restart "$stop_functions"
+    extract_function cmd_stop "$stop_functions"
+    # shellcheck disable=SC1090
+    . "$stop_functions"
+    validate_runtime_config() { :; }
+    reconcile_stop() { return 1; }
+    kache_watchdog_stop() { : >"$stubborn_dir/teardown-ran"; }
+    cmd_start() { : >"$stubborn_dir/start-ran"; }
+    if cmd_stop || [ -e "$stubborn_dir/teardown-ran" ]; then
+      echo 'FAIL: inner cmd_stop continued after reconcile fencing failed' >&2
+      exit 1
+    fi
+    if cmd_restart || [ -e "$stubborn_dir/start-ran" ]; then
+      echo 'FAIL: inner cmd_restart started after Stop failed' >&2
+      exit 1
+    fi
+  )
+  # Model the leader-dead case for replacement: the group is still token-owned,
+  # but reconcile_pid_active can no longer prove a live leader.
+  reconcile_pid_active() { return 1; }
+  if reconcile_start || [ -e "$stubborn_dir/replacement-launched" ]; then
+    echo 'FAIL: reconcile_start replaced a still-owned process group' >&2
+    exit 1
+  fi
+
+  group_stubborn=0
+  reconcile_pid_active() { return 1; }
+  reconcile_group_owned() { return 1; }
+  reconcile_stop || {
+    echo 'FAIL: reconcile_stop retry failed after the owned group disappeared' >&2
+    exit 1
+  }
+  [ ! -e "$RECONCILE_PID" ] && [ ! -e "$RECONCILE_IDENTITY" ] || {
+    echo 'FAIL: successful reconcile_stop retry retained stale ownership files' >&2
+    exit 1
+  }
+)
+
+echo 'reconcile-stop-stubborn-owned-group: OK'
+
+# A failed reconcile_start is a lifecycle fence, not an advisory daemon-start
+# result. Every operational caller must return before the first subsequent
+# override, admission, provisioning, scale, or success mutation.
+(
+  caller_dir="$tmpdir/start-failure-callers"
+  mkdir -p "$caller_dir"
+
+  # Apply commits the validated configuration first, but must preserve runtime
+  # overrides and avoid daemon/admission changes when the reconcile fence fails.
+  (
+    functions="$caller_dir/apply-functions.sh"
+    : >"$functions"; extract_function cmd_apply_config "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    CFGDIR="$caller_dir/apply-config"; RUNDIR="$caller_dir/apply-run"
+    mkdir -p "$CFGDIR" "$RUNDIR"
+    CFG="$CFGDIR/ci-runner-farm.cfg"
+    staged="$CFGDIR/.apply.test"
+    printf 'old\n' >"$CFG"; printf 'new\n' >"$staged"
+    : >"$RUNDIR/scale-override.keep"
+    expected="$(printf 'a%.0s' {1..64})"
+    load_calls=0
+    load_cfg() {
+      load_calls=$((load_calls + 1))
+      GH_SCOPE=org; GH_OWNER=test; GH_REPOS=''; RUNNER_GROUP=Default
+      RUNNER_COUNT="$([ "$load_calls" -eq 1 ] && echo 1 || echo 2)"
+      RUNNER_MODE=single; RUNNER_POOLS=''; AUTOSCALE=false; POOL_AUTOSCALE=inherit
+      AUTOSCALE_MIN=0; AUTOSCALE_MAX=2; AUTOSCALE_MIN_IDLE=0; AUTOSCALE_STEP=1
+      AUTOSCALE_INTERVAL=60; AUTOSCALE_IDLE_GRACE=60
+      IMAGE_AUTOUPDATE=false; IMAGE_AUTOUPDATE_INTERVAL=300; IMAGE_DRAIN_TIMEOUT=60
+      IMAGE_SOURCE=builtin; IMAGE=''; NETWORK_ISOLATION=off
+    }
+    config_revision() { printf '%s\n' "$expected"; }
+    validate_settings_config() { return 0; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); [ "$reconcile_calls" -eq 1 ]; }
+    managed_names() { : >"$caller_dir/apply-admission-ran"; }
+    config_json() { printf '{}'; }
+    SCALESET_PID="$RUNDIR/scaleset.pid"; AUTOSCALE_PID="$RUNDIR/autoscale.pid"
+    IMAGEUPDATE_PID="$RUNDIR/imageupdate.pid"
+    if output="$(cmd_apply_config "$expected" "$staged")"; then
+      echo 'FAIL: cmd_apply_config accepted reconcile_start failure' >&2; exit 1
+    fi
+    [ -e "$RUNDIR/scale-override.keep" ] || {
+      echo 'FAIL: cmd_apply_config cleared overrides after reconcile_start failed' >&2; exit 1;
+    }
+    [ ! -e "$caller_dir/apply-admission-ran" ] && [[ "$output" != *'"ok":true'* ]] || {
+      echo 'FAIL: cmd_apply_config continued admission/success after reconcile_start failed' >&2; exit 1;
+    }
+  )
+
+  (
+    functions="$caller_dir/reconcile-config-functions.sh"
+    : >"$functions"; extract_function cmd_reconcile_config "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    RUNDIR="$caller_dir/reconcile-config-run"; mkdir -p "$RUNDIR"
+    : >"$RUNDIR/scale-override.keep"
+    validate_runtime_config() { return 0; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); [ "$reconcile_calls" -eq 1 ]; }
+    NETWORK_ISOLATION=off
+    if output="$(cmd_reconcile_config)"; then
+      echo 'FAIL: cmd_reconcile_config accepted reconcile_start failure' >&2; exit 1
+    fi
+    [ -e "$RUNDIR/scale-override.keep" ] && [ -z "$output" ] || {
+      echo 'FAIL: cmd_reconcile_config mutated overrides or reported success after reconcile_start failed' >&2; exit 1;
+    }
+  )
+
+  (
+    functions="$caller_dir/maintenance-functions.sh"
+    : >"$functions"; extract_function cmd_maintenance "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    MAINTENANCE_FILE="$caller_dir/maintenance.state"; : >"$MAINTENANCE_FILE"
+    AUTOSCALE=true
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); [ "$reconcile_calls" -eq 1 ]; }
+    autoscale_start() { : >"$caller_dir/maintenance-admission-ran"; }
+    if output="$(cmd_maintenance resume)"; then
+      echo 'FAIL: maintenance resume accepted reconcile_start failure' >&2; exit 1
+    fi
+    [ -e "$MAINTENANCE_FILE" ] && [ ! -e "$caller_dir/maintenance-admission-ran" ] && [ -z "$output" ] || {
+      echo 'FAIL: maintenance resumed admissions/state after reconcile_start failed' >&2; exit 1;
+    }
+  )
+
+  (
+    functions="$caller_dir/start-functions.sh"
+    : >"$functions"; extract_function cmd_start "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    RUNDIR="$caller_dir/start-run"; mkdir -p "$RUNDIR"; : >"$RUNDIR/scale-override.keep"
+    SECURITY_CACHE="$RUNDIR/security.cache"
+    validate_runtime_config() { return 0; }
+    auth_credentials_configured() { return 0; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); [ "$reconcile_calls" -eq 1 ]; }
+    provision_preflight() { : >"$caller_dir/start-provision-ran"; }
+    public_repo_problem() { :; }
+    org_runner_group_problem() { :; }
+    managed_names() { :; }
+    start_stopped_managed() { : >"$caller_dir/start-capacity-ran"; }
+    pool_mode_enabled() { return 1; }
+    current_count() { echo 0; }
+    start_one() { : >"$caller_dir/start-capacity-ran"; }
+    RUNNER_COUNT=1 AUTOSCALE=false AUTOSCALE_MIN=0
+    if cmd_start; then
+      echo 'FAIL: cmd_start accepted reconcile_start failure' >&2; exit 1
+    fi
+    [ -e "$RUNDIR/scale-override.keep" ] && [ ! -e "$caller_dir/start-provision-ran" ] &&
+      [ ! -e "$caller_dir/start-capacity-ran" ] || {
+      echo 'FAIL: cmd_start cleared overrides or provisioned after reconcile_start failed' >&2; exit 1;
+    }
+  )
+
+  (
+    functions="$caller_dir/scale-functions.sh"
+    : >"$functions"; extract_function cmd_scale "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    validate_runtime_config() { return 0; }
+    pool_mode_enabled() { return 1; }
+    pool_autoscale_enabled() { return 1; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); [ "$reconcile_calls" -eq 1 ]; }
+    cmd_scale_internal() { : >"$caller_dir/scale-mutation-ran"; }
+    if cmd_scale 2; then
+      echo 'FAIL: cmd_scale accepted reconcile_start failure' >&2; exit 1
+    fi
+    [ ! -e "$caller_dir/scale-mutation-ran" ] || {
+      echo 'FAIL: cmd_scale mutated capacity after reconcile_start failed' >&2; exit 1;
+    }
+  )
+)
+
+echo 'reconcile-start-failure-callers: OK'
+
+# Fence mode must leave a proven healthy worker running. Otherwise a later
+# read-only validation failure (invalid Scale, failed Start preflight) strands
+# unrelated reconciliation even though no requested mutation occurred.
+(
+  healthy_dir="$tmpdir/healthy-fence"
+  mkdir -p "$healthy_dir"
+  RUNDIR="$healthy_dir"; RECONCILE_PID="$RUNDIR/reconcile.pid"; RECONCILE_IDENTITY="$RUNDIR/reconcile.identity"
+  reconcile_pid_active() { return 0; }
+  reconcile_stop() { : >"$healthy_dir/worker-stopped"; }
+  reconcile_start fence || { echo 'FAIL: healthy reconcile fence failed' >&2; exit 1; }
+  [ ! -e "$healthy_dir/worker-stopped" ] || {
+    echo 'FAIL: fence mode stopped a proven healthy reconcile worker' >&2
+    exit 1
+  }
+)
+
+echo 'reconcile-fence-preserves-healthy-worker: OK'
+
+(
+  invalid_dir="$tmpdir/invalid-after-healthy"
+  mkdir -p "$invalid_dir"
+
+  # Start validates the lifecycle twice (healthy fence + existing launch) before
+  # provisioning. A later preflight failure must not have stopped that worker.
+  (
+    functions="$invalid_dir/start-functions.sh"
+    : >"$functions"; extract_function cmd_start "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    RUNDIR="$invalid_dir/start-run"; mkdir -p "$RUNDIR"; SECURITY_CACHE="$RUNDIR/security"
+    validate_runtime_config() { return 0; }
+    auth_credentials_configured() { return 0; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); return 0; }
+    public_repo_problem() { :; }; org_runner_group_problem() { :; }
+    provision_preflight() { return 1; }
+    if cmd_start; then echo 'FAIL: invalid Start preflight succeeded' >&2; exit 1; fi
+    [ "$reconcile_calls" -eq 2 ] || {
+      echo 'FAIL: invalid Start did not preserve/confirm the healthy reconcile worker before preflight' >&2; exit 1;
+    }
+  )
+
+  # Autoscale bounds are read-only and must reject before even fencing a healthy
+  # worker, so an invalid request cannot interrupt unrelated reconciliation.
+  (
+    functions="$invalid_dir/scale-functions.sh"
+    : >"$functions"; extract_function cmd_scale "$functions"
+    # shellcheck disable=SC1090
+    . "$functions"
+    validate_runtime_config() { return 0; }
+    pool_mode_enabled() { return 1; }
+    pool_autoscale_enabled() { return 0; }
+    current_count() { echo 2; }
+    reconcile_calls=0
+    reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); return 0; }
+    AUTOSCALE_MAX=4
+    if cmd_scale 2; then echo 'FAIL: invalid autoscale request succeeded' >&2; exit 1; fi
+    [ "$reconcile_calls" -eq 0 ] || {
+      echo 'FAIL: invalid Scale fenced a healthy reconcile worker before read-only validation' >&2; exit 1;
+    }
+  )
+)
+
+echo 'reconcile-invalid-commands-preserve-healthy-worker: OK'

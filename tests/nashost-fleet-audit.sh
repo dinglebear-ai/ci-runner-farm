@@ -289,6 +289,84 @@ done
 # Installer preflight must independently enforce the plaintext boundary. This
 # catches drift between its duplicated parser and the audit's parser above.
 gotify_env="$user_root/gotify.env"
+
+# The installer runs as root in production, so treating gotify.env as shell code
+# would give configuration-file writers root command execution. Every malformed,
+# executable, ambiguous, or untrusted fixture below must be rejected before any
+# install/schedule state changes.
+gotify_rejects_without_mutation() {
+  local label="$1" fixture="$2" fake_path="${3:-$PATH}"
+  local fixture_mode="${4:-0600}"
+  local schedule_before cron_before status
+  printf '%s' "$fixture" >"$gotify_env"
+  chmod "$fixture_mode" "$gotify_env"
+  schedule_before="$(sha256sum "$user_root/schedule.json" | awk '{print $1}')"
+  cron_before="$(sha256sum "$user_root/customSchedule.cron" | awk '{print $1}')"
+  set +e
+  env \
+    PATH="$fake_path" \
+    CRF_EXPECTED_KACHE_ENDPOINT='http://10.23.45.67:9000' \
+    CRF_GOTIFY_ENV="$gotify_env" \
+    CRF_BOOT_CONFIG_ROOT="$boot" \
+    CRF_AUDIT_SOURCE="$PWD/$AUDIT" \
+    CRF_AUDIT_LOG_ROOT="$tmp/logs" \
+    CRF_UPDATE_CRON=0 CRF_INSTALL_RUN_AUDIT=0 \
+    bash "$INSTALLER" >"$tmp/gotify-parser-reject.out" 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || crf_fail "installer accepted $label Gotify config"
+  [ ! -e "$plugin_dir/fleet-audit.sh" ] || crf_fail "$label Gotify config wrote the fleet audit"
+  [ ! -e "$plugin_dir/fleet-audit.env" ] || crf_fail "$label Gotify config wrote the audit config"
+  [ ! -e "$plugin_dir/audit-schedule-backups" ] || crf_fail "$label Gotify config wrote schedule backups"
+  [ ! -e "$user_root/scripts/ci-runner-farm-audit" ] || crf_fail "$label Gotify config wrote the User Scripts wrapper"
+  crf_assert_eq "$schedule_before" "$(sha256sum "$user_root/schedule.json" | awk '{print $1}')" "schedule after $label Gotify rejection"
+  crf_assert_eq "$cron_before" "$(sha256sum "$user_root/customSchedule.cron" | awk '{print $1}')" "cron after $label Gotify rejection"
+}
+
+payload_marker="$tmp/gotify-payload-executed"
+gotify_rejects_without_mutation 'command-line' \
+  "touch '$payload_marker'"$'\n'"GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n'
+[ ! -e "$payload_marker" ] || crf_fail 'installer executed a Gotify command line'
+gotify_rejects_without_mutation 'command-substitution' \
+  "GOTIFY_URL=\"\$(touch '$payload_marker')\""$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n'
+[ ! -e "$payload_marker" ] || crf_fail 'installer executed Gotify command substitution'
+gotify_rejects_without_mutation 'duplicate-key' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_URL='https://gotify.other.internal'"$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n'
+gotify_rejects_without_mutation 'unknown-key' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n'"GOTIFY_PRIORITY='8'"$'\n'
+gotify_rejects_without_mutation 'world-readable' \
+  "GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n' \
+  "$PATH" 0644
+
+# Simulate a file owned by another account at the stat boundary. The real file
+# remains usable by this unprivileged test process; production must still reject
+# the reported foreign UID before interpreting any bytes.
+mkdir -p "$tmp/foreign-owner-bin"
+real_stat="$(command -v stat)"
+cat >"$tmp/foreign-owner-bin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -c ] && [ "${2:-}" = %u ] && [ "${3:-}" = "$CRF_FOREIGN_OWNER_FILE" ]; then
+  echo 65534
+  exit 0
+fi
+exec "$CRF_REAL_STAT" "$@"
+SH
+chmod +x "$tmp/foreign-owner-bin/stat"
+export CRF_FOREIGN_OWNER_FILE="$gotify_env" CRF_REAL_STAT="$real_stat"
+gotify_rejects_without_mutation 'foreign-owner' \
+  "touch '$payload_marker'"$'\n'"GOTIFY_URL='https://gotify.internal'"$'\n'"GOTIFY_TOKEN='$notify_secret'"$'\n' \
+  "$tmp/foreign-owner-bin:$PATH"
+unset CRF_FOREIGN_OWNER_FILE CRF_REAL_STAT
+[ ! -e "$payload_marker" ] || crf_fail 'foreign-owned Gotify config executed a command'
+
+gotify_real="$tmp/gotify-real.env"
+printf "GOTIFY_URL='https://gotify.internal'\nGOTIFY_TOKEN='%s'\n" "$notify_secret" >"$gotify_real"
+chmod 0600 "$gotify_real"
+rm -f "$gotify_env"
+ln -s "$gotify_real" "$gotify_env"
+gotify_rejects_without_mutation 'symlink' ''
+rm -f "$gotify_env" "$gotify_real"
+
 for hostile_gotify_url in \
   'http://gotify.internal:8080' \
   'http://user@localhost:8080'; do
@@ -340,7 +418,7 @@ set -e
 [ ! -e "$user_root/scripts/ci-runner-farm-audit" ] || crf_fail 'rejected Gotify install wrote the User Scripts wrapper'
 
 cat >"$gotify_env" <<EOF
-GOTIFY_URL='http://127.0.0.1:8080'
+GOTIFY_URL="http://127.0.0.1:8080"
 GOTIFY_TOKEN='$notify_secret'
 EOF
 chmod 0600 "$gotify_env"

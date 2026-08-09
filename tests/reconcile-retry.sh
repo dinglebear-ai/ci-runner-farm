@@ -10,6 +10,7 @@ if [ "${1:-}" = reconcile-drain ] && [ -n "${CRF_RETRY_TEST_DIR:-}" ]; then
   probe="$CRF_RETRY_TEST_DIR"
   functions="$probe/worker-functions.sh"
   : >"$functions"
+  extract_function count_reconcile_work_locked "$functions"
   extract_function cmd_reconcile_drain "$functions"
   # shellcheck disable=SC1090
   . "$functions"

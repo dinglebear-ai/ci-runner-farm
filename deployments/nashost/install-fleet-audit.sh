@@ -78,6 +78,49 @@ require_gotify_url() {
   return 0
 }
 
+# gotify.env is operator-controlled configuration read by this root installer,
+# never a shell program. Accept only one literal assignment for each allowlisted
+# key; quotes are delimiters, not evaluation syntax.
+load_gotify_literals() {
+  local config="$1" line key raw value quote
+  local seen_url=0 seen_token=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    case "$line" in
+      GOTIFY_URL=*|GOTIFY_TOKEN=*) ;;
+      *) echo "Gotify config contains an unknown or executable line" >&2; return 1 ;;
+    esac
+    key="${line%%=*}"
+    raw="${line#*=}"
+    [ "${#raw}" -ge 2 ] || {
+      echo "Gotify config values must be quoted literals" >&2; return 1;
+    }
+    quote="${raw:0:1}"
+    [ "$quote" = "'" ] || [ "$quote" = '"' ] || {
+      echo "Gotify config values must be quoted literals" >&2; return 1;
+    }
+    [ "${raw: -1}" = "$quote" ] || {
+      echo "Gotify config values must be quoted literals" >&2; return 1;
+    }
+    value="${raw:1:${#raw}-2}"
+    case "$value" in
+      *"$quote"*) echo "Gotify config values must be simple literals" >&2; return 1 ;;
+    esac
+    case "$key" in
+      GOTIFY_URL)
+        [ "$seen_url" -eq 0 ] || { echo "duplicate GOTIFY_URL in Gotify config" >&2; return 1; }
+        GOTIFY_URL="$value"; seen_url=1
+        ;;
+      GOTIFY_TOKEN)
+        [ "$seen_token" -eq 0 ] || { echo "duplicate GOTIFY_TOKEN in Gotify config" >&2; return 1; }
+        GOTIFY_TOKEN="$value"; seen_token=1
+        ;;
+    esac
+  done <"$config"
+}
+
 [ -f "$AUDIT_SOURCE" ] && [ ! -L "$AUDIT_SOURCE" ] ||
   { echo "fleet audit source is unavailable: $AUDIT_SOURCE" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
@@ -97,8 +140,9 @@ if [ -e "$GOTIFY_ENV" ]; then
     { echo "unsafe Gotify config: $GOTIFY_ENV" >&2; exit 1; }
   [ "$(stat -c %a "$GOTIFY_ENV")" = 600 ] ||
     { echo "Gotify config must be mode 600: $GOTIFY_ENV" >&2; exit 1; }
-  # shellcheck disable=SC1090
-  . "$GOTIFY_ENV"
+  [ "$(stat -c %u "$GOTIFY_ENV")" = "$EUID" ] ||
+    { echo "Gotify config must be owned by the installer user: $GOTIFY_ENV" >&2; exit 1; }
+  load_gotify_literals "$GOTIFY_ENV" || exit 1
 fi
 if [ -n "$GOTIFY_TOKEN" ]; then
   [[ "$GOTIFY_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] ||

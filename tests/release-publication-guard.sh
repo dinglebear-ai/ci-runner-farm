@@ -48,16 +48,34 @@ chmod +x "$tmp/bin/gh"
 printf '{".":"1.9.1"}\n' >"$tmp/repo/.release-please-manifest.json"
 printf 'trusted package bytes\n' >"$tmp/repo/ci-runner-farm-test-1.9.1.tgz"
 package_md5="$(md5sum "$tmp/repo/ci-runner-farm-test-1.9.1.tgz" | awk '{print $1}')"
-cat >"$tmp/repo/ci-runner-farm.plg" <<'PLG'
+cat >"$tmp/base.plg" <<'PLG'
 <!DOCTYPE PLUGIN [
+<!ENTITY pluginVersion "1.9.1">
+<!ENTITY releaseTag    "v1.9.1">
 <!ENTITY packageName   "ci-runner-farm-test-1.9.1.tgz">
+<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.9.1/ci-runner-farm-test-1.9.1.tgz">
 <!ENTITY packageMD5    "PACKAGE_MD5">
 ]>
+<PLUGIN/>
 PLG
-sed -i "s/PACKAGE_MD5/$package_md5/" "$tmp/repo/ci-runner-farm.plg"
+sed -i "s/PACKAGE_MD5/$package_md5/" "$tmp/base.plg"
 run_guard() {
   local release_plg="$tmp/repo/ci-runner-farm.plg"
   local release_package="$tmp/repo/ci-runner-farm-test-1.9.1.tgz"
+  inject_before_entity() {
+    python3 - "$release_plg" "$1" "$2" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+name, declaration = sys.argv[2:]
+document = path.read_text()
+needle = f"<!ENTITY {name} "
+if document.count(needle) != 1:
+    raise SystemExit(f"fixture expected one canonical {name} declaration")
+path.write_text(document.replace(needle, declaration + needle, 1))
+PY
+  }
+  cp "$tmp/base.plg" "$tmp/repo/ci-runner-farm.plg"
   case "${2:-complete}" in
     corrupt-plg)
       release_plg="$tmp/corrupt.plg"
@@ -67,6 +85,106 @@ run_guard() {
       release_package="$tmp/corrupt.tgz"
       printf 'substituted package bytes\n' >"$release_package"
       ;;
+  esac
+  case "${3:-valid}" in
+    valid) ;;
+    indented-valid)
+      sed -i '/^<!ENTITY \(pluginVersion\|releaseTag\|packageURL\) /s/^/  /' "$release_plg"
+      ;;
+    missing-plugin-version)
+      sed -i '/^<!ENTITY pluginVersion /d' "$release_plg"
+      ;;
+    missing-release-tag)
+      sed -i '/^<!ENTITY releaseTag /d' "$release_plg"
+      ;;
+    missing-package-url)
+      sed -i '/^<!ENTITY packageURL /d' "$release_plg"
+      ;;
+    duplicate-plugin-version)
+      sed -i '/^]>$/i <!ENTITY pluginVersion "1.9.1">' "$release_plg"
+      ;;
+    duplicate-plugin-version-noncanonical)
+      sed -i '/^]>$/i <!ENTITY pluginVersion "1.9.1" >' "$release_plg"
+      ;;
+    duplicate-plugin-version-indented)
+      sed -i '/^<!ENTITY pluginVersion /i\  <!ENTITY pluginVersion "1.8.0">' "$release_plg"
+      ;;
+    duplicate-release-tag)
+      sed -i '/^]>$/i <!ENTITY releaseTag "v1.9.1">' "$release_plg"
+      ;;
+    duplicate-release-tag-indented)
+      sed -i '/^<!ENTITY releaseTag /i\  <!ENTITY releaseTag "v1.8.0">' "$release_plg"
+      ;;
+    duplicate-package-url)
+      sed -i '/^]>$/i <!ENTITY packageURL "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.9.1/ci-runner-farm-test-1.9.1.tgz">' "$release_plg"
+      ;;
+    duplicate-package-url-indented)
+      sed -i '/^<!ENTITY packageURL /i\  <!ENTITY packageURL "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.8.0/ci-runner-farm-test-1.9.1.tgz">' "$release_plg"
+      ;;
+    duplicate-plugin-version-multiline)
+      inject_before_entity pluginVersion $'<!ENTITY\n pluginVersion\n "1.8.0">\n'
+      ;;
+    duplicate-release-tag-multiline)
+      inject_before_entity releaseTag $'<!ENTITY\n releaseTag\n "v1.8.0">\n'
+      ;;
+    duplicate-package-url-multiline)
+      inject_before_entity packageURL $'<!ENTITY\n packageURL\n "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.8.0/ci-runner-farm-test-1.9.1.tgz">\n'
+      ;;
+    xml-whitespace-valid)
+      python3 - "$release_plg" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+document = path.read_bytes()
+document = document.replace(b'<!ENTITY pluginVersion ', b'\t<!ENTITY pluginVersion ', 1)
+document = document.replace(b'<!ENTITY releaseTag ', b'\r<!ENTITY releaseTag ', 1)
+path.write_bytes(document)
+PY
+      ;;
+    multiline-valid)
+      python3 - "$release_plg" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+document = path.read_text()
+for name in ("pluginVersion", "releaseTag", "packageURL"):
+    document = document.replace(f"<!ENTITY {name} ", f"<!ENTITY\n {name}\n ", 1)
+path.write_text(document)
+PY
+      ;;
+    vertical-tab-prefix)
+      python3 - "$release_plg" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(path.read_bytes().replace(b'<!ENTITY pluginVersion ', b'\v<!ENTITY pluginVersion ', 1))
+PY
+      ;;
+    form-feed-prefix)
+      python3 - "$release_plg" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(path.read_bytes().replace(b'<!ENTITY releaseTag ', b'\f<!ENTITY releaseTag ', 1))
+PY
+      ;;
+    external-doctype)
+      sed -i 's@<!DOCTYPE PLUGIN \[@<!DOCTYPE PLUGIN SYSTEM "http://network-must-not-run.invalid/release.dtd" [@' "$release_plg"
+      ;;
+    external-entity)
+      sed -i '/^]>$/i <!ENTITY remote SYSTEM "http://network-must-not-run.invalid/entity">' "$release_plg"
+      ;;
+    stale-plugin-version)
+      sed -i 's/pluginVersion "1\.9\.1"/pluginVersion "1.8.0"/' "$release_plg"
+      ;;
+    stale-release-tag)
+      sed -i 's/releaseTag    "v1\.9\.1"/releaseTag    "v1.8.0"/' "$release_plg"
+      ;;
+    stale-package-url-tag)
+      sed -i 's@releases/download/v1\.9\.1/@releases/download/v1.8.0/@' "$release_plg"
+      ;;
+    wrong-package-url-asset)
+      sed -i 's@/ci-runner-farm-test-1\.9\.1\.tgz">@/other-package.tgz">@' "$release_plg"
+      ;;
+    *) exit 67 ;;
   esac
   (
     cd "$tmp/repo"
@@ -117,6 +235,44 @@ if run_guard 1 corrupt-package >"$tmp/corrupt-package.out" 2>"$tmp/corrupt-packa
   echo "FAIL: package bytes that disagree with packageMD5 passed the publication guard" >&2
   new_failures=$((new_failures + 1))
 fi
+
+# The published plugin metadata must be one exact release identity, not merely
+# a byte-for-byte match to a stale default-branch file with a valid package MD5.
+for metadata_case in \
+  missing-plugin-version \
+  missing-release-tag \
+  missing-package-url \
+  duplicate-plugin-version \
+  duplicate-plugin-version-noncanonical \
+  duplicate-plugin-version-indented \
+  duplicate-release-tag \
+  duplicate-release-tag-indented \
+  duplicate-package-url \
+  duplicate-package-url-indented \
+  duplicate-plugin-version-multiline \
+  duplicate-release-tag-multiline \
+  duplicate-package-url-multiline \
+  stale-plugin-version \
+  stale-release-tag \
+  stale-package-url-tag \
+  wrong-package-url-asset \
+  vertical-tab-prefix \
+  form-feed-prefix \
+  external-doctype \
+  external-entity; do
+  if run_guard 1 complete "$metadata_case" \
+      >"$tmp/$metadata_case.out" 2>"$tmp/$metadata_case.err"; then
+    echo "FAIL: release metadata case '$metadata_case' passed the publication guard" >&2
+    new_failures=$((new_failures + 1))
+  fi
+done
+
+run_guard 1 complete indented-valid >"$tmp/indented-valid.out" 2>"$tmp/indented-valid.err" ||
+  crf_fail "XML-valid leading whitespace was rejected for release identity entities"
+run_guard 1 complete xml-whitespace-valid >"$tmp/xml-whitespace-valid.out" 2>"$tmp/xml-whitespace-valid.err" ||
+  crf_fail "XML-valid tab or carriage-return whitespace was rejected"
+run_guard 1 complete multiline-valid >"$tmp/multiline-valid.out" 2>"$tmp/multiline-valid.err" ||
+  crf_fail "XML-valid multiline release identity declarations were rejected"
 
 # On an ordinary main push while a release PR remains open, the manifest still
 # names the last published version, so the post-action assertion remains green.
