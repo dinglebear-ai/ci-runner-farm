@@ -18,6 +18,28 @@
 * Document the final feasible 16-runner Nashost pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
 
+## [1.9.2](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.1...v1.9.2) (2026-08-10)
+
+
+### Bug Fixes
+
+* address merged PR review findings ([3265656](https://github.com/dinglebear-ai/ci-runner-farm/commit/3265656d081517add74faeedc23559dba25e15ba))
+* close PR review lifecycle and release gaps ([51da252](https://github.com/dinglebear-ai/ci-runner-farm/commit/51da2523644dee00c97bd3081d6e7f8e9c9dccba))
+* close release and lifecycle review gaps ([4c97138](https://github.com/dinglebear-ai/ci-runner-farm/commit/4c9713853bee6058a590a1bd60ca41bdb2e19714))
+* complete candidate and audit review hardening ([acba7e4](https://github.com/dinglebear-ai/ci-runner-farm/commit/acba7e4d96cf18f89001f1f487529a30160c7847))
+* complete reconciliation and audit remediation ([57b2b55](https://github.com/dinglebear-ai/ci-runner-farm/commit/57b2b55a87aa265eb21699e5f5fc57be2a0d4ae9))
+* harden reconciliation activation and audit parsing ([df7fdd8](https://github.com/dinglebear-ai/ci-runner-farm/commit/df7fdd87927c055ded26cf43902344ff22a33bcd))
+* recover runner fleet after transient boot failures ([#36](https://github.com/dinglebear-ai/ci-runner-farm/issues/36)) ([010a911](https://github.com/dinglebear-ai/ci-runner-farm/commit/010a9113508b671e071af11b130a89a3396876ef))
+* remove runtime validation artifacts ([5faa3f5](https://github.com/dinglebear-ai/ci-runner-farm/commit/5faa3f5033f38667619fd48688ee247949067c87))
+* remove runtime validation artifacts ([06f33ef](https://github.com/dinglebear-ai/ci-runner-farm/commit/06f33efc5e26fd2123e5ed533174b3036502b8b6))
+* run persistent fleet audit through bash ([a803fa9](https://github.com/dinglebear-ai/ci-runner-farm/commit/a803fa956b8188cfdca6e9ef7ad36f6c63982b72))
+* run persistent fleet audit through bash ([8cc3f17](https://github.com/dinglebear-ai/ci-runner-farm/commit/8cc3f172433bec8a52e8b8d9fdae1c822e1797e5))
+* scope watchdog audit to host namespace ([a3afff8](https://github.com/dinglebear-ai/ci-runner-farm/commit/a3afff8dedf256ea33d99942dea4aeaab7c7b607))
+* scope watchdog audit to host namespace ([a082d74](https://github.com/dinglebear-ai/ci-runner-farm/commit/a082d74eb2b0f118c5c4a5daf1583f6cd4e63b33))
+* serialize lease fencing and unify endpoint validation ([1be9d3d](https://github.com/dinglebear-ai/ci-runner-farm/commit/1be9d3d1fcb6642851772e9676f755811693d356))
+* validate runtime with a configured pool ([c300f2c](https://github.com/dinglebear-ai/ci-runner-farm/commit/c300f2c06fb1bdcaa4422ccce98f75dd459ef690))
+* validate runtime with a configured pool ([f450e68](https://github.com/dinglebear-ai/ci-runner-farm/commit/f450e684d1981172f7cfc6755f60bd8086f1ea93))
+
 ## [1.9.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.0...v1.9.1) (2026-08-08)
 
 
