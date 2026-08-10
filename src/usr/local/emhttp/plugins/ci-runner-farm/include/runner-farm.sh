@@ -5011,15 +5011,21 @@ cmd_build_image() {
 # rc.local reinstalling all .plg) AND from the Unraid `docker_started` event hook
 # (which fires on an array stop->start or Docker service restart without a
 # reboot). It may fire before the array/dockerd are up, so wait for both, then
-# bring the fleet up idempotently. The caller detaches it so it never blocks
-# install/boot/the event sequence. No-op until a token is configured (a fresh
-# install waits for the user); cmd_start recreates exited runners and skips
-# running ones. A delayed, fail-closed sweep then repairs any running classic
-# container whose protected credential handoff never completed.
-cmd_boot_autostart() {
+# bring the fleet up idempotently. A dedicated lock coalesces the install and
+# docker_started hooks when they arrive together. The caller detaches it so it
+# never blocks install/boot/the event sequence. No-op until a token is configured
+# (a fresh install waits for the user); transient partial starts retry with fresh
+# observability on every attempt, while cmd_start recreates exited runners and
+# skips running ones. A delayed, fail-closed sweep then repairs any running
+# classic container whose protected credential handoff never completed.
+boot_autostart_locked() {
   auth_credentials_configured ||
     { log "boot-autostart: no valid GitHub credentials configured yet — skipping"; return 0; }
-  local i
+  local i start_attempt start_rc
+  local start_attempts="${BOOT_AUTOSTART_START_ATTEMPTS:-3}"
+  local retry_delay="${BOOT_AUTOSTART_RETRY_DELAY_SECONDS:-15}"
+  case "$start_attempts" in ''|*[!0-9]*|0) start_attempts=3 ;; esac
+  case "$retry_delay" in ''|*[!0-9]*) retry_delay=15 ;; esac
   for i in $(seq 1 150); do
     docker info >/dev/null 2>&1 && check_cache_root >/dev/null 2>&1 && break
     sleep 4
@@ -5031,7 +5037,22 @@ cmd_boot_autostart() {
   # uses: on a Docker-service restart (no reboot) the autoscale/image daemons may
   # still be alive and ticking, so an unlocked cmd_start here would race them into
   # duplicate 'docker run's. The long readiness wait above stays OUTSIDE the lock.
-  with_fleet_lock wait cmd_start || return 1
+  for start_attempt in $(seq 1 "$start_attempts"); do
+    log "boot-autostart: fleet start attempt $start_attempt/$start_attempts"
+    if with_fleet_lock wait cmd_start; then
+      start_rc=0
+      log "boot-autostart: fleet start completed on attempt $start_attempt/$start_attempts"
+      break
+    else
+      start_rc=$?
+    fi
+    if [ "$start_attempt" -ge "$start_attempts" ]; then
+      err "boot-autostart: fleet start exhausted $start_attempts attempt(s) (last_rc=$start_rc)"
+      return "$start_rc"
+    fi
+    err "boot-autostart: fleet start attempt $start_attempt/$start_attempts failed (rc=$start_rc); retrying in ${retry_delay}s"
+    sleep "$retry_delay"
+  done
 
   # Docker may have already restarted an existing classic container before this
   # hook ran. Its entrypoint then waits on a fresh credential FIFO that cmd_start
@@ -5041,6 +5062,25 @@ cmd_boot_autostart() {
   case "$handoff_wait" in ''|*[!0-9]*) handoff_wait=240 ;; esac
   sleep "$handoff_wait"
   with_fleet_lock wait recover_stalled_credential_handoffs
+}
+
+cmd_boot_autostart() {
+  local boot_lock_fd rc
+  mkdir -p "$RUNDIR"
+  exec {boot_lock_fd}>"$RUNDIR/boot-autostart.lock" || {
+    err "boot-autostart: could not open coalescing lock"
+    return 1
+  }
+  if ! flock -n "$boot_lock_fd"; then
+    log "boot-autostart: another invocation is active — coalescing duplicate hook"
+    exec {boot_lock_fd}>&-
+    return 0
+  fi
+  boot_autostart_locked
+  rc=$?
+  flock -u "$boot_lock_fd" 2>/dev/null || true
+  exec {boot_lock_fd}>&-
+  return "$rc"
 }
 
 cmd_validate_pools() {

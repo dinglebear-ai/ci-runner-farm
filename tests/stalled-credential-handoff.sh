@@ -8,7 +8,7 @@ tmpdir="$(mktemp -d)"
 snippet="$tmpdir/functions.sh"
 trap 'rm -rf "$tmpdir"' EXIT
 
-for fn in runner_credential_handoff_stalled recover_stalled_credential_handoffs cmd_boot_autostart; do
+for fn in runner_credential_handoff_stalled recover_stalled_credential_handoffs boot_autostart_locked cmd_boot_autostart; do
   sed -n "/^${fn}()/,/^}/p" "$ENGINE" >>"$snippet"
 done
 # shellcheck disable=SC1090
@@ -190,24 +190,72 @@ expect_true recover_stalled_credential_handoffs
 [ ! -e "$token_count" ] || fail 'scale-set mode loaded a classic mutation credential'
 unset -f backend_effective
 
-# Boot autostart waits beyond the handoff window, then invokes recovery under
-# the same fleet lock as all other mutations.
+# Boot autostart retries a transient partial start before waiting beyond the
+# handoff window and invoking recovery under the same fleet lock as all other
+# mutations.
 (
   boot_calls="$tmpdir/boot-calls"
   sleep_calls="$tmpdir/sleep-calls"
+  start_count_file="$tmpdir/start-count"
+  RUNDIR="$tmpdir/serial-run"
+  mkdir -p "$RUNDIR"
   auth_credentials_configured() { return 0; }
   docker() { [ "${1:-}" = info ]; }
   check_cache_root() { return 0; }
   log() { :; }
   err() { :; }
-  with_fleet_lock() { printf '%s|%s\n' "$1" "$2" >>"$boot_calls"; }
+  with_fleet_lock() {
+    printf '%s|%s\n' "$1" "$2" >>"$boot_calls"
+    if [ "$2" = cmd_start ]; then
+      start_count=0
+      [ -f "$start_count_file" ] && start_count="$(cat "$start_count_file")"
+      start_count=$((start_count + 1))
+      printf '%s\n' "$start_count" >"$start_count_file"
+      [ "$start_count" -ge 3 ]
+    fi
+  }
   sleep() { printf '%s\n' "$1" >>"$sleep_calls"; }
   RUNNER_CREDENTIAL_HANDOFF_STALL_SECONDS=7
-  cmd_boot_autostart
-  [ "$(cat "$boot_calls")" = $'wait|cmd_start\nwait|recover_stalled_credential_handoffs' ] ||
-    fail 'boot autostart did not serialize start and recovery sweeps'
-  [ "$(cat "$sleep_calls")" = 7 ] ||
-    fail 'boot autostart did not wait for the configured handoff window'
+  BOOT_AUTOSTART_START_ATTEMPTS=3
+  BOOT_AUTOSTART_RETRY_DELAY_SECONDS=2
+  cmd_boot_autostart || fail 'boot autostart gave up before the transient start failure cleared'
+  [ "$(cat "$boot_calls")" = $'wait|cmd_start\nwait|cmd_start\nwait|cmd_start\nwait|recover_stalled_credential_handoffs' ] ||
+    fail 'boot autostart did not retry partial starts before the recovery sweep'
+  [ "$(cat "$sleep_calls")" = $'2\n2\n7' ] ||
+    fail 'boot autostart did not apply retry delays before the handoff wait'
+)
+
+# The plugin install path and docker_started event can fire together during
+# boot. Concurrent autostarts must coalesce into one fleet mutation.
+(
+  boot_calls="$tmpdir/concurrent-boot-calls"
+  first_start="$tmpdir/concurrent-first-start"
+  RUNDIR="$tmpdir/concurrent-run"
+  mkdir -p "$RUNDIR"
+  auth_credentials_configured() { return 0; }
+  docker() { [ "${1:-}" = info ]; }
+  check_cache_root() { return 0; }
+  log() { :; }
+  err() { :; }
+  with_fleet_lock() {
+    printf '%s\n' "$2" >>"$boot_calls"
+    if [ "$2" = cmd_start ]; then
+      : >"$first_start"
+      command sleep 0.2
+    fi
+  }
+  RUNNER_CREDENTIAL_HANDOFF_STALL_SECONDS=0
+  cmd_boot_autostart & first_pid=$!
+  for _ in $(seq 1 50); do
+    [ -f "$first_start" ] && break
+    command sleep 0.01
+  done
+  [ -f "$first_start" ] || fail 'first boot autostart never reached fleet start'
+  cmd_boot_autostart & second_pid=$!
+  wait "$first_pid"
+  wait "$second_pid"
+  [ "$(grep -c '^cmd_start$' "$boot_calls")" -eq 1 ] ||
+    fail 'concurrent boot autostarts did not coalesce into one fleet start'
 )
 
 [ "$(grep -c '^runner_credential_handoff_stalled()' "$ENGINE")" -eq 1 ] ||
