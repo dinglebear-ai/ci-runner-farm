@@ -12,7 +12,9 @@
 # for dockerd + the cache pool to be ready, recreates stopped runners with fresh
 # registration credentials, refills the fleet to its floor, and performs a delayed
 # recovery sweep for any running container stalled at protected credential handoff.
-# It is idempotent and a no-op until GitHub credentials are configured.
+# Transient partial starts retry, and a dedicated lock coalesces this hook with
+# the plugin-install boot hook. It is idempotent and a no-op until GitHub
+# credentials are configured.
 #
 # Detached so we never block Unraid's start sequence.
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"

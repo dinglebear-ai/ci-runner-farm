@@ -211,7 +211,8 @@ fi
 ( docker pull myoung34/github-runner:latest >/dev/null 2>&1 & ) || true
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
-# blocking. No-op until a GitHub token is configured.
+# blocking. Transient partial starts retry, and the runtime coalesces this hook
+# with docker_started. No-op until a GitHub token is configured.
 ( nohup "\$PLGDIR/include/runner-farm.sh" boot-autostart >>"\$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
