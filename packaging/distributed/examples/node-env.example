@@ -1,0 +1,29 @@
+# Required node identity/controller transport.
+CRF_NODE_ID=node-1
+CRF_CONTROLLER_ADDR=100.64.0.10:7443
+CRF_CONTROLLER_SERVER_NAME=controller.internal
+CRF_CA_CERT=/etc/ci-runner-farm/tls/ca.pem
+CRF_CLIENT_CERT=/etc/ci-runner-farm/tls/node.pem
+CRF_CLIENT_KEY=/etc/ci-runner-farm/tls/node-key.pem
+
+# Explicit host budget. The daemon refuses to advertise more than the host has.
+CRF_NODE_CPU_MILLIS=8000
+CRF_NODE_MEMORY_BYTES=17179869184
+
+# Durable/private node paths.
+CRF_STATE_DIR=/var/lib/ci-runner-farm/node/state
+CRF_RUNTIME_DIR=/var/lib/ci-runner-farm/node/runners
+CRF_LOG_DIR=/var/log/ci-runner-farm/node
+
+# Choose exactly ONE runner source.
+# Managed pinned package (recommended):
+CRF_RUNNER_MANIFEST=/etc/ci-runner-farm/runner-manifest.json
+CRF_RUNNER_CACHE_DIR=/var/lib/ci-runner-farm/node/runner-cache
+# Pre-staged template alternative:
+# CRF_RUNNER_TEMPLATE=/opt/ci-runner-farm/runner-template
+
+# Optional bounded tuning.
+CRF_HEARTBEAT_MS=5000
+CRF_CONNECT_TIMEOUT_MS=5000
+CRF_IO_TIMEOUT_MS=15000
+CRF_COMMAND_LEDGER_CAPACITY=4096

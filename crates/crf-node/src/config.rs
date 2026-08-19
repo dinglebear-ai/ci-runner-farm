@@ -218,6 +218,20 @@ fn duration_ms(
 mod tests {
     use super::*;
 
+    fn test_path(path: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                r"C:\crf-test\{}",
+                path.trim_start_matches('/').replace('/', "\\")
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            path.to_owned()
+        }
+    }
+
     fn values() -> BTreeMap<String, String> {
         BTreeMap::from([
             ("CRF_CONTROLLER_ADDR".into(), "127.0.0.1:9443".into()),
@@ -225,16 +239,16 @@ mod tests {
                 "CRF_CONTROLLER_SERVER_NAME".into(),
                 "controller.internal".into(),
             ),
-            ("CRF_CA_CERT".into(), "/etc/crf/ca.pem".into()),
-            ("CRF_CLIENT_CERT".into(), "/etc/crf/node.pem".into()),
-            ("CRF_CLIENT_KEY".into(), "/etc/crf/node-key.pem".into()),
-            ("CRF_STATE_DIR".into(), "/var/lib/crf/state".into()),
+            ("CRF_CA_CERT".into(), test_path("/etc/crf/ca.pem")),
+            ("CRF_CLIENT_CERT".into(), test_path("/etc/crf/node.pem")),
+            ("CRF_CLIENT_KEY".into(), test_path("/etc/crf/node-key.pem")),
+            ("CRF_STATE_DIR".into(), test_path("/var/lib/crf/state")),
             (
                 "CRF_RUNNER_TEMPLATE".into(),
-                "/opt/crf/runner-template".into(),
+                test_path("/opt/crf/runner-template"),
             ),
-            ("CRF_RUNTIME_DIR".into(), "/var/lib/crf/runners".into()),
-            ("CRF_LOG_DIR".into(), "/var/log/crf".into()),
+            ("CRF_RUNTIME_DIR".into(), test_path("/var/lib/crf/runners")),
+            ("CRF_LOG_DIR".into(), test_path("/var/log/crf")),
             ("CRF_NODE_CPU_MILLIS".into(), "8000".into()),
             ("CRF_NODE_MEMORY_BYTES".into(), "17179869184".into()),
         ])
@@ -245,7 +259,7 @@ mod tests {
         let config = NodeConfig::from_values(&values()).expect("config");
         assert_eq!(
             config.runner_source,
-            RunnerSourceConfig::Template(PathBuf::from("/opt/crf/runner-template"))
+            RunnerSourceConfig::Template(PathBuf::from(test_path("/opt/crf/runner-template")))
         );
         assert_eq!(
             config.resources,
@@ -261,11 +275,11 @@ mod tests {
         managed.remove("CRF_RUNNER_TEMPLATE");
         managed.insert(
             "CRF_RUNNER_MANIFEST".into(),
-            "/etc/crf/runner-manifest.json".into(),
+            test_path("/etc/crf/runner-manifest.json"),
         );
         managed.insert(
             "CRF_RUNNER_CACHE_DIR".into(),
-            "/var/cache/crf/runner".into(),
+            test_path("/var/cache/crf/runner"),
         );
 
         assert_eq!(
@@ -273,14 +287,14 @@ mod tests {
                 .expect("managed")
                 .runner_source,
             RunnerSourceConfig::Managed {
-                manifest_path: PathBuf::from("/etc/crf/runner-manifest.json"),
-                cache_root: PathBuf::from("/var/cache/crf/runner"),
+                manifest_path: PathBuf::from(test_path("/etc/crf/runner-manifest.json")),
+                cache_root: PathBuf::from(test_path("/var/cache/crf/runner")),
             }
         );
 
         managed.insert(
             "CRF_RUNNER_TEMPLATE".into(),
-            "/opt/crf/runner-template".into(),
+            test_path("/opt/crf/runner-template"),
         );
         assert_eq!(
             NodeConfig::from_values(&managed),
@@ -293,7 +307,7 @@ mod tests {
         let mut values = values();
         values.insert(
             "CRF_RUNTIME_DIR".into(),
-            "/opt/crf/runner-template/runners".into(),
+            test_path("/opt/crf/runner-template/runners"),
         );
         assert_eq!(
             NodeConfig::from_values(&values),
@@ -307,11 +321,11 @@ mod tests {
         values.remove("CRF_RUNNER_TEMPLATE");
         values.insert(
             "CRF_RUNNER_MANIFEST".into(),
-            "/etc/crf/runner-manifest.json".into(),
+            test_path("/etc/crf/runner-manifest.json"),
         );
         values.insert(
             "CRF_RUNNER_CACHE_DIR".into(),
-            "/var/lib/crf/runners/cache".into(),
+            test_path("/var/lib/crf/runners/cache"),
         );
         assert_eq!(
             NodeConfig::from_values(&values),

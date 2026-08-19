@@ -56,7 +56,7 @@ install -m 0644 "$bundle_root/systemd/ci-runner-farm-node.service" "$(rooted "$u
 
 install -d -m 0755 "$(rooted "$doc_dir/examples")"
 install -m 0644 "$bundle_root/examples/controller-config.example.json" "$(rooted "$doc_dir/examples/controller-config.example.json")"
-install -m 0644 "$bundle_root/examples/node.env.example" "$(rooted "$doc_dir/examples/node.env.example")"
+install -m 0644 "$bundle_root/examples/node-env.example" "$(rooted "$doc_dir/examples/node-env.example")"
 install -m 0644 "$bundle_root/examples/runner-manifest.example.json" "$(rooted "$doc_dir/examples/runner-manifest.example.json")"
 install -m 0644 "$bundle_root/README.md" "$(rooted "$doc_dir/README.md")"
 

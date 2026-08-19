@@ -10,10 +10,12 @@ Last updated: 2026-08-19
 - Pull request: draft PR #37, `Distributed Elixir/Rust runner farm control plane`
 - Initial implementation commit: `5efe6b6ce0325924e93b5ec1c1613339ab6004cc`
 - Tracker checkpoint commit: `f6ed39faa52017a7af16778a1b1464d1ee5d3977`
-- Current packaging/CI-fix checkpoint: pending commit/push
+- Packaging checkpoint commit: `5f65e77fc809391536c831a2b1d295585d0361d2`
+- Current hosted-CI portability repair: pending commit/push
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, 96 Elixir controller tests, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
-- PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and legacy final-release gate failures were localized and fixed in the pending checkpoint. CI rerun is pending push.
+- PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
+- PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three are fixed locally in the pending portability repair.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
@@ -34,8 +36,8 @@ The implemented path is:
 - Go scale-set adapter: every package in `tools/crf-scaleset` passes.
 - GitHub workflow: `actionlint` passes. Distributed core CI builds/tests Rust and Elixir on Ubuntu and Windows and exposes the real scheduler binary to controller tests.
 - `git diff --check` passes and isolated Cargo target directories are ignored.
-- Linux service packaging: a 33,547,073-byte Ubuntu 26.04 x86_64 bundle was assembled and passed checksum, symlink-boundary, packaged-binary, OTP-release, and twice-idempotent `DESTDIR` installation verification. A clean-committed-tree rebuild is the next checkpoint proof.
-- PR #37 CI findings: Windows Clippy flagged Windows-only readonly-bit reset helpers and the legacy release gate overfit the Go constant formatting. Both are corrected locally; Windows-target Clippy and the semantic issued-handle cap check now pass.
+- Linux service packaging: a clean `5f65e77` Ubuntu 26.04 x86_64 bundle was assembled at 33,546,492 bytes with `GIT_SHA=5f65e77fc809391536c831a2b1d295585d0361d2` and `GIT_DIRTY=false`, then passed checksum, symlink-boundary, packaged-binary, OTP-release, and twice-idempotent `DESTDIR` installation verification. That proof also revealed a developer-global ignored example file, so the builder is now hardened to require all static bundle inputs to be Git-tracked. A final clean rebuild after the portability repair commit is pending.
+- Hosted-CI portability repair proofs: Linux node config tests 5/5, Windows-target Clippy green, `runner-pools.sh` 118/118, repaired dirty-validation bundle verified end to end, and its packaged `node-env.example` contains the real `CRF_RUNNER_CACHE_DIR` contract.
 
 ## Implemented controller/runtime behavior
 

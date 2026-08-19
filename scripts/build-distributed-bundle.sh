@@ -15,14 +15,34 @@ version="$(tr -d "[:space:]" < "$root/VERSION")"
 git_sha="$(git -C "$root" rev-parse HEAD)"
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$root" show -s --format=%ct HEAD)}"
 git_dirty=false
-if ! git -C "$root" diff --quiet --ignore-submodules -- ||
-   ! git -C "$root" diff --cached --quiet --ignore-submodules --; then
+git_status="$(git -C "$root" status --porcelain --untracked-files=all)"
+if [[ -n "$git_status" ]]; then
   git_dirty=true
   if [[ "${CRF_ALLOW_DIRTY_BUNDLE:-0}" != "1" ]]; then
-    echo "refusing to build a release bundle from tracked dirty sources; commit first or set CRF_ALLOW_DIRTY_BUNDLE=1 for local validation" >&2
+    echo "refusing to build a release bundle from dirty or untracked sources; commit first or set CRF_ALLOW_DIRTY_BUNDLE=1 for local validation" >&2
     exit 1
   fi
 fi
+
+tracked_inputs=(
+  VERSION
+  Cargo.toml
+  Cargo.lock
+  controller/mix.exs
+  packaging/distributed/README.md
+  packaging/distributed/install.sh
+  packaging/distributed/examples/node-env.example
+  packaging/distributed/systemd/ci-runner-farm-controller.service
+  packaging/distributed/systemd/ci-runner-farm-node.service
+  docs/distributed-runner-farm/controller-config.example.json
+  docs/distributed-runner-farm/runner-manifest.example.json
+)
+for relative in "${tracked_inputs[@]}"; do
+  if ! git -C "$root" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
+    echo "refusing to build: required bundle input is not tracked by git: $relative" >&2
+    exit 1
+  fi
+done
 
 os_id=linux
 os_version=unknown
@@ -66,7 +86,7 @@ install -m 0644 "$root/packaging/distributed/README.md" "$stage/README.md"
 install -m 0644 "$root/packaging/distributed/systemd/ci-runner-farm-controller.service" "$stage/systemd/ci-runner-farm-controller.service"
 install -m 0644 "$root/packaging/distributed/systemd/ci-runner-farm-node.service" "$stage/systemd/ci-runner-farm-node.service"
 install -m 0644 "$root/docs/distributed-runner-farm/controller-config.example.json" "$stage/examples/controller-config.example.json"
-install -m 0644 "$root/packaging/distributed/examples/node.env.example" "$stage/examples/node.env.example"
+install -m 0644 "$root/packaging/distributed/examples/node-env.example" "$stage/examples/node-env.example"
 install -m 0644 "$root/docs/distributed-runner-farm/runner-manifest.example.json" "$stage/examples/runner-manifest.example.json"
 
 {

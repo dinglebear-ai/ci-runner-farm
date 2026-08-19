@@ -174,7 +174,7 @@ grep -q 'never edits workflow files in sibling repositories' README.md && ok || 
 
 WORKFLOW_DIR=".github/workflows"
 route_jobs="$(awk '/^[[:space:]]*runs-on:/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
-[ "$route_jobs" -eq 7 ] && ok || bad "expected 7 workflow jobs with runner routes, found $route_jobs"
+[ "$route_jobs" -eq 8 ] && ok || bad "expected 8 workflow jobs with runner routes, found $route_jobs"
 ops_routes="$(awk '/^[[:space:]]*runs-on:.*ci-pool-ops/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
 [ "$ops_routes" -eq 7 ] && ok || bad "expected 7 trusted ops-pool routes, found $ops_routes"
 hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
