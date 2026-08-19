@@ -44,7 +44,7 @@ defmodule CrfController.ScaleSetSequence do
   defp read_state(path, controller_instance_id) do
     with {:ok, stat} <- File.stat(path),
          true <- stat.type == :regular and stat.size in 1..@max_state_bytes,
-         true <- (stat.mode &&& 0o777) == 0o600,
+         true <- secure_state_mode?(stat.mode),
          {:ok, binary} <- File.read(path),
          {:ok, state} <- decode_state(binary),
          true <- state["controller_instance_id"] == controller_instance_id,
@@ -119,6 +119,13 @@ defmodule CrfController.ScaleSetSequence do
       _ -> {:error, :invalid_scaleset_sequence_state}
     catch
       _, _ -> {:error, :invalid_scaleset_sequence_state}
+    end
+  end
+
+  defp secure_state_mode?(mode) do
+    case :os.type() do
+      {:win32, _} -> true
+      _ -> (mode &&& 0o777) == 0o600
     end
   end
 

@@ -35,7 +35,8 @@ defmodule CrfController.PlacementStateStoreTest do
     assert restored.resources.cpu_millis == 2_000
 
     assert {:ok, stat} = File.stat(path)
-    assert Bitwise.band(stat.mode, 0o777) == 0o600
+    assert stat.type == :regular
+    if elem(:os.type(), 0) != :win32, do: assert(Bitwise.band(stat.mode, 0o777) == 0o600)
 
     GenServer.stop(second)
     File.rm_rf!(root)

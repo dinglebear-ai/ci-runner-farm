@@ -216,21 +216,44 @@ done
   exit 1
 }
 
-bootstrap_pid=""
-for candidate in $(pgrep -P "$launcher_pid" 2>/dev/null || true); do
-  candidate_pgid="$(ps -o pgid= -p "$candidate" 2>/dev/null | tr -d '[:space:]')"
-  candidate_sid="$(ps -o sid= -p "$candidate" 2>/dev/null | tr -d '[:space:]')"
-  [ "$candidate_pgid" = "$candidate" ] && [ "$candidate_sid" = "$candidate" ] || continue
-  [ -r "/proc/$candidate/environ" ] || continue
-  tr '\0' '\n' <"/proc/$candidate/environ" 2>/dev/null |
-    grep -Eq '^CRF_RECONCILE_SESSION_TOKEN=[0-9a-f]{32}$' || continue
-  bootstrap_pid="$candidate"
+bootstrap_identity_tmp=""
+for candidate in "$bootstrap_dir/run"/reconcile.identity.tmp.*; do
+  [ -f "$candidate" ] || continue
+  bootstrap_identity_tmp="$candidate"
   break
 done
-[ -n "$bootstrap_pid" ] || {
-  echo 'FAIL: pre-publication child was not an isolated token-bearing session leader' >&2
+[ -n "$bootstrap_identity_tmp" ] || {
+  echo 'FAIL: pre-publication identity record was not written before atomic publication' >&2
   exit 1
 }
+bootstrap_extra=""
+read -r bootstrap_pid bootstrap_starttime bootstrap_token bootstrap_script bootstrap_extra <"$bootstrap_identity_tmp"
+[[ "$bootstrap_pid" =~ ^[1-9][0-9]*$ ]] &&
+  [[ "$bootstrap_starttime" =~ ^[1-9][0-9]*$ ]] &&
+  [[ "$bootstrap_token" =~ ^[0-9a-f]{32}$ ]] &&
+  [ -n "$bootstrap_script" ] && [ -z "$bootstrap_extra" ] || {
+    echo 'FAIL: malformed pre-publication worker identity record' >&2
+    exit 1
+  }
+bootstrap_record="$(reconcile_proc_record "$bootstrap_pid" 2>/dev/null)" || bootstrap_record=""
+[ -n "$bootstrap_record" ] || {
+  echo 'FAIL: pre-publication worker identity PID is not live' >&2
+  exit 1
+}
+read -r bootstrap_state bootstrap_pgid bootstrap_sid bootstrap_actual_starttime <<EOF
+$bootstrap_record
+EOF
+[ "$bootstrap_pgid" = "$bootstrap_pid" ] && [ "$bootstrap_sid" = "$bootstrap_pid" ] &&
+  [ "$bootstrap_actual_starttime" = "$bootstrap_starttime" ] || {
+    echo 'FAIL: pre-publication worker identity did not name the isolated session leader' >&2
+    exit 1
+  }
+[ -r "/proc/$bootstrap_pid/environ" ] &&
+  tr '\0' '\n' <"/proc/$bootstrap_pid/environ" 2>/dev/null |
+    grep -Fxq -- "CRF_RECONCILE_SESSION_TOKEN=$bootstrap_token" || {
+      echo 'FAIL: pre-publication worker identity did not match its token-bearing session' >&2
+      exit 1
+    }
 worker_pid="$bootstrap_pid"
 assert_worker_isolated "$bootstrap_pid"
 [ ! -e "$bootstrap_dir/run/reconcile.identity" ] || {

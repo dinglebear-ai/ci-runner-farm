@@ -48,7 +48,7 @@ defmodule CrfController.PlacementStateStore do
   defp read(path) do
     with {:ok, stat} <- File.stat(path),
          true <- stat.type == :regular and stat.size in 1..@max_state_bytes,
-         true <- (stat.mode &&& 0o777) == 0o600,
+         true <- secure_state_mode?(stat.mode),
          {:ok, binary} <- File.read(path),
          {:ok, decoded} <- decode_json(binary),
          {:ok, placements} <- decode_placements(decoded) do
@@ -194,6 +194,13 @@ defmodule CrfController.PlacementStateStore do
       "detail_code" => if(is_nil(placement.detail_code), do: :null, else: placement.detail_code),
       "updated_at_ms" => placement.updated_at_ms
     }
+  end
+
+  defp secure_state_mode?(mode) do
+    case :os.type() do
+      {:win32, _} -> true
+      _ -> (mode &&& 0o777) == 0o600
+    end
   end
 
   defp atomic_write(path, encoded) do

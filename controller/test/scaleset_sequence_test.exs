@@ -13,7 +13,8 @@ defmodule CrfController.ScaleSetSequenceTest do
     assert {:ok, 2} = ScaleSetSequence.load(path, "controller-1")
 
     assert {:ok, stat} = File.stat(path)
-    assert Bitwise.band(stat.mode, 0o777) == 0o600
+    assert stat.type == :regular
+    if elem(:os.type(), 0) != :win32, do: assert(Bitwise.band(stat.mode, 0o777) == 0o600)
 
     assert {:error, :invalid_scaleset_sequence_state} =
              ScaleSetSequence.load(path, "controller-2")
