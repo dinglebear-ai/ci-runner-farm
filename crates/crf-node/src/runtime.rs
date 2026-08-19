@@ -2,10 +2,12 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
 };
 
 use crf_protocol::OperatingSystem;
+
+use crate::process_tree::ManagedProcess;
 
 pub const JIT_CONFIG_ENV: &str = "ACTIONS_RUNNER_INPUT_JITCONFIG";
 
@@ -46,11 +48,10 @@ impl NativeRunnerInvocation {
         }
     }
 
-    pub fn spawn(&self, jit_config: &str) -> io::Result<Child> {
-        self.command(jit_config)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
+    pub fn spawn(&self, jit_config: &str) -> io::Result<ManagedProcess> {
+        let mut command = self.command(jit_config);
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        ManagedProcess::spawn(&mut command)
     }
 
     pub fn spawn_with_logs(
@@ -58,11 +59,12 @@ impl NativeRunnerInvocation {
         jit_config: &str,
         stdout: std::fs::File,
         stderr: std::fs::File,
-    ) -> io::Result<Child> {
-        self.command(jit_config)
+    ) -> io::Result<ManagedProcess> {
+        let mut command = self.command(jit_config);
+        command
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()
+            .stderr(Stdio::from(stderr));
+        ManagedProcess::spawn(&mut command)
     }
 
     fn command(&self, jit_config: &str) -> Command {

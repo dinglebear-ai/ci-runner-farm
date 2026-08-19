@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    process::Child,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crf_protocol::wire::{ControllerCommand, ControllerEnvelope};
 use crf_protocol::{ExecutionBackend, OperatingSystem, valid_identifier};
@@ -13,6 +10,7 @@ use crate::{
     placement_state::{
         LocalPlacementState, PlacementStore, PlacementStoreError, TerminalOutcome, TerminalReport,
     },
+    process_tree::ManagedProcess,
     runtime::NativeRunnerInvocation,
     system_probe::SystemProbe,
 };
@@ -32,7 +30,7 @@ pub enum NativeExecutorError {
 }
 
 struct ManagedChild {
-    child: Child,
+    process: ManagedProcess,
     pid: u32,
 }
 
@@ -118,7 +116,7 @@ impl NativeRunnerExecutor {
                 .children
                 .get_mut(&placement_id)
                 .ok_or(NativeExecutorError::PollFailed)?
-                .child
+                .process
                 .try_wait()
                 .map_err(|_| NativeExecutorError::PollFailed)?;
             let Some(status) = status else {
@@ -215,13 +213,13 @@ impl NativeRunnerExecutor {
             Ok(invocation) => invocation,
             Err(_) => return self.fail_before_spawn(placement_id, "native_runtime_unsupported"),
         };
-        let child = match invocation.spawn_with_logs(jit_config.expose_secret(), stdout, stderr) {
-            Ok(child) => child,
+        let process = match invocation.spawn_with_logs(jit_config.expose_secret(), stdout, stderr) {
+            Ok(process) => process,
             Err(_) => return self.fail_before_spawn(placement_id, "runner_spawn_failed"),
         };
-        let pid = child.id();
+        let pid = process.id();
         self.children
-            .insert(placement_id.clone(), ManagedChild { child, pid });
+            .insert(placement_id.clone(), ManagedChild { process, pid });
         if self.store.record_spawned(placement_id, pid).is_err() {
             return ExecutionResult::Deferred("spawn_state_unavailable".into());
         }
@@ -265,7 +263,7 @@ impl NativeRunnerExecutor {
             return ExecutionResult::Rejected("invalid_placement_id".into());
         }
         if let Some(mut managed) = self.children.remove(placement_id) {
-            match managed.child.try_wait() {
+            match managed.process.try_wait() {
                 Ok(Some(status)) => {
                     let outcome = if status.success() {
                         TerminalOutcome::Finished
@@ -286,7 +284,7 @@ impl NativeRunnerExecutor {
                     return ExecutionResult::Deferred("cancel_uncertain".into());
                 }
             }
-            if managed.child.kill().is_err() || managed.child.wait().is_err() {
+            if managed.process.terminate_tree().is_err() {
                 self.children.insert(placement_id.to_owned(), managed);
                 return ExecutionResult::Deferred("cancel_uncertain".into());
             }

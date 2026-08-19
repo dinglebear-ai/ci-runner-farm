@@ -18,3 +18,9 @@ ureq = "3.4.0"
 tar = "0.4.46"
 flate2 = "1.1.9"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }

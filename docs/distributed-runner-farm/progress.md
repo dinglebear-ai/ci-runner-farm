@@ -14,7 +14,8 @@ Last updated: 2026-08-19
 - Hosted-CI portability repair commit: `b297b04d53f477655e59bfdab1f8e59105abc8a6`
 - Windows LF-normalization commit: `d493f4bd6120cf7ffce5b602254d3611f2126b12`
 - Cross-platform recovery commit: `0e950214be70aac916dcce07e7115794dfdf65be`
-- Current live certificate authorization checkpoint: pending commit/push
+- Live certificate authorization commit: `a114746e6cd071510cbdc34adcea69730cedccd1`
+- Current process-tree cancellation checkpoint: pending commit/push; Steamy WSL Linux and Agent OS Windows host proofs pending.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
@@ -22,6 +23,7 @@ Last updated: 2026-08-19
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
 - PR #37 fourth hosted run on `d493f4b`: Ubuntu remained green and Windows advanced through formatting/Rust to Elixir tests, exposing POSIX-only mode validation in two durable-state readers. Those were fixed in `0e95021`; Unix still requires exact `0600`, Windows uses ACL-backed regular-file semantics plus schema/checksum validation. The same run surfaced a pre-existing reconcile crash-boundary test that assumed `setsid` direct-child parentage; `0e95021` strengthens it to verify the authoritative prepublication identity record (PID/starttime/PGID/SID/token) instead.
 - PR #37 hosted runs for `0e95021` are fully green: both the distributed lint workflow and Build Plugin workflow completed successfully, proving native Windows Rust+Elixir, Ubuntu bundle verification, and the full legacy behavioral regression suite on the recovery fixes.
+- PR #37 hosted runs for `a114746` are also fully green with merge state CLEAN: Build Plugin, legacy Shell/PHP regression suite, Ubuntu distributed-core/bundle verification, and native Windows distributed-core all pass with live certificate authorization included.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
@@ -100,11 +102,11 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Add certificate enrollment/rotation/revocation, additional target-distribution Linux bundles, and Windows service packaging.
+1. Add automated CA/server-certificate rotation, additional target-distribution Linux bundles, and Windows service packaging.
 2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
-5. Harden explicit cancellation with Unix process groups and Windows Job Objects, persist process-start identity to close PID-reuse ambiguity, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
+5. Complete Steamy WSL + Agent OS live proof of the new Unix process-group / Windows Job Object cancellation path, persist process-start identity to close PID-reuse ambiguity, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
 
 ## Deployment status
 

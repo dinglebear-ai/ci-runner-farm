@@ -32,7 +32,7 @@
 - [x] Durable placement intent/spawn/terminal state without JIT persistence.
 - [x] Private per-placement runner materialization.
 - [x] File-backed runner stdout/stderr.
-- [x] Managed cancellation and terminal polling.
+- [x] Managed process-tree cancellation and terminal polling: dedicated Unix process groups with TERM→KILL escalation and race-free Windows Job Object assignment via suspended startup.
 - [x] Durable terminal-report outbox and agent sync.
 - [x] Runnable `crf-node` configuration, startup, reconnect/backoff, heartbeat loop, and shutdown.
 - [x] Host memory/resource probing and durable local reservation accounting.
@@ -73,7 +73,7 @@
 
 - [x] Windows-target GNU cross-check for node and scheduler.
 - [x] GitHub-hosted Ubuntu/Windows distributed-core CI wiring.
-- [ ] Native Windows MSVC CI run from the eventual PR.
+- [x] Native Windows MSVC CI run from PR #37.
 - [ ] Live Linux node smoke.
 - [ ] Live Windows node smoke.
 - [ ] Real GitHub scale-set two-node smoke.
