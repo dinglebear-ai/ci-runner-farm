@@ -7,7 +7,8 @@ Last updated: 2026-08-19
 - Worktree: `/home/jmagar/workspace/ci-runner-farm/.claude/worktrees/distributed-elixir-rust`
 - Branch: `worktree-distributed-elixir-rust`
 - Base: current `origin/main` at `00c0c95349db5ff04d15a87525ae4e4d50ae4414`
-- Pull request: pending creation at this checkpoint
+- Pull request: draft PR #37, `Distributed Elixir/Rust runner farm control plane`
+- Initial implementation commit: `5efe6b6ce0325924e93b5ec1c1613339ab6004cc`
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks for node/scheduler, all Go scale-set packages, 96 Elixir controller tests, `actionlint`, and `git diff --check`
 
