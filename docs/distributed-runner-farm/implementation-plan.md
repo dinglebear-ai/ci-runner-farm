@@ -56,7 +56,8 @@
 - [x] Opt-in serialized automatic reconciliation loop and sidecar-session recovery.
 - [x] Load real pool policies, TLS peers, scale-set adapter identity, durable state, scheduler, and reconciliation settings from a strict controller config.
 - [x] Optional OTP supervision of the Go adapter + Elixir controller + Rust scheduler with bounded child-process cleanup.
-- [ ] OS-level release/service packaging and certificate enrollment/rotation for the combined controller stack.
+- [x] Distribution-tagged Linux release bundle with OTP controller, Rust scheduler/node, optional Go sidecar, hardened systemd units, idempotent installer, checksums, and CI verification smoke.
+- [ ] Certificate enrollment/rotation/revocation and additional target-distribution/Windows service packaging.
 - [x] Conservative placement-loss grace, operator-visible orphan tracking, node-recovery recheck, and explicit force-abandon/JIT cleanup without automatic duplicate execution.
 
 ## Phase 5: existing Unraid integration

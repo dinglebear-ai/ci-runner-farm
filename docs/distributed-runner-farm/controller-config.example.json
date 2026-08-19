@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scheduler": {
-    "executable": "/opt/ci-runner-farm/bin/crf-scheduler",
+    "executable": "/opt/ci-runner-farm/current/bin/crf-scheduler",
     "request_timeout_ms": 5000
   },
   "state": {

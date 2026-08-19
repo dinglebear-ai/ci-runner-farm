@@ -9,8 +9,11 @@ Last updated: 2026-08-19
 - Base: current `origin/main` at `00c0c95349db5ff04d15a87525ae4e4d50ae4414`
 - Pull request: draft PR #37, `Distributed Elixir/Rust runner farm control plane`
 - Initial implementation commit: `5efe6b6ce0325924e93b5ec1c1613339ab6004cc`
+- Tracker checkpoint commit: `f6ed39faa52017a7af16778a1b1464d1ee5d3977`
+- Current packaging/CI-fix checkpoint: pending commit/push
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks for node/scheduler, all Go scale-set packages, 96 Elixir controller tests, `actionlint`, and `git diff --check`
+- Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, 96 Elixir controller tests, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and legacy final-release gate failures were localized and fixed in the pending checkpoint. CI rerun is pending push.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
@@ -31,6 +34,8 @@ The implemented path is:
 - Go scale-set adapter: every package in `tools/crf-scaleset` passes.
 - GitHub workflow: `actionlint` passes. Distributed core CI builds/tests Rust and Elixir on Ubuntu and Windows and exposes the real scheduler binary to controller tests.
 - `git diff --check` passes and isolated Cargo target directories are ignored.
+- Linux service packaging: a 33,547,073-byte Ubuntu 26.04 x86_64 bundle was assembled and passed checksum, symlink-boundary, packaged-binary, OTP-release, and twice-idempotent `DESTDIR` installation verification. A clean-committed-tree rebuild is the next checkpoint proof.
+- PR #37 CI findings: Windows Clippy flagged Windows-only readonly-bit reset helpers and the legacy release gate overfit the Go constant formatting. Both are corrected locally; Windows-target Clippy and the semantic issued-handle cap check now pass.
 
 ## Implemented controller/runtime behavior
 
@@ -58,7 +63,8 @@ The implemented path is:
 - optional OTP-owned `crf-scaleset` sidecar with bounded socket readiness and verified SIGTERM/SIGKILL child cleanup;
 - managed pinned GitHub runner acquisition using Rustls HTTPS, exact byte count + SHA-256 verification, TAR/ZIP traversal/link defenses, immutable content-addressed cache, cache-tamper detection, OS-backed cache locking, and current-plus-one-rollback pruning;
 - placement-loss grace tracking that surfaces nonterminal work on unavailable node incarnations as orphans without automatically retrying it;
-- explicit force-abandon remediation that re-checks live node health, requires confirmation, terminalizes the durable placement, removes stale mailbox work, and retires matching central JIT state.
+- explicit force-abandon remediation that re-checks live node health, requires confirmation, terminalizes the durable placement, removes stale mailbox work, and retires matching central JIT state;
+- distribution-tagged Linux service bundle containing the self-contained OTP controller release, Rust scheduler/node, Go scale-set sidecar, hardened systemd units, versioned atomic install layout, checksums/build metadata, fake-root/idempotent installer verification, and CI bundle smoke.
 
 ## Recovery invariants covered by tests
 
@@ -85,10 +91,11 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Add OS-level release/service packaging for the already unified Go + Elixir + Rust controller stack, certificate enrollment/rotation, and durable-path installation.
+1. Add certificate enrollment/rotation/revocation, additional target-distribution Linux bundles, and Windows service packaging.
 2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
-4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, and adversarial release review.
+4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
+5. Harden explicit cancellation with Unix process groups and Windows Job Objects, persist process-start identity to close PID-reuse ambiguity, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
 
 ## Deployment status
 

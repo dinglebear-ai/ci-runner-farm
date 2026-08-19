@@ -11,6 +11,7 @@ The design extends the existing single-host Unraid runner farm into one logical 
 - [protocol-contract.md](protocol-contract.md) defines the versioned controller/node wire and transport contract.
 - [controller-config.md](controller-config.md) defines the strict portable controller configuration and sidecar supervision contract.
 - [runner-packages.md](runner-packages.md) defines pinned portable GitHub runner acquisition, verification, and cache lifecycle.
+- [service-packaging.md](service-packaging.md) defines the distribution-tagged Linux bundle, installer, systemd units, and verification contract.
 - [implementation-plan.md](implementation-plan.md) defines staged delivery.
 - [progress.md](progress.md) is the living implementation tracker.
 

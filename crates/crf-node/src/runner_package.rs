@@ -433,11 +433,19 @@ fn set_writable_file(path: &Path, _metadata: &fs::Metadata) -> Result<(), io::Er
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
 fn set_writable_file(path: &Path, metadata: &fs::Metadata) -> Result<(), io::Error> {
+    // On Windows this toggles FILE_ATTRIBUTE_READONLY; it does not make the
+    // file world-writable as the same portable API can on Unix.
     let mut permissions = metadata.permissions();
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn set_writable_file(_path: &Path, _metadata: &fs::Metadata) -> Result<(), io::Error> {
+    Ok(())
 }
 
 fn unique_suffix() -> String {

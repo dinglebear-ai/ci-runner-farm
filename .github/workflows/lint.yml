@@ -85,6 +85,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go 1.25.3 for bundle smoke
+        if: runner.os == 'Linux'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.25.3
+          cache-dependency-path: tools/crf-scaleset/go.sum
+
       - name: Set up Elixir 1.20.3 / OTP 29.0.5
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
         with:
@@ -129,3 +136,15 @@ jobs:
       - name: Elixir tests
         working-directory: controller
         run: mix test
+
+      - name: Build distributed Linux service bundle
+        if: runner.os == 'Linux'
+        run: scripts/build-distributed-bundle.sh
+
+      - name: Verify distributed Linux service bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bundle="$(find build/distributed -maxdepth 1 -type f -name 'ci-runner-farm-distributed-*.tar.gz' -print -quit)"
+          test -n "$bundle"
+          scripts/verify-distributed-bundle.sh "$bundle"

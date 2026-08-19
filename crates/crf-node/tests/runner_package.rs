@@ -538,6 +538,7 @@ fn zip_file(path: &str, data: &[u8], symlink: bool) -> Vec<u8> {
     writer.finish().expect("zip finish").into_inner()
 }
 
+#[cfg_attr(windows, allow(clippy::permissions_set_readonly_false))]
 fn make_writable(path: &Path) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;

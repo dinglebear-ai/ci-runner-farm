@@ -4,9 +4,12 @@ defmodule CrfController.MixProject do
   def project do
     [
       app: :crf_controller,
-      version: "0.1.0",
+      version: repo_version(),
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
+      releases: [
+        crf_controller: [include_executables_for: [:unix]]
+      ],
       deps: []
     ]
   end
@@ -16,5 +19,12 @@ defmodule CrfController.MixProject do
       extra_applications: [:logger, :crypto, :public_key, :ssl],
       mod: {CrfController.Application, []}
     ]
+  end
+
+  defp repo_version do
+    "../VERSION"
+    |> Path.expand(__DIR__)
+    |> File.read!()
+    |> String.trim()
   end
 end
