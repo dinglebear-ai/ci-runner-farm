@@ -75,4 +75,4 @@ CI runs this build+verification smoke on Linux in the distributed-core job.
 
 ## Current proof
 
-On 2026-08-19, DOOKIE built and verified a 33,547,073-byte Ubuntu 26.04 x86_64 bundle. This was a local artifact verification only; nothing was installed into or started on the host root.
+On 2026-08-19, DOOKIE built and verified a clean 33,546,551-byte Ubuntu 26.04 x86_64 bundle from `b297b04d53f477655e59bfdab1f8e59105abc8a6`; `BUILD-INFO` records `GIT_DIRTY=false`. The same SHA also passed the hosted Ubuntu bundle build/verification lane. These were artifact/fake-root installation proofs only; nothing was installed into or started on the live host root.
