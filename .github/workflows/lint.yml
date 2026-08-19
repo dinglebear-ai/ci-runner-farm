@@ -1,9 +1,9 @@
 name: Lint
 
-# Fast static gate for the plugin: shell syntax, PHP syntax, the config-parity
-# guard (engine / default.cfg / UI $defaults must agree — see tests/config-parity.sh),
-# and the crf-scaleset Go unit test suite. No build or runtime; complements
-# package-plugins.yml (which builds the crf-scaleset binary but does not test it).
+# Fast static gates for the Unraid plugin plus the platform-agnostic distributed
+# controller/node core. The legacy gate covers shell, PHP, config parity, and the
+# crf-scaleset Go suite. A separate hosted matrix proves the new Elixir/Rust core
+# on ordinary Linux and Windows hosts without relying on Unraid.
 
 on:
   pull_request:
@@ -69,3 +69,63 @@ jobs:
             echo "bash $test"
             bash "$test"
           done
+
+  distributed-core:
+    name: Distributed core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up Elixir 1.20.3 / OTP 29.0.5
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: 1.20.3
+          otp-version: 29.0.5
+
+      - name: Set up Rust 1.97.1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Build Rust scheduler bridge
+        run: cargo build -p crf-scheduler
+
+      - name: Expose scheduler binary to controller tests
+        shell: bash
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            suffix=".exe"
+          fi
+          printf 'CRF_SCHEDULER_BIN=%s/target/debug/crf-scheduler%s\n' "$GITHUB_WORKSPACE" "$suffix" >> "$GITHUB_ENV"
+
+      - name: Elixir formatting
+        working-directory: controller
+        run: mix format --check-formatted
+
+      - name: Elixir compile warnings
+        working-directory: controller
+        run: mix compile --warnings-as-errors
+
+      - name: Elixir tests
+        working-directory: controller
+        run: mix test

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/crf-node",
+  "crates/crf-protocol",
+  "crates/crf-scheduler",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }

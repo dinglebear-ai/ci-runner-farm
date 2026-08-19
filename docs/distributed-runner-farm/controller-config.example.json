@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "scheduler": {
+    "executable": "/opt/ci-runner-farm/bin/crf-scheduler",
+    "request_timeout_ms": 5000
+  },
+  "state": {
+    "placement_path": "/var/lib/ci-runner-farm/controller/placements.json"
+  },
+  "node_registry": {
+    "stale_after_ms": 15000
+  },
+  "scaleset": {
+    "socket_path": "/run/ci-runner-farm/scaleset/control.sock",
+    "sequence_path": "/var/lib/ci-runner-farm/controller/scaleset-sequence.json",
+    "controller_instance_id": "controller-1",
+    "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ownership_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "timeout_ms": 30000
+  },
+  "sidecar": null,
+  "tls": {
+    "port": 7443,
+    "certfile": "/etc/ci-runner-farm/tls/controller.crt",
+    "keyfile": "/etc/ci-runner-farm/tls/controller.key",
+    "cacertfile": "/etc/ci-runner-farm/tls/ca.crt",
+    "handshake_timeout_ms": 15000,
+    "peers": [
+      {
+        "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "node_id": "dookie"
+      }
+    ]
+  },
+  "demand": {
+    "auto_reconcile": true,
+    "reconcile_interval_ms": 1000,
+    "offer_ttl_ms": 90000,
+    "placement_loss_grace_ms": 60000,
+    "max_new_offers_per_tick": 4,
+    "pools": [
+      {
+        "id": "build",
+        "max_concurrency": 8,
+        "resources": {
+          "cpu_millis": 2000,
+          "memory_bytes": 4294967296
+        },
+        "required_os": "linux",
+        "required_arch": "x86_64",
+        "required_backend": "native_process",
+        "required_capabilities": ["github-actions"],
+        "work_folder": "_work"
+      }
+    ]
+  }
+}

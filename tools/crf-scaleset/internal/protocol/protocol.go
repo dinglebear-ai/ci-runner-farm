@@ -24,6 +24,7 @@ var (
 		"issue_jit":               true,
 		"retire_jit":              true,
 		"read_snapshot":           true,
+		"read_jit_state":          true,
 		"reconcile_owned":         true,
 		"delete_owned":            true,
 	}
@@ -99,6 +100,14 @@ type PoolSnapshot struct {
 	AcquiredHandles    []int64   `json:"acquired_handles"`
 	ObservedAt         time.Time `json:"observed_at"`
 	ValidUntil         time.Time `json:"valid_until"`
+}
+
+type JITState struct {
+	PoolID              string `json:"pool_id"`
+	ScaleSetID          int64  `json:"scale_set_id"`
+	WorkHandle          int64  `json:"work_handle"`
+	State               string `json:"state"`
+	DescriptorAvailable bool   `json:"descriptor_available"`
 }
 
 type Snapshot struct {

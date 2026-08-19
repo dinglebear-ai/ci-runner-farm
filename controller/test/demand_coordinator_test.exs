@@ -1,0 +1,569 @@
+defmodule CrfController.DemandCoordinatorTest do
+  use ExUnit.Case, async: false
+
+  alias CrfController.{
+    DemandCoordinator,
+    NodeCommand,
+    NodeMailbox,
+    NodeRegistry,
+    OfferLedger,
+    PlacementCoordinator,
+    PlacementLedger,
+    SchedulerClient,
+    Secret,
+    WorkIdentity
+  }
+
+  @gib 1024 * 1024 * 1024
+  @now_unix_ms 1_787_070_001_000
+
+  defmodule FakeScaleSet do
+    use GenServer
+
+    alias CrfController.Secret
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+    def state(server), do: GenServer.call(server, :state)
+    def set_handles(server, handles), do: GenServer.call(server, {:set_handles, handles})
+    def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
+    def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
+
+    @impl true
+    def init(_opts) do
+      {:ok,
+       %{
+         snapshot: snapshot([]),
+         jit_states: [],
+         apply_calls: 0,
+         issue_calls: 0,
+         retire_calls: 0,
+         last_leases: %{},
+         fail_next_snapshot: false
+       }}
+    end
+
+    @impl true
+    def handle_call(:state, _from, state), do: {:reply, state, state}
+
+    def handle_call({:set_handles, handles}, _from, state) do
+      [pool] = state.snapshot.pools
+      pool = %{pool | acquired_handles: handles, assigned_jobs: length(handles)}
+      state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:set_jit_states, states}, _from, state) do
+      {:reply, :ok, %{state | jit_states: states}}
+    end
+
+    def handle_call(:fail_next_snapshot, _from, state) do
+      {:reply, :ok, %{state | fail_next_snapshot: true}}
+    end
+
+    def handle_call({:call, "apply_sessions", %{"eligible" => true}}, _from, state) do
+      {:reply, {:ok, %{"applied" => true}}, %{state | apply_calls: state.apply_calls + 1}}
+    end
+
+    def handle_call({:call, "read_jit_state", %{}}, _from, state) do
+      {:reply, {:ok, state.jit_states}, state}
+    end
+
+    def handle_call({:call, "read_snapshot", %{}}, _from, %{fail_next_snapshot: true} = state) do
+      {:reply, {:error, {:scaleset_transport, :closed}}, %{state | fail_next_snapshot: false}}
+    end
+
+    def handle_call({:call, "read_snapshot", %{}}, _from, state) do
+      {:reply, {:ok, state.snapshot}, state}
+    end
+
+    def handle_call({:call, "publish_capacity_leases", %{"leases" => leases}}, _from, state) do
+      {:reply, {:ok, %{"leases" => leases}}, %{state | last_leases: leases}}
+    end
+
+    def handle_call({:call, "issue_jit", payload}, _from, state) do
+      pool_id = payload["pool_id"]
+      handle = payload["work_handle"]
+      [pool] = state.snapshot.pools
+      {:ok, secret} = Secret.new("jit-config-#{handle}==")
+
+      jit = %{
+        pool_id: pool_id,
+        scale_set_id: pool.scale_set_id,
+        work_handle: handle,
+        state: "issued",
+        descriptor_available: true
+      }
+
+      jit_states =
+        [jit | state.jit_states]
+        |> Enum.uniq_by(&{&1.pool_id, &1.work_handle})
+
+      {:reply, {:ok, %{descriptor: secret, scale_set_id: pool.scale_set_id}},
+       %{state | issue_calls: state.issue_calls + 1, jit_states: jit_states}}
+    end
+
+    def handle_call({:call, "retire_jit", payload}, _from, state) do
+      pool_id = payload["pool_id"]
+      handle = payload["work_handle"]
+
+      jit_states =
+        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
+
+      {:reply, {:ok, %{"retired" => true}},
+       %{state | retire_calls: state.retire_calls + 1, jit_states: jit_states}}
+    end
+
+    defp snapshot(handles) do
+      %{
+        controller_instance_id: "controller-1",
+        config_revision: String.duplicate("a", 64),
+        ownership_revision: String.duplicate("b", 64),
+        sequence: 1,
+        pools: [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            assigned_jobs: length(handles),
+            advertised_capacity: 0,
+            last_message_id: 1,
+            session_healthy: true,
+            acquired_handles: handles
+          }
+        ]
+      }
+    end
+  end
+
+  setup do
+    case System.get_env("CRF_SCHEDULER_BIN") do
+      nil ->
+        %{disabled: true}
+
+      executable ->
+        registry = start_supervised!({NodeRegistry, name: nil, stale_after_ms: 10_000})
+        placements = start_supervised!({PlacementLedger, name: nil})
+        offers = start_supervised!({OfferLedger, name: nil, capacity: 32})
+        mailbox = start_supervised!({NodeMailbox, name: nil, capacity: 32})
+        scale_set = start_supervised!({FakeScaleSet, []})
+
+        scheduler =
+          start_supervised!(
+            {SchedulerClient, name: nil, executable: executable, request_timeout_ms: 5_000}
+          )
+
+        coordinator =
+          start_supervised!(
+            {PlacementCoordinator,
+             name: nil,
+             node_registry: registry,
+             placement_ledger: placements,
+             offer_ledger: offers,
+             node_mailbox: mailbox}
+          )
+
+        assert {:ok, _} = register_node(registry)
+
+        demand =
+          start_supervised!(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(2)],
+             scale_set_client: scale_set,
+             scheduler_client: scheduler,
+             node_registry: registry,
+             placement_ledger: placements,
+             offer_ledger: offers,
+             node_mailbox: mailbox,
+             placement_coordinator: coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 4}
+          )
+
+        %{
+          disabled: false,
+          registry: registry,
+          placements: placements,
+          offers: offers,
+          mailbox: mailbox,
+          scale_set: scale_set,
+          scheduler: scheduler,
+          coordinator: coordinator,
+          demand: demand
+        }
+    end
+  end
+
+  test "resource-backed offers become JIT placements without changing advertised capacity", ctx do
+    unless ctx.disabled do
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.leases == %{"build" => 2}
+      assert first.offers == 2
+      assert first.placements == 0
+      assert Enum.all?(OfferLedger.snapshot(ctx.offers, now_ms: 101), &(&1.state == :offered))
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [101, 102])
+
+      assert {:ok, second} = reconcile(ctx.demand, 200)
+      assert second.leases == %{"build" => 2}
+      assert second.offers == 0
+      assert second.placements == 2
+      assert NodeMailbox.size(ctx.mailbox) == 2
+
+      placements = PlacementLedger.snapshot(ctx.placements)
+      assert Enum.all?(placements, &(&1.state == :commanded))
+      assert Enum.map(placements, & &1.pool_id) == ["build", "build"]
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.apply_calls == 1
+      assert sidecar.issue_calls == 2
+      assert sidecar.last_leases == %{"build" => 2}
+    end
+  end
+
+  test "active deterministic placement is reconstructed without another JIT issuance", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 501)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 501,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert {:ok, _} =
+               NodeRegistry.heartbeat(
+                 ctx.registry,
+                 "dookie",
+                 7,
+                 %{cpu_millis: 6_000, memory_bytes: 12 * @gib},
+                 active_placements: MapSet.new([identity.placement_id]),
+                 now_ms: 90
+               )
+
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert placement.state == :observed
+      assert FakeScaleSet.state(ctx.scale_set).issue_calls == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+    end
+  end
+
+  test "persisted commanded placement rebuilds a lost mailbox command exactly once", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 701)
+
+      assert {:ok, _} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 50
+               )
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 701,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert NodeMailbox.size(ctx.mailbox) == 1
+      assert FakeScaleSet.state(ctx.scale_set).issue_calls == 1
+
+      assert {:ok, _} = reconcile(ctx.demand, 200)
+      assert NodeMailbox.size(ctx.mailbox) == 1
+      assert FakeScaleSet.state(ctx.scale_set).issue_calls == 1
+    end
+  end
+
+  test "surviving runner adopts a newer node generation and drops stale mailbox command", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 702)
+
+      assert {:ok, placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 50
+               )
+
+      {:ok, secret} = Secret.new("jit-config-702==")
+
+      {:ok, command} =
+        NodeCommand.start_placement(
+          placement,
+          identity.runner_name,
+          :native_process,
+          secret,
+          @now_unix_ms,
+          @now_unix_ms + 60_000
+        )
+
+      assert {:ok, ^command} =
+               NodeMailbox.enqueue(ctx.mailbox, command, now_unix_ms: @now_unix_ms)
+
+      assert {:ok, _} = register_node_generation(ctx.registry, 8)
+
+      assert {:ok, _} =
+               NodeRegistry.heartbeat(
+                 ctx.registry,
+                 "dookie",
+                 8,
+                 %{cpu_millis: 6_000, memory_bytes: 12 * @gib},
+                 active_placements: MapSet.new([identity.placement_id]),
+                 now_ms: 90
+               )
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 702,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert {:ok, adopted} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert adopted.node_generation == 8
+      assert adopted.state == :observed
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert FakeScaleSet.state(ctx.scale_set).issue_calls == 0
+    end
+  end
+
+  test "missing placement becomes operator-visible orphan without automatic retry", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 801)
+
+      assert {:ok, placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 50
+               )
+
+      {:ok, secret} = Secret.new("jit-config-801==")
+
+      {:ok, command} =
+        NodeCommand.start_placement(
+          placement,
+          identity.runner_name,
+          :native_process,
+          secret,
+          @now_unix_ms,
+          @now_unix_ms + 60_000
+        )
+
+      assert {:ok, ^command} =
+               NodeMailbox.enqueue(ctx.mailbox, command, now_unix_ms: @now_unix_ms)
+
+      assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements == []
+
+      assert {:error, :placement_not_orphaned} =
+               DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
+                 force: true,
+                 now_ms: 500
+               )
+
+      assert {:ok, _} = reconcile(ctx.demand, 1_100)
+
+      assert [orphan] =
+               CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements
+
+      assert orphan.placement_id == identity.placement_id
+      assert orphan.state == :commanded
+      assert orphan.missing_for_ms == 1_000
+      assert NodeMailbox.size(ctx.mailbox) == 1
+      assert {:ok, still_live} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert still_live.state == :commanded
+    end
+  end
+
+  test "force abandon requires explicit confirmation and terminalizes an orphan", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 802)
+
+      assert {:ok, placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 50
+               )
+
+      {:ok, secret} = Secret.new("jit-config-802==")
+
+      {:ok, command} =
+        NodeCommand.start_placement(
+          placement,
+          identity.runner_name,
+          :native_process,
+          secret,
+          @now_unix_ms,
+          @now_unix_ms + 60_000
+        )
+
+      assert {:ok, ^command} =
+               NodeMailbox.enqueue(ctx.mailbox, command, now_unix_ms: @now_unix_ms)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 802,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert {:ok, _} = reconcile(ctx.demand, 1_100)
+
+      assert {:error, :explicit_force_required} =
+               DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
+                 now_ms: 1_100
+               )
+
+      assert {:ok, %{placement: failed, jit_cleanup: :ok}} =
+               DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
+                 force: true,
+                 now_ms: 1_100
+               )
+
+      assert failed.state == :failed
+      assert failed.detail_code == "operator_abandoned"
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.retire_calls == 1
+      assert sidecar.jit_states == []
+      assert CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements == []
+    end
+  end
+
+  test "force abandon rechecks live node recovery instead of trusting stale orphan status", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 803)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 50
+               )
+
+      assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert {:ok, _} = reconcile(ctx.demand, 1_100)
+      assert [_orphan] = CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements
+
+      assert {:ok, _node} = register_node_generation(ctx.registry, 7)
+
+      assert {:error, :placement_not_orphaned} =
+               DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
+                 force: true,
+                 now_ms: 1_200
+               )
+
+      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert placement.state == :commanded
+      assert CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements == []
+    end
+  end
+
+  test "scale-set transport failure resets session activation and the next tick reapplies sessions",
+       ctx do
+    unless ctx.disabled do
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert FakeScaleSet.state(ctx.scale_set).apply_calls == 1
+      assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+
+      :ok = FakeScaleSet.fail_next_snapshot(ctx.scale_set)
+      assert {:error, {:scaleset_transport, :closed}} = reconcile(ctx.demand, 200)
+      refute CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+
+      assert {:ok, _} = reconcile(ctx.demand, 300)
+      assert FakeScaleSet.state(ctx.scale_set).apply_calls == 2
+      assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+    end
+  end
+
+  test "ambiguous JIT tombstone is retired before new capacity is offered", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 601,
+            state: "issue_started",
+            descriptor_available: false
+          }
+        ])
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.leases == %{"build" => 2}
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.retire_calls == 1
+      assert sidecar.jit_states == []
+    end
+  end
+
+  defp reconcile(server, now_ms) do
+    DemandCoordinator.reconcile(server,
+      now_ms: now_ms,
+      now_unix_ms: @now_unix_ms + now_ms,
+      timeout: 10_000
+    )
+  end
+
+  defp register_node(registry), do: register_node_generation(registry, 7)
+
+  defp register_node_generation(registry, generation) do
+    NodeRegistry.register(
+      registry,
+      %{
+        id: "dookie",
+        generation: generation,
+        os: :linux,
+        arch: :x86_64,
+        execution_backends: [:native_process],
+        capabilities: ["github-actions"],
+        total: %{cpu_millis: 8_000, memory_bytes: 16 * @gib},
+        available: %{cpu_millis: 8_000, memory_bytes: 16 * @gib}
+      },
+      now_ms: 1
+    )
+  end
+
+  defp placement_attrs(identity, generation) do
+    %{
+      id: identity.placement_id,
+      command_id: identity.command_id,
+      idempotency_key: identity.idempotency_key,
+      node_id: "dookie",
+      node_generation: generation,
+      work_id: identity.work_id,
+      pool_id: "build",
+      resources: %{cpu_millis: 2_000, memory_bytes: 4 * @gib}
+    }
+  end
+
+  defp policy(max_concurrency) do
+    %{
+      id: "build",
+      max_concurrency: max_concurrency,
+      resources: %{cpu_millis: 2_000, memory_bytes: 4 * @gib},
+      required_os: :linux,
+      required_arch: :x86_64,
+      required_backend: :native_process,
+      required_capabilities: ["github-actions"],
+      work_folder: "_work"
+    }
+  end
+end

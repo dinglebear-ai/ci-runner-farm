@@ -148,7 +148,7 @@ func runProbe(args []string) {
 func supervise(args []string) {
 	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	socket := flags.String("socket", "", "root-only Unix socket")
+	socket := flags.String("socket", "", "same-UID Unix socket")
 	compatibility := flags.String("compatibility", "", "sealed compatibility record")
 	runtimeConfig := flags.String("runtime-config", "", "mode-0600 runtime configuration")
 	if err := flags.Parse(args); err != nil || *socket == "" || *compatibility == "" ||
@@ -182,15 +182,20 @@ func supervise(args []string) {
 	defer control.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := (&ipc.Server{Path: *socket, Handler: control.Handle}).Serve(ctx); err != nil {
+	if err := supervisorServer(*socket, control.Handle).Serve(ctx); err != nil {
 		fail("supervisor_failed", err.Error())
 	}
+}
+
+func supervisorServer(path string, handler ipc.Handler) *ipc.Server {
+	allowedUID := uint32(os.Geteuid())
+	return &ipc.Server{Path: path, Handler: handler, AllowedUID: &allowedUID}
 }
 
 func request(args []string) {
 	flags := flag.NewFlagSet("request", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	socket := flags.String("socket", "", "root-only Unix socket")
+	socket := flags.String("socket", "", "same-UID Unix socket")
 	timeout := flags.Duration("timeout", 30*time.Second, "request timeout")
 	if err := flags.Parse(args); err != nil || *socket == "" || *timeout <= 0 ||
 		*timeout > 2*time.Minute || flags.NArg() != 0 {
