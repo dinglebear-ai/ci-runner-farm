@@ -12,6 +12,7 @@ Environment=HOME=/var/lib/ci-runner-farm
 Environment=RELEASE_TMP=/run/ci-runner-farm/controller-tmp
 Environment=CRF_CONTROLLER_CONFIG=/etc/ci-runner-farm/controller.json
 ExecStart=/opt/ci-runner-farm/current/controller/bin/crf_controller start
+ExecReload=/opt/ci-runner-farm/current/bin/crf-peer-admin reload
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=30s

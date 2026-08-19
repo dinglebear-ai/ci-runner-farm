@@ -12,12 +12,16 @@ Last updated: 2026-08-19
 - Tracker checkpoint commit: `f6ed39faa52017a7af16778a1b1464d1ee5d3977`
 - Packaging checkpoint commit: `5f65e77fc809391536c831a2b1d295585d0361d2`
 - Hosted-CI portability repair commit: `b297b04d53f477655e59bfdab1f8e59105abc8a6`
-- Current Windows LF-normalization checkpoint: pending commit/push
+- Windows LF-normalization commit: `d493f4bd6120cf7ffce5b602254d3611f2126b12`
+- Cross-platform recovery commit: `0e950214be70aac916dcce07e7115794dfdf65be`
+- Current live certificate authorization checkpoint: pending commit/push
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, 96 Elixir controller tests, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
-- PR #37 third hosted run on `b297b04`: Ubuntu distributed-core is green, including bundle build/verification; native Windows Rust tests are green; Windows only failed at `mix format --check-formatted` because checkout CRLF differed from formatter LF. A narrow `.gitattributes` LF contract is the pending checkpoint. Legacy behavioral regressions are still completing.
+- PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
+- PR #37 fourth hosted run on `d493f4b`: Ubuntu remained green and Windows advanced through formatting/Rust to Elixir tests, exposing POSIX-only mode validation in two durable-state readers. Those were fixed in `0e95021`; Unix still requires exact `0600`, Windows uses ACL-backed regular-file semantics plus schema/checksum validation. The same run surfaced a pre-existing reconcile crash-boundary test that assumed `setsid` direct-child parentage; `0e95021` strengthens it to verify the authoritative prepublication identity record (PID/starttime/PGID/SID/token) instead.
+- PR #37 hosted runs for `0e95021` are fully green: both the distributed lint workflow and Build Plugin workflow completed successfully, proving native Windows Rust+Elixir, Ubuntu bundle verification, and the full legacy behavioral regression suite on the recovery fixes.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
@@ -34,12 +38,13 @@ The implemented path is:
 - Rust workspace: **87 tests pass** across protocol, scheduler service, node unit tests, native executor integration, and hostile runner-package/cache tests.
 - Rust strict Clippy: all three crates pass independently with `-D warnings`.
 - Windows portability: both `crf-node --all-targets` and `crf-scheduler --all-targets` cross-check successfully for `x86_64-pc-windows-gnu`. Native MSVC remains covered by the Windows GitHub-hosted CI job because DOOKIE does not have Microsoft linker tools.
-- Elixir controller: **96 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, and conservative orphan/remediation behavior.
+- Elixir controller: **100 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, and live TLS session revocation.
 - Go scale-set adapter: every package in `tools/crf-scaleset` passes.
 - GitHub workflow: `actionlint` passes. Distributed core CI builds/tests Rust and Elixir on Ubuntu and Windows and exposes the real scheduler binary to controller tests.
 - `git diff --check` passes and isolated Cargo target directories are ignored.
 - Linux service packaging: a clean `b297b04` Ubuntu 26.04 x86_64 bundle was assembled at 33,546,551 bytes with `GIT_SHA=b297b04d53f477655e59bfdab1f8e59105abc8a6` and `GIT_DIRTY=false`, then passed the full checksum, symlink-boundary, packaged-binary, OTP-release, and twice-idempotent `DESTDIR` verifier. The builder now rejects dirty/untracked source trees by default and requires every static packaging input to be Git-tracked. Hosted Ubuntu CI also builds and verifies the bundle successfully on this SHA.
 - Hosted-CI portability repair proofs: Linux node config tests 5/5, Windows-target Clippy green, `runner-pools.sh` 118/118, repaired dirty-validation bundle verified end to end, and its packaged `node-env.example` contains the real `CRF_RUNNER_CACHE_DIR` contract.
+- Certificate authorization proof: `PeerRegistry` supports atomic overlap rotation, revoke-all, malformed-replacement rollback, and per-frame live-session reauthorization; a real TLS 1.3 mTLS integration test revokes an already-open node session and observes closure on its next heartbeat. `crf-cert-fingerprint` matches OpenSSL DER SHA-256 exactly; `crf-peer-admin` status/reload/revoke-all wrappers pass smoke tests and require explicit `--force` for revoke-all. A staged certificate-enabled 33,550,571-byte Linux bundle passed the complete bundle verifier with packaged admin helpers and systemd `ExecReload`.
 
 ## Implemented controller/runtime behavior
 

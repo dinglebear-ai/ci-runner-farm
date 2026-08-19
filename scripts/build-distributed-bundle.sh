@@ -31,6 +31,8 @@ tracked_inputs=(
   controller/mix.exs
   packaging/distributed/README.md
   packaging/distributed/install.sh
+  packaging/distributed/admin/crf-peer-admin
+  packaging/distributed/admin/crf-cert-fingerprint
   packaging/distributed/examples/node-env.example
   packaging/distributed/systemd/ci-runner-farm-controller.service
   packaging/distributed/systemd/ci-runner-farm-node.service
@@ -73,6 +75,8 @@ install -d -m 0755 "$stage/bin" "$stage/systemd" "$stage/examples"
 cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node -p crf-scheduler
 install -m 0755 "$root/target/release/crf-node" "$stage/bin/crf-node"
 install -m 0755 "$root/target/release/crf-scheduler" "$stage/bin/crf-scheduler"
+install -m 0755 "$root/packaging/distributed/admin/crf-peer-admin" "$stage/bin/crf-peer-admin"
+install -m 0755 "$root/packaging/distributed/admin/crf-cert-fingerprint" "$stage/bin/crf-cert-fingerprint"
 
 go -C "$root/tools/crf-scaleset" build -trimpath -o "$stage/bin/crf-scaleset" ./cmd/crf-scaleset
 

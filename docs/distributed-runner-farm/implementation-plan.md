@@ -57,7 +57,8 @@
 - [x] Load real pool policies, TLS peers, scale-set adapter identity, durable state, scheduler, and reconciliation settings from a strict controller config.
 - [x] Optional OTP supervision of the Go adapter + Elixir controller + Rust scheduler with bounded child-process cleanup.
 - [x] Distribution-tagged Linux release bundle with OTP controller, Rust scheduler/node, optional Go sidecar, hardened systemd units, idempotent installer, checksums, and CI verification smoke.
-- [ ] Certificate enrollment/rotation/revocation and additional target-distribution/Windows service packaging.
+- [x] CA-agnostic node leaf enrollment, fingerprint helper, atomic hot allowlist reload, overlap rotation, already-connected-session revocation, and explicit emergency revoke-all.
+- [ ] CA/server-certificate automation, additional target-distribution Linux bundles, and Windows service packaging.
 - [x] Conservative placement-loss grace, operator-visible orphan tracking, node-recovery recheck, and explicit force-abandon/JIT cleanup without automatic duplicate execution.
 
 ## Phase 5: existing Unraid integration
@@ -78,7 +79,8 @@
 - [ ] Real GitHub scale-set two-node smoke.
 - [ ] Controller/node restart and network-partition matrix.
 - [ ] Resource fragmentation/oversubscription/fairness matrix at sustained load.
-- [ ] Certificate rotation/revocation and enrollment workflow.
+- [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.
+- [ ] Automated CA/server certificate rotation and revocation-provider integration policy.
 - [ ] Security review of credentials, certificates, durable JIT cache, filesystem permissions, and logs.
 - [ ] Distributed API/UI production-readiness sweep.
 - [ ] Adversarial PR review and full existing plugin regression suite.

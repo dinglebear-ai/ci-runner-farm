@@ -36,6 +36,10 @@ done < <(find "$bundle" -type l -print0)
 test -x "$bundle/bin/crf-node"
 test -x "$bundle/bin/crf-scheduler"
 test -x "$bundle/bin/crf-scaleset"
+test -x "$bundle/bin/crf-peer-admin"
+test -x "$bundle/bin/crf-cert-fingerprint"
+bash -n "$bundle/bin/crf-peer-admin"
+bash -n "$bundle/bin/crf-cert-fingerprint"
 test -x "$bundle/controller/bin/crf_controller"
 test -x "$bundle/install.sh"
 bash -n "$bundle/install.sh"
@@ -68,5 +72,6 @@ test ! -e "$rootfs/etc/ci-runner-farm/node.env"
 
 grep -q "^KillMode=process$" "$rootfs/etc/systemd/system/ci-runner-farm-node.service"
 grep -q "CRF_CONTROLLER_CONFIG=/etc/ci-runner-farm/controller.json" "$rootfs/etc/systemd/system/ci-runner-farm-controller.service"
+grep -q "^ExecReload=/opt/ci-runner-farm/current/bin/crf-peer-admin reload$" "$rootfs/etc/systemd/system/ci-runner-farm-controller.service"
 
 echo "distributed bundle verification passed: $(basename "$archive")"

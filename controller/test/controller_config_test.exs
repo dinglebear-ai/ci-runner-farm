@@ -127,6 +127,7 @@ defmodule CrfController.ControllerConfigTest do
     legacy_modules = child_modules(legacy)
     refute CrfController.ScaleSetClient in legacy_modules
     refute CrfController.DemandCoordinator in legacy_modules
+    refute CrfController.PeerRegistry in legacy_modules
     refute CrfController.TlsServer in legacy_modules
 
     path = write_config(ctx, config(ctx))
@@ -141,6 +142,7 @@ defmodule CrfController.ControllerConfigTest do
              CrfController.SchedulerClient,
              CrfController.PlacementCoordinator,
              CrfController.Ingress,
+             CrfController.PeerRegistry,
              Task.Supervisor,
              CrfController.ScaleSetClient,
              CrfController.DemandCoordinator,

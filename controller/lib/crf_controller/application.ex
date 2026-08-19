@@ -32,6 +32,9 @@ defmodule CrfController.Application do
         opts -> [{CrfController.ScaleSetSidecar, opts}]
       end
 
+    peers = Keyword.fetch!(config.tls_opts, :peers)
+    tls_opts = Keyword.put(config.tls_opts, :peer_registry, CrfController.PeerRegistry)
+
     [
       {CrfController.NodeRegistry, config.node_registry_opts},
       {CrfController.PlacementLedger, config.placement_opts},
@@ -40,13 +43,14 @@ defmodule CrfController.Application do
       {CrfController.SchedulerClient, config.scheduler_opts},
       {CrfController.PlacementCoordinator, []},
       {CrfController.Ingress, []},
+      {CrfController.PeerRegistry, [peers: peers]},
       {Task.Supervisor, name: CrfController.ConnectionSupervisor}
     ] ++
       sidecar_children ++
       [
         {CrfController.ScaleSetClient, config.scaleset_opts},
         {CrfController.DemandCoordinator, config.demand_opts},
-        {CrfController.TlsServer, config.tls_opts}
+        {CrfController.TlsServer, tls_opts}
       ]
   end
 

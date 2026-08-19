@@ -35,6 +35,8 @@ defmodule CrfController.PeerAuthorizer do
 
   def new(_), do: {:error, :invalid_authorizer}
 
+  def empty, do: %__MODULE__{by_fingerprint: %{}}
+
   @spec authorize(t(), binary()) :: {:ok, PeerIdentity.t()} | {:error, atom()}
   def authorize(%__MODULE__{} = authorizer, certificate_der)
       when is_binary(certificate_der) and byte_size(certificate_der) > 0 do
@@ -47,6 +49,18 @@ defmodule CrfController.PeerAuthorizer do
   end
 
   def authorize(%__MODULE__{}, _), do: {:error, :invalid_certificate}
+
+  @spec authorize_identity(t(), PeerIdentity.t()) :: :ok | {:error, atom()}
+  def authorize_identity(
+        %__MODULE__{} = authorizer,
+        %PeerIdentity{node_id: node_id, certificate_sha256: fingerprint}
+      ) do
+    case Map.fetch(authorizer.by_fingerprint, fingerprint) do
+      {:ok, ^node_id} -> :ok
+      {:ok, _different_node} -> {:error, :authenticated_identity_mismatch}
+      :error -> {:error, :unauthorized_certificate}
+    end
+  end
 
   defp normalize_fingerprint(value) when is_binary(value) and byte_size(value) == 64 do
     normalized = String.downcase(value)
