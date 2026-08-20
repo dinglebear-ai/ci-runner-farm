@@ -1,10 +1,10 @@
 use std::{
     fs::File,
     io::{BufReader, Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::TcpStream,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crf_protocol::wire::{
@@ -14,11 +14,13 @@ use crf_protocol::wire::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
+use crate::controller_endpoint::ControllerEndpoint;
+
 const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TlsClientSettings {
-    pub controller_addr: SocketAddr,
+    pub controller_addr: ControllerEndpoint,
     pub server_name: String,
     pub ca_cert_path: PathBuf,
     pub client_cert_path: PathBuf,
@@ -29,7 +31,7 @@ pub struct TlsClientSettings {
 
 impl TlsClientSettings {
     pub fn validate(&self) -> Result<(), NodeTransportError> {
-        if self.controller_addr.port() == 0
+        if self.controller_addr.as_str().is_empty()
             || self.server_name.is_empty()
             || self.server_name.len() > 253
             || self.ca_cert_path.as_os_str().is_empty()
@@ -85,11 +87,24 @@ impl TlsClient {
     }
 
     pub fn connect(&self) -> Result<TlsSession, NodeTransportError> {
-        let socket = TcpStream::connect_timeout(
-            &self.settings.controller_addr,
-            self.settings.connect_timeout,
-        )
-        .map_err(|_| NodeTransportError::ConnectFailed)?;
+        let addresses = self
+            .settings
+            .controller_addr
+            .resolve()
+            .map_err(|_| NodeTransportError::ResolveControllerFailed)?;
+        let deadline = Instant::now() + self.settings.connect_timeout;
+        let mut socket = None;
+        for address in addresses {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if let Ok(connected) = TcpStream::connect_timeout(&address, remaining) {
+                socket = Some(connected);
+                break;
+            }
+        }
+        let socket = socket.ok_or(NodeTransportError::ConnectFailed)?;
         socket
             .set_read_timeout(Some(self.settings.io_timeout))
             .map_err(|_| NodeTransportError::SocketConfigurationFailed)?;
@@ -135,6 +150,7 @@ pub enum NodeTransportError {
     MissingPrivateKey,
     InvalidClientIdentity,
     InvalidServerName,
+    ResolveControllerFailed,
     ConnectFailed,
     SocketConfigurationFailed,
     TlsConnectionFailed,

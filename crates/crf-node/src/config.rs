@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use crf_protocol::Resources;
+
+use crate::controller_endpoint::ControllerEndpoint;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerSourceConfig {
@@ -18,7 +19,7 @@ pub enum RunnerSourceConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeConfig {
-    pub controller_addr: SocketAddr,
+    pub controller_addr: ControllerEndpoint,
     pub controller_server_name: String,
     pub ca_cert_path: PathBuf,
     pub client_cert_path: PathBuf,
@@ -54,12 +55,8 @@ impl NodeConfig {
     }
 
     pub fn from_values(values: &BTreeMap<String, String>) -> Result<Self, ConfigError> {
-        let controller_addr = required(values, "CRF_CONTROLLER_ADDR")?
-            .parse::<SocketAddr>()
+        let controller_addr = ControllerEndpoint::parse(required(values, "CRF_CONTROLLER_ADDR")?)
             .map_err(|_| ConfigError::InvalidControllerAddress)?;
-        if controller_addr.port() == 0 {
-            return Err(ConfigError::InvalidControllerAddress);
-        }
         let controller_server_name = required(values, "CRF_CONTROLLER_SERVER_NAME")?.to_owned();
         if controller_server_name.is_empty() || controller_server_name.len() > 253 {
             return Err(ConfigError::InvalidServerName);
@@ -267,6 +264,33 @@ mod tests {
         );
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(config.command_ledger_capacity, 4_096);
+    }
+
+    #[test]
+    fn controller_endpoint_accepts_magicdns_hostname_without_resolving_at_parse_time() {
+        let mut values = values();
+        values.insert(
+            "CRF_CONTROLLER_ADDR".into(),
+            "controller.tailnet-name.ts.net:9443".into(),
+        );
+        let config = NodeConfig::from_values(&values).expect("MagicDNS endpoint");
+        assert_eq!(
+            config.controller_addr.as_str(),
+            "controller.tailnet-name.ts.net:9443"
+        );
+    }
+
+    #[test]
+    fn controller_endpoint_rejects_url_and_zero_port_shapes() {
+        for endpoint in ["https://controller:9443", "controller:0", "bad_name:9443"] {
+            let mut values = values();
+            values.insert("CRF_CONTROLLER_ADDR".into(), endpoint.into());
+            assert_eq!(
+                NodeConfig::from_values(&values),
+                Err(ConfigError::InvalidControllerAddress),
+                "{endpoint}"
+            );
+        }
     }
 
     #[test]

@@ -35,6 +35,7 @@
 - [x] Managed process-tree cancellation and terminal polling: dedicated Unix process groups with TERM→KILL escalation and race-free Windows Job Object assignment via suspended startup.
 - [x] Durable terminal-report outbox and agent sync.
 - [x] Runnable `crf-node` configuration, startup, reconnect/backoff, heartbeat loop, and shutdown.
+- [x] Literal IP or DNS/MagicDNS controller endpoints with syntax validation and fresh OS resolution on every reconnect; TLS server identity remains separately pinned.
 - [x] Host memory/resource probing and durable local reservation accounting.
 - [x] Restart recovery for durable spawned processes with PID + OS process-birth identity, rejecting PID reuse instead of adopting an unrelated process.
 - [x] Native GitHub runner package acquisition, pinned manifest, exact-size/SHA verification, safe TAR/ZIP extraction, immutable cache, tamper detection, bounded rollback retention, and garbage collection.

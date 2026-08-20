@@ -1,7 +1,8 @@
 # Required node identity/controller transport.
 CRF_NODE_ID=node-1
-CRF_CONTROLLER_ADDR=100.64.0.10:7443
-CRF_CONTROLLER_SERVER_NAME=controller.internal
+# Literal IPs are supported, but a Tailscale MagicDNS name avoids pinning a node to one address.
+CRF_CONTROLLER_ADDR=controller.tailnet-name.ts.net:7443
+CRF_CONTROLLER_SERVER_NAME=controller.tailnet-name.ts.net
 CRF_CA_CERT=/etc/ci-runner-farm/tls/ca.pem
 CRF_CLIENT_CERT=/etc/ci-runner-farm/tls/node.pem
 CRF_CLIENT_KEY=/etc/ci-runner-farm/tls/node-key.pem

@@ -17,16 +17,19 @@ Last updated: 2026-08-19
 - Live certificate authorization commit: `a114746e6cd071510cbdc34adcea69730cedccd1`
 - Process-tree containment commit: `6b3bce10b3f39ab1a18a0ee1f2cd4ca3680d1d5a`.
 - Hosted-Windows process-tree test fix commit: `31ebe51f6a53d2f2ae50dd88d2f5e2d17f094762`; Agent OS rerun passed the ToolHelp-based test in 0.14s.
-- Current process-birth identity checkpoint: pending commit/push; Linux/Windows live-host identity probes pending.
+- Process-birth identity commit: `e822b7a8091d7509a670a7dd3bda2ff163f0ad00`; Steamy WSL and Agent OS both passed stable identity + forged-live-PID rejection on the exact SHA.
+- Current hostname/MagicDNS transport checkpoint: pending commit/push.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: **91 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, Steamy WSL + Agent OS native process-tree proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: **96 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, Steamy WSL + Agent OS native process-tree and process-birth-identity proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
 - PR #37 fourth hosted run on `d493f4b`: Ubuntu remained green and Windows advanced through formatting/Rust to Elixir tests, exposing POSIX-only mode validation in two durable-state readers. Those were fixed in `0e95021`; Unix still requires exact `0600`, Windows uses ACL-backed regular-file semantics plus schema/checksum validation. The same run surfaced a pre-existing reconcile crash-boundary test that assumed `setsid` direct-child parentage; `0e95021` strengthens it to verify the authoritative prepublication identity record (PID/starttime/PGID/SID/token) instead.
 - PR #37 hosted runs for `0e95021` are fully green: both the distributed lint workflow and Build Plugin workflow completed successfully, proving native Windows Rust+Elixir, Ubuntu bundle verification, and the full legacy behavioral regression suite on the recovery fixes.
 - PR #37 hosted runs for `a114746` are fully green with merge state CLEAN: Build Plugin, legacy Shell/PHP regression suite, Ubuntu distributed-core/bundle verification, and native Windows distributed-core all pass with live certificate authorization included.
-- Process-tree containment on `6b3bce1` is proven on the requested real hosts: Steamy WSL2 x86_64 with Rust 1.97.1 passed the stubborn-descendant Unix process-group TERM→KILL test in 5.05s after a clean checkout; Agent OS native Windows x64/MSVC passed suspended-start + Job Object descendant termination in 1.39s after a clean checkout. Hosted Ubuntu/legacy/plugin CI also pass `6b3bce1`. Hosted Windows failed only because the test fixture depended on nested PowerShell publishing a child PID; the Job Object implementation itself passed Agent OS. The pending test fix replaces that fixture with `cmd.exe` + `ping.exe` and discovers the child through Win32 ToolHelp.
+- Process-tree containment on `6b3bce1` is proven on the requested real hosts: Steamy WSL2 x86_64 with Rust 1.97.1 passed the stubborn-descendant Unix process-group TERM→KILL test in 5.05s after a clean checkout; Agent OS native Windows x64/MSVC passed suspended-start + Job Object descendant termination in 1.39s after a clean checkout. Hosted Ubuntu/legacy/plugin CI also pass `6b3bce1`. The hosted-Windows-only PowerShell test-fixture issue was replaced by the Win32 ToolHelp proof in `31ebe51`; Agent OS reran that exact fixture in 0.14s.
+- Process-birth identity on `e822b7a` is proven on both requested hosts: Steamy WSL passed stable/nonzero Linux `/proc/<pid>/stat` birth-token capture plus forged-live-PID rejection; Agent OS passed stable/nonzero Windows `GetProcessTimes` creation-token capture plus the same forged-live-PID recovery rejection.
+- Real tailnet DNS evidence for the hostname checkpoint: Steamy WSL `getaddrinfo("dookie")` and Agent OS `.NET DNS`/`Resolve-DnsName dookie` all resolve `dookie.manatee-triceratops.ts.net` to `100.88.16.79`. Node transport now accepts that hostname shape and re-resolves it on every reconnect rather than pinning the first IP.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
@@ -40,7 +43,7 @@ The implemented path is:
 
 ## Verified today
 
-- Rust workspace: **87 tests pass** across protocol, scheduler service, node unit tests, native executor integration, and hostile runner-package/cache tests.
+- Rust workspace: **96 tests pass** across protocol, scheduler service, node unit tests, native executor/process-tree integration, process-birth identity, hostname endpoint parsing/resolution, and hostile runner-package/cache tests.
 - Rust strict Clippy: all three crates pass independently with `-D warnings`.
 - Windows portability: both `crf-node --all-targets` and `crf-scheduler --all-targets` cross-check successfully for `x86_64-pc-windows-gnu`. Native MSVC remains covered by the Windows GitHub-hosted CI job because DOOKIE does not have Microsoft linker tools.
 - Elixir controller: **100 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, and live TLS session revocation.
@@ -109,7 +112,7 @@ The implemented path is:
 2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
-5. Complete Steamy WSL + Agent OS live proof of durable process birth-token recovery, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
+5. Complete the hostname/MagicDNS checkpoint and finish durable-state/cache retention GC.
 
 ## Deployment status
 
