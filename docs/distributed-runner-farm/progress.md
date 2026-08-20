@@ -20,7 +20,8 @@ Last updated: 2026-08-19
 - Process-birth identity commit: `e822b7a8091d7509a670a7dd3bda2ff163f0ad00`; Steamy WSL and Agent OS both passed stable identity + forged-live-PID rejection on the exact SHA.
 - Hostname/MagicDNS transport commit: `158226bbc824b4d8a6a0d9c3edd2212fb3e0e1a7`; Steamy WSL and Agent OS both pass exact endpoint/config tests and resolve `dookie` through tailnet MagicDNS.
 - Node placement-state GC commit: `e092e625e8d38a7553a14dbd58dc9ce01c92490b`; Steamy WSL and Agent OS each passed all 14 crash-safe GC/state tests on the exact SHA.
-- Current controller terminal-placement compaction checkpoint: pending commit/push.
+- Controller terminal-placement compaction commit: `f63fd023baba2741cd817162e7cb35e69a413fe1`; schema-v1 migration, compact schema-v2 replay tombstones, and 105/105 controller tests are green. Hosted Ubuntu and Windows distributed-core are green on this SHA; the legacy regression lane is still completing.
+- Current implementation checkpoint: extract the existing Unraid Docker/JIT execution mechanics behind a shared backend boundary without changing legacy default behavior.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: **102 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.

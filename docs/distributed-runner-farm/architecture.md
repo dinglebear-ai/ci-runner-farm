@@ -104,4 +104,6 @@ Controller placement state and scale-set sequence state use private atomic files
 
 Node-local terminal state is retained through controller acknowledgement and the current node generation. On a later generation, acknowledged terminal directories move atomically into a sibling quarantine and are deleted resumably; unexpected quarantine contents fail closed.
 
+The legacy Unraid backend now has an explicit container-runtime boundary in `runner-runtime.sh`. Classic fixed runners, scale-set JIT runners, and manual recycle all use the same prepared-container launch and remove primitives. Admission, fleet locks, resource reservations, GitHub registration/JIT state, credential FIFO handoff, identity validation, and cache policy remain in their existing higher-level shell modules. Registry-mirror lifecycle and validation probes are intentionally outside the runner runtime boundary. This preserves the current single-host default while providing one container mutation seam for future distributed/container adapters.
+
 Workspaces and mutable package caches remain node-local. Cross-node compiler reuse should use concurrency-safe services such as Kache/sccache. Docker image sharing should use a registry mirror rather than a shared writable Docker filesystem.

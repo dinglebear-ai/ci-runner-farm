@@ -63,6 +63,7 @@ make_tgz() {
   find "$package_root" -type d -exec chmod 0755 {} +
   find "$package_root" -type f -exec chmod 0644 {} +
   chmod 0755 "$package_root/include/runner-farm.sh"
+  chmod 0755 "$package_root/include/runner-runtime.sh"
   chmod 0755 "$package_root/include/runner-entrypoint.sh"
   [ ! -f "$package_root/bin/crf-scaleset" ] || chmod 0755 "$package_root/bin/crf-scaleset"
   [ ! -d "$package_root/nchan" ] ||
@@ -170,6 +171,7 @@ chown -R root:root "\$PLGDIR"
 find "\$PLGDIR" -type d -exec chmod 0755 {} +
 find "\$PLGDIR" -type f -exec chmod 0644 {} +
 chmod 0755 "\$PLGDIR/include/runner-farm.sh"
+chmod 0755 "\$PLGDIR/include/runner-runtime.sh"
 chmod 0755 "\$PLGDIR/include/runner-entrypoint.sh"
 [ ! -f "\$PLGDIR/bin/crf-scaleset" ] || chmod 0755 "\$PLGDIR/bin/crf-scaleset"
 [ -d "\$PLGDIR/nchan" ] && find "\$PLGDIR/nchan" -type f -exec chmod 0755 {} +

@@ -155,6 +155,7 @@ helper="$tmp/package/bin/crf-scaleset"
 [ -x "$helper" ] || crf_fail "packaged helper is not executable"
 for executable in \
   include/runner-farm.sh \
+  include/runner-runtime.sh \
   include/runner-entrypoint.sh \
   event/docker_started \
   event/stopping_docker \

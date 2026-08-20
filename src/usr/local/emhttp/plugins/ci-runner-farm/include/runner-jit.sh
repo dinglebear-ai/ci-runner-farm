@@ -1,4 +1,11 @@
 #!/bin/bash
+
+if ! declare -F crf_runtime_run_prepared >/dev/null 2>&1; then
+  CRF_RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-runtime.sh
+  . "$CRF_RUNTIME_DIR/runner-runtime.sh"
+  unset CRF_RUNTIME_DIR
+fi
 # Execute one already-admitted scale-set work item. Demand, session ownership,
 # and backend transitions are deliberately outside this file.
 
@@ -242,7 +249,7 @@ jit_cleanup_observed() {
   jit_state_write "$runner_id" deleting "$reservation" "$handle" "$container" "$pool" || return 1
   jit_capture_diagnostics "$container" "$runner_id" || true
   jit_recent_activity_record "$runner_id" "$pool" "$handle" || true
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  crf_runtime_force_remove "$container" || true
   if jit_container_exists "$container"; then
     return 1
   fi
@@ -307,7 +314,7 @@ jit_execute() {
     "$jit_image"
   )
   jit_state_write "$runner_id" container_create_started "$reservation" "$handle" "$container" "$pool" || return 1
-  docker run "${ARGS[@]}" >/dev/null 2>&1
+  crf_runtime_run_prepared
   rc=$?
   if jit_container_exists "$container"; then
     jit_state_write "$runner_id" container_observed "$reservation" "$handle" "$container" "$pool" || return 1
@@ -392,7 +399,7 @@ jit_reconcile() {
         if jit_container_exists "$container" &&
            [ "$(jit_container_identity_pool "$container" "$runner_id" "$handle")" = "$pool" ]; then
           jit_capture_diagnostics "$container" "$runner_id" || true
-          docker rm -f "$container" >/dev/null 2>&1 || true
+          crf_runtime_force_remove "$container" || true
         fi
         ;;
     esac

@@ -66,7 +66,7 @@
 
 ## Phase 5: existing Unraid integration
 
-- [ ] Extract current local Docker/JIT execution behind the shared runtime interface.
+- [x] Extract current local Docker/JIT container mutation mechanics behind `runner-runtime.sh`; classic registration, scale-set JIT, recycle, graceful stop/remove, and force-remove now share one Docker runtime boundary while policy/locks/secrets remain above it.
 - [ ] Preserve single-host behavior as the local-node backend.
 - [ ] Map legacy pool policy and resource configuration into distributed pool policy.
 - [ ] Add distributed node status/configuration to API and UI.
