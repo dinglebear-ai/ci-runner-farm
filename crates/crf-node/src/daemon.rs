@@ -80,6 +80,9 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
 
     let placement_store = PlacementStore::new(config.state_root.join("placements"))
         .map_err(|_| DaemonError::PlacementState)?;
+    placement_store
+        .prune_reported_before_generation(generation)
+        .map_err(|_| DaemonError::PlacementState)?;
     let materializer = RunnerMaterializer::new(
         platform.os.clone(),
         &runner_template,

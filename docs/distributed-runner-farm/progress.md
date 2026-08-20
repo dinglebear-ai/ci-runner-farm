@@ -18,9 +18,10 @@ Last updated: 2026-08-19
 - Process-tree containment commit: `6b3bce10b3f39ab1a18a0ee1f2cd4ca3680d1d5a`.
 - Hosted-Windows process-tree test fix commit: `31ebe51f6a53d2f2ae50dd88d2f5e2d17f094762`; Agent OS rerun passed the ToolHelp-based test in 0.14s.
 - Process-birth identity commit: `e822b7a8091d7509a670a7dd3bda2ff163f0ad00`; Steamy WSL and Agent OS both passed stable identity + forged-live-PID rejection on the exact SHA.
-- Current hostname/MagicDNS transport checkpoint: pending commit/push.
+- Hostname/MagicDNS transport commit: `158226bbc824b4d8a6a0d9c3edd2212fb3e0e1a7`; Steamy WSL and Agent OS both pass exact endpoint/config tests and resolve `dookie` through tailnet MagicDNS.
+- Current node placement-state GC checkpoint: pending commit/push and live-host filesystem proofs.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: **96 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, Steamy WSL + Agent OS native process-tree and process-birth-identity proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: **102 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
@@ -43,7 +44,7 @@ The implemented path is:
 
 ## Verified today
 
-- Rust workspace: **96 tests pass** across protocol, scheduler service, node unit tests, native executor/process-tree integration, process-birth identity, hostname endpoint parsing/resolution, and hostile runner-package/cache tests.
+- Rust workspace: **102 tests pass** across protocol, scheduler service, node unit tests, native executor/process-tree integration, process-birth identity, hostname endpoint parsing/resolution, crash-safe placement GC, and hostile runner-package/cache tests.
 - Rust strict Clippy: all three crates pass independently with `-D warnings`.
 - Windows portability: both `crf-node --all-targets` and `crf-scheduler --all-targets` cross-check successfully for `x86_64-pc-windows-gnu`. Native MSVC remains covered by the Windows GitHub-hosted CI job because DOOKIE does not have Microsoft linker tools.
 - Elixir controller: **100 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, and live TLS session revocation.
@@ -112,7 +113,7 @@ The implemented path is:
 2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
-5. Complete the hostname/MagicDNS checkpoint and finish durable-state/cache retention GC.
+5. Finish durable-state/cache retention GC, then move into the Unraid runtime abstraction and live GitHub multi-node smoke matrix.
 
 ## Deployment status
 

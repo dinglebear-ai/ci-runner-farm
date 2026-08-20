@@ -38,6 +38,7 @@
 - [x] Literal IP or DNS/MagicDNS controller endpoints with syntax validation and fresh OS resolution on every reconnect; TLS server identity remains separately pinned.
 - [x] Host memory/resource probing and durable local reservation accounting.
 - [x] Restart recovery for durable spawned processes with PID + OS process-birth identity, rejecting PID reuse instead of adopting an unrelated process.
+- [x] Crash-safe node placement-state GC: only controller-acknowledged terminal tombstones from older generations are atomically quarantined and deleted; same-generation, unreported, and nonterminal state is retained.
 - [x] Native GitHub runner package acquisition, pinned manifest, exact-size/SHA verification, safe TAR/ZIP extraction, immutable cache, tamper detection, bounded rollback retention, and garbage collection.
 
 ## Phase 4: GitHub demand and distributed admission

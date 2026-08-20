@@ -17,10 +17,12 @@ use crate::process_identity::ProcessIdentity;
 const SCHEMA_VERSION: u8 = 1;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 const MAX_PLACEMENTS: usize = 4096;
+const MAX_GC_SCAN_PLACEMENTS: usize = 65_536;
 
 #[derive(Clone, Debug)]
 pub struct PlacementStore {
     root: PathBuf,
+    gc_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +59,9 @@ pub enum PlacementStoreError {
     ReadState,
     WriteState,
     SyncState,
+    CreateGcRoot,
+    MoveState,
+    RemoveState,
     TooManyPlacements,
 }
 
@@ -92,17 +97,44 @@ struct ReportedRecord {
     schema_version: u8,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GcRecord {
+    schema_version: u8,
+    placement_id: String,
+    node_generation: u64,
+}
+
 impl PlacementStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, PlacementStoreError> {
         let root = root.into();
-        if root.as_os_str().is_empty() {
+        let gc_root = default_gc_root(&root)?;
+        Self::with_gc_root(root, gc_root)
+    }
+
+    pub fn with_gc_root(
+        root: impl Into<PathBuf>,
+        gc_root: impl Into<PathBuf>,
+    ) -> Result<Self, PlacementStoreError> {
+        let root = root.into();
+        let gc_root = gc_root.into();
+        if root.as_os_str().is_empty()
+            || gc_root.as_os_str().is_empty()
+            || root == gc_root
+            || root.starts_with(&gc_root)
+            || gc_root.starts_with(&root)
+        {
             return Err(PlacementStoreError::InvalidRoot);
         }
-        Ok(Self { root })
+        Ok(Self { root, gc_root })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn gc_root(&self) -> &Path {
+        &self.gc_root
     }
 
     pub fn begin(&self, command: &ControllerEnvelope) -> Result<(), PlacementStoreError> {
@@ -284,7 +316,104 @@ impl PlacementStore {
         sync_directory(&directory)
     }
 
+    pub fn prune_reported_before_generation(
+        &self,
+        current_generation: u64,
+    ) -> Result<Vec<String>, PlacementStoreError> {
+        if current_generation == 0 {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        self.ensure_root()?;
+        self.ensure_gc_root()?;
+        self.clean_quarantine(current_generation)?;
+
+        let mut pruned = Vec::new();
+        for placement_id in self.placement_ids_with_limit(MAX_GC_SCAN_PLACEMENTS)? {
+            let directory = self.placement_directory(&placement_id)?;
+            let intent: IntentRecord = read_json(&directory.join("intent.json"))?;
+            if intent.schema_version != SCHEMA_VERSION
+                || intent.placement_id != placement_id
+                || intent.node_generation == 0
+            {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            if intent.node_generation >= current_generation {
+                continue;
+            }
+
+            let terminal = directory.join("terminal.json");
+            let reported = directory.join("reported.json");
+            if reported.exists() && !terminal.exists() {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            if !terminal.exists() || !reported.exists() {
+                continue;
+            }
+
+            validate_gc_candidate(&directory, &placement_id, current_generation)?;
+            let quarantine = self.gc_root.join(&placement_id);
+            if quarantine.exists() {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            fs::rename(&directory, &quarantine).map_err(|_| PlacementStoreError::MoveState)?;
+            sync_directory(&self.root)?;
+            prepare_gc_directory(&quarantine, &placement_id, current_generation)?;
+            remove_gc_directory(&quarantine)?;
+            sync_directory(&self.gc_root)?;
+            pruned.push(placement_id);
+        }
+        self.placement_ids()?;
+        Ok(pruned)
+    }
+
+    fn clean_quarantine(&self, current_generation: u64) -> Result<(), PlacementStoreError> {
+        let mut entries = fs::read_dir(&self.gc_root)
+            .map_err(|_| PlacementStoreError::ReadState)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PlacementStoreError::ReadState)?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry
+                .file_type()
+                .map_err(|_| PlacementStoreError::ReadState)?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            let placement_id = entry
+                .file_name()
+                .to_str()
+                .map(str::to_owned)
+                .ok_or(PlacementStoreError::CorruptState)?;
+            if !valid_identifier(&placement_id) {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            prepare_gc_directory(&entry.path(), &placement_id, current_generation)?;
+            remove_gc_directory(&entry.path())?;
+        }
+        sync_directory(&self.gc_root)
+    }
+
+    fn ensure_gc_root(&self) -> Result<(), PlacementStoreError> {
+        fs::create_dir_all(&self.gc_root).map_err(|_| PlacementStoreError::CreateGcRoot)?;
+        let metadata =
+            fs::symlink_metadata(&self.gc_root).map_err(|_| PlacementStoreError::CreateGcRoot)?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.gc_root, fs::Permissions::from_mode(0o700))
+                .map_err(|_| PlacementStoreError::CreateGcRoot)?;
+        }
+        Ok(())
+    }
+
     fn placement_ids(&self) -> Result<Vec<String>, PlacementStoreError> {
+        self.placement_ids_with_limit(MAX_PLACEMENTS)
+    }
+
+    fn placement_ids_with_limit(&self, limit: usize) -> Result<Vec<String>, PlacementStoreError> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
@@ -305,7 +434,7 @@ impl PlacementStore {
                 return Err(PlacementStoreError::CorruptState);
             }
             placements.push(placement_id);
-            if placements.len() > MAX_PLACEMENTS {
+            if placements.len() > limit {
                 return Err(PlacementStoreError::TooManyPlacements);
             }
         }
@@ -329,6 +458,146 @@ impl PlacementStore {
         }
         Ok(self.root.join(placement_id))
     }
+}
+
+fn default_gc_root(root: &Path) -> Result<PathBuf, PlacementStoreError> {
+    let file_name = root.file_name().ok_or(PlacementStoreError::InvalidRoot)?;
+    let mut gc_name = file_name.to_os_string();
+    gc_name.push(".gc");
+    Ok(root.with_file_name(gc_name))
+}
+
+fn gc_entry_names(directory: &Path) -> Result<BTreeSet<String>, PlacementStoreError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|_| PlacementStoreError::ReadState)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(PlacementStoreError::CorruptState);
+    }
+    let allowed = BTreeSet::from([
+        "intent.json",
+        "spawned.json",
+        "terminal.json",
+        "reported.json",
+        "gc.json",
+    ]);
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(directory).map_err(|_| PlacementStoreError::ReadState)? {
+        let entry = entry.map_err(|_| PlacementStoreError::ReadState)?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or(PlacementStoreError::CorruptState)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|_| PlacementStoreError::ReadState)?;
+        if !allowed.contains(name.as_str()) || !file_type.is_file() || file_type.is_symlink() {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        names.insert(name);
+    }
+    Ok(names)
+}
+
+fn validate_gc_candidate(
+    directory: &Path,
+    placement_id: &str,
+    current_generation: u64,
+) -> Result<IntentRecord, PlacementStoreError> {
+    let names = gc_entry_names(directory)?;
+    if names.contains("gc.json")
+        || !names.contains("intent.json")
+        || !names.contains("terminal.json")
+        || !names.contains("reported.json")
+    {
+        return Err(PlacementStoreError::CorruptState);
+    }
+    let intent: IntentRecord = read_json(&directory.join("intent.json"))?;
+    if intent.schema_version != SCHEMA_VERSION
+        || intent.placement_id != placement_id
+        || intent.node_generation == 0
+        || intent.node_generation >= current_generation
+    {
+        return Err(PlacementStoreError::CorruptState);
+    }
+    let terminal: TerminalRecord = read_json(&directory.join("terminal.json"))?;
+    let reported: ReportedRecord = read_json(&directory.join("reported.json"))?;
+    if terminal.schema_version != SCHEMA_VERSION || reported.schema_version != SCHEMA_VERSION {
+        return Err(PlacementStoreError::CorruptState);
+    }
+    validate_terminal_outcome(&terminal.outcome)?;
+    if names.contains("spawned.json") {
+        let spawned: SpawnedRecord = read_json(&directory.join("spawned.json"))?;
+        if spawned.schema_version != SCHEMA_VERSION
+            || spawned.process.pid == 0
+            || spawned.process.start_token == 0
+        {
+            return Err(PlacementStoreError::CorruptState);
+        }
+    }
+    Ok(intent)
+}
+
+fn prepare_gc_directory(
+    directory: &Path,
+    placement_id: &str,
+    current_generation: u64,
+) -> Result<(), PlacementStoreError> {
+    let names = gc_entry_names(directory)?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    if names.contains("gc.json") {
+        let marker: GcRecord = read_json(&directory.join("gc.json"))?;
+        if marker.schema_version != SCHEMA_VERSION
+            || marker.placement_id != placement_id
+            || marker.node_generation == 0
+            || marker.node_generation >= current_generation
+        {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        return Ok(());
+    }
+
+    let intent = validate_gc_candidate(directory, placement_id, current_generation)?;
+    write_new_json(
+        &directory.join("gc.json"),
+        &GcRecord {
+            schema_version: SCHEMA_VERSION,
+            placement_id: placement_id.to_owned(),
+            node_generation: intent.node_generation,
+        },
+    )?;
+    sync_directory(directory)
+}
+
+fn remove_gc_directory(directory: &Path) -> Result<(), PlacementStoreError> {
+    let names = gc_entry_names(directory)?;
+    if names.is_empty() {
+        fs::remove_dir(directory).map_err(|_| PlacementStoreError::RemoveState)?;
+        return Ok(());
+    }
+    if !names.contains("gc.json") {
+        return Err(PlacementStoreError::CorruptState);
+    }
+    for name in [
+        "reported.json",
+        "terminal.json",
+        "spawned.json",
+        "intent.json",
+    ] {
+        let path = directory.join(name);
+        if path.exists() {
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| PlacementStoreError::ReadState)?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            fs::remove_file(path).map_err(|_| PlacementStoreError::RemoveState)?;
+        }
+    }
+    sync_directory(directory)?;
+    fs::remove_file(directory.join("gc.json")).map_err(|_| PlacementStoreError::RemoveState)?;
+    fs::remove_dir(directory).map_err(|_| PlacementStoreError::RemoveState)
 }
 
 fn start_placement_id(command: &ControllerEnvelope) -> Result<&str, PlacementStoreError> {
@@ -486,6 +755,9 @@ mod tests {
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+            if let Ok(gc_root) = default_gc_root(&self.0) {
+                let _ = fs::remove_dir_all(gc_root);
+            }
         }
     }
 
@@ -654,6 +926,123 @@ mod tests {
         store
             .mark_terminal_reported("placement-1")
             .expect("idempotent reported marker");
+    }
+
+    #[test]
+    fn gc_prunes_only_reported_terminal_state_from_older_generation() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        store
+            .record_terminal("placement-1", TerminalOutcome::Finished)
+            .expect("terminal");
+        store
+            .mark_terminal_reported("placement-1")
+            .expect("reported");
+
+        assert_eq!(store.prune_reported_before_generation(3), Ok(Vec::new()));
+        assert!(directory.0.join("placement-1").is_dir());
+
+        assert_eq!(
+            store.prune_reported_before_generation(4),
+            Ok(vec!["placement-1".into()])
+        );
+        assert!(!directory.0.join("placement-1").exists());
+        assert!(store.gc_root().is_dir());
+        assert_eq!(fs::read_dir(store.gc_root()).expect("gc root").count(), 0);
+    }
+
+    #[test]
+    fn gc_retains_unreported_terminal_state_across_generation_change() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        store
+            .record_terminal("placement-1", TerminalOutcome::Cancelled)
+            .expect("terminal");
+
+        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert!(directory.0.join("placement-1").is_dir());
+        assert_eq!(store.pending_terminal_reports().expect("pending").len(), 1);
+    }
+
+    #[test]
+    fn gc_retains_nonterminal_old_generation_for_restart_adoption() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
+
+        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert!(directory.0.join("placement-1").is_dir());
+        assert_eq!(
+            store.active_placements(),
+            Ok(BTreeSet::from(["placement-1".into()]))
+        );
+    }
+
+    #[test]
+    fn gc_recovers_crash_after_atomic_move_before_marker() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        store
+            .record_terminal("placement-1", TerminalOutcome::Finished)
+            .expect("terminal");
+        store
+            .mark_terminal_reported("placement-1")
+            .expect("reported");
+        store.ensure_gc_root().expect("gc root");
+        let source = directory.0.join("placement-1");
+        let quarantine = store.gc_root().join("placement-1");
+        fs::rename(source, &quarantine).expect("simulate atomic move");
+
+        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert!(!quarantine.exists());
+    }
+
+    #[test]
+    fn gc_resumes_partial_delete_when_durable_marker_exists() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
+        store
+            .record_terminal("placement-1", TerminalOutcome::Finished)
+            .expect("terminal");
+        store
+            .mark_terminal_reported("placement-1")
+            .expect("reported");
+        store.ensure_gc_root().expect("gc root");
+        let source = directory.0.join("placement-1");
+        let quarantine = store.gc_root().join("placement-1");
+        fs::rename(source, &quarantine).expect("simulate atomic move");
+        prepare_gc_directory(&quarantine, "placement-1", 4).expect("durable gc marker");
+        fs::remove_file(quarantine.join("reported.json")).expect("simulate partial delete");
+        fs::remove_file(quarantine.join("terminal.json")).expect("simulate partial delete");
+
+        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert!(!quarantine.exists());
+    }
+
+    #[test]
+    fn gc_refuses_unrecognized_quarantine_contents() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.ensure_gc_root().expect("gc root");
+        let quarantine = store.gc_root().join("placement-1");
+        fs::create_dir(&quarantine).expect("quarantine directory");
+        fs::write(quarantine.join("unexpected.txt"), b"do not delete").expect("unexpected file");
+
+        assert_eq!(
+            store.prune_reported_before_generation(4),
+            Err(PlacementStoreError::CorruptState)
+        );
+        assert!(quarantine.join("unexpected.txt").exists());
     }
 
     #[test]
