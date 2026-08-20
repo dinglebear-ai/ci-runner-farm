@@ -113,6 +113,26 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+      - name: Build distributed Windows node package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-distributed-windows-node.ps1
+
+      - name: Validate Windows service installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$env:GITHUB_WORKSPACE\packaging\distributed\windows\Install-CrfNodeService.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          $archive = Get-ChildItem build/distributed/ci-runner-farm-node-*-windows-x86_64.zip
+          if ($archive.Count -ne 1) { throw 'Expected exactly one Windows node archive' }
+
       - name: Build Rust scheduler bridge
         run: cargo build -p crf-scheduler
 

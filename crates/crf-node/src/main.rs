@@ -4,6 +4,14 @@ fn main() {
         println!("crf-node {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    #[cfg(windows)]
+    if args == ["--windows-service"] {
+        if let Err(error) = crf_node::windows_service::dispatch() {
+            eprintln!("crf-node Windows service terminated: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if !args.is_empty() {
         eprintln!("usage: crf-node [--version]");
         std::process::exit(2);

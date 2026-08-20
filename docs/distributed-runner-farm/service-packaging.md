@@ -1,4 +1,6 @@
-# Linux Service Packaging
+# Service Packaging
+
+The controller and Linux node ship together as a Linux bundle. The portable Windows node ships as a separate x86_64 ZIP; the controller remains a Linux OTP release.
 
 The distributed Linux stack ships independently from the legacy Unraid plugin as a native, distribution-tagged service bundle.
 
@@ -72,6 +74,14 @@ The verifier:
 8. proves the installer did not create active configuration.
 
 CI runs this build+verification smoke on Linux in the distributed-core job.
+
+## Windows node package
+
+On native Windows, run `scripts/build-distributed-windows-node.ps1`. The archive contains `crf-node.exe`, a strict environment example, the pinned runner manifest example, and `Install-CrfNodeService.ps1`.
+
+The installer requires an explicit node binary and completed environment file. It copies both into protected Program Files/ProgramData locations, rejects malformed or duplicate environment keys, registers `CiRunnerFarmNode` under the low-privilege `LocalService` identity, and leaves startup set to Manual. It never starts the service. The binary's `--windows-service` mode registers directly with the Windows Service Control Manager and maps SCM Stop to the same cooperative shutdown flag used by the console daemon, preserving durable runner adoption across agent restarts.
+
+The hosted Windows distributed-core lane compiles the real service entry point, builds the release ZIP, parses the installer with PowerShell's AST parser, and verifies exactly one archive is emitted. Live installation/start/stop and a GitHub job lifecycle remain part of the live Windows node smoke.
 
 `/opt/ci-runner-farm/current/bin/crf-operator-status` uses the release's authenticated local RPC channel to print a redacted snapshot of nodes, resources, offers, placements, orphan state, configured pools, peer authorization counts, and sidecar health. It also exposes generation-fenced `drain`/`undrain` and `force-abandon PLACEMENT_ID --force`. The fixed command grammar rejects unsafe identifiers and never includes JIT descriptors, idempotency keys, certificate bytes, or controller credentials.
 

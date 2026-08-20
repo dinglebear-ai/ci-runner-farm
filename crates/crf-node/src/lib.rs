@@ -23,6 +23,8 @@ pub mod runner_package;
 pub mod runtime;
 pub mod system_probe;
 pub mod transport;
+#[cfg(windows)]
+pub mod windows_service;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalPlatform {

@@ -61,7 +61,8 @@
 - [x] Optional OTP supervision of the Go adapter + Elixir controller + Rust scheduler with bounded child-process cleanup.
 - [x] Distribution-tagged Linux release bundle with OTP controller, Rust scheduler/node, optional Go sidecar, hardened systemd units, idempotent installer, checksums, and CI verification smoke.
 - [x] CA-agnostic node leaf enrollment, fingerprint helper, atomic hot allowlist reload, overlap rotation, already-connected-session revocation, and explicit emergency revoke-all.
-- [ ] CA/server-certificate automation, additional target-distribution Linux bundles, and Windows service packaging.
+- [ ] CA/server-certificate automation and additional target-distribution Linux bundles.
+- [x] Native Windows node service entry point, low-privilege/manual-start installer, release ZIP builder, and hosted-Windows packaging validation.
 - [x] Conservative placement-loss grace, operator-visible orphan tracking, node-recovery recheck, and explicit force-abandon/JIT cleanup without automatic duplicate execution.
 
 ## Phase 5: existing Unraid integration

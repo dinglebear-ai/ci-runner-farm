@@ -1,0 +1,14 @@
+# Copy to C:\ProgramData\CiRunnerFarm\node.env and replace every example value.
+CRF_NODE_ID=windows-node-1
+CRF_CONTROLLER_ADDR=controller.tailnet-name.ts.net:7443
+CRF_CONTROLLER_SERVER_NAME=controller.tailnet-name.ts.net
+CRF_CA_CERT=C:\ProgramData\CiRunnerFarm\tls\ca.pem
+CRF_CLIENT_CERT=C:\ProgramData\CiRunnerFarm\tls\node.pem
+CRF_CLIENT_KEY=C:\ProgramData\CiRunnerFarm\tls\node-key.pem
+CRF_NODE_CPU_MILLIS=8000
+CRF_NODE_MEMORY_BYTES=17179869184
+CRF_STATE_DIR=C:\ProgramData\CiRunnerFarm\state
+CRF_RUNTIME_DIR=C:\ProgramData\CiRunnerFarm\runners
+CRF_LOG_DIR=C:\ProgramData\CiRunnerFarm\logs
+CRF_RUNNER_MANIFEST=C:\ProgramData\CiRunnerFarm\runner-manifest.json
+CRF_RUNNER_CACHE_DIR=C:\ProgramData\CiRunnerFarm\runner-cache

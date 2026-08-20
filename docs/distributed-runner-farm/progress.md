@@ -126,7 +126,7 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Add automated CA/server-certificate rotation, additional target-distribution Linux bundles, and Windows service packaging.
+1. Add automated CA/server-certificate rotation and additional target-distribution Linux bundles. Native Windows node service packaging is implemented; live Windows installation remains in the acceptance matrix.
 2. Complete live Unraid validation and opt-in node/controller service configuration for the local container adapter while keeping legacy single-host behavior as the default; pool/resource mapping is implemented.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.

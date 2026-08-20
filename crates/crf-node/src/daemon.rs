@@ -57,6 +57,14 @@ pub fn run_from_env() -> Result<(), DaemonError> {
 }
 
 pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
+    let running = Arc::new(AtomicBool::new(true));
+    let signal_running = running.clone();
+    ctrlc::set_handler(move || signal_running.store(false, Ordering::SeqCst))
+        .map_err(|_| DaemonError::SignalHandler)?;
+    run_until_stopped(config, running)
+}
+
+pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result<(), DaemonError> {
     let platform = probe_local_platform();
     let mut host = SystemProbe::new().map_err(|_| DaemonError::HostProbe)?;
     let host_memory = host
@@ -152,11 +160,6 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
         io_timeout: config.io_timeout,
     })
     .map_err(|_| DaemonError::TlsClient)?;
-
-    let running = Arc::new(AtomicBool::new(true));
-    let signal_running = running.clone();
-    ctrlc::set_handler(move || signal_running.store(false, Ordering::SeqCst))
-        .map_err(|_| DaemonError::SignalHandler)?;
 
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     while running.load(Ordering::SeqCst) {
