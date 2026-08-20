@@ -11,6 +11,7 @@ defmodule CrfController.PlacementCoordinator do
     OfferLedger,
     Placement,
     PlacementLedger,
+    PlacementTombstone,
     Resources,
     Secret
   }
@@ -62,13 +63,13 @@ defmodule CrfController.PlacementCoordinator do
 
   defp existing_or_new(placement, command, node, attrs, now_ms, now_unix_ms, state) do
     case PlacementLedger.get(state.placement_ledger, placement.id) do
-      {:ok, existing} ->
+      {:ok, %PlacementTombstone{}} ->
+        {:error, :placement_terminal}
+
+      {:ok, %Placement{} = existing} ->
         cond do
           not Placement.same_command?(existing, placement) ->
             {:error, :placement_conflict}
-
-          Placement.terminal?(existing) ->
-            {:error, :placement_terminal}
 
           true ->
             with :ok <- ensure_offer_consumed(attrs, existing, node, state) do

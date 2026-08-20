@@ -74,8 +74,10 @@ Offers transition `offered -> assigned(handle) -> consumed into placement`. Only
 
 ## Durable placement state
 
-Controller placement state is persisted in a private atomic JSON file when configured. It contains IDs, node/generation, pool/work identity, resources, lifecycle state/detail, and update metadata. It contains no JIT.
+Controller placement state is persisted in a private atomic JSON file when configured. Schema v2 keeps full scheduling fields only for nonterminal placements. When a placement becomes terminal, the controller atomically compacts it into a replay-fence tombstone containing placement ID, command ID, a SHA-256 digest of the idempotency key, node identity/generation, final state, and detail code. Tombstones preserve redispatch, late-ACK, late-update, JIT-retirement, placement-ID, and command-ID fences while dropping work/pool/resource scheduling data. No controller placement record contains JIT. Schema-v1 files remain readable and terminal v1 records migrate to tombstones on the next write.
+
+The placement file is deliberately bounded to 65,536 combined live placements and tombstones and 16 MiB. Compaction keeps normal terminal history inside that bound; longer-horizon archival/segmentation is a separate concern rather than an excuse to weaken replay fencing.
 
 JIT-bearing NodeMailbox entries are intentionally ephemeral. After a controller restart, a durable commanded placement can reconstruct a missing mailbox command only by replaying the central cached descriptor through the scale-set adapter.
 
-Node placement state is phase-based: intent, spawned PID, terminal outcome, reported marker. Node terminal reports remain pending until controller acceptance.
+Node placement state is phase-based: intent, spawned PID plus OS process-birth token, terminal outcome, reported marker. After the controller acknowledges a terminal report and the node advances to a newer generation, node-local terminal state is crash-safely quarantined and pruned. Same-generation, unreported, and nonterminal state remains durable.

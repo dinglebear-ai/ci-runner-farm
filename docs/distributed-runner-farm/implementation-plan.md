@@ -23,6 +23,7 @@
 - [x] Authenticated newer-generation adoption for a surviving runner.
 - [x] Two-phase controller ACK/mailbox transaction.
 - [x] Durable controller placement ledger.
+- [x] Schema-v2 terminal placement compaction into durable replay-fence tombstones, with schema-v1 migration and live-only capacity snapshots.
 - [x] Durable scale-set sequence/replay fence.
 
 ## Phase 3: portable node execution

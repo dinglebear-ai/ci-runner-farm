@@ -100,6 +100,8 @@ Assigned offers do not expire while a handle is in flight. Free offers may expir
 
 ## Storage and caches
 
-Controller placement state and scale-set sequence state use private atomic files. JIT secrets are not stored in those files. The only durable JIT copy is the central private adapter recovery cache.
+Controller placement state and scale-set sequence state use private atomic files. The placement file keeps full nonterminal records and compact schema-v2 terminal replay tombstones; legacy v1 state migrates in place. Terminal tombstones retain the identity/replay fence but drop scheduling-only resource/work/pool fields. JIT secrets are not stored in those files. The only durable JIT copy is the central private adapter recovery cache.
+
+Node-local terminal state is retained through controller acknowledgement and the current node generation. On a later generation, acknowledged terminal directories move atomically into a sibling quarantine and are deleted resumably; unexpected quarantine contents fail closed.
 
 Workspaces and mutable package caches remain node-local. Cross-node compiler reuse should use concurrency-safe services such as Kache/sccache. Docker image sharing should use a registry mirror rather than a shared writable Docker filesystem.

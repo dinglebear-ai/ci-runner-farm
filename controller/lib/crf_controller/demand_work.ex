@@ -6,6 +6,7 @@ defmodule CrfController.DemandWork do
     OfferLedger,
     Placement,
     PlacementCoordinator,
+    PlacementTombstone,
     PlacementLedger,
     PoolPolicy,
     ScaleSetClient,
@@ -62,6 +63,9 @@ defmodule CrfController.DemandWork do
         with {:ok, identity} <-
                WorkIdentity.for_handle(jit.pool_id, jit.scale_set_id, jit.work_handle) do
           case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
+            {:ok, %PlacementTombstone{}} ->
+              retire_and_release(jit.pool_id, jit.work_handle, ctx)
+
             {:ok, %Placement{} = placement} ->
               reconcile_existing_jit(jit, policy, identity, placement, ctx, now_ms, now_unix_ms)
 
@@ -345,8 +349,11 @@ defmodule CrfController.DemandWork do
       %PoolPolicy{} = policy ->
         with {:ok, identity} <- WorkIdentity.for_handle(pool.pool_id, pool.scale_set_id, handle) do
           case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
-            {:ok, %Placement{} = placement} ->
-              if Placement.terminal?(placement), do: :blocked, else: :ok
+            {:ok, %PlacementTombstone{}} ->
+              :blocked
+
+            {:ok, %Placement{}} ->
+              :ok
 
             {:error, :unknown_placement} ->
               issue_new(pool, handle, policy, identity, ctx, now_ms, now_unix_ms)

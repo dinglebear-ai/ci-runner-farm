@@ -9,6 +9,7 @@ defmodule CrfController.DemandCoordinator do
     OfferPlanner,
     Placement,
     PlacementHealth,
+    PlacementTombstone,
     PlacementLedger,
     PoolPolicy,
     ScaleSetClient,
@@ -238,6 +239,7 @@ defmodule CrfController.DemandCoordinator do
       cleanup = cleanup_jit_for_placement(placement, state.ctx)
       {:ok, %{placement: failed, jit_cleanup: cleanup}}
     else
+      {:ok, %PlacementTombstone{}} -> {:error, :placement_terminal}
       true -> {:error, :placement_terminal}
       {:error, reason} -> {:error, reason}
     end
