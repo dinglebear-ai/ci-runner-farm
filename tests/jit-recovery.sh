@@ -18,6 +18,7 @@ JIT_HANDOFF_GRACE_SECONDS=300
 mkdir -p "$RUNDIR" "$CFGDIR" "$CACHE_ROOT" "$RESERVATION_DIR" "$JIT_LEGACY_STATE_DIR"
 
 pool_id_valid(){ [[ "${1:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; }
+crf_safe_cache_root(){ printf '%s' "$CACHE_ROOT"; }
 . "$SCRIPT_DIR/runner-resources.sh"
 . "$SCRIPT_DIR/runner-jit.sh"
 CACHE_ROOT="$tmp/configured"
@@ -89,9 +90,13 @@ write_state(){
 old=$(( $(date +%s) - 3600 ))
 rust=ci-runner-jit-rust-aaaaaaaaaaaaaaaaaaaa
 fake_exists[$rust]=1; fake_status[$rust]=exited; fake_consumed[$rust]=1; fake_pool[$rust]=rust; fake_handle[$rust]=101
+mkdir -p "$CACHE_ROOT/work/$rust" "$CACHE_ROOT/docker/$rust"
+touch "$CACHE_ROOT/work/$rust/artifact" "$CACHE_ROOT/docker/$rust/layer"
 write_state "$JIT_LEGACY_STATE_DIR/$rust.state" "$rust" running lease-rust-old 101 "$old"
 jit_reconcile
 [ "${fake_exists[$rust]}" = 0 ] || crf_fail "exited legacy JIT container was not removed"
+[ ! -e "$CACHE_ROOT/work/$rust" ] || crf_fail "retired JIT workspace was not removed"
+[ ! -e "$CACHE_ROOT/docker/$rust" ] || crf_fail "retired JIT Docker root was not removed"
 [ ! -e "$JIT_LEGACY_STATE_DIR/$rust.state" ] || crf_fail "legacy JIT state was not imported"
 [ ! -e "$JIT_STATE_DIR/$rust.state" ] || crf_fail "fully retired JIT state was not removed"
 grep -Fq '"pool_id":"rust"' "$retired" || crf_fail "retirement used the wrong pool"

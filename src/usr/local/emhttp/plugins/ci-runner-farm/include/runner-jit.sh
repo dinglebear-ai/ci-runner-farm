@@ -230,6 +230,13 @@ jit_retire_handle() {
   return "$validation_rc"
 }
 
+jit_runner_data_remove() {
+  local runner_id="$1" root
+  jit_pool_from_runner_id "$runner_id" >/dev/null 2>&1 || return 1
+  root="$(crf_safe_cache_root)" || return 1
+  rm -rf -- "${root:?}/work/${runner_id:?}" "${root:?}/docker/${runner_id:?}"
+}
+
 jit_cleanup_observed() {
   local runner_id="$1" reservation="$2" handle="$3" container="$4" pool="${5:-}" state
   reservation_dir_ensure || return 1
@@ -246,6 +253,7 @@ jit_cleanup_observed() {
   if jit_container_exists "$container"; then
     return 1
   fi
+  jit_runner_data_remove "$runner_id" || return 1
   # REVIEW(crf-v3q.13.10): The helper first compacts replay proof, then the
   # shell releases its resource reservation. Failure leaves deleting state for
   # a conservative retry and never permits an old work handle to be reissued.
