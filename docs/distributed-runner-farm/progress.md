@@ -15,7 +15,8 @@ Last updated: 2026-08-19
 - Windows LF-normalization commit: `d493f4bd6120cf7ffce5b602254d3611f2126b12`
 - Cross-platform recovery commit: `0e950214be70aac916dcce07e7115794dfdf65be`
 - Live certificate authorization commit: `a114746e6cd071510cbdc34adcea69730cedccd1`
-- Current process-tree cancellation checkpoint: pending commit/push; Steamy WSL Linux and Agent OS Windows host proofs pending.
+- Process-tree containment commit: `6b3bce10b3f39ab1a18a0ee1f2cd4ca3680d1d5a`.
+- Current hosted-Windows process-tree test portability fix: pending commit/push; production containment is unchanged.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
@@ -23,7 +24,8 @@ Last updated: 2026-08-19
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
 - PR #37 fourth hosted run on `d493f4b`: Ubuntu remained green and Windows advanced through formatting/Rust to Elixir tests, exposing POSIX-only mode validation in two durable-state readers. Those were fixed in `0e95021`; Unix still requires exact `0600`, Windows uses ACL-backed regular-file semantics plus schema/checksum validation. The same run surfaced a pre-existing reconcile crash-boundary test that assumed `setsid` direct-child parentage; `0e95021` strengthens it to verify the authoritative prepublication identity record (PID/starttime/PGID/SID/token) instead.
 - PR #37 hosted runs for `0e95021` are fully green: both the distributed lint workflow and Build Plugin workflow completed successfully, proving native Windows Rust+Elixir, Ubuntu bundle verification, and the full legacy behavioral regression suite on the recovery fixes.
-- PR #37 hosted runs for `a114746` are also fully green with merge state CLEAN: Build Plugin, legacy Shell/PHP regression suite, Ubuntu distributed-core/bundle verification, and native Windows distributed-core all pass with live certificate authorization included.
+- PR #37 hosted runs for `a114746` are fully green with merge state CLEAN: Build Plugin, legacy Shell/PHP regression suite, Ubuntu distributed-core/bundle verification, and native Windows distributed-core all pass with live certificate authorization included.
+- Process-tree containment on `6b3bce1` is proven on the requested real hosts: Steamy WSL2 x86_64 with Rust 1.97.1 passed the stubborn-descendant Unix process-group TERM→KILL test in 5.05s after a clean checkout; Agent OS native Windows x64/MSVC passed suspended-start + Job Object descendant termination in 1.39s after a clean checkout. Hosted Ubuntu/legacy/plugin CI also pass `6b3bce1`. Hosted Windows failed only because the test fixture depended on nested PowerShell publishing a child PID; the Job Object implementation itself passed Agent OS. The pending test fix replaces that fixture with `cmd.exe` + `ping.exe` and discovers the child through Win32 ToolHelp.
 
 This document is the living implementation tracker. Update this checkpoint section whenever the branch, PR, commits, verification evidence, or remaining-work inventory changes.
 
