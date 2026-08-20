@@ -10,6 +10,7 @@ use crate::{
     placement_state::{
         LocalPlacementState, PlacementStore, PlacementStoreError, TerminalOutcome, TerminalReport,
     },
+    process_identity::ProcessIdentity,
     process_tree::ManagedProcess,
     runtime::NativeRunnerInvocation,
     system_probe::SystemProbe,
@@ -31,7 +32,7 @@ pub enum NativeExecutorError {
 
 struct ManagedChild {
     process: ManagedProcess,
-    pid: u32,
+    identity: ProcessIdentity,
 }
 
 pub struct NativeRunnerExecutor {
@@ -151,14 +152,14 @@ impl NativeRunnerExecutor {
             if self.children.contains_key(&placement_id) {
                 continue;
             }
-            let LocalPlacementState::Spawned { pid } = self
+            let LocalPlacementState::Spawned { process } = self
                 .store
                 .inspect(&placement_id)
                 .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?
             else {
                 continue;
             };
-            if self.system.process_exists(pid) {
+            if self.system.process_matches(process) {
                 continue;
             }
             let outcome = TerminalOutcome::Failed {
@@ -213,14 +214,21 @@ impl NativeRunnerExecutor {
             Ok(invocation) => invocation,
             Err(_) => return self.fail_before_spawn(placement_id, "native_runtime_unsupported"),
         };
-        let process = match invocation.spawn_with_logs(jit_config.expose_secret(), stdout, stderr) {
-            Ok(process) => process,
-            Err(_) => return self.fail_before_spawn(placement_id, "runner_spawn_failed"),
+        let mut process =
+            match invocation.spawn_with_logs(jit_config.expose_secret(), stdout, stderr) {
+                Ok(process) => process,
+                Err(_) => return self.fail_before_spawn(placement_id, "runner_spawn_failed"),
+            };
+        let identity = match ProcessIdentity::capture(process.id()) {
+            Ok(identity) => identity,
+            Err(_) => {
+                let _ = process.terminate_tree();
+                return self.fail_before_spawn(placement_id, "runner_identity_unavailable");
+            }
         };
-        let pid = process.id();
         self.children
-            .insert(placement_id.clone(), ManagedChild { process, pid });
-        if self.store.record_spawned(placement_id, pid).is_err() {
+            .insert(placement_id.clone(), ManagedChild { process, identity });
+        if self.store.record_spawned(placement_id, identity).is_err() {
             return ExecutionResult::Deferred("spawn_state_unavailable".into());
         }
         ExecutionResult::Applied
@@ -233,7 +241,7 @@ impl NativeRunnerExecutor {
         if let Some(managed) = self.children.get(placement_id) {
             if self
                 .store
-                .record_spawned(placement_id, managed.pid)
+                .record_spawned(placement_id, managed.identity)
                 .is_err()
             {
                 return ExecutionResult::Deferred("spawn_state_unavailable".into());

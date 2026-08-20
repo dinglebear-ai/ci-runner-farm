@@ -12,6 +12,7 @@ use crf_node::{
     native_executor::NativeRunnerExecutor,
     native_materializer::RunnerMaterializer,
     placement_state::{LocalPlacementState, PlacementStore, TerminalOutcome},
+    process_identity::ProcessIdentity,
 };
 use crf_protocol::wire::{ControllerCommand, ControllerEnvelope, PROTOCOL_VERSION, SecretString};
 use crf_protocol::{ExecutionBackend, OperatingSystem, Resources};
@@ -255,7 +256,13 @@ fn restarted_executor_marks_missing_spawned_pid_terminal() {
     let command = start_command("node-1", 1);
     store.begin(&command).expect("intent");
     store
-        .record_spawned("placement-1", u32::MAX)
+        .record_spawned(
+            "placement-1",
+            ProcessIdentity {
+                pid: u32::MAX,
+                start_token: 1,
+            },
+        )
         .expect("spawned state");
 
     let materializer = RunnerMaterializer::new(
@@ -283,6 +290,43 @@ fn restarted_executor_marks_missing_spawned_pid_terminal() {
                 detail_code: "runner_process_lost".into(),
             },
         })
+    );
+}
+
+#[test]
+fn restarted_executor_rejects_reused_pid_with_different_birth_token() {
+    let roots = TestRoots::success();
+    let store = roots.store();
+    let command = start_command("node-1", 1);
+    store.begin(&command).expect("intent");
+
+    let current = ProcessIdentity::capture(std::process::id()).expect("current process identity");
+    let mismatched = ProcessIdentity {
+        pid: current.pid,
+        start_token: current.start_token.wrapping_add(1).max(1),
+    };
+    assert_ne!(current, mismatched);
+    store
+        .record_spawned("placement-1", mismatched)
+        .expect("spawned state");
+
+    let materializer = RunnerMaterializer::new(
+        roots.os.clone(),
+        &roots.template,
+        &roots.runtime,
+        &roots.logs,
+    )
+    .expect("materializer");
+    let mut executor =
+        NativeRunnerExecutor::new(roots.os.clone(), materializer, store).expect("executor");
+
+    let updates = executor.poll_terminal_updates().expect("poll recovery");
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0].outcome,
+        TerminalOutcome::Failed {
+            detail_code: "runner_process_lost".into(),
+        }
     );
 }
 

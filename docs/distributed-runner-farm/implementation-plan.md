@@ -36,7 +36,7 @@
 - [x] Durable terminal-report outbox and agent sync.
 - [x] Runnable `crf-node` configuration, startup, reconnect/backoff, heartbeat loop, and shutdown.
 - [x] Host memory/resource probing and durable local reservation accounting.
-- [x] Restart recovery for durable spawned PIDs.
+- [x] Restart recovery for durable spawned processes with PID + OS process-birth identity, rejecting PID reuse instead of adopting an unrelated process.
 - [x] Native GitHub runner package acquisition, pinned manifest, exact-size/SHA verification, safe TAR/ZIP extraction, immutable cache, tamper detection, bounded rollback retention, and garbage collection.
 
 ## Phase 4: GitHub demand and distributed admission

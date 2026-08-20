@@ -1,5 +1,7 @@
 use sysinfo::{MemoryRefreshKind, Pid, ProcessesToUpdate, System};
 
+use crate::process_identity::ProcessIdentity;
+
 #[derive(Debug)]
 pub struct SystemProbe {
     system: System,
@@ -40,6 +42,10 @@ impl SystemProbe {
         self.system
             .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         self.system.process(pid).is_some()
+    }
+
+    pub fn process_matches(&mut self, identity: ProcessIdentity) -> bool {
+        ProcessIdentity::capture(identity.pid) == Ok(identity)
     }
 }
 

@@ -11,6 +11,7 @@ pub mod generation;
 pub mod native_executor;
 pub mod native_materializer;
 pub mod placement_state;
+pub mod process_identity;
 pub mod process_tree;
 pub mod runner_archive;
 pub mod runner_manifest;

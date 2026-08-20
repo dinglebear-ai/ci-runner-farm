@@ -16,9 +16,10 @@ Last updated: 2026-08-19
 - Cross-platform recovery commit: `0e950214be70aac916dcce07e7115794dfdf65be`
 - Live certificate authorization commit: `a114746e6cd071510cbdc34adcea69730cedccd1`
 - Process-tree containment commit: `6b3bce10b3f39ab1a18a0ee1f2cd4ca3680d1d5a`.
-- Current hosted-Windows process-tree test portability fix: pending commit/push; production containment is unchanged.
+- Hosted-Windows process-tree test fix commit: `31ebe51f6a53d2f2ae50dd88d2f5e2d17f094762`; Agent OS rerun passed the ToolHelp-based test in 0.14s.
+- Current process-birth identity checkpoint: pending commit/push; Linux/Windows live-host identity probes pending.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: 87 Rust tests, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: **91 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **100 Elixir controller tests**, Steamy WSL + Agent OS native process-tree proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
@@ -108,7 +109,7 @@ The implemented path is:
 2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
-5. Complete Steamy WSL + Agent OS live proof of the new Unix process-group / Windows Job Object cancellation path, persist process-start identity to close PID-reuse ambiguity, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
+5. Complete Steamy WSL + Agent OS live proof of durable process birth-token recovery, add hostname/MagicDNS controller addressing, and finish durable-state/cache retention GC.
 
 ## Deployment status
 

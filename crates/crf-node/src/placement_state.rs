@@ -12,6 +12,8 @@ use crf_protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::process_identity::ProcessIdentity;
+
 const SCHEMA_VERSION: u8 = 1;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 const MAX_PLACEMENTS: usize = 4096;
@@ -24,7 +26,7 @@ pub struct PlacementStore {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalPlacementState {
     IntentOnly,
-    Spawned { pid: u32 },
+    Spawned { process: ProcessIdentity },
     Terminal { outcome: TerminalOutcome },
 }
 
@@ -74,7 +76,7 @@ struct IntentRecord {
 #[serde(deny_unknown_fields)]
 struct SpawnedRecord {
     schema_version: u8,
-    pid: u32,
+    process: ProcessIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -128,14 +130,18 @@ impl PlacementStore {
         }
     }
 
-    pub fn record_spawned(&self, placement_id: &str, pid: u32) -> Result<(), PlacementStoreError> {
-        if pid == 0 {
+    pub fn record_spawned(
+        &self,
+        placement_id: &str,
+        process: ProcessIdentity,
+    ) -> Result<(), PlacementStoreError> {
+        if process.pid == 0 || process.start_token == 0 {
             return Err(PlacementStoreError::CorruptState);
         }
         let directory = self.placement_directory(placement_id)?;
         let record = SpawnedRecord {
             schema_version: SCHEMA_VERSION,
-            pid,
+            process,
         };
         write_idempotent_json(&directory.join("spawned.json"), &record)?;
         sync_directory(&directory)
@@ -175,10 +181,15 @@ impl PlacementStore {
         let spawned_path = directory.join("spawned.json");
         if spawned_path.exists() {
             let spawned: SpawnedRecord = read_json(&spawned_path)?;
-            if spawned.schema_version != SCHEMA_VERSION || spawned.pid == 0 {
+            if spawned.schema_version != SCHEMA_VERSION
+                || spawned.process.pid == 0
+                || spawned.process.start_token == 0
+            {
                 return Err(PlacementStoreError::CorruptState);
             }
-            return Ok(LocalPlacementState::Spawned { pid: spawned.pid });
+            return Ok(LocalPlacementState::Spawned {
+                process: spawned.process,
+            });
         }
 
         Ok(LocalPlacementState::IntentOnly)
@@ -478,6 +489,13 @@ mod tests {
         }
     }
 
+    fn process_identity(pid: u32) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            start_token: 99,
+        }
+    }
+
     fn command(secret: &str) -> ControllerEnvelope {
         ControllerEnvelope {
             protocol_version: PROTOCOL_VERSION,
@@ -521,7 +539,9 @@ mod tests {
         let store = PlacementStore::new(&directory.0).expect("store");
         let secret = "jit-config-super-secret==";
         store.begin(&command(secret)).expect("begin");
-        store.record_spawned("placement-1", 4242).expect("spawned");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
 
         for entry in fs::read_dir(directory.0.join("placement-1")).expect("state directory") {
             let entry = entry.expect("entry");
@@ -541,10 +561,14 @@ mod tests {
             Ok(LocalPlacementState::IntentOnly)
         );
 
-        store.record_spawned("placement-1", 4242).expect("spawned");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
         assert_eq!(
             store.inspect("placement-1"),
-            Ok(LocalPlacementState::Spawned { pid: 4242 })
+            Ok(LocalPlacementState::Spawned {
+                process: process_identity(4242),
+            })
         );
 
         store
@@ -567,7 +591,9 @@ mod tests {
             store.reserved_resources(),
             Ok(Resources::new(2_000, 4 * 1024 * 1024 * 1024))
         );
-        store.record_spawned("placement-1", 4242).expect("spawned");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
         assert_eq!(
             store.reserved_resources(),
             Ok(Resources::new(2_000, 4 * 1024 * 1024 * 1024))
@@ -598,7 +624,9 @@ mod tests {
         let directory = TestDirectory::new();
         let store = PlacementStore::new(&directory.0).expect("store");
         store.begin(&command("jit-config-abc123==")).expect("begin");
-        store.record_spawned("placement-1", 4242).expect("spawned");
+        store
+            .record_spawned("placement-1", process_identity(4242))
+            .expect("spawned");
         store
             .record_terminal(
                 "placement-1",
