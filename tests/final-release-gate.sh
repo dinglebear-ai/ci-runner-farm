@@ -136,6 +136,7 @@ bash tests/stalled-credential-handoff.sh >/dev/null
 bash tests/reconcile-stop-lifecycle.sh >/dev/null
 bash tests/reconcile-retry.sh >/dev/null
 bash tests/runner-runtime.sh >/dev/null
+bash tests/distributed-container-adapter.sh >/dev/null
 bash tests/validate-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
@@ -156,6 +157,7 @@ helper="$tmp/package/bin/crf-scaleset"
 for executable in \
   include/runner-farm.sh \
   include/runner-runtime.sh \
+  include/runner-container-adapter.sh \
   include/runner-entrypoint.sh \
   event/docker_started \
   event/stopping_docker \

@@ -129,6 +129,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-runtime.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 . "$SCRIPT_DIR/runner-jit.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-distributed-adapter.sh
+. "$SCRIPT_DIR/runner-distributed-adapter.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 
@@ -2223,7 +2225,7 @@ runner_secret_inject() {
     # A freshly created container may not yet be in the shared inventory. Its
     # exact deterministic name is still bounded before this function is called.
     case "$name" in
-      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*) ;;
+      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*|"$NAME_PREFIX"-dist-[a-z]*-[0-9a-f]*) ;;
       *) return 1 ;;
     esac
   }
@@ -5181,6 +5183,7 @@ case "${1:-status}" in
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
   prewarm)          with_fleet_lock wait scheduler_prewarm_guarded "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
+  distributed-adapter) distributed_adapter_locked ;;
   jit-reconcile)    with_fleet_lock wait jit_reconcile ;;
   begin-migration)  with_fleet_lock wait migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   continue-migration) with_fleet_lock wait migration_continue_guarded ;;

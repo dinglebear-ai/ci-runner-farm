@@ -203,6 +203,62 @@ esac
 }
 
 #[test]
+fn prepared_adapter_state_replays_start_exactly_once() {
+    let root = TestRoot::new();
+    let log = root.root.join("adapter.log");
+    let script = root.script(
+        "adapter.sh",
+        &format!(
+            r#"
+req=$(cat)
+printf '%s\n' "$req" >> '{}'
+case "$req" in
+  *'"action":"inspect"'*) printf '%s\n' '{{"schema_version":1,"payload":{{"result":"deferred","detail_code":"container_start_prepared"}}}}' ;;
+  *'"action":"start"'*) printf '%s\n' '{{"schema_version":1,"payload":{{"result":"started","id":"container-prepared"}}}}' ;;
+  *) exit 2 ;;
+esac
+"#,
+            log.display()
+        ),
+    );
+    let store = root.store();
+    let command = start_command();
+    store.begin(&command).expect("intent");
+    let mut executor = ContainerRunnerExecutor::new(
+        ProcessContainerAdapter::new(script, Duration::from_secs(2)).expect("adapter"),
+        store,
+    );
+
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Applied
+    );
+    assert_eq!(
+        executor.placement_state("placement-1"),
+        Ok(LocalPlacementState::Spawned {
+            runtime: RuntimeIdentity::Container {
+                id: "container-prepared".into(),
+            },
+        })
+    );
+    let calls = fs::read_to_string(log).expect("adapter log");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains(r#""action":"inspect""#))
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains(r#""action":"start""#))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn uncertain_start_remains_intent_only_and_never_claims_absence() {
     let root = TestRoot::new();
     let script = root.script(

@@ -25,7 +25,7 @@ Last updated: 2026-08-20
 - Portable runtime-identity checkpoint: `f00c26707152898bcffd1428fa1bdb6404c98139`; legacy native spawned-state migration plus tagged native/container identities are green, and PR #37 hosted Build Plugin, Shell/PHP, Ubuntu, and Windows jobs are all green/CLEAN on this SHA.
 - Bounded container-adapter client checkpoint: `b46646ef928ed2f28cde14b966040e8d57ee7ab9`; 7/7 adapter behavior tests prove stdin-only JIT delivery, bounded typed output, oversized-response rejection, and timeout process-tree containment.
 - Controller-approved container executor checkpoint: `f1684b9d50fe4c0b85e88a975225c163e44f9cc8`; crash adoption, exact-ID cancellation, uncertain start, lost-container reporting, and cross-backend identity preservation are covered.
-- Current implementation checkpoint: finish explicit `native_process`/`container` node backend selection and then implement the local Unraid adapter endpoint onto `runner-runtime.sh`.
+- Current implementation checkpoint: the local Unraid adapter endpoint maps controller-approved Start/Inspect/Cancel requests onto `runner-runtime.sh`, with private crash-recovery state, exact container identity fencing, local resource/config validation, and no duplicate scheduler or GitHub JIT-retirement authority.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
@@ -87,6 +87,7 @@ The implemented path is:
 - portable node runtime identity with backward-compatible native v1 migration and tagged native-process/container v2 spawned state;
 - bounded local container-adapter wire/client with JIT only on stdin, hard request/response limits, process-tree timeout containment, exact immutable container identity, and no GitHub credentials on nodes;
 - controller-approved container executor with inspect-before-retry crash recovery, exact-ID cancellation, durable lost-container reporting, and fail-closed backend identity mismatch behavior;
+- local Unraid Start/Inspect/Cancel adapter over the shared runner runtime, with deterministic placement/container/reservation identities, private phase state, exact-label discovery, terminal-before-removal persistence, and safe replay of prepared or secret-pending starts;
 - explicit daemon backend selection: existing configuration defaults to `native_process`, while opt-in `container` mode requires only an absolute adapter program and bounded timeout and advertises only the instantiated backend/capability;
 - strict schema-versioned portable controller configuration with legacy fallback and a fully supervised distributed child tree;
 - optional OTP-owned `crf-scaleset` sidecar with bounded socket readiness and verified SIGTERM/SIGKILL child cleanup;
@@ -123,7 +124,7 @@ The implemented path is:
 ## Remaining major work
 
 1. Add automated CA/server-certificate rotation, additional target-distribution Linux bundles, and Windows service packaging.
-2. Implement the local Unraid container-adapter endpoint that maps already controller-approved placements onto the shared `runner-runtime.sh` boundary without duplicating scheduling/admission or GitHub JIT-retirement authority; keep legacy single-host behavior as the default.
+2. Complete live Unraid validation and opt-in configuration/migration for the local container adapter while keeping legacy single-host behavior as the default.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
 5. Add longer-horizon controller replay-fence archival/segmentation beyond the current bounded 65,536-record/16 MiB state file if operational scale requires it; node GC and controller hot-state compaction are implemented. Then move into the Unraid runtime abstraction and live GitHub multi-node smoke matrix.

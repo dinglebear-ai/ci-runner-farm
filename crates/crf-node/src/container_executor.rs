@@ -158,6 +158,21 @@ impl ContainerRunnerExecutor {
                     },
                     &detail_code,
                 ),
+            Ok(ContainerAdapterResponse::Deferred { detail_code })
+                if detail_code == "container_secret_pending"
+                    || detail_code == "container_start_prepared" =>
+            {
+                let request = match ContainerAdapterRequest::start_from(command) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        return ExecutionResult::Rejected("invalid_container_request".into());
+                    }
+                };
+                match self.adapter.call(&request) {
+                    Ok(response) => self.handle_start_response(placement_id, response),
+                    Err(error) => map_adapter_error(error),
+                }
+            }
             Ok(ContainerAdapterResponse::Deferred { detail_code }) => {
                 ExecutionResult::Deferred(detail_code)
             }
