@@ -73,7 +73,7 @@ The verifier:
 
 CI runs this build+verification smoke on Linux in the distributed-core job.
 
-`/opt/ci-runner-farm/current/bin/crf-operator-status` uses the release's authenticated local RPC channel to print a redacted read-only snapshot of nodes, resources, offers, placements, orphan state, configured pools, peer authorization counts, and sidecar health. It never includes JIT descriptors, idempotency keys, certificate bytes, or controller credentials.
+`/opt/ci-runner-farm/current/bin/crf-operator-status` uses the release's authenticated local RPC channel to print a redacted snapshot of nodes, resources, offers, placements, orphan state, configured pools, peer authorization counts, and sidecar health. It also exposes generation-fenced `drain`/`undrain` and `force-abandon PLACEMENT_ID --force`. The fixed command grammar rejects unsafe identifiers and never includes JIT descriptors, idempotency keys, certificate bytes, or controller credentials.
 
 ## Current proof
 
