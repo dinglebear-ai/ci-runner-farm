@@ -73,6 +73,8 @@ The verifier:
 
 CI runs this build+verification smoke on Linux in the distributed-core job.
 
+`/opt/ci-runner-farm/current/bin/crf-operator-status` uses the release's authenticated local RPC channel to print a redacted read-only snapshot of nodes, resources, offers, placements, orphan state, configured pools, peer authorization counts, and sidecar health. It never includes JIT descriptors, idempotency keys, certificate bytes, or controller credentials.
+
 ## Current proof
 
 On 2026-08-19, DOOKIE built and verified a clean 33,546,551-byte Ubuntu 26.04 x86_64 bundle from `b297b04d53f477655e59bfdab1f8e59105abc8a6`; `BUILD-INFO` records `GIT_DIRTY=false`. The same SHA also passed the hosted Ubuntu bundle build/verification lane. These were artifact/fake-root installation proofs only; nothing was installed into or started on the live host root.

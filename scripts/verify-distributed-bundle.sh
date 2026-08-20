@@ -34,6 +34,7 @@ while IFS= read -r -d "" link; do
 done < <(find "$bundle" -type l -print0)
 
 test -x "$bundle/bin/crf-node"
+test -x "$bundle/bin/crf-operator-status"
 test -x "$bundle/bin/crf-scheduler"
 test -x "$bundle/bin/crf-scaleset"
 test -x "$bundle/bin/crf-peer-admin"
@@ -59,6 +60,7 @@ case "$(readlink "$rootfs/opt/ci-runner-farm/current")" in
   *) echo "installed current symlink is not release-relative" >&2; exit 1 ;;
 esac
 test -x "$rootfs/opt/ci-runner-farm/current/bin/crf-node"
+test -x "$rootfs/opt/ci-runner-farm/current/bin/crf-operator-status"
 test -x "$rootfs/opt/ci-runner-farm/current/bin/crf-scheduler"
 test -x "$rootfs/opt/ci-runner-farm/current/bin/crf-scaleset"
 test -x "$rootfs/opt/ci-runner-farm/current/controller/bin/crf_controller"

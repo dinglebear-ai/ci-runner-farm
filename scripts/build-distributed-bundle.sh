@@ -33,6 +33,7 @@ tracked_inputs=(
   packaging/distributed/install.sh
   packaging/distributed/admin/crf-peer-admin
   packaging/distributed/admin/crf-cert-fingerprint
+  packaging/distributed/admin/crf-operator-status
   packaging/distributed/examples/node-env.example
   packaging/distributed/systemd/ci-runner-farm-controller.service
   packaging/distributed/systemd/ci-runner-farm-node.service
@@ -77,6 +78,7 @@ install -m 0755 "$root/target/release/crf-node" "$stage/bin/crf-node"
 install -m 0755 "$root/target/release/crf-scheduler" "$stage/bin/crf-scheduler"
 install -m 0755 "$root/packaging/distributed/admin/crf-peer-admin" "$stage/bin/crf-peer-admin"
 install -m 0755 "$root/packaging/distributed/admin/crf-cert-fingerprint" "$stage/bin/crf-cert-fingerprint"
+install -m 0755 "$root/packaging/distributed/admin/crf-operator-status" "$stage/bin/crf-operator-status"
 
 go -C "$root/tools/crf-scaleset" build -trimpath -o "$stage/bin/crf-scaleset" ./cmd/crf-scaleset
 

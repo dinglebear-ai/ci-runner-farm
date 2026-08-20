@@ -28,7 +28,7 @@ Last updated: 2026-08-20
 - Current implementation checkpoint: the local Unraid adapter endpoint maps controller-approved Start/Inspect/Cancel requests onto `runner-runtime.sh`, with private crash-recovery state, exact container identity fencing, local resource/config validation, and no duplicate scheduler or GitHub JIT-retirement authority.
 - Unraid pool-policy mapping: validated legacy single-fleet or V2 pool configuration exports as the controller's exact typed `demand.pools` JSON for x86_64/arm64 container nodes; export is read-only and never enables distributed mode.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **107 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
@@ -54,7 +54,7 @@ The implemented path is:
 - Rust workspace: **120 tests pass** across protocol, scheduler service, node unit tests, native/container executor integration, bounded container-adapter behavior, process-tree/process-birth identity, hostname endpoint parsing/resolution, crash-safe placement GC, and hostile runner-package/cache tests.
 - Rust strict Clippy: all three crates pass independently with `-D warnings`.
 - Windows portability: both `crf-node --all-targets` and `crf-scheduler --all-targets` cross-check successfully for `x86_64-pc-windows-gnu`. Native MSVC remains covered by the Windows GitHub-hosted CI job because DOOKIE does not have Microsoft linker tools.
-- Elixir controller: **105 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, live TLS session revocation, schema-v1 placement-state migration, and compact schema-v2 terminal replay tombstones.
+- Elixir controller: **107 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, live TLS session revocation, schema-v1 placement-state migration, compact schema-v2 terminal replay tombstones, and the redacted operator snapshot.
 - Go scale-set adapter: every package in `tools/crf-scaleset` passes.
 - GitHub workflow: `actionlint` passes. Distributed core CI builds/tests Rust and Elixir on Ubuntu and Windows and exposes the real scheduler binary to controller tests.
 - `git diff --check` passes and isolated Cargo target directories are ignored.
@@ -96,6 +96,7 @@ The implemented path is:
 - placement-loss grace tracking that surfaces nonterminal work on unavailable node incarnations as orphans without automatically retrying it;
 - explicit force-abandon remediation that re-checks live node health, requires confirmation, terminalizes the durable placement, removes stale mailbox work, and retires matching central JIT state;
 - distribution-tagged Linux service bundle containing the self-contained OTP controller release, Rust scheduler/node, Go scale-set sidecar, hardened systemd units, versioned atomic install layout, checksums/build metadata, fake-root/idempotent installer verification, and CI bundle smoke.
+- packaged `crf-operator-status` local-RPC helper exposing a deterministic secret-free snapshot of nodes, resources, offers, placements, replay fences, orphan/pool state, peer authorization counts, and sidecar health.
 
 ## Recovery invariants covered by tests
 

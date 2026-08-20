@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+release="${CRF_CONTROLLER_RELEASE:-/opt/ci-runner-farm/current/controller/bin/crf_controller}"
+[[ -x "$release" ]] || { echo "controller release executable not found: $release" >&2; exit 1; }
+exec "$release" rpc 'IO.inspect(CrfController.OperatorSnapshot.snapshot(), pretty: true, limit: :infinity, printable_limit: :infinity)'
