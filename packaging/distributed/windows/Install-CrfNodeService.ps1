@@ -54,4 +54,4 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
     New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null
 }
 
-Write-Host "Installed $serviceName with Manual startup. To change configuration, edit $privateEnvironment and rerun this installer before starting it explicitly."
+Write-Host "Installed $serviceName with Manual startup. To change configuration, edit the source environment file and rerun this installer before starting it explicitly."
