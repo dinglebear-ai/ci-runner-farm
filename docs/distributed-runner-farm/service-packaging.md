@@ -44,7 +44,7 @@ The installer does not create an active `controller.json` or `node.env`. It inst
 
 The controller unit uses systemd hardening including private runtime/state/log directories, a 0077 umask, `ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`, and restricted address families. It intentionally does not use `MemoryDenyWriteExecute`, because the BEAM JIT requires executable memory.
 
-The node unit intentionally uses `KillMode=process`. Restarting the node agent must not blindly terminate an already-running GitHub runner child, because that child may own a live job and the new agent generation can adopt the surviving durable placement. Explicit placement cancellation still requires the tracked Unix process-group / Windows Job Object hardening before production.
+The node unit intentionally uses `KillMode=process`. Restarting the node agent must not blindly terminate an already-running GitHub runner or container, because that runtime may own a live job and the new agent generation must reconcile the surviving durable placement. Native runners are adopted through persisted PID/start identity; container runners are rediscovered through the configured local adapter and persisted immutable container ID. Explicit native cancellation uses the tracked Unix process group / Windows Job Object, while container cancellation carries the expected immutable container ID so a reused name cannot target a newer runtime.
 
 ## Building
 

@@ -1,6 +1,6 @@
 # Distributed Runner Farm Progress
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 ## Active checkpoint
 
@@ -20,10 +20,14 @@ Last updated: 2026-08-19
 - Process-birth identity commit: `e822b7a8091d7509a670a7dd3bda2ff163f0ad00`; Steamy WSL and Agent OS both passed stable identity + forged-live-PID rejection on the exact SHA.
 - Hostname/MagicDNS transport commit: `158226bbc824b4d8a6a0d9c3edd2212fb3e0e1a7`; Steamy WSL and Agent OS both pass exact endpoint/config tests and resolve `dookie` through tailnet MagicDNS.
 - Node placement-state GC commit: `e092e625e8d38a7553a14dbd58dc9ce01c92490b`; Steamy WSL and Agent OS each passed all 14 crash-safe GC/state tests on the exact SHA.
-- Controller terminal-placement compaction commit: `f63fd023baba2741cd817162e7cb35e69a413fe1`; schema-v1 migration, compact schema-v2 replay tombstones, and 105/105 controller tests are green. Hosted Ubuntu and Windows distributed-core are green on this SHA; the legacy regression lane is still completing.
-- Current implementation checkpoint: extract the existing Unraid Docker/JIT execution mechanics behind a shared backend boundary without changing legacy default behavior.
+- Controller terminal-placement compaction commit: `f63fd023baba2741cd817162e7cb35e69a413fe1`; schema-v1 migration, compact schema-v2 replay tombstones, and 105/105 controller tests are green.
+- Shared Unraid runner-runtime checkpoint: `58a72447dfe9e7e883ff23d51cc2b1a47f0de652`; `runner-runtime.sh` is packaged mode 0755 and the solitary full legacy `final-release-gate.sh` exits 0.
+- Portable runtime-identity checkpoint: `f00c26707152898bcffd1428fa1bdb6404c98139`; legacy native spawned-state migration plus tagged native/container identities are green, and PR #37 hosted Build Plugin, Shell/PHP, Ubuntu, and Windows jobs are all green/CLEAN on this SHA.
+- Bounded container-adapter client checkpoint: `b46646ef928ed2f28cde14b966040e8d57ee7ab9`; 7/7 adapter behavior tests prove stdin-only JIT delivery, bounded typed output, oversized-response rejection, and timeout process-tree containment.
+- Controller-approved container executor checkpoint: `f1684b9d50fe4c0b85e88a975225c163e44f9cc8`; crash adoption, exact-ID cancellation, uncertain start, lost-container reporting, and cross-backend identity preservation are covered.
+- Current implementation checkpoint: finish explicit `native_process`/`container` node backend selection and then implement the local Unraid adapter endpoint onto `runner-runtime.sh`.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
-- Verification: **102 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
+- Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
 - PR #37 third hosted run on `b297b04`: Ubuntu distributed-core green including bundle verification; native Windows Rust tests green; Windows formatter exposed CRLF normalization, fixed by `d493f4b`.
@@ -46,7 +50,7 @@ The implemented path is:
 
 ## Verified today
 
-- Rust workspace: **102 tests pass** across protocol, scheduler service, node unit tests, native executor/process-tree integration, process-birth identity, hostname endpoint parsing/resolution, crash-safe placement GC, and hostile runner-package/cache tests.
+- Rust workspace: **120 tests pass** across protocol, scheduler service, node unit tests, native/container executor integration, bounded container-adapter behavior, process-tree/process-birth identity, hostname endpoint parsing/resolution, crash-safe placement GC, and hostile runner-package/cache tests.
 - Rust strict Clippy: all three crates pass independently with `-D warnings`.
 - Windows portability: both `crf-node --all-targets` and `crf-scheduler --all-targets` cross-check successfully for `x86_64-pc-windows-gnu`. Native MSVC remains covered by the Windows GitHub-hosted CI job because DOOKIE does not have Microsoft linker tools.
 - Elixir controller: **105 tests pass** with warnings-as-errors compilation, including real Rust scheduler Port integration, strict production-config tests, managed Go-sidecar lifecycle tests, conservative orphan/remediation behavior, dynamic certificate authorization, live TLS session revocation, schema-v1 placement-state migration, and compact schema-v2 terminal replay tombstones.
@@ -80,6 +84,10 @@ The implemented path is:
 - scale-set transport/session failure resets activation and reapplies sessions on the next tick;
 - runnable portable `crf-node` daemon with explicit resource budget, durable generation, reconnect backoff, resource accounting, terminal outbox, and graceful shutdown;
 - native Linux/Windows runner lifecycle, private materialization, file-backed logs, cancellation, and PID recovery;
+- portable node runtime identity with backward-compatible native v1 migration and tagged native-process/container v2 spawned state;
+- bounded local container-adapter wire/client with JIT only on stdin, hard request/response limits, process-tree timeout containment, exact immutable container identity, and no GitHub credentials on nodes;
+- controller-approved container executor with inspect-before-retry crash recovery, exact-ID cancellation, durable lost-container reporting, and fail-closed backend identity mismatch behavior;
+- explicit daemon backend selection: existing configuration defaults to `native_process`, while opt-in `container` mode requires only an absolute adapter program and bounded timeout and advertises only the instantiated backend/capability;
 - strict schema-versioned portable controller configuration with legacy fallback and a fully supervised distributed child tree;
 - optional OTP-owned `crf-scaleset` sidecar with bounded socket readiness and verified SIGTERM/SIGKILL child cleanup;
 - managed pinned GitHub runner acquisition using Rustls HTTPS, exact byte count + SHA-256 verification, TAR/ZIP traversal/link defenses, immutable content-addressed cache, cache-tamper detection, OS-backed cache locking, and current-plus-one-rollback pruning;
@@ -97,8 +105,10 @@ The implemented path is:
 - uncommitted node commands are never evicted;
 - original accepted/rejected command outcome is replayed exactly;
 - placement intent is durable before process creation;
-- intent-only crash state never auto-spawns a duplicate;
-- dead persisted runner PIDs become durable `runner_process_lost` reports;
+- native intent-only crash state never auto-spawns a duplicate; container intent recovery inspects first and retries start only after explicit `absent`;
+- dead persisted runner PIDs become durable `runner_process_lost` reports and missing previously identified containers become `container_lost`;
+- container cancellation carries the exact persisted immutable ID, so a reused name cannot target a newer runtime;
+- native/container runtime identity mismatches preserve the foreign durable state and fail closed instead of manufacturing a terminal result;
 - terminal reports remain pending until controller acceptance;
 - a dropped terminal response does not mark the report delivered;
 - a persisted commanded placement with a lost mailbox rebuilds the command exactly once from the central cached JIT descriptor;
@@ -113,7 +123,7 @@ The implemented path is:
 ## Remaining major work
 
 1. Add automated CA/server-certificate rotation, additional target-distribution Linux bundles, and Windows service packaging.
-2. Unify the existing Unraid Docker execution path behind the distributed runtime/backend boundary while preserving legacy default behavior.
+2. Implement the local Unraid container-adapter endpoint that maps already controller-approved placements onto the shared `runner-runtime.sh` boundary without duplicating scheduling/admission or GitHub JIT-retirement authority; keep legacy single-host behavior as the default.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
 5. Add longer-horizon controller replay-fence archival/segmentation beyond the current bounded 65,536-record/16 MiB state file if operational scale requires it; node GC and controller hot-state compaction are implemented. Then move into the Unraid runtime abstraction and live GitHub multi-node smoke matrix.

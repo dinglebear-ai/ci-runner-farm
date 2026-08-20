@@ -8,16 +8,19 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crf_protocol::{ExecutionBackend, NodeSnapshot};
+use crf_protocol::NodeSnapshot;
 
 use crate::{
-    agent::{AgentCore, AgentSession, AgentSessionError},
+    agent::{AgentCore, AgentSession, AgentSessionError, PlacementRuntime},
     command_ledger::CommandLedger,
     command_processor::CommandProcessor,
-    config::{ConfigError, NodeConfig, RunnerSourceConfig},
+    config::{ConfigError, NodeConfig, NodeExecutionConfig, RunnerSourceConfig},
+    container_adapter::ProcessContainerAdapter,
+    container_executor::ContainerRunnerExecutor,
     generation::reserve_next_generation,
     native_executor::NativeRunnerExecutor,
     native_materializer::RunnerMaterializer,
+    node_executor::NodeExecutor,
     placement_state::PlacementStore,
     probe_local_platform,
     runner_package::RunnerPackageManager,
@@ -39,6 +42,7 @@ pub enum DaemonError {
     RunnerPackage,
     Materializer,
     NativeExecutor,
+    ContainerAdapter,
     TlsClient,
     CommandLedger,
     AgentCore,
@@ -64,16 +68,6 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
         return Err(DaemonError::ResourceBudgetExceedsHost);
     }
 
-    let runner_template = match &config.runner_source {
-        RunnerSourceConfig::Template(path) => path.clone(),
-        RunnerSourceConfig::Managed {
-            manifest_path,
-            cache_root,
-        } => RunnerPackageManager::new(manifest_path, cache_root)
-            .and_then(|manager| manager.resolve(&platform.os, &platform.arch))
-            .map_err(|_| DaemonError::RunnerPackage)?,
-    };
-
     let generation =
         reserve_next_generation(&config.state_root.join("generations"), &platform.node_id)
             .map_err(|_| DaemonError::GenerationState)?;
@@ -83,15 +77,44 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
     placement_store
         .prune_reported_before_generation(generation)
         .map_err(|_| DaemonError::PlacementState)?;
-    let materializer = RunnerMaterializer::new(
-        platform.os.clone(),
-        &runner_template,
-        &config.runtime_root,
-        &config.log_root,
-    )
-    .map_err(|_| DaemonError::Materializer)?;
-    let executor = NativeRunnerExecutor::new(platform.os.clone(), materializer, placement_store)
-        .map_err(|_| DaemonError::NativeExecutor)?;
+    let executor = match &config.execution {
+        NodeExecutionConfig::Native {
+            runner_source,
+            runtime_root,
+            log_root,
+        } => {
+            let runner_template = match runner_source {
+                RunnerSourceConfig::Template(path) => path.clone(),
+                RunnerSourceConfig::Managed {
+                    manifest_path,
+                    cache_root,
+                } => RunnerPackageManager::new(manifest_path, cache_root)
+                    .and_then(|manager| manager.resolve(&platform.os, &platform.arch))
+                    .map_err(|_| DaemonError::RunnerPackage)?,
+            };
+            let materializer = RunnerMaterializer::new(
+                platform.os.clone(),
+                &runner_template,
+                runtime_root,
+                log_root,
+            )
+            .map_err(|_| DaemonError::Materializer)?;
+            NodeExecutor::Native(Box::new(
+                NativeRunnerExecutor::new(platform.os.clone(), materializer, placement_store)
+                    .map_err(|_| DaemonError::NativeExecutor)?,
+            ))
+        }
+        NodeExecutionConfig::Container {
+            adapter_program,
+            adapter_timeout,
+        } => {
+            let adapter = ProcessContainerAdapter::new(adapter_program, *adapter_timeout)
+                .map_err(|_| DaemonError::ContainerAdapter)?;
+            NodeExecutor::Container(ContainerRunnerExecutor::new(adapter, placement_store))
+        }
+    };
+    let execution_backend = executor.execution_backend();
+    let capabilities = executor.capabilities();
 
     let mut available = config.resources;
     let reserved = executor
@@ -106,8 +129,8 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
         generation,
         os: platform.os,
         arch: platform.arch,
-        execution_backends: BTreeSet::from([ExecutionBackend::NativeProcess]),
-        capabilities: BTreeSet::from(["github-actions".into(), "native-process".into()]),
+        execution_backends: BTreeSet::from([execution_backend]),
+        capabilities,
         total: config.resources,
         available,
         draining: false,

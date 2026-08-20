@@ -50,11 +50,12 @@ The exact offer being converted into a placement is excluded from the final comm
 - mTLS connection to the controller;
 - resource and active-placement reporting;
 - idempotent command processing;
-- durable placement intent/spawn/terminal state;
+- durable placement intent/runtime/terminal state with portable native-process or container identity;
 - native runner materialization and lifecycle;
-- file-backed stdout/stderr logs;
+- controller-approved container execution through a bounded local adapter process;
+- file-backed native stdout/stderr logs;
 - durable terminal-report outbox;
-- durable resource accounting and restarted-PID recovery.
+- durable resource accounting plus restarted-PID and container-ID recovery.
 
 The node never persists the JIT descriptor.
 
@@ -79,10 +80,10 @@ Assigned offers do not expire while a handle is in flight. Free offers may expir
 1. Controller records a durable placement and enqueues a fenced `start_placement` command.
 2. Node heartbeat receives at most one pending command in the response.
 3. Node validates protocol, certificate-bound identity, generation, TTL, and idempotency.
-4. Node records placement intent before process creation.
-5. Node materializes a private runner directory and launches with JIT in `ACTIONS_RUNNER_INPUT_JITCONFIG` only.
-6. Node records the spawned PID before ACKing accepted.
-7. Runner exit is durable before being reported.
+4. Node records placement intent before local runtime creation.
+5. The configured backend executes the already-approved placement: native mode materializes a private runner and launches with JIT only in `ACTIONS_RUNNER_INPUT_JITCONFIG`; container mode sends a bounded request and JIT descriptor to the local adapter only over stdin.
+6. Node records the runtime identity before ACKing accepted: PID + process birth token for native runners, immutable container ID for containers.
+7. Runtime exit/loss is durable before being reported.
 8. Terminal report remains pending until controller acceptance.
 
 ## Restart and ambiguity behavior
@@ -94,8 +95,8 @@ Assigned offers do not expire while a handle is in flight. Free offers may expir
 - **Controller loss:** no new placements; already-running node runners continue.
 - **Lost command ACK:** node replays the original accepted/rejected outcome.
 - **Lost terminal response:** durable terminal outbox retries.
-- **Crash after local placement intent but before known spawn:** treated as uncertain and never auto-respawned.
-- **Dead durable PID after node restart:** becomes `runner_process_lost` terminal state.
+- **Crash after local placement intent but before known runtime:** native mode stays uncertain and never auto-respawns; container mode first inspects by placement identity and retries start only after the adapter explicitly proves the runtime absent.
+- **Dead durable runtime after node restart:** a missing native PID becomes `runner_process_lost`; a previously identified but absent container becomes `container_lost`.
 - **GitHub JIT ambiguity:** the adapter never retries the one-shot GitHub issue call unless it has an already-fsynced cached descriptor to replay.
 
 ## Storage and caches
@@ -104,6 +105,6 @@ Controller placement state and scale-set sequence state use private atomic files
 
 Node-local terminal state is retained through controller acknowledgement and the current node generation. On a later generation, acknowledged terminal directories move atomically into a sibling quarantine and are deleted resumably; unexpected quarantine contents fail closed.
 
-The legacy Unraid backend now has an explicit container-runtime boundary in `runner-runtime.sh`. Classic fixed runners, scale-set JIT runners, and manual recycle all use the same prepared-container launch and remove primitives. Admission, fleet locks, resource reservations, GitHub registration/JIT state, credential FIFO handoff, identity validation, and cache policy remain in their existing higher-level shell modules. Registry-mirror lifecycle and validation probes are intentionally outside the runner runtime boundary. This preserves the current single-host default while providing one container mutation seam for future distributed/container adapters.
+The legacy Unraid backend now has an explicit container-runtime boundary in `runner-runtime.sh`. Classic fixed runners, scale-set JIT runners, and manual recycle all use the same prepared-container launch and remove primitives. Admission, fleet locks, resource reservations, GitHub registration/JIT state, credential FIFO handoff, identity validation, and cache policy remain in their existing higher-level shell modules. Registry-mirror lifecycle and validation probes are intentionally outside the runner runtime boundary. The portable node side now has a strict bounded container-adapter client/executor and explicit backend selection; the remaining bridge is a local Unraid shell adapter endpoint that translates controller-approved placement requests into this shared runtime boundary without re-running scheduling/admission or owning GitHub JIT retirement.
 
 Workspaces and mutable package caches remain node-local. Cross-node compiler reuse should use concurrency-safe services such as Kache/sccache. Docker image sharing should use a registry mirror rather than a shared writable Docker filesystem.

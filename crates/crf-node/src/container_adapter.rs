@@ -398,8 +398,12 @@ mod tests {
             ProcessContainerAdapter::new("relative-helper", Duration::from_secs(1)).unwrap_err(),
             ContainerAdapterError::InvalidProgram
         );
+        #[cfg(windows)]
+        let absolute_program = r"C:\crf-test\adapter.exe";
+        #[cfg(not(windows))]
+        let absolute_program = "/bin/true";
         assert_eq!(
-            ProcessContainerAdapter::new("/bin/true", Duration::from_millis(1)).unwrap_err(),
+            ProcessContainerAdapter::new(absolute_program, Duration::from_millis(1)).unwrap_err(),
             ContainerAdapterError::InvalidTimeout
         );
     }

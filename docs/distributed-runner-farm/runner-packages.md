@@ -1,6 +1,13 @@
-# Portable Node Runner Packages
+# Portable Node Execution Backends and Runner Packages
 
-`crf-node` supports two mutually exclusive runner-template sources.
+`crf-node` defaults to the `native_process` execution backend for backward compatibility. Native mode supports two mutually exclusive runner-template sources described below.
+
+## Execution backend selection
+
+- Omit `CRF_EXECUTION_BACKEND` or set it to `native_process` to use the existing per-placement native runner materialization path. Native mode requires `CRF_RUNTIME_DIR`, `CRF_LOG_DIR`, and exactly one runner source.
+- Set `CRF_EXECUTION_BACKEND=container` to use a controller-approved local container adapter. Container mode requires `CRF_CONTAINER_ADAPTER_PROGRAM=/absolute/path/to/adapter`; `CRF_CONTAINER_ADAPTER_TIMEOUT_MS` defaults to 15000 and is bounded to 100..120000 ms. Native runner-template/runtime/log settings are not required.
+
+The container adapter is an execution boundary, not a scheduler. The controller remains authoritative for placement/resource admission. The adapter receives placement identity, pool, resource claim, runner name, and JIT descriptor over bounded JSON stdin; the JIT descriptor is never placed in adapter argv or environment. Start recovery inspects by placement identity before any retry, and exact immutable container IDs are persisted for cancellation and liveness checks.
 
 ## Staged template
 

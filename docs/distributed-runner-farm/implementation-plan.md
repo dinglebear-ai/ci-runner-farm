@@ -67,6 +67,8 @@
 ## Phase 5: existing Unraid integration
 
 - [x] Extract current local Docker/JIT container mutation mechanics behind `runner-runtime.sh`; classic registration, scale-set JIT, recycle, graceful stop/remove, and force-remove now share one Docker runtime boundary while policy/locks/secrets remain above it.
+- [x] Add portable `crf-node` container runtime identity, bounded stdin/stdout adapter client, crash-safe start/inspect/cancel executor, and explicit `native_process`/`container` daemon backend selection.
+- [ ] Add the local Unraid adapter endpoint that maps controller-approved placement requests onto `runner-runtime.sh` without duplicating scheduling/admission or GitHub JIT retirement authority.
 - [ ] Preserve single-host behavior as the local-node backend.
 - [ ] Map legacy pool policy and resource configuration into distributed pool policy.
 - [ ] Add distributed node status/configuration to API and UI.
