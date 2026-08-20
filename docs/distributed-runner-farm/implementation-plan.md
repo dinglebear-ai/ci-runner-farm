@@ -70,7 +70,7 @@
 - [x] Add portable `crf-node` container runtime identity, bounded stdin/stdout adapter client, crash-safe start/inspect/cancel executor, and explicit `native_process`/`container` daemon backend selection.
 - [x] Add the local Unraid adapter endpoint that maps controller-approved placement requests onto `runner-runtime.sh` without duplicating scheduling/admission or GitHub JIT retirement authority.
 - [ ] Preserve single-host behavior as the local-node backend.
-- [ ] Map legacy pool policy and resource configuration into distributed pool policy.
+- [x] Map validated legacy single-fleet and V2 Unraid pool/resource configuration into strict distributed controller pool-policy JSON without enabling distributed mode.
 - [ ] Add distributed node status/configuration to API and UI.
 - [ ] Add migration/default behavior so existing installs remain unchanged unless distributed mode is enabled.
 

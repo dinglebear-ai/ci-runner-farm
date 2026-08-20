@@ -5184,6 +5184,7 @@ case "${1:-status}" in
   prewarm)          with_fleet_lock wait scheduler_prewarm_guarded "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
   distributed-adapter) distributed_adapter_locked ;;
+  distributed-pools-json) pool_distributed_policies_json "${2:-x86_64}" ;;
   jit-reconcile)    with_fleet_lock wait jit_reconcile ;;
   begin-migration)  with_fleet_lock wait migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   continue-migration) with_fleet_lock wait migration_continue_guarded ;;

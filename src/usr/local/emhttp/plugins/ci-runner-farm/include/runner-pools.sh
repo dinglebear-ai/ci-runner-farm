@@ -437,6 +437,27 @@ pool_capacity_ceiling() {
   [ "$value" = auto ] && value="$POOL_HARD_MAX"
   printf '%s\n' "$value"
 }
+
+# Render the validated local pool snapshot in the controller's strict
+# demand.pools schema. This is deliberately a read-only translation boundary:
+# it neither enables distributed mode nor starts a controller/node service.
+pool_distributed_policies_json() {
+  local arch="${1:-x86_64}" rec id ceiling cpu memory first=1
+  case "$arch" in x86_64|arm64) ;; *) return 1 ;; esac
+  pool_snapshot_load || return 1
+  printf '['
+  while IFS= read -r rec; do
+    id="${rec%%|*}"
+    ceiling="$(pool_capacity_ceiling "$id")" || return 1
+    cpu="$(pool_cpu_milli "$id")" || return 1
+    memory="$(pool_memory_bytes "$id")" || return 1
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"id":"%s","max_concurrency":%s,"resources":{"cpu_millis":%s,"memory_bytes":%s},"required_os":"linux","required_arch":"%s","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"}' \
+      "$id" "$ceiling" "$cpu" "$memory" "$arch"
+  done < <(pool_records)
+  printf ']\n'
+}
 pool_idle() {
   pool_snapshot_load || return 1
   if pool_is_v2; then pool_field "$1" 7; else pool_field "$1" 5; fi

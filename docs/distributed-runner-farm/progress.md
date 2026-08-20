@@ -26,6 +26,7 @@ Last updated: 2026-08-20
 - Bounded container-adapter client checkpoint: `b46646ef928ed2f28cde14b966040e8d57ee7ab9`; 7/7 adapter behavior tests prove stdin-only JIT delivery, bounded typed output, oversized-response rejection, and timeout process-tree containment.
 - Controller-approved container executor checkpoint: `f1684b9d50fe4c0b85e88a975225c163e44f9cc8`; crash adoption, exact-ID cancellation, uncertain start, lost-container reporting, and cross-backend identity preservation are covered.
 - Current implementation checkpoint: the local Unraid adapter endpoint maps controller-approved Start/Inspect/Cancel requests onto `runner-runtime.sh`, with private crash-recovery state, exact container identity fencing, local resource/config validation, and no duplicate scheduler or GitHub JIT-retirement authority.
+- Unraid pool-policy mapping: validated legacy single-fleet or V2 pool configuration exports as the controller's exact typed `demand.pools` JSON for x86_64/arm64 container nodes; export is read-only and never enables distributed mode.
 - Deployment: not deployed; existing Unraid production behavior remains untouched
 - Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **105 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
@@ -124,7 +125,7 @@ The implemented path is:
 ## Remaining major work
 
 1. Add automated CA/server-certificate rotation, additional target-distribution Linux bundles, and Windows service packaging.
-2. Complete live Unraid validation and opt-in configuration/migration for the local container adapter while keeping legacy single-host behavior as the default.
+2. Complete live Unraid validation and opt-in node/controller service configuration for the local container adapter while keeping legacy single-host behavior as the default; pool/resource mapping is implemented.
 3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
 4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
 5. Add longer-horizon controller replay-fence archival/segmentation beyond the current bounded 65,536-record/16 MiB state file if operational scale requires it; node GC and controller hot-state compaction are implemented. Then move into the Unraid runtime abstraction and live GitHub multi-node smoke matrix.

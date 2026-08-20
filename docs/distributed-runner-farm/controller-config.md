@@ -66,6 +66,8 @@ Every pool declares:
 
 The controller translates this boundary once into `PoolPolicy` values consumed by the Rust scheduler.
 
+On an Unraid node, `runner-farm.sh distributed-pools-json [x86_64|arm64]` renders the currently validated single-fleet or V2 pool snapshot as this exact JSON array. The export is read-only and selects the local `container` backend; it does not create a controller configuration, enable distributed mode, or start services. Operators insert the resulting array as `demand.pools` in the private controller configuration and review it before activation.
+
 ## Startup ordering
 
 Configured distributed startup is deliberately fail-fast and ordered:
