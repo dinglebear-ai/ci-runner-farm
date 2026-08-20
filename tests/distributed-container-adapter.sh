@@ -280,6 +280,13 @@ crf_assert_contains "$reply" 'state_corrupt' 'tampered derived state identity di
 grep -Fq '. "$SCRIPT_DIR/runner-distributed-adapter.sh"' "$ENGINE" || crf_fail 'runner farm does not source distributed adapter'
 grep -Fq 'distributed-adapter) distributed_adapter_locked' "$ENGINE" || crf_fail 'runner farm dispatch is missing distributed adapter'
 grep -Fq 'exec bash "$SCRIPT_DIR/runner-farm.sh" distributed-adapter' "$WRAPPER" || crf_fail 'adapter wrapper does not use internal dispatch'
+if grep -Eq '^DISTRIBUTED_|^CRF_(CONTROLLER|EXECUTION_BACKEND|CONTAINER_ADAPTER)' src/usr/local/emhttp/plugins/ci-runner-farm/default.cfg; then
+  crf_fail 'distributed mode was added to the legacy default configuration'
+fi
+grep -Fq 'Omit `CRF_EXECUTION_BACKEND` or set it to `native_process`' docs/distributed-runner-farm/runner-packages.md ||
+  crf_fail 'backward-compatible native node default is undocumented'
+grep -Fq 'If the variable is absent or empty, the controller preserves the legacy/minimal startup path.' docs/distributed-runner-farm/controller-config.md ||
+  crf_fail 'backward-compatible controller startup default is undocumented'
 [ -x "$WRAPPER" ] || crf_fail 'source adapter wrapper is not executable'
 php -l "$PARSER" >/dev/null
 bash -n "$ADAPTER" "$WRAPPER" "$ENGINE"
