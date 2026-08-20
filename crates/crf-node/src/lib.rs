@@ -7,6 +7,7 @@ pub mod command_ledger;
 pub mod command_processor;
 pub mod config;
 pub mod container_adapter;
+pub mod container_executor;
 pub mod controller_endpoint;
 pub mod daemon;
 pub mod generation;

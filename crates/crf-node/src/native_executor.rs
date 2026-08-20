@@ -163,17 +163,11 @@ impl NativeRunnerExecutor {
             let process = match runtime {
                 RuntimeIdentity::NativeProcess { process } => process,
                 RuntimeIdentity::Container { .. } => {
-                    let outcome = TerminalOutcome::Failed {
-                        detail_code: "runtime_identity_mismatch".into(),
-                    };
-                    self.store
-                        .record_terminal(&placement_id, outcome.clone())
-                        .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?;
-                    completed.push(PlacementProcessUpdate {
-                        placement_id,
-                        outcome,
-                    });
-                    continue;
+                    // Backend transitions must never let the native executor declare
+                    // a potentially live container dead. Preserve the durable state
+                    // and fail closed so an operator/controller can reconcile it with
+                    // the correct runtime backend.
+                    return Err(NativeExecutorError::PlacementStateUnavailable);
                 }
             };
             if self.system.process_matches(process) {
