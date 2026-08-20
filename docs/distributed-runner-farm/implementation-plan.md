@@ -82,6 +82,7 @@
 - [x] Native Windows MSVC CI run from PR #37.
 - [ ] Live Linux node smoke.
 - [ ] Live Windows node smoke.
+- [x] Live Windows SCM install, mTLS registration, controller restart/reconnect, node restart generation fencing, drain/undrain, and authorization revoke/restore smoke.
 - [ ] Real GitHub scale-set two-node smoke.
 - [ ] Controller/node restart and network-partition matrix.
 - [ ] Resource fragmentation/oversubscription/fairness matrix at sustained load.
