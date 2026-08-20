@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::process_identity::ProcessIdentity;
 
 const SCHEMA_VERSION: u8 = 1;
+const SPAWNED_SCHEMA_VERSION: u8 = 2;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 const MAX_PLACEMENTS: usize = 4096;
 const MAX_GC_SCAN_PLACEMENTS: usize = 65_536;
@@ -28,7 +29,7 @@ pub struct PlacementStore {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalPlacementState {
     IntentOnly,
-    Spawned { process: ProcessIdentity },
+    Spawned { runtime: RuntimeIdentity },
     Terminal { outcome: TerminalOutcome },
 }
 
@@ -78,8 +79,22 @@ struct IntentRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeIdentity {
+    NativeProcess { process: ProcessIdentity },
+    Container { id: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnedRecord {
+    schema_version: u8,
+    runtime: RuntimeIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySpawnedRecord {
     schema_version: u8,
     process: ProcessIdentity,
 }
@@ -103,6 +118,46 @@ struct GcRecord {
     schema_version: u8,
     placement_id: String,
     node_generation: u64,
+}
+
+fn validate_runtime_identity(runtime: &RuntimeIdentity) -> Result<(), PlacementStoreError> {
+    match runtime {
+        RuntimeIdentity::NativeProcess { process }
+            if process.pid != 0 && process.start_token != 0 =>
+        {
+            Ok(())
+        }
+        RuntimeIdentity::Container { id } if valid_identifier(id) => Ok(()),
+        _ => Err(PlacementStoreError::CorruptState),
+    }
+}
+
+fn read_runtime_identity(path: &Path) -> Result<RuntimeIdentity, PlacementStoreError> {
+    let value: serde_json::Value = read_json(path)?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(PlacementStoreError::CorruptState)?;
+    let runtime = match version {
+        1 => {
+            let legacy: LegacySpawnedRecord =
+                serde_json::from_value(value).map_err(|_| PlacementStoreError::CorruptState)?;
+            RuntimeIdentity::NativeProcess {
+                process: legacy.process,
+            }
+        }
+        2 => {
+            let record: SpawnedRecord =
+                serde_json::from_value(value).map_err(|_| PlacementStoreError::CorruptState)?;
+            if record.schema_version != SPAWNED_SCHEMA_VERSION {
+                return Err(PlacementStoreError::CorruptState);
+            }
+            record.runtime
+        }
+        _ => return Err(PlacementStoreError::CorruptState),
+    };
+    validate_runtime_identity(&runtime)?;
+    Ok(runtime)
 }
 
 impl PlacementStore {
@@ -167,13 +222,19 @@ impl PlacementStore {
         placement_id: &str,
         process: ProcessIdentity,
     ) -> Result<(), PlacementStoreError> {
-        if process.pid == 0 || process.start_token == 0 {
-            return Err(PlacementStoreError::CorruptState);
-        }
+        self.record_runtime_started(placement_id, RuntimeIdentity::NativeProcess { process })
+    }
+
+    pub fn record_runtime_started(
+        &self,
+        placement_id: &str,
+        runtime: RuntimeIdentity,
+    ) -> Result<(), PlacementStoreError> {
+        validate_runtime_identity(&runtime)?;
         let directory = self.placement_directory(placement_id)?;
         let record = SpawnedRecord {
-            schema_version: SCHEMA_VERSION,
-            process,
+            schema_version: SPAWNED_SCHEMA_VERSION,
+            runtime,
         };
         write_idempotent_json(&directory.join("spawned.json"), &record)?;
         sync_directory(&directory)
@@ -212,15 +273,8 @@ impl PlacementStore {
 
         let spawned_path = directory.join("spawned.json");
         if spawned_path.exists() {
-            let spawned: SpawnedRecord = read_json(&spawned_path)?;
-            if spawned.schema_version != SCHEMA_VERSION
-                || spawned.process.pid == 0
-                || spawned.process.start_token == 0
-            {
-                return Err(PlacementStoreError::CorruptState);
-            }
             return Ok(LocalPlacementState::Spawned {
-                process: spawned.process,
+                runtime: read_runtime_identity(&spawned_path)?,
             });
         }
 
@@ -526,13 +580,7 @@ fn validate_gc_candidate(
     }
     validate_terminal_outcome(&terminal.outcome)?;
     if names.contains("spawned.json") {
-        let spawned: SpawnedRecord = read_json(&directory.join("spawned.json"))?;
-        if spawned.schema_version != SCHEMA_VERSION
-            || spawned.process.pid == 0
-            || spawned.process.start_token == 0
-        {
-            return Err(PlacementStoreError::CorruptState);
-        }
+        read_runtime_identity(&directory.join("spawned.json"))?;
     }
     Ok(intent)
 }
@@ -824,6 +872,66 @@ mod tests {
     }
 
     #[test]
+    fn legacy_spawned_v1_reads_as_native_runtime_identity() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        let process = process_identity(4242);
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "process": {
+                "pid": process.pid,
+                "start_token": process.start_token
+            }
+        });
+        fs::write(
+            directory.0.join("placement-1/spawned.json"),
+            serde_json::to_vec(&legacy).expect("legacy json"),
+        )
+        .expect("legacy spawned state");
+
+        assert_eq!(
+            store.inspect("placement-1"),
+            Ok(LocalPlacementState::Spawned {
+                runtime: RuntimeIdentity::NativeProcess { process },
+            })
+        );
+    }
+
+    #[test]
+    fn container_runtime_identity_round_trips() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        let runtime = RuntimeIdentity::Container {
+            id: "container-0123456789abcdef".into(),
+        };
+        store
+            .record_runtime_started("placement-1", runtime.clone())
+            .expect("container runtime");
+        assert_eq!(
+            store.inspect("placement-1"),
+            Ok(LocalPlacementState::Spawned { runtime })
+        );
+    }
+
+    #[test]
+    fn invalid_container_runtime_identity_is_rejected() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+        store.begin(&command("jit-config-abc123==")).expect("begin");
+        assert_eq!(
+            store.record_runtime_started(
+                "placement-1",
+                RuntimeIdentity::Container {
+                    id: "../not-a-container".into(),
+                },
+            ),
+            Err(PlacementStoreError::CorruptState)
+        );
+    }
+
+    #[test]
     fn phase_files_form_monotonic_local_state() {
         let directory = TestDirectory::new();
         let store = PlacementStore::new(&directory.0).expect("store");
@@ -839,7 +947,9 @@ mod tests {
         assert_eq!(
             store.inspect("placement-1"),
             Ok(LocalPlacementState::Spawned {
-                process: process_identity(4242),
+                runtime: RuntimeIdentity::NativeProcess {
+                    process: process_identity(4242),
+                },
             })
         );
 

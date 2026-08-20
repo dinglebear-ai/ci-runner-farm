@@ -8,7 +8,8 @@ use crate::{
     command_processor::{CommandExecutor, ExecutionResult},
     native_materializer::{MaterializerError, RunnerMaterializer},
     placement_state::{
-        LocalPlacementState, PlacementStore, PlacementStoreError, TerminalOutcome, TerminalReport,
+        LocalPlacementState, PlacementStore, PlacementStoreError, RuntimeIdentity, TerminalOutcome,
+        TerminalReport,
     },
     process_identity::ProcessIdentity,
     process_tree::ManagedProcess,
@@ -152,12 +153,28 @@ impl NativeRunnerExecutor {
             if self.children.contains_key(&placement_id) {
                 continue;
             }
-            let LocalPlacementState::Spawned { process } = self
+            let LocalPlacementState::Spawned { runtime } = self
                 .store
                 .inspect(&placement_id)
                 .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?
             else {
                 continue;
+            };
+            let process = match runtime {
+                RuntimeIdentity::NativeProcess { process } => process,
+                RuntimeIdentity::Container { .. } => {
+                    let outcome = TerminalOutcome::Failed {
+                        detail_code: "runtime_identity_mismatch".into(),
+                    };
+                    self.store
+                        .record_terminal(&placement_id, outcome.clone())
+                        .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?;
+                    completed.push(PlacementProcessUpdate {
+                        placement_id,
+                        outcome,
+                    });
+                    continue;
+                }
             };
             if self.system.process_matches(process) {
                 continue;
