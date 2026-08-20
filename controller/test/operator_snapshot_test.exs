@@ -1,7 +1,15 @@
 defmodule CrfController.OperatorSnapshotTest do
   use ExUnit.Case, async: true
 
-  alias CrfController.{NodeRegistry, OfferLedger, OperatorSnapshot, PeerRegistry, PlacementLedger}
+  alias CrfController.{
+    DemandCoordinator,
+    NodeRegistry,
+    OfferLedger,
+    OperatorSnapshot,
+    PeerRegistry,
+    PlacementLedger,
+    PoolPolicy
+  }
 
   test "returns a deterministic secret-free controller view" do
     {:ok, nodes} = start_supervised({NodeRegistry, name: nil})
@@ -90,5 +98,42 @@ defmodule CrfController.OperatorSnapshotTest do
     assert snapshot.placements == []
     assert snapshot.demand == nil
     assert snapshot.peer_authorization == nil
+  end
+
+  test "renders the list-backed orphan status returned by the production coordinator" do
+    {:ok, policy} =
+      PoolPolicy.new(%{
+        id: "acceptance",
+        max_concurrency: 1,
+        resources: %{cpu_millis: 1_000, memory_bytes: 1_073_741_824},
+        required_os: :windows,
+        required_arch: :x86_64,
+        required_backend: :native_process,
+        required_capabilities: ["github-actions"],
+        work_folder: "_work"
+      })
+
+    {:ok, demand} =
+      start_supervised(
+        {DemandCoordinator,
+         name: nil,
+         policies: [policy],
+         scale_set_client: self(),
+         scheduler_client: self(),
+         auto_reconcile: false}
+      )
+
+    snapshot =
+      OperatorSnapshot.snapshot(%{
+        nodes: nil,
+        offers: nil,
+        placements: nil,
+        demand: demand,
+        peers: nil,
+        sidecar: nil
+      })
+
+    assert snapshot.demand.orphaned_placements == []
+    assert snapshot.demand.pools == ["acceptance"]
   end
 end

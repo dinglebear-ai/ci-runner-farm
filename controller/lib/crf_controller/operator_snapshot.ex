@@ -104,7 +104,7 @@ defmodule CrfController.OperatorSnapshot do
       auto_reconcile: status.auto_reconcile,
       reconcile_interval_ms: status.reconcile_interval_ms,
       placement_loss_grace_ms: status.placement_loss_grace_ms,
-      orphaned_placements: status.orphaned_placements |> MapSet.to_list() |> Enum.sort(),
+      orphaned_placements: Enum.sort(status.orphaned_placements),
       last_reconcile_unix_ms: status.last_reconcile_unix_ms,
       pools: status.pools
     }
