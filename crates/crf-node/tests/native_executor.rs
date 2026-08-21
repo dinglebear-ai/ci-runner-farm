@@ -354,6 +354,43 @@ fn in_tree_symlink_in_runner_template_is_preserved() {
 
 #[cfg(unix)]
 #[test]
+fn read_only_directories_in_runner_template_are_materialized() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let roots = TestRoots::new(false);
+    let read_only = roots.template.join("read-only");
+    std::fs::create_dir(&read_only).expect("read-only directory");
+    std::fs::write(read_only.join("payload"), b"runner payload").expect("payload");
+    std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o555))
+        .expect("read-only mode");
+
+    let materializer = RunnerMaterializer::new(
+        roots.os.clone(),
+        &roots.template,
+        &roots.runtime,
+        &roots.logs,
+    )
+    .expect("materializer");
+    let runner_root = materializer
+        .prepare("placement-read-only")
+        .expect("prepare");
+
+    assert_eq!(
+        std::fs::read(runner_root.join("read-only/payload")).expect("materialized payload"),
+        b"runner payload"
+    );
+    assert_eq!(
+        std::fs::metadata(runner_root.join("read-only"))
+            .expect("materialized directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o555
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn escaping_symlink_in_runner_template_fails_before_process_creation() {
     use std::os::unix::fs::symlink;
 
