@@ -4,6 +4,7 @@ defmodule CrfController.ScaleSetClient do
   alias CrfController.{Identifier, ScaleSetSequence, ScaleSetTransport, ScaleSetWire}
 
   @default_timeout_ms 30_000
+  @call_timeout_ms 125_000
 
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -12,41 +13,38 @@ defmodule CrfController.ScaleSetClient do
   end
 
   def read_snapshot(server \\ __MODULE__),
-    do: GenServer.call(server, {:call, "read_snapshot", %{}})
+    do: call(server, "read_snapshot", %{})
 
   def read_jit_state(server \\ __MODULE__),
-    do: GenServer.call(server, {:call, "read_jit_state", %{}})
+    do: call(server, "read_jit_state", %{})
 
   def issue_jit(server \\ __MODULE__, pool_id, work_handle, runner_name, work_folder) do
-    GenServer.call(
-      server,
-      {:call, "issue_jit",
-       %{
-         "pool_id" => pool_id,
-         "work_handle" => work_handle,
-         "runner_name" => runner_name,
-         "work_folder" => work_folder
-       }}
-    )
+    call(server, "issue_jit", %{
+      "pool_id" => pool_id,
+      "work_handle" => work_handle,
+      "runner_name" => runner_name,
+      "work_folder" => work_folder
+    })
   end
 
   def retire_jit(server \\ __MODULE__, pool_id, work_handle) do
-    GenServer.call(
-      server,
-      {:call, "retire_jit", %{"pool_id" => pool_id, "work_handle" => work_handle}}
-    )
+    call(server, "retire_jit", %{"pool_id" => pool_id, "work_handle" => work_handle})
   end
 
   def publish_capacity_leases(server \\ __MODULE__, leases) when is_map(leases) do
-    GenServer.call(server, {:call, "publish_capacity_leases", %{"leases" => leases}})
+    call(server, "publish_capacity_leases", %{"leases" => leases})
   end
 
   def apply_sessions(server \\ __MODULE__, eligible) when is_boolean(eligible) do
-    GenServer.call(server, {:call, "apply_sessions", %{"eligible" => eligible}})
+    call(server, "apply_sessions", %{"eligible" => eligible})
   end
 
   def update_revisions(server \\ __MODULE__, config_revision, ownership_revision) do
     GenServer.call(server, {:update_revisions, config_revision, ownership_revision})
+  end
+
+  defp call(server, operation, payload) do
+    GenServer.call(server, {:call, operation, payload}, @call_timeout_ms)
   end
 
   @impl true

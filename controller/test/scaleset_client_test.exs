@@ -135,6 +135,44 @@ defmodule CrfController.ScaleSetClientTest do
     end
   end
 
+  test "public calls outlive the implicit five second GenServer timeout" do
+    if :os.type() |> elem(0) == :win32 do
+      assert true
+    else
+      path = socket_path()
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      :ok = :socket.listen(listener, 1)
+
+      server =
+        Task.async(fn ->
+          {:ok, socket} = :socket.accept(listener, 5_000)
+          request = recv_json(socket)
+          Process.sleep(5_100)
+          response = response_for(request)
+          :ok = :socket.send(socket, :json.encode(response) |> IO.iodata_to_binary(), 5_000)
+          :socket.close(socket)
+        end)
+
+      client =
+        start_supervised!(
+          {ScaleSetClient,
+           name: nil,
+           socket_path: path,
+           controller_instance_id: "controller-slow",
+           config_revision: @revision,
+           ownership_revision: @revision,
+           timeout_ms: 6_000}
+        )
+
+      assert {:ok, %{"applied" => true}} = ScaleSetClient.apply_sessions(client, true)
+      Task.await(server, 6_000)
+      :socket.close(listener)
+      File.rm(path)
+      File.rm(path <> ".sequence")
+    end
+  end
+
   defp response_for(%{"operation" => "apply_sessions", "request_id" => request_id}) do
     %{
       "schema_version" => 1,
