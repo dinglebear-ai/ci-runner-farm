@@ -11,7 +11,8 @@ defmodule CrfController.OperatorSnapshot do
     ScaleSetSidecar
   }
 
-  def snapshot(servers \\ %{}) when is_map(servers) do
+  def snapshot(servers \\ %{}, opts \\ []) when is_map(servers) and is_list(opts) do
+    now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
     nodes = call(Map.get(servers, :nodes, NodeRegistry), &NodeRegistry.snapshot/1, [])
     offers = call(Map.get(servers, :offers, OfferLedger), &OfferLedger.snapshot/1, [])
 
@@ -31,7 +32,7 @@ defmodule CrfController.OperatorSnapshot do
 
     %{
       schema_version: 1,
-      nodes: Enum.map(nodes, &node_view/1),
+      nodes: Enum.map(nodes, &node_view(&1, now_ms)),
       offers: Enum.map(offers, &offer/1),
       placements: Enum.map(placements, &placement/1),
       terminal_replay_fences: length(tombstones),
@@ -49,7 +50,7 @@ defmodule CrfController.OperatorSnapshot do
     :exit, _ -> fallback
   end
 
-  defp node_view(node) do
+  defp node_view(node, now_ms) do
     %{
       id: node.id,
       generation: node.generation,
@@ -61,7 +62,7 @@ defmodule CrfController.OperatorSnapshot do
       available: resources(node.available),
       active_placements: node.active_placements |> MapSet.to_list() |> Enum.sort(),
       draining: node.draining,
-      last_seen_ms: node.last_seen_ms
+      last_seen_age_ms: max(now_ms - node.last_seen_ms, 0)
     }
   end
 
@@ -111,5 +112,8 @@ defmodule CrfController.OperatorSnapshot do
   end
 
   defp sidecar(nil), do: nil
-  defp sidecar(status), do: Map.take(status, [:ready, :os_pid, :output_bytes, :started_at_ms])
+
+  defp sidecar(status) do
+    Map.take(status, [:ready, :os_pid, :output_bytes, :diagnostic_tail, :started_at_ms])
+  end
 end

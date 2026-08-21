@@ -1,9 +1,13 @@
 defmodule CrfController.ScaleSetSidecar do
   use GenServer
 
+  require Logger
+
   @default_startup_timeout_ms 15_000
   @max_startup_timeout_ms 120_000
   @shutdown_timeout_ms 2_000
+  @diagnostic_tail_bytes 4_096
+  @diagnostic_buffer_bytes @diagnostic_tail_bytes * 2
 
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -30,12 +34,14 @@ defmodule CrfController.ScaleSetSidecar do
          true <-
            is_integer(startup_timeout_ms) and startup_timeout_ms in 100..@max_startup_timeout_ms,
          {:ok, port} <- open_sidecar(executable, socket_path, compatibility, runtime_config),
-         :ok <- wait_ready(port, socket_path, startup_timeout_ms) do
+         {:ok, output_bytes, diagnostic_buffer} <-
+           wait_ready(port, socket_path, startup_timeout_ms) do
       {:ok,
        %{
          port: port,
          socket_path: socket_path,
-         output_bytes: 0,
+         output_bytes: output_bytes,
+         diagnostic_buffer: diagnostic_buffer,
          started_at_ms: System.monotonic_time(:millisecond)
        }}
     else
@@ -57,13 +63,22 @@ defmodule CrfController.ScaleSetSidecar do
        ready: File.exists?(state.socket_path) and not is_nil(Port.info(state.port)),
        os_pid: os_pid,
        output_bytes: state.output_bytes,
+       diagnostic_tail: bounded_diagnostic_tail(state.diagnostic_buffer),
        started_at_ms: state.started_at_ms
      }, state}
   end
 
   @impl true
   def handle_info({port, {:data, data}}, %{port: port} = state) when is_binary(data) do
-    {:noreply, %{state | output_bytes: state.output_bytes + byte_size(data)}}
+    diagnostic_buffer =
+      take_binary_tail(state.diagnostic_buffer <> data, @diagnostic_buffer_bytes)
+
+    {:noreply,
+     %{
+       state
+       | output_bytes: state.output_bytes + byte_size(data),
+         diagnostic_buffer: diagnostic_buffer
+     }}
   end
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
@@ -78,7 +93,7 @@ defmodule CrfController.ScaleSetSidecar do
 
   @impl true
   def terminate(_reason, state) do
-    stop_port(state.port)
+    report_cleanup(stop_port(state.port))
     :ok
   end
 
@@ -115,51 +130,68 @@ defmodule CrfController.ScaleSetSidecar do
 
   defp wait_ready(port, socket_path, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    wait_ready_until(port, socket_path, deadline)
+    wait_ready_until(port, socket_path, deadline, 0, "")
   end
 
-  defp wait_ready_until(port, socket_path, deadline) do
+  defp wait_ready_until(port, socket_path, deadline, output_bytes, diagnostic_buffer) do
     cond do
       is_nil(Port.info(port)) ->
         {:error, :scaleset_sidecar_exited}
 
       File.exists?(socket_path) ->
-        :ok
+        {:ok, output_bytes, diagnostic_buffer}
 
       System.monotonic_time(:millisecond) >= deadline ->
-        stop_port(port)
+        report_cleanup(stop_port(port))
         {:error, :scaleset_sidecar_start_timeout}
 
       true ->
         receive do
-          {^port, {:data, _data}} -> wait_ready_until(port, socket_path, deadline)
-          {^port, {:exit_status, status}} -> {:error, {:scaleset_sidecar_exit, status}}
-          {:EXIT, ^port, reason} -> {:error, {:scaleset_sidecar_port_exit, reason}}
+          {^port, {:data, data}} ->
+            wait_ready_until(
+              port,
+              socket_path,
+              deadline,
+              output_bytes + byte_size(data),
+              take_binary_tail(diagnostic_buffer <> data, @diagnostic_buffer_bytes)
+            )
+
+          {^port, {:exit_status, status}} ->
+            {:error, {:scaleset_sidecar_exit, status}}
+
+          {:EXIT, ^port, reason} ->
+            {:error, {:scaleset_sidecar_port_exit, reason}}
         after
-          20 -> wait_ready_until(port, socket_path, deadline)
+          20 -> wait_ready_until(port, socket_path, deadline, output_bytes, diagnostic_buffer)
         end
     end
   end
 
   defp stop_port(port) do
-    case Port.info(port, :os_pid) do
-      {:os_pid, pid} ->
-        _ = signal_process(pid, "-TERM")
+    failures =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} ->
+          failures = record_failure([], :term, signal_process(pid, "-TERM"))
 
-        case wait_port_exit(port, System.monotonic_time(:millisecond) + @shutdown_timeout_ms) do
-          :ok ->
-            :ok
+          case wait_port_exit(port, System.monotonic_time(:millisecond) + @shutdown_timeout_ms) do
+            :ok ->
+              failures
 
-          :timeout ->
-            _ = signal_process(pid, "-KILL")
-            _ = wait_port_exit(port, System.monotonic_time(:millisecond) + 500)
-        end
+            :timeout ->
+              failures
+              |> record_failure(:kill, signal_process(pid, "-KILL"))
+              |> record_failure(
+                :final_wait,
+                wait_port_exit(port, System.monotonic_time(:millisecond) + 500)
+              )
+          end
 
-      nil ->
-        :ok
-    end
+        nil ->
+          []
+      end
 
-    close_port(port)
+    failures = record_failure(failures, :port_close, close_port(port))
+    if failures == [], do: :ok, else: {:error, Enum.reverse(failures)}
   end
 
   defp wait_port_exit(port, deadline) do
@@ -204,9 +236,45 @@ defmodule CrfController.ScaleSetSidecar do
     if not is_nil(Port.info(port)), do: Port.close(port)
     :ok
   rescue
-    _ -> :ok
+    _ -> {:error, :port_close_failed}
   catch
-    _, _ -> :ok
+    _, _ -> {:error, :port_close_failed}
+  end
+
+  defp record_failure(failures, _operation, :ok), do: failures
+  defp record_failure(failures, operation, reason), do: [{operation, reason} | failures]
+
+  defp report_cleanup(:ok), do: :ok
+
+  defp report_cleanup({:error, failures}) do
+    Logger.warning("scale-set sidecar cleanup failed: #{inspect(failures)}")
+  end
+
+  defp bounded_diagnostic_tail(output) do
+    output
+    |> String.replace_invalid("")
+    |> redact_diagnostics()
+    |> take_binary_tail(@diagnostic_tail_bytes)
+  end
+
+  defp redact_diagnostics(output) do
+    output
+    |> String.replace(~r/(?i)\bBearer\s+[^\s]+/, "Bearer [REDACTED]")
+    |> String.replace(~r/\b(?:gh[opusr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/, "[REDACTED]")
+    |> String.replace(
+      ~r/(?i)\b(token|authorization|jit(?:_config)?)\s*[:=]\s*[^\s]+/,
+      "\\1=[REDACTED]"
+    )
+  end
+
+  defp take_binary_tail(output, max_bytes) when byte_size(output) <= max_bytes, do: output
+
+  defp take_binary_tail(output, max_bytes) do
+    offset = byte_size(output) - max_bytes
+
+    case output do
+      <<_::binary-size(^offset), tail::binary>> -> tail
+    end
   end
 
   defp regular_absolute(path, error) do

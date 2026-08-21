@@ -11,6 +11,14 @@ defmodule CrfController.OperatorSnapshotTest do
     PoolPolicy
   }
 
+  defmodule StatusServer do
+    use GenServer
+
+    def start_link(status), do: GenServer.start_link(__MODULE__, status)
+    def init(status), do: {:ok, status}
+    def handle_call(:status, _from, status), do: {:reply, status, status}
+  end
+
   test "returns a deterministic secret-free controller view" do
     {:ok, nodes} = start_supervised({NodeRegistry, name: nil})
     {:ok, offers} = start_supervised({OfferLedger, name: nil})
@@ -65,17 +73,29 @@ defmodule CrfController.OperatorSnapshotTest do
              )
 
     snapshot =
-      OperatorSnapshot.snapshot(%{
-        nodes: nodes,
-        offers: offers,
-        placements: placements,
-        peers: peers,
-        demand: nil,
-        sidecar: nil
-      })
+      OperatorSnapshot.snapshot(
+        %{
+          nodes: nodes,
+          offers: offers,
+          placements: placements,
+          peers: peers,
+          demand: nil,
+          sidecar: nil
+        },
+        now_ms: 175
+      )
 
     assert snapshot.schema_version == 1
-    assert [%{id: "unraid-1", execution_backends: [:container]}] = snapshot.nodes
+
+    assert [
+             %{
+               id: "unraid-1",
+               execution_backends: [:container],
+               last_seen_age_ms: 75
+             }
+           ] = snapshot.nodes
+
+    refute Map.has_key?(hd(snapshot.nodes), :last_seen_ms)
     assert [%{id: "offer-1", pool_id: "build"}] = snapshot.offers
     assert [%{id: "placement-1", state: :commanded}] = snapshot.placements
     assert snapshot.peer_authorization.peer_count == 1
@@ -84,9 +104,13 @@ defmodule CrfController.OperatorSnapshotTest do
   end
 
   test "reports optional processes as unavailable without failing the snapshot" do
+    dead_process = spawn(fn -> :ok end)
+    monitor = Process.monitor(dead_process)
+    assert_receive {:DOWN, ^monitor, :process, ^dead_process, :normal}
+
     snapshot =
       OperatorSnapshot.snapshot(%{
-        nodes: nil,
+        nodes: dead_process,
         offers: nil,
         placements: nil,
         demand: nil,
@@ -98,6 +122,41 @@ defmodule CrfController.OperatorSnapshotTest do
     assert snapshot.placements == []
     assert snapshot.demand == nil
     assert snapshot.peer_authorization == nil
+  end
+
+  test "projects only bounded sidecar operator fields" do
+    {:ok, sidecar} =
+      start_supervised(
+        {StatusServer,
+         %{
+           ready: true,
+           os_pid: 123,
+           output_bytes: 99,
+           diagnostic_tail: "safe diagnostic",
+           started_at_ms: 10,
+           internal_secret: "must-not-leak"
+         }}
+      )
+
+    snapshot =
+      OperatorSnapshot.snapshot(%{
+        nodes: nil,
+        offers: nil,
+        placements: nil,
+        demand: nil,
+        peers: nil,
+        sidecar: sidecar
+      })
+
+    assert snapshot.sidecar == %{
+             ready: true,
+             os_pid: 123,
+             output_bytes: 99,
+             diagnostic_tail: "safe diagnostic",
+             started_at_ms: 10
+           }
+
+    refute inspect(snapshot) =~ "must-not-leak"
   end
 
   test "renders the list-backed orphan status returned by the production coordinator" do
