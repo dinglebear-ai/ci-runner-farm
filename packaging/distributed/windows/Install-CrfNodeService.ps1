@@ -35,7 +35,9 @@ $requiredKeys = @(
 function Invoke-Native {
     param([Parameter(Mandatory = $true)][string] $Program, [Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
     & $Program @Arguments | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Program $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    }
 }
 
 function Assert-NoInjectedFailure {
@@ -125,13 +127,21 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
 
         $quotedBinaryPath = "`"$binaryPath`" --windows-service"
         if (-not $serviceExisted) {
-            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'create' $serviceName 'binPath=' $quotedBinaryPath 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
+            # Windows PowerShell 5.1 strips embedded quotes from native argv,
+            # making a Program Files binPath invalid. Create the stopped service
+            # with a no-space placeholder and set the exact ImagePath through
+            # the registry before it can be started.
+            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'create' $serviceName 'binPath=' "$env:SystemRoot\System32\cmd.exe" 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
         } else {
-            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'binPath=' $quotedBinaryPath 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
+            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
         }
+        Set-ItemProperty -LiteralPath $serviceKey -Name ImagePath -Value $quotedBinaryPath
         Invoke-Native "$env:SystemRoot\System32\sc.exe" 'description' $serviceName 'Distributed CI Runner Farm portable node'
         Assert-NoInjectedFailure 'service-config'
-        Invoke-Native "$env:SystemRoot\System32\sc.exe" 'failure' $serviceName 'reset=86400' 'actions=restart/5000/restart/15000/restart/60000'
+        # sc.exe requires a space between each option's trailing '=' and its
+        # value. Keeping them as separate argv entries works across Windows
+        # PowerShell and PowerShell 7; combining them exits with ERROR_INVALID_COMMAND_LINE (1639).
+        Invoke-Native "$env:SystemRoot\System32\sc.exe" 'failure' $serviceName 'reset=' '86400' 'actions=' 'restart/5000/restart/15000/restart/60000'
         Assert-NoInjectedFailure 'failure-policy'
 
         New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null
@@ -156,7 +166,8 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
             if ($null -ne $originalConfigAcl -and (Test-Path -LiteralPath $ConfigRoot)) { Set-Acl -LiteralPath $ConfigRoot -AclObject $originalConfigAcl }
 
             $startMode = switch ($serviceSnapshot.StartMode) { 'Auto' { 'auto' } 'Disabled' { 'disabled' } default { 'demand' } }
-            Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'binPath=' $serviceSnapshot.PathName 'start=' $startMode 'obj=' $serviceSnapshot.StartName
+            Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'start=' $startMode 'obj=' $serviceSnapshot.StartName
+            Set-ItemProperty -LiteralPath $serviceKey -Name ImagePath -Value ([string] $serviceRegistrySnapshot.ImagePath)
             Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'description' $serviceName ([string] $serviceSnapshot.Description)
             if ($failureActionsExisted) {
                 Set-ItemProperty -LiteralPath $serviceKey -Name FailureActions -Value ([byte[]] $serviceRegistrySnapshot.FailureActions)
