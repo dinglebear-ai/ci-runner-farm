@@ -136,6 +136,38 @@ defmodule CrfController.ScaleSetWireTest do
     assert {:error, :invalid_scaleset_snapshot} = ScaleSetWire.decode_snapshot(invalid, now)
   end
 
+  test "pool TTL covers GitHub long polls without widening the snapshot heartbeat" do
+    now = ~U[2026-08-18 23:15:00Z]
+    snapshot = snapshot(now)
+    [pool] = snapshot["pools"]
+    observed = DateTime.add(now, -1, :second)
+
+    long_poll_pool = %{
+      pool
+      | "observed_at" => DateTime.to_iso8601(observed),
+        "valid_until" => DateTime.to_iso8601(DateTime.add(observed, 90, :second))
+    }
+
+    assert {:ok, _} =
+             ScaleSetWire.decode_snapshot(%{snapshot | "pools" => [long_poll_pool]}, now)
+
+    overlong_pool = %{
+      long_poll_pool
+      | "valid_until" => DateTime.to_iso8601(DateTime.add(observed, 121, :second))
+    }
+
+    assert {:error, :invalid_scaleset_snapshot} =
+             ScaleSetWire.decode_snapshot(%{snapshot | "pools" => [overlong_pool]}, now)
+
+    stale_heartbeat = %{
+      snapshot
+      | "valid_until" => DateTime.to_iso8601(DateTime.add(observed, 31, :second))
+    }
+
+    assert {:error, :invalid_scaleset_snapshot} =
+             ScaleSetWire.decode_snapshot(stale_heartbeat, now)
+  end
+
   defp snapshot(now) do
     observed = DateTime.add(now, -1, :second)
     valid_until = DateTime.add(now, 10, :second)

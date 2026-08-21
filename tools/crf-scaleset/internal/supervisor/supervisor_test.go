@@ -124,12 +124,12 @@ func validSupervisorConfig() Config {
 		Pools: []Pool{{ID: "rust", ScaleSetID: 1}}}
 }
 
-func TestSupervisorDefaultDemandTTLMatchesControllerContract(t *testing.T) {
+func TestSupervisorDefaultDemandTTLCoversGitHubLongPoll(t *testing.T) {
 	s, err := New(validSupervisorConfig(), &staticPoller{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := s.cfg.DemandTTL, 30*time.Second; got != want {
+	if got, want := s.cfg.DemandTTL, 90*time.Second; got != want {
 		t.Fatalf("default demand TTL = %s, want %s", got, want)
 	}
 }

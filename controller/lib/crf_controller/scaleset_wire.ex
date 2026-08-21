@@ -131,7 +131,7 @@ defmodule CrfController.ScaleSetWire do
          sequence when is_integer(sequence) and sequence >= 0 <- result["sequence"],
          {:ok, observed_at} <- parse_time(result["observed_at"]),
          {:ok, valid_until} <- parse_time(result["valid_until"]),
-         :ok <- fresh(observed_at, valid_until, now),
+         :ok <- fresh(observed_at, valid_until, now, 30_000),
          {:ok, pools} <- decode_pools(result["pools"], now) do
       {:ok,
        %{
@@ -244,7 +244,7 @@ defmodule CrfController.ScaleSetWire do
 
   defp handles(_), do: {:error, :invalid_scaleset_snapshot}
 
-  defp fresh(observed_at, valid_until, now) do
+  defp fresh(observed_at, valid_until, now, max_ttl_ms) do
     cond do
       DateTime.compare(observed_at, DateTime.add(now, 5, :second)) == :gt ->
         {:error, :snapshot_from_future}
@@ -252,7 +252,7 @@ defmodule CrfController.ScaleSetWire do
       DateTime.compare(valid_until, now) != :gt ->
         {:error, :snapshot_expired}
 
-      DateTime.diff(valid_until, observed_at, :millisecond) > 30_000 ->
+      DateTime.diff(valid_until, observed_at, :millisecond) > max_ttl_ms ->
         {:error, :snapshot_ttl_too_long}
 
       true ->
@@ -261,7 +261,9 @@ defmodule CrfController.ScaleSetWire do
   end
 
   defp pool_fresh(%DateTime{year: 1}, _valid_until, _now), do: :ok
-  defp pool_fresh(observed_at, valid_until, now), do: fresh(observed_at, valid_until, now)
+
+  defp pool_fresh(observed_at, valid_until, now),
+    do: fresh(observed_at, valid_until, now, 120_000)
 
   defp parse_time(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
