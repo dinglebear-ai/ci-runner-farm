@@ -314,6 +314,13 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, after_timeout} = reconcile(ctx.demand, 90_100)
       assert after_timeout.reclaimed_idle_placements == 1
       assert NodeMailbox.size(ctx.mailbox) == 1
+      assert {:ok, cancelling} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert cancelling.updated_at_ms == 90_100
+      assert cancelling.detail_code == "idle_cancel_requested"
+
+      assert {:ok, pending} = reconcile(ctx.demand, 90_101)
+      assert pending.reclaimed_idle_placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 1
 
       assert {:ok, command} =
                NodeMailbox.next_for(ctx.mailbox, "dookie", 7, now_unix_ms: @now_unix_ms + 90_100)
