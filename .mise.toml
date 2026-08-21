@@ -1,0 +1,6 @@
+[tools]
+# Keep fresh worktrees on the same BEAM toolchain as the distributed-core CI
+# job. Without repository-local selections, the global mise shims cannot choose
+# an installed Erlang/Elixir pair and bundle builds fail when invoking `mix`.
+erlang = "29.0.5"
+elixir = "1.20.3-otp-29"
