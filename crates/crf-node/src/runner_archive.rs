@@ -47,7 +47,8 @@ pub fn validate_template_tree(root: &Path, os: &OperatingSystem) -> Result<(), R
     if !entrypoint_metadata.file_type().is_file() || entrypoint_metadata.file_type().is_symlink() {
         return Err(RunnerArchiveError::InvalidTemplate);
     }
-    scan_tree(root, 0, &mut Budget::default())
+    let canonical_root = fs::canonicalize(root).map_err(|_| RunnerArchiveError::InvalidTemplate)?;
+    scan_tree(root, &canonical_root, 0, &mut Budget::default())
 }
 
 pub fn freeze_tree(path: &Path) -> Result<(), RunnerArchiveError> {
@@ -62,16 +63,31 @@ fn extract_tar_gz(archive_path: &Path, destination: &Path) -> Result<(), RunnerA
 
     for entry in entries {
         let mut entry = entry.map_err(|_| RunnerArchiveError::Io)?;
-        budget.entry()?;
+        budget.entry().inspect_err(|error| {
+            eprintln!("runner archive entry budget exceeded: {error:?}");
+        })?;
         let entry_type = entry.header().entry_type();
-        if !entry_type.is_file() && !entry_type.is_dir() {
+        if !entry_type.is_file() && !entry_type.is_dir() && !entry_type.is_symlink() {
+            eprintln!("runner archive rejected entry type {entry_type:?}");
             return Err(RunnerArchiveError::UnsafeArchive);
         }
         let relative = entry
             .path()
             .map_err(|_| RunnerArchiveError::UnsafeArchive)?
             .into_owned();
-        validate_relative_path(&relative)?;
+        if entry_type.is_dir()
+            && relative
+                .components()
+                .all(|component| matches!(component, Component::CurDir))
+        {
+            continue;
+        }
+        validate_relative_path(&relative).inspect_err(|error| {
+            eprintln!(
+                "runner archive rejected path {}: {error:?}",
+                relative.display()
+            );
+        })?;
         let target = destination.join(relative);
 
         if entry_type.is_dir() {
@@ -79,12 +95,54 @@ fn extract_tar_gz(archive_path: &Path, destination: &Path) -> Result<(), RunnerA
             continue;
         }
 
+        if entry_type.is_symlink() {
+            let link_name = entry
+                .link_name()
+                .map_err(|_| RunnerArchiveError::UnsafeArchive)?
+                .ok_or(RunnerArchiveError::UnsafeArchive)?;
+            validate_symlink_target(
+                target
+                    .strip_prefix(destination)
+                    .map_err(|_| RunnerArchiveError::UnsafeArchive)?,
+                &link_name,
+            )
+            .inspect_err(|error| {
+                eprintln!(
+                    "runner archive rejected symlink {} -> {}: {error:?}",
+                    target.display(),
+                    link_name.display()
+                );
+            })?;
+            if let Some(parent) = target.parent() {
+                ensure_private_directory(parent).map_err(|_| RunnerArchiveError::Io)?;
+            }
+            create_symlink(&link_name, &target).inspect_err(|error| {
+                eprintln!(
+                    "runner archive could not create symlink {} -> {}: {error:?}",
+                    target.display(),
+                    link_name.display()
+                );
+            })?;
+            continue;
+        }
+
         let size = entry.size();
-        budget.bytes(size)?;
+        budget.bytes(size).inspect_err(|error| {
+            eprintln!(
+                "runner archive byte budget exceeded at {}: {error:?}",
+                target.display()
+            );
+        })?;
         if let Some(parent) = target.parent() {
             ensure_private_directory(parent).map_err(|_| RunnerArchiveError::Io)?;
         }
-        let mut output = secure_new_file(&target).map_err(|_| RunnerArchiveError::UnsafeArchive)?;
+        let mut output = secure_new_file(&target).map_err(|error| {
+            eprintln!(
+                "runner archive could not create {}: {error}",
+                target.display()
+            );
+            RunnerArchiveError::UnsafeArchive
+        })?;
         let copied = io::copy(&mut entry, &mut output).map_err(|_| RunnerArchiveError::Io)?;
         if copied != size {
             return Err(RunnerArchiveError::Io);
@@ -200,7 +258,54 @@ fn validate_relative_path(path: &Path) -> Result<(), RunnerArchiveError> {
     Ok(())
 }
 
-fn scan_tree(root: &Path, depth: usize, budget: &mut Budget) -> Result<(), RunnerArchiveError> {
+fn validate_symlink_target(link_path: &Path, link_target: &Path) -> Result<(), RunnerArchiveError> {
+    if link_target.as_os_str().is_empty() || link_target.is_absolute() {
+        return Err(RunnerArchiveError::UnsafeArchive);
+    }
+    let mut depth = link_path
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter(|c| matches!(c, Component::Normal(_)))
+                .count()
+        })
+        .unwrap_or(0);
+    for component in link_target.components() {
+        match component {
+            Component::Normal(_) => depth = depth.saturating_add(1),
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RunnerArchiveError::UnsafeArchive);
+            }
+        }
+        if depth > MAX_DEPTH {
+            return Err(RunnerArchiveError::UnsafeArchive);
+        }
+    }
+    if depth == 0 {
+        return Err(RunnerArchiveError::UnsafeArchive);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(link_target: &Path, target: &Path) -> Result<(), RunnerArchiveError> {
+    std::os::unix::fs::symlink(link_target, target).map_err(|_| RunnerArchiveError::UnsafeArchive)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_link_target: &Path, _target: &Path) -> Result<(), RunnerArchiveError> {
+    Err(RunnerArchiveError::UnsafeArchive)
+}
+
+fn scan_tree(
+    root: &Path,
+    canonical_root: &Path,
+    depth: usize,
+    budget: &mut Budget,
+) -> Result<(), RunnerArchiveError> {
     if depth > MAX_DEPTH {
         return Err(RunnerArchiveError::InvalidTemplate);
     }
@@ -213,14 +318,23 @@ fn scan_tree(root: &Path, depth: usize, budget: &mut Budget) -> Result<(), Runne
             fs::symlink_metadata(entry.path()).map_err(|_| RunnerArchiveError::InvalidTemplate)?;
         let kind = metadata.file_type();
         if kind.is_symlink() {
-            return Err(RunnerArchiveError::InvalidTemplate);
+            let resolved =
+                fs::canonicalize(entry.path()).map_err(|_| RunnerArchiveError::InvalidTemplate)?;
+            let resolved_metadata =
+                fs::metadata(&resolved).map_err(|_| RunnerArchiveError::InvalidTemplate)?;
+            if !resolved.starts_with(canonical_root) || !resolved_metadata.is_file() {
+                return Err(RunnerArchiveError::InvalidTemplate);
+            }
         }
         if kind.is_dir() {
-            scan_tree(&entry.path(), depth + 1, budget)?;
+            scan_tree(&entry.path(), canonical_root, depth + 1, budget)?;
         } else if kind.is_file() {
             budget
                 .bytes(metadata.len())
                 .map_err(|_| RunnerArchiveError::InvalidTemplate)?;
+        } else if kind.is_symlink() {
+            // The resolved target was checked above. Count only the directory
+            // entry so linked file contents are not charged twice.
         } else {
             return Err(RunnerArchiveError::InvalidTemplate);
         }
@@ -242,7 +356,7 @@ fn freeze(path: &Path, depth: usize) -> Result<(), RunnerArchiveError> {
     }
     let metadata = fs::symlink_metadata(path).map_err(|_| RunnerArchiveError::Io)?;
     if metadata.file_type().is_symlink() {
-        return Err(RunnerArchiveError::InvalidTemplate);
+        return Ok(());
     }
     if metadata.file_type().is_dir() {
         for entry in fs::read_dir(path).map_err(|_| RunnerArchiveError::Io)? {
@@ -329,4 +443,108 @@ fn set_readonly_file(path: &Path, metadata: &fs::Metadata) -> Result<(), io::Err
     let mut permissions = metadata.permissions();
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use flate2::{Compression, write::GzEncoder};
+    use std::{
+        io::Cursor,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "crf-runner-archive-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock after epoch")
+                    .as_nanos()
+            ));
+            fs::create_dir(&path).expect("create test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn append_file(builder: &mut tar::Builder<GzEncoder<File>>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, Cursor::new(bytes))
+            .expect("append file");
+    }
+
+    fn write_archive(root: &Path, link_target: &str) -> PathBuf {
+        let archive_path = root.join("runner.tar.gz");
+        let file = File::create(&archive_path).expect("create archive");
+        let encoder = GzEncoder::new(file, Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+
+        let mut root_header = tar::Header::new_gnu();
+        root_header.set_entry_type(tar::EntryType::Directory);
+        root_header.set_size(0);
+        root_header.set_mode(0o755);
+        root_header.set_cksum();
+        builder
+            .append_data(&mut root_header, "./", io::empty())
+            .expect("append root directory");
+        append_file(&mut builder, "./run.sh", b"#!/bin/sh\n");
+        append_file(&mut builder, "./lib/cli.js", b"console.log('ok');\n");
+
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Symlink);
+        link_header.set_size(0);
+        link_header.set_mode(0o777);
+        link_header.set_cksum();
+        builder
+            .append_link(&mut link_header, "./bin/cli", link_target)
+            .expect("append symlink");
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+        archive_path
+    }
+
+    #[test]
+    fn accepts_root_entry_and_in_tree_relative_symlink() {
+        let temp = TestDir::new();
+        let archive = write_archive(&temp.0, "../lib/cli.js");
+        let destination = temp.0.join("template");
+        fs::create_dir(&destination).expect("create destination");
+
+        extract_archive(&archive, &destination, ArchiveFormat::TarGz).expect("extract archive");
+        validate_template_tree(&destination, &OperatingSystem::Linux).expect("validate template");
+        assert_eq!(
+            fs::read_link(destination.join("bin/cli")).expect("read symlink"),
+            Path::new("../lib/cli.js")
+        );
+    }
+
+    #[test]
+    fn rejects_relative_symlink_that_escapes_template() {
+        let temp = TestDir::new();
+        let archive = write_archive(&temp.0, "../../../outside");
+        let destination = temp.0.join("template");
+        fs::create_dir(&destination).expect("create destination");
+
+        assert_eq!(
+            extract_archive(&archive, &destination, ArchiveFormat::TarGz),
+            Err(RunnerArchiveError::UnsafeArchive)
+        );
+    }
 }

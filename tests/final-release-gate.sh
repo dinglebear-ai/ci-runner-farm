@@ -158,6 +158,7 @@ for executable in \
   include/runner-farm.sh \
   include/runner-runtime.sh \
   include/runner-container-adapter.sh \
+  include/runner-distributed-adapter.sh \
   include/runner-entrypoint.sh \
   event/docker_started \
   event/stopping_docker \

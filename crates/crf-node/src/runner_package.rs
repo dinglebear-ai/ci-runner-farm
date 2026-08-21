@@ -74,18 +74,20 @@ impl RunnerFetcher for HttpRunnerFetcher {
         destination: &Path,
         expected_size: u64,
     ) -> Result<(), RunnerPackageError> {
-        let mut response = ureq::get(url)
-            .call()
-            .map_err(|_| RunnerPackageError::DownloadFailed)?;
+        let mut response = ureq::get(url).call().map_err(|error| {
+            eprintln!("runner package request failed: {error}");
+            RunnerPackageError::DownloadFailed
+        })?;
         let mut reader = response.body_mut().as_reader();
         let mut output = secure_new_file(destination).map_err(|_| RunnerPackageError::CacheIo)?;
         let mut total = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
 
         loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| RunnerPackageError::DownloadFailed)?;
+            let read = reader.read(&mut buffer).map_err(|error| {
+                eprintln!("runner package body failed after {total} bytes: {error}");
+                RunnerPackageError::DownloadFailed
+            })?;
             if read == 0 {
                 break;
             }
@@ -169,10 +171,15 @@ impl RunnerPackageManager {
         create_private_directory(&staging_template).map_err(|_| RunnerPackageError::CacheIo)?;
 
         let install_result = (|| {
-            fetcher.fetch(&artifact.url, &archive_path, artifact.size_bytes)?;
-            verify_archive(&archive_path, artifact.size_bytes, &digest)?;
-            extract_archive(&archive_path, &staging_template, artifact.format)?;
-            validate_template_tree(&staging_template, os)?;
+            fetcher
+                .fetch(&artifact.url, &archive_path, artifact.size_bytes)
+                .inspect_err(|error| eprintln!("runner package fetch failed: {error:?}"))?;
+            verify_archive(&archive_path, artifact.size_bytes, &digest)
+                .inspect_err(|error| eprintln!("runner package verification failed: {error:?}"))?;
+            extract_archive(&archive_path, &staging_template, artifact.format)
+                .inspect_err(|error| eprintln!("runner package extraction failed: {error:?}"))?;
+            validate_template_tree(&staging_template, os)
+                .inspect_err(|error| eprintln!("runner package template failed: {error:?}"))?;
             write_marker(
                 &staging_entry,
                 &CacheMarker {
@@ -199,6 +206,9 @@ impl RunnerPackageManager {
             }
         })();
 
+        if let Err(error) = &install_result {
+            eprintln!("runner package installation failed: {error:?}");
+        }
         let _ = fs::remove_dir_all(&install_root);
         let template = install_result?;
         prune_cache(&templates_root, &final_entry)?;
