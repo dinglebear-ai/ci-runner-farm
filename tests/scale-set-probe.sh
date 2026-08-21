@@ -30,6 +30,7 @@ printf 'token\n' >"$tmpdir/cfg/token"
 chmod 0600 "$tmpdir/cfg/token"
 SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
   SCALESET_STATE_DIR="$tmpdir/run/scalesets" \
+  SCALESET_DURABLE_STATE_DIR="$tmpdir/run/durable" \
   SCALESET_WORKLOAD_EVIDENCE="$tmpdir/cfg/evidence.json" \
   SCALESET_PROBE_CONFIG="$tmpdir/run/scalesets/probe.json" \
   TOKEN_FILE="$tmpdir/cfg/token" GH_SCOPE=org GH_OWNER=dinglebear-ai \
@@ -40,6 +41,13 @@ SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
     . src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scalesets.sh
     scaleset_bound_identity(){ printf "%064d|%064d|%064d|%064d|dinglebear-ai|installation-1|%064d\n" 1 2 3 4 5; }
     scaleset_installation_id(){ printf "installation-1\n"; }
+    config_revision(){ printf "%064d\n" 6; }
+    scaleset_ownership_revision(){ printf "%064d\n" 7; }
+    pool_snapshot_load(){ return 0; }
+    pool_is_v2(){ return 0; }
+    pool_records(){ printf "accept|unused\n"; }
+    pool_routing_label(){ printf "accept\n"; }
+    pool_additional_labels(){ printf "linux\n"; }
     created=0
     gh_api_request(){
       GH_STATUS=200
@@ -62,6 +70,10 @@ SCRIPT_DIR="$tmpdir" RUNDIR="$tmpdir/run" CFGDIR="$tmpdir/cfg" \
     php -r '\''
       $j=json_decode(file_get_contents($argv[1]),true);
       exit(($j["runtime"]["owner"]??"") === "dinglebear-ai" &&
+        ($j["runtime"]["schema_version"]??0) === 1 &&
+        ($j["runtime"]["runner_group_id"]??0) === 7 &&
+        ($j["runtime"]["quarantine_runner_group_id"]??0) === 8 &&
+        ($j["runtime"]["pools"][0]["routing_label"]??"") === "accept" &&
         ($j["runtime"]["auth"]["token_file"]??"") === $argv[2] &&
         ($j["live"]["runner_group_id"]??0) === 7 &&
         ($j["live"]["runner_group_policy"]??"") === "selected_repositories" &&
