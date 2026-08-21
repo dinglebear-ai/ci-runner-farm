@@ -12,8 +12,8 @@ entrypoint=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-entrypoint
 engine=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 
 wait_for_secret_fifo() {
-  local label="$1" stderr_path="$2"
-  for _ in $(seq 1 500); do
+  local label="$1" stderr_path="$2" attempt
+  for ((attempt = 0; attempt < 500; attempt++)); do
     [ -f "$CRF_SECRET_DIR/ready" ] && return 0
     sleep 0.02
   done
