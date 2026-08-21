@@ -35,14 +35,23 @@ defmodule CrfController.OfferPlanner do
     placements = PlacementLedger.snapshot(ctx.placement_ledger)
     offers = OfferLedger.snapshot(ctx.offer_ledger, now_ms: now_ms)
     health = Map.new(snapshot.pools, &{&1.pool_id, &1.session_healthy})
+    sessions_ready = Enum.all?(Map.keys(ctx.policies), &(Map.get(health, &1, false) == true))
 
+    if not sessions_ready do
+      {:ok, planner}
+    else
+      plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms)
+    end
+  end
+
+  defp plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms) do
     needs =
       Map.new(ctx.policies, fn {pool_id, policy} ->
         service = Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
         pool_offers = Enum.count(offers, &(&1.pool_id == pool_id))
 
         need =
-          if MapSet.member?(blocked, pool_id) or Map.get(health, pool_id, false) != true do
+          if MapSet.member?(blocked, pool_id) do
             0
           else
             max(policy.max_concurrency - service - pool_offers, 0)
