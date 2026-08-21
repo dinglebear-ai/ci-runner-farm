@@ -8,7 +8,7 @@ Last updated: 2026-08-21
   PR #64 fixed materialization, scale-set selectors, demand-driven capacity,
   startup session health, fresh initial snapshots, and fairness-cursor drift.
 - The Dookie controller runs immutable clean release
-  `1935505eef4f2c6e79a230eab228f906f31b47da` from `/opt/ci-runner-farm`.
+  `10aae171711af21936345fe87a5ba095b09f8ad4` from `/opt/ci-runner-farm`.
   Controller configuration, sidecar state, placement state, and GitHub
   credentials remain on Dookie, not Unraid flash.
 - Registered nodes: Dookie (Linux native), Squirts (Linux native), Steamy
@@ -17,12 +17,28 @@ Last updated: 2026-08-21
   configuration, TLS, state, logs, and operator projection live under
   `/mnt/cache/appdata/ci-runner-farm/distributed-node`; only the PID is tmpfs.
 - Production owns seven scale sets: Rust, Python, TypeScript, Go, Ops, System,
-  and Residential Egress. The clean post-deploy set on 2026-08-21 used IDs
-  192-198; IDs are runtime evidence, not durable configuration.
+  and Residential Egress. After final qualification and test-scale-set cleanup
+  on 2026-08-21, the clean restored set used IDs 238-244; IDs are runtime
+  evidence, not durable configuration.
 - Real GitHub jobs passed on Dookie, Squirts, Steamy, Steamy WSL, and Tootie's
   container backend. A live Dookie cancellation observed TERM, completed as
   cancelled in GitHub, removed the complete runner process group, returned
   resources, and removed runner credentials.
+- Final-release qualification used dedicated temporary Linux and Windows scale
+  sets so shared production Ops demand could not select or disrupt unrelated
+  organization jobs. Runs `32525456114` (Tootie container), `32525954093`
+  (Dookie), `32526980166` (Squirts), `32527137309` (Steamy WSL), and
+  `32527420841` (Steamy Windows) all passed. Each native run reported the
+  expected host, OS, architecture, and service cgroup; the container run also
+  proved `/.dockerenv`. Controller placement evidence tied the WSL and Windows
+  runs to node IDs `steamy-wsl` and `steamy`. All temporary scale sets and JIT
+  runners were removed, the seven production pools were recreated eligible,
+  all five nodes returned full resources, and the placement/offer ledgers were
+  empty.
+- The acceptance workflow now offers a constrained
+  `ci-pool-acceptance-linux` dispatch choice. Its default remains
+  `ci-pool-ops` for ordinary production-ops checks; fleet qualification should
+  provision and select the isolated label.
 - Classic replacement is complete. Busy classic jobs were quarantined and
   allowed to finish; their exact registrations and containers were then retired.
   GitHub and Docker both reported zero classic runners, and the temporary runner
@@ -165,14 +181,13 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Merge, deploy, and browser-verify the capability-gated mTLS controller
-   projection and expanded Unraid distributed-fleet UI.
+1. Complete authenticated real-browser verification of the expanded Unraid
+   distributed-fleet UI; backend, projection, DOM behavior, and responsive
+   source-level tests are complete, but this checkout has no authenticated
+   Unraid browser session.
 2. Complete the controller/node restart and network-partition matrix plus
    orphan/force-abandon acceptance under production pool identities.
-3. Re-run real one-job lifecycle acceptance on Tootie, Dookie, Squirts, Steamy
-   WSL, and Steamy against the final merged release, including terminal ACK,
-   runner retirement, and resource return.
-4. Add automated CA/server-certificate rotation, more target-distribution Linux
+3. Add automated CA/server-certificate rotation, more target-distribution Linux
    bundles, sustained fairness/load tests, and longer-horizon replay-fence
    archival if operational scale requires it.
 
