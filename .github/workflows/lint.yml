@@ -220,7 +220,7 @@ jobs:
           Add-Content -LiteralPath $installedEnvironment -Value '# pre-upgrade-environment'
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('config', $serviceName, 'binPath=', 'C:\Windows\System32\cmd.exe /c exit 0', 'start=', 'disabled', 'obj=', 'LocalSystem') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('description', $serviceName, 'Pre-upgrade rollback sentinel') | Out-Null
-          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=123', 'actions=restart/3210') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=', '123', 'actions=', 'restart/3210') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\icacls.exe" @($configRoot, '/grant', 'Users:(OI)(CI)R') | Out-Null
 
           function Get-RollbackFingerprint {
