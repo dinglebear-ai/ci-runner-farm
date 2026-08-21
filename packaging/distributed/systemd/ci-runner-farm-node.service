@@ -1,0 +1,28 @@
+[Unit]
+Description=CI Runner Farm distributed node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ci-runner-farm
+Group=ci-runner-farm
+WorkingDirectory=/var/lib/ci-runner-farm
+Environment=HOME=/var/lib/ci-runner-farm
+EnvironmentFile=/etc/ci-runner-farm/node.env
+ExecStart=/opt/ci-runner-farm/current/bin/crf-node
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+# Runner children intentionally survive a node-agent restart. The restarted
+# agent advances generation and adopts surviving durable placements.
+KillMode=process
+StateDirectory=ci-runner-farm
+StateDirectoryMode=0700
+LogsDirectory=ci-runner-farm
+LogsDirectoryMode=0700
+UMask=0022
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

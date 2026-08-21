@@ -94,6 +94,16 @@ RUNNER_COUNT=5 RUNNER_LABELS='self-hosted,changed' AUTOSCALE_MIN=3 AUTOSCALE_MAX
 [ "$(pool_records)" = 'default|5|3|9|1' ] && ok || bad 'single-mode pool snapshot cache ignored changed capacity'
 [ "$(pool_effective_labels default)" = "$RUNNER_LABELS" ] && ok || bad 'single-mode pool snapshot cache ignored changed labels'
 
+RUNNER_CPUS=2 RUNNER_MEMORY=4g AUTOSCALE_MAX=9
+single_distributed='[{"id":"default","max_concurrency":9,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"required_os":"linux","required_arch":"x86_64","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"}]'
+[ "$(pool_distributed_policies_json)" = "$single_distributed" ] && ok || bad 'single-mode distributed pool policy differs'
+RUNNER_MODE=pools RUNNER_POOLS="$valid_v2" GH_SCOPE=org GH_OWNER=acme POOL_BACKEND=classic RUNNER_CPUS=8 RUNNER_MEMORY=16g
+v2_distributed='[{"id":"rust","max_concurrency":5,"resources":{"cpu_millis":4000,"memory_bytes":17179869184},"required_os":"linux","required_arch":"arm64","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"},{"id":"python","max_concurrency":2,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"required_os":"linux","required_arch":"arm64","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"}]'
+[ "$(pool_distributed_policies_json arm64)" = "$v2_distributed" ] && ok || bad 'V2 distributed pool policy differs'
+php -r '$v=json_decode(stream_get_contents(STDIN), true, 32, JSON_THROW_ON_ERROR); if (count($v) !== 2 || $v[0]["required_backend"] !== "container" || $v[1]["resources"]["memory_bytes"] !== 4294967296) exit(1);' \
+  <<<"$v2_distributed" && ok || bad 'distributed pool policy is not valid typed JSON'
+if pool_distributed_policies_json ppc64le >/dev/null 2>&1; then bad 'unsupported distributed node architecture was accepted'; else ok; fi
+
 reject broken "$valid" org
 reject pools '' org
 reject pools "$valid" repo
@@ -158,6 +168,7 @@ grep -q 'RUNNER_MODE="single"' "$ENGINE" && ok || bad 'engine lacks backward-com
 grep -q 'RUNNER_POOLS' "$SETTINGS" && ok || bad 'Settings lacks the pool config source'
 grep -q 'id="crf-pools-errors".*aria-live="polite"' "$POOLS_PAGE" && ok || bad 'Pools tab errors are not announced'
 grep -q 'ci-pool-python' "$FLEET" "$POOLS_PAGE" "$ENGINE" && ok || bad 'derived pool selector is absent'
+grep -q 'distributed-pools-json) pool_distributed_policies_json' "$ENGINE" && ok || bad 'distributed pool policy export is not dispatched'
 grep -q "action:'scale',pool,n" "$FLEET" && ok || bad 'Fleet does not send a pool-aware scale action'
 grep -q 'data-crf-mutation' "$FLEET" && ok || bad 'Fleet mutations cannot be disabled on invalid config'
 grep -q "case 'validate-pools'" "$EXEC" && ok || bad 'server pool validation endpoint missing'
@@ -174,7 +185,7 @@ grep -q 'never edits workflow files in sibling repositories' README.md && ok || 
 
 WORKFLOW_DIR=".github/workflows"
 route_jobs="$(awk '/^[[:space:]]*runs-on:/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
-[ "$route_jobs" -eq 7 ] && ok || bad "expected 7 workflow jobs with runner routes, found $route_jobs"
+[ "$route_jobs" -eq 8 ] && ok || bad "expected 8 workflow jobs with runner routes, found $route_jobs"
 ops_routes="$(awk '/^[[:space:]]*runs-on:.*ci-pool-ops/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
 [ "$ops_routes" -eq 7 ] && ok || bad "expected 7 trusted ops-pool routes, found $ops_routes"
 hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"

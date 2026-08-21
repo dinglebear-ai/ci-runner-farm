@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+certificate="${1:-}"
+if [[ -z "$certificate" || "$#" -ne 1 ]]; then
+  echo "usage: crf-cert-fingerprint <certificate.pem>" >&2
+  exit 2
+fi
+[[ -f "$certificate" && ! -L "$certificate" ]] || { echo "certificate must be a regular non-symlink file" >&2; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum is required" >&2; exit 1; }
+
+fingerprint="$(openssl x509 -in "$certificate" -outform DER | sha256sum | awk '{print $1}')"
+[[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || { echo "failed to compute SHA-256 certificate fingerprint" >&2; exit 1; }
+printf "%s\n" "$fingerprint"

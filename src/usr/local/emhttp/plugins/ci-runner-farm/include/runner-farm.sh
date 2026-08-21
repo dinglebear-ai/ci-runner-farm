@@ -125,8 +125,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-migration.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-scheduler.sh
 . "$SCRIPT_DIR/runner-scheduler.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-runtime.sh
+. "$SCRIPT_DIR/runner-runtime.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 . "$SCRIPT_DIR/runner-jit.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-distributed-adapter.sh
+. "$SCRIPT_DIR/runner-distributed-adapter.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
 
@@ -2221,7 +2225,7 @@ runner_secret_inject() {
     # A freshly created container may not yet be in the shared inventory. Its
     # exact deterministic name is still bounded before this function is called.
     case "$name" in
-      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*) ;;
+      "$NAME_PREFIX"-[0-9]*|"$NAME_PREFIX"-[a-z]*-[0-9]*|"$NAME_PREFIX"-jit-[a-z]*-[0-9a-f]*|"$NAME_PREFIX"-dist-[a-z]*-[0-9a-f]*) ;;
       *) return 1 ;;
     esac
   }
@@ -2306,12 +2310,12 @@ start_one() {
 
   log "starting $name (pool=$pool cpu_milli=$cpu_milli memory_bytes=$memory_bytes scope=${scope_target:-$GH_SCOPE})"
   fleet_lock_suspend || { [ -z "$reservation_id" ] || reservation_release "$reservation_id"; return 1; }
-  docker run "${ARGS[@]}" >/dev/null
+  crf_runtime_run_prepared
   rc=$?
   if [ "$rc" -eq 0 ] && [ -n "${CRF_REGISTRATION_SECRET:-}" ]; then
     if ! runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET"; then
       err "runner $name did not consume its protected registration credential"
-      docker rm -f "$name" >/dev/null 2>&1 || true
+      crf_runtime_force_remove "$name" || true
       rc=1
     fi
   fi
@@ -2354,7 +2358,7 @@ recreate_stopped_runner() {
     err "runner $c was not recreated because GitHub deregistration was not confirmed"
     return 1
   }
-  docker rm -f "$c" >/dev/null 2>&1
+  crf_runtime_force_remove "$c" >/dev/null 2>&1
   fleet_inventory_invalidate
   if pool_mode_enabled; then scope="org:$GH_OWNER"
   elif [ "$GH_SCOPE" = org ]; then scope="org:$GH_OWNER"
@@ -3490,8 +3494,7 @@ remove_runner_container() {
   if runner_identity_validate "$c"; then
     root="$(crf_safe_cache_root 2>/dev/null || true)"
   fi
-  docker stop -t 30 "$c" >/dev/null 2>&1
-  docker rm "$c" >/dev/null 2>&1
+  crf_runtime_stop_remove "$c" 30
   fleet_inventory_invalidate
   if [ -n "$root" ]; then
     rm -rf -- "${root:?}/docker/${c:?}" 2>/dev/null || true
@@ -4164,15 +4167,15 @@ recreate_runner() {
     }
   fi
   log "recycling $name ($mode)"
-  if ! created_id="$(docker run "${ARGS[@]}" 2>/dev/null)"; then
-    docker rm -f "$name" >/dev/null 2>&1 || true
+  if ! created_id="$(crf_runtime_run_prepared_capture)"; then
+    crf_runtime_force_remove "$name" || true
     runner_registration_secret_clear
     log "recycle: $name removed but its replacement failed to start"
     echo '{"ok":false,"error":"removed but not recreated"}'; return 1
   fi
   current_id="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
   if [ -z "$created_id" ] || [ "$current_id" != "$created_id" ]; then
-    [ -z "$created_id" ] || docker rm -f "$created_id" >/dev/null 2>&1 || true
+    [ -z "$created_id" ] || crf_runtime_force_remove "$created_id" || true
     runner_registration_secret_clear
     log "recycle: $name replacement identity could not be verified"
     echo '{"ok":false,"error":"replacement identity could not be verified"}'; return 1
@@ -4183,18 +4186,18 @@ recreate_runner() {
     # reporting the mutation. Cleanup uses the exact created container ID so a
     # concurrent Stop/Recycle can never cause us to delete its replacement.
     if ! fleet_lock_suspend; then
-      docker rm -f "$created_id" >/dev/null 2>&1 || true
+      crf_runtime_force_remove "$created_id" || true
       runner_registration_secret_clear
       echo '{"ok":false,"error":"could not release fleet lock for credential handoff"}'; return 1
     fi
     runner_secret_inject "$name" "$CRF_REGISTRATION_SECRET" "$created_id" || handoff_ok=false
     runner_registration_secret_clear
     if ! fleet_lock_resume; then
-      [ "$handoff_ok" = true ] || docker rm -f "$created_id" >/dev/null 2>&1 || true
+      [ "$handoff_ok" = true ] || crf_runtime_force_remove "$created_id" || true
       echo '{"ok":false,"error":"fleet lock could not be reacquired after credential handoff"}'; return 1
     fi
     if [ "$handoff_ok" != true ]; then
-      docker rm -f "$created_id" >/dev/null 2>&1 || true
+      crf_runtime_force_remove "$created_id" || true
       log "recycle: $name did not consume its protected registration credential"
       echo '{"ok":false,"error":"replacement credential handoff failed"}'; return 1
     fi
@@ -5180,6 +5183,8 @@ case "${1:-status}" in
   scheduler-plan)   scheduler_plan "${2:?input}" "${3:?cpu}" "${4:?memory}" "${5:-0}" "${6:-1}" ;;
   prewarm)          with_fleet_lock wait scheduler_prewarm_guarded "${2:?pool}" "${3:?target}" "${4:?revision}" ;;
   jit-run)          jit_execute "${2:?pool}" "${3:?reservation}" "${4:?handle}" "${5:?spec}" "${6:?revision}" ;;
+  distributed-adapter) distributed_adapter_locked ;;
+  distributed-pools-json) pool_distributed_policies_json "${2:-x86_64}" ;;
   jit-reconcile)    with_fleet_lock wait jit_reconcile ;;
   begin-migration)  with_fleet_lock wait migration_start "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   continue-migration) with_fleet_lock wait migration_continue_guarded ;;

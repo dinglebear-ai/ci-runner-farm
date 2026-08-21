@@ -32,7 +32,7 @@ grep -Fq 'make(chan protocol.PoolSnapshot, len(s.cfg.Pools))' "$supervisor" ||
 grep -Fq 'MaxJournalBytes int64 = 8 << 20' \
   tools/crf-scaleset/internal/journal/journal.go ||
   crf_fail "eight MiB replay-journal cap drifted"
-grep -Fq 'const maxIssuedHandles = 131072' \
+grep -Eq '^[[:space:]]*maxIssuedHandles[[:space:]]*=[[:space:]]*131072([[:space:]]|$)' \
   tools/crf-scaleset/internal/controller/controller.go ||
   crf_fail "issued-handle state cap drifted"
 grep -Fq 'SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-8388608}"' \
@@ -136,6 +136,7 @@ bash tests/stalled-credential-handoff.sh >/dev/null
 bash tests/reconcile-stop-lifecycle.sh >/dev/null
 bash tests/reconcile-retry.sh >/dev/null
 bash tests/runner-runtime.sh >/dev/null
+bash tests/distributed-container-adapter.sh >/dev/null
 bash tests/validate-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null
@@ -155,6 +156,8 @@ helper="$tmp/package/bin/crf-scaleset"
 [ -x "$helper" ] || crf_fail "packaged helper is not executable"
 for executable in \
   include/runner-farm.sh \
+  include/runner-runtime.sh \
+  include/runner-container-adapter.sh \
   include/runner-entrypoint.sh \
   event/docker_started \
   event/stopping_docker \

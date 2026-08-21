@@ -27,4 +27,6 @@ for phase in admitted jit_received container_create_started container_observed \
 done
 
 grep -Fq 'if jit_container_exists "$container"' "$script"
+grep -Fq 'crf_runtime_run_prepared' "$script" || crf_fail "scale-set JIT bypasses shared runtime launch"
+if grep -Fq 'docker run "${ARGS[@]}"' "$script"; then crf_fail "scale-set JIT still owns a raw runner docker run"; fi
 echo "scale-set-runtime: OK"

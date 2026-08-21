@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ type fakeAPI struct {
 	capacities  []int
 	acknowledge int
 	jitCalls    int
+	jitErr      error
 	deleted     []int64
 }
 
@@ -93,6 +95,9 @@ func (f *fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITR
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.jitCalls++
+	if f.jitErr != nil {
+		return nil, f.jitErr
+	}
 	return []byte("single-use-jit"), nil
 }
 
@@ -192,10 +197,22 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	if !first.OK {
 		t.Fatalf("JIT issue failed: %#v", first)
 	}
-	second := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, jitPayload))
-	sequence++
-	if second.OK || second.Code != "work_handle_not_available" || api.jitCalls != 1 {
-		t.Fatalf("JIT descriptor was reusable: response=%#v calls=%d", second, api.jitCalls)
+	descriptorPath := control.descriptorPath(snapshot.Pools[0].ScaleSetID, 501)
+	info, err := os.Stat(descriptorPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("JIT descriptor cache was not private: info=%#v err=%v", info, err)
+	}
+	restarted, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.poller = &consumeFailPoller{}
+	second := restarted.Handle(context.Background(), request(cfg, "issue_jit", 1, jitPayload))
+	if !second.OK || api.jitCalls != 1 {
+		t.Fatalf("durable JIT descriptor did not replay after restart: response=%#v calls=%d", second, api.jitCalls)
+	}
+	if fmt.Sprint(first.Result) != fmt.Sprint(second.Result) {
+		t.Fatalf("replayed JIT descriptor changed: first=%#v second=%#v", first.Result, second.Result)
 	}
 	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
 		`{"pool_id":"python","work_handle":501}`)); !response.OK {
@@ -205,6 +222,9 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	issued, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
 	if err != nil || strings.TrimSpace(string(issued)) != "{}" {
 		t.Fatalf("terminal issued handle was not compacted: %q err=%v", issued, err)
+	}
+	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired JIT descriptor cache remained: err=%v", err)
 	}
 
 	if response := control.Handle(context.Background(), request(cfg, "reconcile_owned", sequence,
@@ -222,6 +242,66 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	}
 	if len(api.deleted) != 1 || len(api.sets) != 0 {
 		t.Fatalf("exact owned set not deleted: ids=%#v sets=%#v", api.deleted, api.sets)
+	}
+}
+
+func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}, jitErr: errors.New("ambiguous JIT response")}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+
+	if response := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, "{}")); !response.OK {
+		t.Fatalf("apply sessions failed: %#v", response)
+	}
+	if response := control.Handle(context.Background(), request(cfg, "publish_capacity_leases", 2,
+		"{\"leases\":{\"python\":1}}")); !response.OK {
+		t.Fatalf("publish leases failed: %#v", response)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	sequence := uint64(3)
+	var snapshot protocol.Snapshot
+	for time.Now().Before(deadline) {
+		response := control.Handle(context.Background(), request(cfg, "read_snapshot", sequence, "{}"))
+		sequence++
+		var ok bool
+		snapshot, ok = response.Result.(protocol.Snapshot)
+		if response.OK && ok && len(snapshot.Pools) == 1 && slices.Contains(snapshot.Pools[0].AcquiredHandles, int64(501)) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(snapshot.Pools) != 1 || !slices.Contains(snapshot.Pools[0].AcquiredHandles, int64(501)) {
+		t.Fatalf("acquired handle never reached snapshot: %#v", snapshot)
+	}
+
+	payload := "{\"pool_id\":\"python\",\"work_handle\":501,\"runner_name\":\"runner-501\",\"work_folder\":\"_work\"}"
+	first := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, payload))
+	sequence++
+	if first.OK || first.Code != "jit_issue_ambiguous" || api.jitCalls != 1 {
+		t.Fatalf("ambiguous JIT was not tombstoned: response=%#v calls=%d", first, api.jitCalls)
+	}
+	second := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, payload))
+	sequence++
+	if second.OK || second.Code != "jit_issue_ambiguous" || api.jitCalls != 1 {
+		t.Fatalf("ambiguous JIT was reissued: response=%#v calls=%d", second, api.jitCalls)
+	}
+
+	key := fmt.Sprintf("%d:%d", snapshot.Pools[0].ScaleSetID, 501)
+	if control.issued[key] != "issue_started" {
+		t.Fatalf("ambiguous JIT tombstone missing: %#v", control.issued)
+	}
+	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
+		"{\"pool_id\":\"python\",\"work_handle\":501}")); !response.OK {
+		t.Fatalf("ambiguous JIT retirement failed: %#v", response)
+	}
+	if len(control.issued) != 0 {
+		t.Fatalf("ambiguous JIT tombstone survived retirement: %#v", control.issued)
 	}
 }
 

@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENGINE="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"
+RUNTIME="src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-runtime.sh"
 tmpdir="$(mktemp -d)"
 snippet="$tmpdir/functions.sh"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -11,6 +12,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 for fn in runner_registration_secret_clear recreate_runner; do
   sed -n "/^${fn}()/,/^}/p" "$ENGINE" >>"$snippet"
 done
+# shellcheck disable=SC1090
+. "$RUNTIME"
 # shellcheck disable=SC1090
 . "$snippet"
 
@@ -96,6 +99,10 @@ docker() {
     inspect:--format)
       [ -f "$current_id_file" ] && cat "$current_id_file"
       ;;
+    stop:-t)
+      printf 'stop|%s|%s\n' "${3:-}" "${4:-}" >>"$cleanup_log"
+      return "${DOCKER_STOP_RC:-0}"
+      ;;
     rm:-f)
       local target="${3:-}"
       printf '%s\n' "$target" >>"$cleanup_log"
@@ -106,6 +113,10 @@ docker() {
           command rm -f "$current_id_file"
         fi
       fi
+      return 0
+      ;;
+    rm:ci-runner-1)
+      printf 'remove|%s\n' "${2:-}" >>"$cleanup_log"
       return 0
       ;;
     pull:*) return 0 ;;
@@ -179,5 +190,31 @@ assert_contains "$out" 'replacement changed during credential handoff' 'concurre
 [ ! -e "$cleanup_log" ] || fail 'concurrent replacement cleanup targeted the newer container'
 assert_eq "$(cat "$current_id_file")" 'concurrent-replacement-id' 'concurrent replacement was deleted or overwritten'
 assert_eq "${CRF_REGISTRATION_SECRET:-}" '' 'concurrent replacement retained registration credential'
+
+# Production classic runner creation must stay behind the shared runtime boundary.
+if grep -Fq 'docker run "${ARGS[@]}" >/dev/null' "$ENGINE"; then fail 'classic runner still owns a raw docker run'; fi
+grep -Fq 'crf_runtime_run_prepared' "$ENGINE" || fail 'classic runner bypasses shared runtime launch'
+
+# Shared runtime rejects incomplete/unsafe mutation requests before Docker.
+reset_case
+ARGS=()
+if crf_runtime_run_prepared; then fail 'shared runtime accepted empty prepared argv'; fi
+if crf_runtime_force_remove ""; then fail 'shared runtime accepted empty force-remove identity'; fi
+if crf_runtime_stop_remove ci-runner-1 nope; then fail 'shared runtime accepted nonnumeric stop timeout'; fi
+if crf_runtime_stop_remove ci-runner-1 301; then fail 'shared runtime accepted oversized stop timeout'; fi
+[ ! -e "$state/unexpected" ] || fail 'invalid runtime request reached Docker'
+
+# Shared runtime graceful teardown preserves the legacy 30-second stop then remove sequence.
+reset_case
+crf_runtime_stop_remove ci-runner-1 30 || fail 'shared runtime graceful stop/remove failed'
+assert_eq "$(tr '\n' ' ' <"$cleanup_log")" 'stop|30|ci-runner-1 remove|ci-runner-1 ' 'shared runtime graceful teardown order drifted'
+
+# Legacy semantics still attempt removal when Docker stop races/fails.
+reset_case
+DOCKER_STOP_RC=9
+export DOCKER_STOP_RC
+crf_runtime_stop_remove ci-runner-1 30 || fail 'stop failure prevented legacy remove attempt'
+unset DOCKER_STOP_RC
+assert_eq "$(tr '\n' ' ' <"$cleanup_log")" 'stop|30|ci-runner-1 remove|ci-runner-1 ' 'stop failure changed legacy remove sequencing'
 
 echo 'recycle-runtime: OK'

@@ -7,3 +7,12 @@
 # Local session logs (save-to-md / quick-push notes) — dev artifacts, never committed.
 docs/sessions/
 build/
+
+# Distributed controller / node build output.
+/target/
+/target-*/
+/controller/_build/
+/controller/deps/
+/controller/cover/
+/controller/.elixir_ls/
+/controller/erl_crash.dump

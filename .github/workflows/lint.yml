@@ -1,9 +1,9 @@
 name: Lint
 
-# Fast static gate for the plugin: shell syntax, PHP syntax, the config-parity
-# guard (engine / default.cfg / UI $defaults must agree — see tests/config-parity.sh),
-# and the crf-scaleset Go unit test suite. No build or runtime; complements
-# package-plugins.yml (which builds the crf-scaleset binary but does not test it).
+# Fast static gates for the Unraid plugin plus the platform-agnostic distributed
+# controller/node core. The legacy gate covers shell, PHP, config parity, and the
+# crf-scaleset Go suite. A separate hosted matrix proves the new Elixir/Rust core
+# on ordinary Linux and Windows hosts without relying on Unraid.
 
 on:
   pull_request:
@@ -69,3 +69,252 @@ jobs:
             echo "bash $test"
             bash "$test"
           done
+
+  distributed-core:
+    name: Distributed core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go 1.25.3 for bundle smoke
+        if: runner.os == 'Linux'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.25.3
+          cache-dependency-path: tools/crf-scaleset/go.sum
+
+      - name: Set up Elixir 1.20.3 / OTP 29.0.5
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: 1.20.3
+          otp-version: 29.0.5
+
+      - name: Set up Rust 1.97.1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Build distributed Windows node package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-distributed-windows-node.ps1
+
+      - name: Validate Windows package and service behavior
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $serviceName = 'CiRunnerFarmNode'
+          $installRoot = Join-Path $env:RUNNER_TEMP 'crf-windows-install'
+          $configRoot = Join-Path $env:ProgramData "CiRunnerFarm-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "CRF_CI_WINDOWS_INSTALL_ROOT=$installRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CRF_CI_WINDOWS_CONFIG_ROOT=$configRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          function Invoke-CheckedText([string] $Program, [string[]] $Arguments) {
+            $output = & $Program @Arguments 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "$Program $($Arguments -join ' ') failed ($LASTEXITCODE): $output" }
+            return $output
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$env:GITHUB_WORKSPACE\packaging\distributed\windows\Install-CrfNodeService.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          $archive = Get-ChildItem build/distributed/ci-runner-farm-node-*-windows-x86_64.zip
+          if ($archive.Count -ne 1) { throw 'Expected exactly one Windows node archive' }
+          $expanded = Join-Path $env:RUNNER_TEMP 'crf-windows-archive'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $expanded
+          $names = Get-ChildItem -LiteralPath $expanded -Recurse -File | ForEach-Object Name
+          foreach ($required in @('crf-node.exe', 'Install-CrfNodeService.ps1', 'node-env.example', 'runner-manifest.example.json')) {
+            if ($required -notin $names) { throw "Archive is missing $required" }
+          }
+          $binary = (Get-ChildItem -LiteralPath $expanded -Recurse -Filter crf-node.exe -File).FullName
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $expectedVersion = ($metadata.packages | Where-Object name -eq 'crf-node').version
+          $actualVersion = Invoke-CheckedText $binary @('--version')
+          if ($actualVersion.Trim() -ne "crf-node $expectedVersion") { throw "Unexpected binary version: $actualVersion" }
+
+          $example = Get-Content packaging/distributed/windows/node-env.example -Raw
+          $unknown = Join-Path $env:RUNNER_TEMP 'node-unknown.env'
+          Set-Content -LiteralPath $unknown -Value ($example + "`nCRF_CONTROLLER_ADRESS=typo")
+          try {
+            & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $unknown -InstallRoot $installRoot -ConfigRoot $configRoot
+            throw 'Installer accepted an unknown CRF key'
+          } catch {
+            if ($_.Exception.Message -eq 'Installer accepted an unknown CRF key') { throw }
+          }
+          $duplicate = Join-Path $env:RUNNER_TEMP 'node-duplicate.env'
+          Set-Content -LiteralPath $duplicate -Value ($example + "`nCRF_NODE_ID=duplicate")
+          try {
+            & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $duplicate -InstallRoot $installRoot -ConfigRoot $configRoot
+            throw 'Installer accepted a duplicate CRF key'
+          } catch {
+            if ($_.Exception.Message -eq 'Installer accepted a duplicate CRF key') { throw }
+          }
+
+          $environmentFile = Join-Path $env:RUNNER_TEMP 'node-valid.env'
+          $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot)
+          Set-Content -LiteralPath $environmentFile -Value $configured
+          & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
+
+          $qc = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)
+          if ($qc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START') { throw "Service is not Manual: $qc" }
+          if ($qc -notmatch 'SERVICE_START_NAME\s+: NT AUTHORITY\\LocalService') { throw "Service identity is not LocalService: $qc" }
+          if ((Get-Service -Name $serviceName).Status -ne 'Stopped') { throw 'Installer unexpectedly started the service' }
+          $failure = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qfailure', $serviceName)
+          if ($failure -notmatch 'RESTART -- Delay = 5000 milliseconds' -or $failure -notmatch 'RESTART -- Delay = 60000 milliseconds') {
+            throw "Service failure policy is incomplete: $failure"
+          }
+          $registryEnvironment = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name Environment).Environment
+          if (-not ($registryEnvironment -contains "CRF_SERVICE_ERROR_LOG=$configRoot\logs\service-errors.log")) { throw 'Registry environment is missing the error log contract' }
+
+          $acl = Get-Acl -LiteralPath $configRoot
+          if (-not $acl.AreAccessRulesProtected) { throw 'Configuration ACL still inherits permissions' }
+          $allowed = @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators', 'NT AUTHORITY\LOCAL SERVICE')
+          $unexpected = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }
+          if ($unexpected) { throw "Configuration ACL grants unexpected identities: $($unexpected.IdentityReference.Value -join ', ')" }
+          foreach ($identity in $allowed) {
+            if (-not ($acl.Access.IdentityReference.Value -contains $identity)) { throw "Configuration ACL is missing $identity" }
+          }
+
+          # Start only the disposable CI service. Its deliberately unprovisioned TLS paths must
+          # stop it with a concrete, bounded error category in the protected service log.
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('start', $serviceName) | Out-Null
+          $errorLog = Join-Path $configRoot 'logs\service-errors.log'
+          for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $errorLog); $attempt++) { Start-Sleep -Milliseconds 200 }
+          if (-not (Test-Path -LiteralPath $errorLog)) { throw 'Service failure did not create its observable error log' }
+          $errorText = Get-Content -LiteralPath $errorLog -Raw
+          if ($errorText -notmatch '^crf-node daemon failure: [A-Za-z]+') { throw "Service error was not a concrete bounded category: $errorText" }
+          if ((Get-Item -LiteralPath $errorLog).Length -gt 65536) { throw 'Service error log exceeded its bound' }
+          for ($attempt = 0; $attempt -lt 50 -and (Get-Service -Name $serviceName).Status -ne 'Stopped'; $attempt++) { Start-Sleep -Milliseconds 200 }
+          if ((Get-Service -Name $serviceName).Status -ne 'Stopped') { throw 'Disposable service did not stop after its expected configuration failure' }
+
+          # Make every upgrade target observably different, then inject a failure after each
+          # mutation boundary and require a byte/config/ACL/registry-exact rollback.
+          $installedBinary = Join-Path $installRoot 'crf-node.exe'
+          $installedEnvironment = Join-Path $configRoot 'node.env'
+          Set-Content -LiteralPath $installedBinary -Value 'pre-upgrade-binary'
+          Add-Content -LiteralPath $installedEnvironment -Value '# pre-upgrade-environment'
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('config', $serviceName, 'binPath=', 'C:\Windows\System32\cmd.exe /c exit 0', 'start=', 'disabled', 'obj=', 'LocalSystem') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('description', $serviceName, 'Pre-upgrade rollback sentinel') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=123', 'actions=restart/3210') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\icacls.exe" @($configRoot, '/grant', 'Users:(OI)(CI)R') | Out-Null
+
+          function Get-RollbackFingerprint {
+            $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+            $registry = Get-ItemProperty -LiteralPath $serviceKey
+            $failureBytes = if ($registry.PSObject.Properties.Name -contains 'FailureActions') { [Convert]::ToBase64String([byte[]] $registry.FailureActions) } else { '<absent>' }
+            @(
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedEnvironment).Hash,
+              (Get-Acl -LiteralPath $configRoot).Sddl,
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)),
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qdescription', $serviceName)),
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qfailure', $serviceName)),
+              (($registry.Environment | Sort-Object) -join "`n"),
+              $failureBytes
+            ) -join "`n---`n"
+          }
+
+          $preUpgrade = Get-RollbackFingerprint
+          foreach ($boundary in @('acl', 'files', 'service-config', 'failure-policy', 'registry-environment')) {
+            $env:CRF_INSTALLER_TEST_FAILURE = $boundary
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw "Upgrade unexpectedly succeeded at injected boundary $boundary"
+            } catch {
+              if ($_.Exception.Message -eq "Upgrade unexpectedly succeeded at injected boundary $boundary") { throw }
+              if ($_.Exception.Message -notmatch "Injected installer failure after $boundary") { throw }
+            } finally {
+              Remove-Item Env:CRF_INSTALLER_TEST_FAILURE -ErrorAction SilentlyContinue
+            }
+            $postFailure = Get-RollbackFingerprint
+            if ($postFailure -cne $preUpgrade) { throw "Upgrade rollback changed state after injected $boundary failure" }
+          }
+
+          # A successful reinstall must replace the restored sentinel state with the safe contract.
+          & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
+          $reinstalledQc = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)
+          if ($reinstalledQc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START' -or $reinstalledQc -notmatch 'SERVICE_START_NAME\s+: NT AUTHORITY\\LocalService') {
+            throw "Reinstall did not restore the safe service contract: $reinstalledQc"
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash) {
+            throw 'Reinstall did not replace the node binary'
+          }
+
+      - name: Remove disposable Windows service
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $serviceName = 'CiRunnerFarmNode'
+          $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+          if ($null -ne $existing) {
+            & "$env:SystemRoot\System32\sc.exe" delete $serviceName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to delete $serviceName ($LASTEXITCODE)" }
+            for ($attempt = 0; $attempt -lt 30 -and $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue); $attempt++) {
+              Start-Sleep -Milliseconds 200
+            }
+            if ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { throw "$serviceName was not deleted" }
+          }
+          foreach ($path in @($env:CRF_CI_WINDOWS_INSTALL_ROOT, $env:CRF_CI_WINDOWS_CONFIG_ROOT)) {
+            if ($path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Build Rust scheduler bridge
+        run: cargo build -p crf-scheduler
+
+      - name: Expose scheduler binary to controller tests
+        shell: bash
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            suffix=".exe"
+          fi
+          printf 'CRF_SCHEDULER_BIN=%s/target/debug/crf-scheduler%s\n' "$GITHUB_WORKSPACE" "$suffix" >> "$GITHUB_ENV"
+
+      - name: Elixir formatting
+        working-directory: controller
+        run: mix format --check-formatted
+
+      - name: Elixir compile warnings
+        working-directory: controller
+        run: mix compile --warnings-as-errors
+
+      - name: Elixir tests
+        working-directory: controller
+        run: mix test
+
+      - name: Build distributed Linux service bundle
+        if: runner.os == 'Linux'
+        run: scripts/build-distributed-bundle.sh
+
+      - name: Verify distributed Linux service bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bundle="$(find build/distributed -maxdepth 1 -type f -name 'ci-runner-farm-distributed-*.tar.gz' -print -quit)"
+          test -n "$bundle"
+          scripts/verify-distributed-bundle.sh "$bundle"

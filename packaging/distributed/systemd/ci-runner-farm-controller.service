@@ -1,0 +1,39 @@
+[Unit]
+Description=CI Runner Farm distributed controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ci-runner-farm
+Group=ci-runner-farm
+WorkingDirectory=/var/lib/ci-runner-farm
+Environment=HOME=/var/lib/ci-runner-farm
+Environment=RELEASE_TMP=/run/ci-runner-farm/controller-tmp
+Environment=CRF_CONTROLLER_CONFIG=/etc/ci-runner-farm/controller.json
+ExecStart=/opt/ci-runner-farm/current/controller/bin/crf_controller start
+ExecReload=/opt/ci-runner-farm/current/bin/crf-peer-admin reload
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+StateDirectory=ci-runner-farm
+StateDirectoryMode=0700
+RuntimeDirectory=ci-runner-farm
+RuntimeDirectoryMode=0700
+LogsDirectory=ci-runner-farm
+LogsDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

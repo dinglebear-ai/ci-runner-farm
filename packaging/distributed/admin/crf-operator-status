@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+release="${CRF_CONTROLLER_RELEASE:-/opt/ci-runner-farm/current/controller/bin/crf_controller}"
+[[ -x "$release" ]] || { echo "controller release executable not found: $release" >&2; exit 1; }
+
+identifier() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$ ]]; }
+generation() { [[ "$1" =~ ^[1-9][0-9]{0,18}$ ]]; }
+inspect='|> IO.inspect(pretty: true, limit: :infinity, printable_limit: :infinity)'
+mutation=false
+
+case "${1:-status}" in
+  status)
+    [[ "$#" -le 1 ]] || { echo 'usage: crf-operator-status status' >&2; exit 64; }
+    expression="CrfController.OperatorSnapshot.snapshot() $inspect"
+    ;;
+  drain|undrain)
+    [[ "$#" -eq 3 ]] || { echo "usage: crf-operator-status $1 NODE_ID GENERATION" >&2; exit 64; }
+    if ! identifier "$2" || ! generation "$3"; then echo 'invalid node identity or generation' >&2; exit 64; fi
+    value=false; [[ "$1" = drain ]] && value=true
+    expression="case CrfController.OperatorActions.set_draining(\"$2\", $3, $value) do {:ok, result} -> IO.puts(\"CRF_OPERATOR_OK \" <> inspect(result)); {:error, reason} -> IO.puts(\"CRF_OPERATOR_ERROR \" <> inspect(reason)) end"
+    mutation=true
+    ;;
+  force-abandon)
+    [[ "$#" -eq 3 && "$3" = --force ]] || { echo 'usage: crf-operator-status force-abandon PLACEMENT_ID --force' >&2; exit 64; }
+    identifier "$2" || { echo 'invalid placement identity' >&2; exit 64; }
+    expression="case CrfController.OperatorActions.force_abandon(\"$2\", true) do {:ok, result} -> IO.puts(\"CRF_OPERATOR_OK \" <> inspect(result)); {:error, reason} -> IO.puts(\"CRF_OPERATOR_ERROR \" <> inspect(reason)) end"
+    mutation=true
+    ;;
+  *) echo 'usage: crf-operator-status {status|drain NODE_ID GENERATION|undrain NODE_ID GENERATION|force-abandon PLACEMENT_ID --force}' >&2; exit 64 ;;
+esac
+
+if [[ "$mutation" = false ]]; then exec "$release" rpc "$expression"; fi
+output="$("$release" rpc "$expression" 2>&1)" || { printf '%s\n' "$output" >&2; exit 1; }
+printf '%s\n' "$output"
+printf '%s\n' "$output" | grep -Fq 'CRF_OPERATOR_OK ' || exit 1

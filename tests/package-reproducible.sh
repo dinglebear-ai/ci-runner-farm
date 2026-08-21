@@ -28,6 +28,7 @@ cmp "$tmp/modes1" "$tmp/modes2"
 # shows up as an intermittent CI failure unrelated to whatever is being tested.
 tar -xOf "$tmp/repo/ci-runner-farm.tgz" ./include/runner-entrypoint.sh > "$tmp/entrypoint-packaged.sh"
 grep -Fq 'secret.in' "$tmp/entrypoint-packaged.sh"
+grep -Fq 'chmod 0755 "$PLGDIR/include/runner-container-adapter.sh"' "$tmp/repo/ci-runner-farm.plg"
 grep -Fq 'chmod 0755 "$PLGDIR/include/runner-entrypoint.sh"' "$tmp/repo/ci-runner-farm.plg"
 grep -Fq 'chmod 0755 "$PLGDIR/bin/crf-scaleset"' "$tmp/repo/ci-runner-farm.plg"
 grep -Fxq './bin/crf-scaleset' "$tmp/list2"
@@ -36,6 +37,7 @@ tar -xzf "$tmp/repo/ci-runner-farm.tgz" -C "$tmp/package"
 for executable in \
   bin/crf-scaleset \
   include/runner-farm.sh \
+  include/runner-container-adapter.sh \
   include/runner-entrypoint.sh \
   event/docker_started \
   event/stopping_docker \

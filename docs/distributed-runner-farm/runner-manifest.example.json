@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "version": "2.336.0",
+  "artifacts": [
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz",
+      "sha256": "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d",
+      "size_bytes": 226035903,
+      "format": "tar_gz"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "url": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-arm64-2.336.0.tar.gz",
+      "sha256": "58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1",
+      "size_bytes": 138824064,
+      "format": "tar_gz"
+    },
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "url": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-win-x64-2.336.0.zip",
+      "sha256": "d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162",
+      "size_bytes": 103253740,
+      "format": "zip"
+    },
+    {
+      "os": "windows",
+      "arch": "arm64",
+      "url": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-win-arm64-2.336.0.zip",
+      "sha256": "b3799e9cf754fe4dfcb3d220c9701c924829737ee815dbeb674f8bd076794504",
+      "size_bytes": 94445234,
+      "format": "zip"
+    }
+  ]
+}

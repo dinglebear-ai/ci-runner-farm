@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_bin="${CRF_CONTROLLER_RELEASE_BIN:-/opt/ci-runner-farm/current/controller/bin/crf_controller}"
+command_name="${1:-}"
+
+usage() {
+  echo "usage: crf-peer-admin status | reload | revoke-all --force" >&2
+  exit 2
+}
+
+[[ -x "$release_bin" ]] || { echo "controller release executable not found: $release_bin" >&2; exit 1; }
+
+case "$command_name" in
+  status)
+    [[ "$#" -eq 1 ]] || usage
+    expression='IO.puts("CRF_PEER_ADMIN_OK " <> inspect(CrfController.PeerRegistry.status()))'
+    ;;
+  reload)
+    [[ "$#" -eq 1 ]] || usage
+    expression='case CrfController.PeerRegistry.reload_from_env() do {:ok, status} -> IO.puts("CRF_PEER_ADMIN_OK " <> inspect(status)); {:error, reason} -> IO.puts("CRF_PEER_ADMIN_ERROR " <> inspect(reason)) end'
+    ;;
+  revoke-all)
+    [[ "$#" -eq 2 && "$2" == "--force" ]] || usage
+    expression='case CrfController.PeerRegistry.revoke_all() do {:ok, status} -> IO.puts("CRF_PEER_ADMIN_OK " <> inspect(status)); {:error, reason} -> IO.puts("CRF_PEER_ADMIN_ERROR " <> inspect(reason)) end'
+    ;;
+  *) usage ;;
+esac
+
+output="$("$release_bin" rpc "$expression" 2>&1)" || { printf "%s\n" "$output" >&2; exit 1; }
+printf "%s\n" "$output"
+printf "%s\n" "$output" | grep -Fq "CRF_PEER_ADMIN_OK " || exit 1

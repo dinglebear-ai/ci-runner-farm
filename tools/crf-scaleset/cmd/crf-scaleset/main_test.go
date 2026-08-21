@@ -12,6 +12,17 @@ import (
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/probe"
 )
 
+func TestSupervisorServerAuthorizesEffectiveUID(t *testing.T) {
+	server := supervisorServer(filepath.Join(t.TempDir(), "control.sock"), nil)
+	if server.AllowedUID == nil {
+		t.Fatal("supervisor server did not bind a peer UID")
+	}
+	want := uint32(os.Geteuid())
+	if got := *server.AllowedUID; got != want {
+		t.Fatalf("supervisor server allowed UID %d, want effective UID %d", got, want)
+	}
+}
+
 func TestScaleSetClientFactoryBindsDistinctClientIdentities(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("secret-token\n"), 0o600); err != nil {

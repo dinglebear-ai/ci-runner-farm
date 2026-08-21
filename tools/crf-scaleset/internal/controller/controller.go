@@ -31,7 +31,10 @@ var (
 	issuedKey  = regexp.MustCompile(`^[1-9][0-9]*:[1-9][0-9]*$`)
 )
 
-const maxIssuedHandles = 131072
+const (
+	maxIssuedHandles     = 131072
+	maxJITDescriptorSize = 64 << 10
+)
 
 type AuthConfig struct {
 	Mode           string `json:"mode"`
@@ -390,6 +393,48 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			return failure(req, "sessions_not_applied", nil)
 		}
 		return response(req, c.super.Snapshot())
+	case "read_jit_state":
+		owned, err := c.ownership.Load()
+		if err != nil {
+			return failure(req, "ownership_load_failed", err)
+		}
+		poolByScaleSet := make(map[int64]string, len(owned.Records))
+		for _, record := range owned.Records {
+			if record.ScaleSetID > 0 {
+				poolByScaleSet[record.ScaleSetID] = record.PoolID
+			}
+		}
+		states := make([]protocol.JITState, 0, len(c.issued))
+		for key, state := range c.issued {
+			var scaleSetID, workHandle int64
+			if _, err := fmt.Sscanf(key, "%d:%d", &scaleSetID, &workHandle); err != nil ||
+				scaleSetID <= 0 || workHandle <= 0 {
+				return failure(req, "invalid_issued_state", err)
+			}
+			pool, ok := poolByScaleSet[scaleSetID]
+			if !ok {
+				return failure(req, "issued_scale_set_not_owned", nil)
+			}
+			_, descriptorErr := c.readJITDescriptor(scaleSetID, workHandle)
+			states = append(states, protocol.JITState{PoolID: pool, ScaleSetID: scaleSetID,
+				WorkHandle: workHandle, State: state, DescriptorAvailable: descriptorErr == nil})
+		}
+		slices.SortFunc(states, func(a, b protocol.JITState) int {
+			if a.ScaleSetID < b.ScaleSetID {
+				return -1
+			}
+			if a.ScaleSetID > b.ScaleSetID {
+				return 1
+			}
+			if a.WorkHandle < b.WorkHandle {
+				return -1
+			}
+			if a.WorkHandle > b.WorkHandle {
+				return 1
+			}
+			return 0
+		})
+		return response(req, map[string]any{"states": states})
 	case "reconcile_owned":
 		var payload struct {
 			Eligible bool `json:"eligible"`
@@ -429,8 +474,32 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			}
 		}
 		key := fmt.Sprintf("%d:%d", scaleSetID, payload.WorkHandle)
-		if scaleSetID <= 0 || c.issued[key] != "" ||
-			!c.poller.HasHandle(scaleSetID, payload.WorkHandle) {
+		if scaleSetID <= 0 {
+			return failure(req, "work_handle_not_available", nil)
+		}
+		if state := c.issued[key]; state != "" {
+			descriptor, descriptorErr := c.readJITDescriptor(scaleSetID, payload.WorkHandle)
+			switch state {
+			case "issued":
+				if descriptorErr != nil {
+					return failure(req, "jit_descriptor_unavailable", descriptorErr)
+				}
+				return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
+			case "issue_started":
+				if descriptorErr != nil {
+					return failure(req, "jit_issue_ambiguous", descriptorErr)
+				}
+				c.issued[key] = "issued"
+				if err := c.writeIssued(); err != nil {
+					c.issued[key] = "issue_started"
+					return failure(req, "jit_state_failed", err)
+				}
+				return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
+			default:
+				return failure(req, "invalid_issued_state", nil)
+			}
+		}
+		if !c.poller.HasHandle(scaleSetID, payload.WorkHandle) {
 			return failure(req, "work_handle_not_available", nil)
 		}
 		c.issued[key] = "issue_started"
@@ -449,8 +518,12 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err != nil {
 			return failure(req, "jit_issue_ambiguous", err)
 		}
+		if err := c.writeJITDescriptor(scaleSetID, payload.WorkHandle, descriptor); err != nil {
+			return failure(req, "jit_state_failed", err)
+		}
 		c.issued[key] = "issued"
 		if err := c.writeIssued(); err != nil {
+			c.issued[key] = "issue_started"
 			return failure(req, "jit_state_failed", err)
 		}
 		return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
@@ -478,7 +551,8 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			}
 		}
 		key := fmt.Sprintf("%d:%d", scaleSetID, payload.WorkHandle)
-		if scaleSetID <= 0 || c.issued[key] != "issued" {
+		issuedState := c.issued[key]
+		if scaleSetID <= 0 || (issuedState != "issued" && issuedState != "issue_started") {
 			return failure(req, "work_handle_not_issued", nil)
 		}
 		// REVIEW(crf-v3q.13.10): Compact the durable replay proof before
@@ -486,6 +560,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		// leaves a conservative, replay-safe record instead of a reusable JIT.
 		if err := c.poller.RetireHandle(scaleSetID, payload.WorkHandle); err != nil {
 			return failure(req, "jit_retirement_failed", err)
+		}
+		if err := c.removeJITDescriptor(scaleSetID, payload.WorkHandle); err != nil {
+			return failure(req, "jit_state_failed", err)
 		}
 		if err := c.removeIssued(key); err != nil {
 			return failure(req, "jit_state_failed", err)
@@ -505,6 +582,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err := c.writeIssued(); err != nil {
 			return failure(req, "jit_state_cleanup_failed", err)
 		}
+		if err := os.RemoveAll(c.descriptorDir()); err != nil {
+			return failure(req, "jit_descriptor_cleanup_failed", err)
+		}
 		if err := os.RemoveAll(filepath.Join(c.cfg.StateDir, "replay")); err != nil {
 			return failure(req, "journal_cleanup_failed", err)
 		}
@@ -516,6 +596,107 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 
 func (c *Control) issuedPath() string {
 	return filepath.Join(c.cfg.StateDir, "issued-handles.json")
+}
+
+func (c *Control) descriptorDir() string {
+	return filepath.Join(c.cfg.StateDir, "jit-descriptors")
+}
+
+func (c *Control) descriptorPath(scaleSetID, workHandle int64) string {
+	return filepath.Join(c.descriptorDir(), fmt.Sprintf("%d-%d.jit", scaleSetID, workHandle))
+}
+
+func validJITDescriptor(descriptor []byte) bool {
+	if len(descriptor) == 0 || len(descriptor) > maxJITDescriptorSize {
+		return false
+	}
+	for _, b := range descriptor {
+		if (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') ||
+			b == '.' || b == '_' || b == '+' || b == '/' || b == '=' || b == ':' || b == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (c *Control) writeJITDescriptor(scaleSetID, workHandle int64, descriptor []byte) error {
+	if scaleSetID <= 0 || workHandle <= 0 || !validJITDescriptor(descriptor) {
+		return errors.New("invalid_jit_descriptor")
+	}
+	dir := c.descriptorDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".jit.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(descriptor); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, c.descriptorPath(scaleSetID, workHandle)); err != nil {
+		return fmt.Errorf("persist JIT descriptor: %w", err)
+	}
+	return syncDirectory(dir)
+}
+
+func (c *Control) readJITDescriptor(scaleSetID, workHandle int64) ([]byte, error) {
+	path := c.descriptorPath(scaleSetID, workHandle)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() <= 0 || info.Size() > maxJITDescriptorSize {
+		return nil, errors.New("jit_descriptor_permissions_or_size")
+	}
+	descriptor, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !validJITDescriptor(descriptor) {
+		return nil, errors.New("invalid_jit_descriptor")
+	}
+	return descriptor, nil
+}
+
+func (c *Control) removeJITDescriptor(scaleSetID, workHandle int64) error {
+	path := c.descriptorPath(scaleSetID, workHandle)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Stat(c.descriptorDir()); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return syncDirectory(c.descriptorDir())
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 func (c *Control) loadIssued() error {

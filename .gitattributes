@@ -1,0 +1,10 @@
+# Distributed cross-platform sources are formatted byte-for-byte in CI. Force LF
+# on Windows checkouts so rustfmt/mix format evaluate the same source bytes as Linux.
+/controller/** text eol=lf
+/crates/** text eol=lf
+/Cargo.toml text eol=lf
+/Cargo.lock text eol=lf
+/packaging/distributed/** text eol=lf
+/scripts/build-distributed-bundle.sh text eol=lf
+/scripts/verify-distributed-bundle.sh text eol=lf
+/tests/fixtures/distributed-controller-command-v1.json text eol=lf
