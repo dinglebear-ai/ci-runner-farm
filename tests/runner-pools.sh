@@ -48,6 +48,10 @@ RUNNER_MODE=pools RUNNER_POOLS="$valid_v2" GH_SCOPE=org GH_OWNER=acme
 [ "$(pool_cpu_source rust)" = 4 ] && ok || bad 'CPU source provenance was lost'
 [ "$(pool_config_revision)" != '' ] && ok || bad 'config revision is empty'
 [ "$(pool_runner_spec_hash rust | wc -c)" -eq 65 ] && ok || bad 'runner spec hash is not SHA-256'
+expected_spec_hash="$(pool_runner_spec_hash rust)"
+POOL_CONFIG_VERSION='' POOL_RECORDS='' POOL_SERIALIZED_V2='' POOL_CONFIG_REVISION=''
+[ "$(pool_runner_spec_hash rust)" = "$expected_spec_hash" ] && ok ||
+  bad 'runner spec hash changed when the pool snapshot was not preloaded by the caller'
 
 RUNNER_POOLS='v2|inherit|ci-inherit||1|1|2|0|inherit|inherit'
 [ "$(pool_cpu_milli inherit)" = 8000 ] && ok || bad 'inherited CPU claim did not resolve'
