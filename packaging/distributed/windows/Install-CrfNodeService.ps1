@@ -38,6 +38,17 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
 }
 
+function Assert-NoInjectedFailure {
+    param([Parameter(Mandatory = $true)][string] $Boundary)
+    if ($env:CRF_INSTALLER_TEST_FAILURE -eq $Boundary) { throw "Injected installer failure after $Boundary" }
+}
+
+function Invoke-RollbackNative {
+    param([Parameter(Mandatory = $true)][string] $Program, [Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
+    & $Program @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Rollback command failed ($LASTEXITCODE): $Program $($Arguments -join ' ')" }
+}
+
 $environment = [System.Collections.Generic.List[string]]::new()
 $values = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 foreach ($line in [System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $EnvironmentFile))) {
@@ -89,16 +100,28 @@ $originalConfigAcl = if ($configRootExisted) { Get-Acl -LiteralPath $ConfigRoot 
 $rollbackId = [Guid]::NewGuid().ToString('N')
 $binaryBackup = "$binaryPath.$rollbackId.rollback"
 $environmentBackup = "$privateEnvironment.$rollbackId.rollback"
+$serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+$serviceSnapshot = if ($serviceExisted) { Get-CimInstance Win32_Service -Filter "Name='$serviceName'" } else { $null }
+$serviceRegistrySnapshot = if ($serviceExisted) { Get-ItemProperty -LiteralPath $serviceKey } else { $null }
+$environmentExisted = $serviceExisted -and ($serviceRegistrySnapshot.PSObject.Properties.Name -contains 'Environment')
+$failureActionsExisted = $serviceExisted -and ($serviceRegistrySnapshot.PSObject.Properties.Name -contains 'FailureActions')
+$failureFlagExisted = $serviceExisted -and ($serviceRegistrySnapshot.PSObject.Properties.Name -contains 'FailureActionsOnNonCrashFailures')
+$binaryMutationStarted = $false
+$environmentMutationStarted = $false
 
 if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without starting it')) {
     try {
         New-Item -ItemType Directory -Force -Path $InstallRoot, $ConfigRoot | Out-Null
+        if (Test-Path -LiteralPath $binaryPath) { Copy-Item -LiteralPath $binaryPath -Destination $binaryBackup }
+        if (Test-Path -LiteralPath $privateEnvironment) { Copy-Item -LiteralPath $privateEnvironment -Destination $environmentBackup }
         Invoke-Native "$env:SystemRoot\System32\icacls.exe" $ConfigRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'LOCAL SERVICE:(OI)(CI)F'
-        if (-not $serviceExisted -and (Test-Path -LiteralPath $binaryPath)) { Copy-Item -LiteralPath $binaryPath -Destination $binaryBackup }
-        if (-not $serviceExisted -and (Test-Path -LiteralPath $privateEnvironment)) { Copy-Item -LiteralPath $privateEnvironment -Destination $environmentBackup }
+        Assert-NoInjectedFailure 'acl'
+        $binaryMutationStarted = $true
         Copy-Item -LiteralPath $NodeBinary -Destination $binaryPath -Force
         Copy-Item -LiteralPath $EnvironmentFile -Destination $temporaryEnvironment -Force
+        $environmentMutationStarted = $true
         Move-Item -LiteralPath $temporaryEnvironment -Destination $privateEnvironment -Force
+        Assert-NoInjectedFailure 'files'
 
         $quotedBinaryPath = "`"$binaryPath`" --windows-service"
         if (-not $serviceExisted) {
@@ -107,17 +130,52 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
             Invoke-Native "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'binPath=' $quotedBinaryPath 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
         }
         Invoke-Native "$env:SystemRoot\System32\sc.exe" 'description' $serviceName 'Distributed CI Runner Farm portable node'
+        Assert-NoInjectedFailure 'service-config'
         Invoke-Native "$env:SystemRoot\System32\sc.exe" 'failure' $serviceName 'reset=86400' 'actions=restart/5000/restart/15000/restart/60000'
+        Assert-NoInjectedFailure 'failure-policy'
 
-        $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
         New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null
+        Assert-NoInjectedFailure 'registry-environment'
         Remove-Item -LiteralPath $binaryBackup, $environmentBackup -Force -ErrorAction SilentlyContinue
     } catch {
+        $installError = $_
         Remove-Item -LiteralPath $temporaryEnvironment -Force -ErrorAction SilentlyContinue
-        if (-not $serviceExisted) {
+        if ($serviceExisted) {
+            if ($binaryMutationStarted) {
+                Remove-Item -LiteralPath $binaryPath -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $binaryBackup) { Move-Item -LiteralPath $binaryBackup -Destination $binaryPath -Force }
+            } else {
+                Remove-Item -LiteralPath $binaryBackup -Force -ErrorAction SilentlyContinue
+            }
+            if ($environmentMutationStarted) {
+                Remove-Item -LiteralPath $privateEnvironment -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $environmentBackup) { Move-Item -LiteralPath $environmentBackup -Destination $privateEnvironment -Force }
+            } else {
+                Remove-Item -LiteralPath $environmentBackup -Force -ErrorAction SilentlyContinue
+            }
+            if ($null -ne $originalConfigAcl -and (Test-Path -LiteralPath $ConfigRoot)) { Set-Acl -LiteralPath $ConfigRoot -AclObject $originalConfigAcl }
+
+            $startMode = switch ($serviceSnapshot.StartMode) { 'Auto' { 'auto' } 'Disabled' { 'disabled' } default { 'demand' } }
+            Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'binPath=' $serviceSnapshot.PathName 'start=' $startMode 'obj=' $serviceSnapshot.StartName
+            Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'description' $serviceName ([string] $serviceSnapshot.Description)
+            if ($failureActionsExisted) {
+                Set-ItemProperty -LiteralPath $serviceKey -Name FailureActions -Value ([byte[]] $serviceRegistrySnapshot.FailureActions)
+            } else {
+                Remove-ItemProperty -LiteralPath $serviceKey -Name FailureActions -ErrorAction SilentlyContinue
+            }
+            if ($failureFlagExisted) {
+                Set-ItemProperty -LiteralPath $serviceKey -Name FailureActionsOnNonCrashFailures -Value $serviceRegistrySnapshot.FailureActionsOnNonCrashFailures
+            } else {
+                Remove-ItemProperty -LiteralPath $serviceKey -Name FailureActionsOnNonCrashFailures -ErrorAction SilentlyContinue
+            }
+            if ($environmentExisted) {
+                New-ItemProperty -LiteralPath $serviceKey -Name Environment -PropertyType MultiString -Value ([string[]] $serviceRegistrySnapshot.Environment) -Force | Out-Null
+            } else {
+                Remove-ItemProperty -LiteralPath $serviceKey -Name Environment -ErrorAction SilentlyContinue
+            }
+        } else {
             if ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-                & "$env:SystemRoot\System32\sc.exe" delete $serviceName | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Warning "Rollback could not delete $serviceName (exit $LASTEXITCODE)" }
+                Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'delete' $serviceName
             }
             Remove-Item -LiteralPath $binaryPath, $privateEnvironment -Force -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $binaryBackup) { Move-Item -LiteralPath $binaryBackup -Destination $binaryPath -Force }
@@ -126,7 +184,7 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
             if (-not $installRootExisted) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue }
             if (-not $configRootExisted) { Remove-Item -LiteralPath $ConfigRoot -Recurse -Force -ErrorAction SilentlyContinue }
         }
-        throw
+        throw $installError
     }
 }
 

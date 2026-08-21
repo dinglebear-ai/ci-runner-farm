@@ -211,9 +211,58 @@ jobs:
           for ($attempt = 0; $attempt -lt 50 -and (Get-Service -Name $serviceName).Status -ne 'Stopped'; $attempt++) { Start-Sleep -Milliseconds 200 }
           if ((Get-Service -Name $serviceName).Status -ne 'Stopped') { throw 'Disposable service did not stop after its expected configuration failure' }
 
-          # A reinstall must preserve the same safe service contract and replace config atomically.
+          # Make every upgrade target observably different, then inject a failure after each
+          # mutation boundary and require a byte/config/ACL/registry-exact rollback.
+          $installedBinary = Join-Path $installRoot 'crf-node.exe'
+          $installedEnvironment = Join-Path $configRoot 'node.env'
+          Set-Content -LiteralPath $installedBinary -Value 'pre-upgrade-binary'
+          Add-Content -LiteralPath $installedEnvironment -Value '# pre-upgrade-environment'
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('config', $serviceName, 'binPath=', 'C:\Windows\System32\cmd.exe /c exit 0', 'start=', 'disabled', 'obj=', 'LocalSystem') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('description', $serviceName, 'Pre-upgrade rollback sentinel') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=123', 'actions=restart/3210') | Out-Null
+          Invoke-CheckedText "$env:SystemRoot\System32\icacls.exe" @($configRoot, '/grant', 'Users:(OI)(CI)R') | Out-Null
+
+          function Get-RollbackFingerprint {
+            $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+            $registry = Get-ItemProperty -LiteralPath $serviceKey
+            $failureBytes = if ($registry.PSObject.Properties.Name -contains 'FailureActions') { [Convert]::ToBase64String([byte[]] $registry.FailureActions) } else { '<absent>' }
+            @(
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedEnvironment).Hash,
+              (Get-Acl -LiteralPath $configRoot).Sddl,
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)),
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qdescription', $serviceName)),
+              (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qfailure', $serviceName)),
+              (($registry.Environment | Sort-Object) -join "`n"),
+              $failureBytes
+            ) -join "`n---`n"
+          }
+
+          $preUpgrade = Get-RollbackFingerprint
+          foreach ($boundary in @('acl', 'files', 'service-config', 'failure-policy', 'registry-environment')) {
+            $env:CRF_INSTALLER_TEST_FAILURE = $boundary
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw "Upgrade unexpectedly succeeded at injected boundary $boundary"
+            } catch {
+              if ($_.Exception.Message -eq "Upgrade unexpectedly succeeded at injected boundary $boundary") { throw }
+              if ($_.Exception.Message -notmatch "Injected installer failure after $boundary") { throw }
+            } finally {
+              Remove-Item Env:CRF_INSTALLER_TEST_FAILURE -ErrorAction SilentlyContinue
+            }
+            $postFailure = Get-RollbackFingerprint
+            if ($postFailure -cne $preUpgrade) { throw "Upgrade rollback changed state after injected $boundary failure" }
+          }
+
+          # A successful reinstall must replace the restored sentinel state with the safe contract.
           & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
-          Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName) | Out-Null
+          $reinstalledQc = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)
+          if ($reinstalledQc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START' -or $reinstalledQc -notmatch 'SERVICE_START_NAME\s+: NT AUTHORITY\\LocalService') {
+            throw "Reinstall did not restore the safe service contract: $reinstalledQc"
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash) {
+            throw 'Reinstall did not replace the node binary'
+          }
 
       - name: Remove disposable Windows service
         if: always() && runner.os == 'Windows'
