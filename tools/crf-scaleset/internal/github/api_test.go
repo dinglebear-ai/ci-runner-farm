@@ -134,3 +134,40 @@ func TestAssignedJobHandleRejectsMissingStableIdentity(t *testing.T) {
 		t.Fatal("assignment without a stable job identity was accepted")
 	}
 }
+
+func TestAssignedJobHandleSurvivesGitHubReassignment(t *testing.T) {
+	base := scaleset.JobMessageBase{
+		WorkflowRunID: 32490619097,
+		OwnerName:     "dinglebear-ai", RepositoryName: "ci-runner-farm",
+		JobWorkflowRef: "dinglebear-ai/ci-runner-farm/.github/workflows/distributed-farm-acceptance.yaml@refs/heads/main",
+		JobDisplayName: "distributed-windows",
+	}
+	first := base
+	first.JobID = "assignment-a"
+	first.RunnerRequestID = 101
+	second := base
+	second.JobID = "assignment-b"
+	second.RunnerRequestID = 202
+
+	firstHandle, err := assignedJobHandle(112, &scaleset.JobAssigned{JobMessageBase: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondHandle, err := assignedJobHandle(112, &scaleset.JobAssigned{JobMessageBase: second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHandle != secondHandle {
+		t.Fatalf("reassigned workflow job changed handle: first=%d second=%d", firstHandle, secondHandle)
+	}
+
+	other := base
+	other.JobDisplayName = "distributed-linux"
+	otherHandle, err := assignedJobHandle(112, &scaleset.JobAssigned{JobMessageBase: other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherHandle == firstHandle {
+		t.Fatal("different workflow jobs received the same handle")
+	}
+}
