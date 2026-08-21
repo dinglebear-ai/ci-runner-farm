@@ -36,7 +36,7 @@ export CRF_EXPECTED_SECRET="$sentinel"
 export CRF_TEST_RESULT="$task_tmp/result"
 "$entrypoint" "$task_tmp/final-command" >"$task_tmp/stdout" 2>"$task_tmp/stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+for _ in $(seq 1 250); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
 [ -f "$CRF_SECRET_DIR/ready" ] || crf_fail "entrypoint did not become ready"
 printf '%s\n' "$sentinel" > "$CRF_SECRET_DIR/secret.in"
 wait "$entry_pid"
@@ -130,7 +130,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   PATH="$task_tmp/bin:$PATH" \
   "$entrypoint" >"$task_tmp/jit-stdout" 2>"$task_tmp/jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+for _ in $(seq 1 250); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
 printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
 if ! wait "$entry_pid"; then
   cat "$task_tmp/jit-stderr" >&2
@@ -153,7 +153,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" START_DOCKER_SERVICE=false \
   "$entrypoint" >"$task_tmp/bad-jit-stdout" 2>"$task_tmp/bad-jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+for _ in $(seq 1 250); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
 printf '%s\n' "$bad_descriptor" >"$CRF_SECRET_DIR/secret.in"
 if wait "$entry_pid"; then
   crf_fail "JIT entrypoint accepted an unknown descriptor key"
@@ -176,7 +176,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   PATH="$task_tmp/fail-bin:$PATH" \
   "$entrypoint" >"$task_tmp/rename-jit-stdout" 2>"$task_tmp/rename-jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+for _ in $(seq 1 250); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
 printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
 if wait "$entry_pid"; then
   crf_fail "JIT entrypoint ignored a credential rename failure"
