@@ -33,7 +33,7 @@ pub enum NativeExecutorError {
 
 struct ManagedChild {
     process: ManagedProcess,
-    identity: ProcessIdentity,
+    identity: Option<ProcessIdentity>,
 }
 
 pub struct NativeRunnerExecutor {
@@ -233,15 +233,47 @@ impl NativeRunnerExecutor {
         let identity = match ProcessIdentity::capture(process.id()) {
             Ok(identity) => identity,
             Err(_) => {
-                let _ = process.terminate_tree();
+                let pid = process.id();
+                if process.terminate_tree().is_err() {
+                    eprintln!(
+                        "crf-node: failed to capture or terminate runner identity placement_id={placement_id} pid={pid}"
+                    );
+                    self.children.insert(
+                        placement_id.clone(),
+                        ManagedChild {
+                            process,
+                            identity: None,
+                        },
+                    );
+                    return ExecutionResult::Deferred("runner_cleanup_uncertain".into());
+                }
                 return self.fail_before_spawn(placement_id, "runner_identity_unavailable");
             }
         };
-        self.children
-            .insert(placement_id.clone(), ManagedChild { process, identity });
         if self.store.record_spawned(placement_id, identity).is_err() {
-            return ExecutionResult::Deferred("spawn_state_unavailable".into());
+            let pid = process.id();
+            if process.terminate_tree().is_err() {
+                eprintln!(
+                    "crf-node: failed to persist or terminate spawned runner placement_id={placement_id} pid={pid}"
+                );
+                self.children.insert(
+                    placement_id.clone(),
+                    ManagedChild {
+                        process,
+                        identity: Some(identity),
+                    },
+                );
+                return ExecutionResult::Deferred("spawn_cleanup_uncertain".into());
+            }
+            return self.fail_before_spawn(placement_id, "spawn_state_unavailable");
         }
+        self.children.insert(
+            placement_id.clone(),
+            ManagedChild {
+                process,
+                identity: Some(identity),
+            },
+        );
         ExecutionResult::Applied
     }
 
@@ -249,12 +281,18 @@ impl NativeRunnerExecutor {
         let ControllerCommand::StartPlacement { placement_id, .. } = &command.payload else {
             return ExecutionResult::Rejected("invalid_start_command".into());
         };
-        if let Some(managed) = self.children.get(placement_id) {
-            if self
-                .store
-                .record_spawned(placement_id, managed.identity)
-                .is_err()
-            {
+        if let Some(managed) = self.children.get_mut(placement_id) {
+            let identity = match managed.identity {
+                Some(identity) => identity,
+                None => match ProcessIdentity::capture(managed.process.id()) {
+                    Ok(identity) => {
+                        managed.identity = Some(identity);
+                        identity
+                    }
+                    Err(_) => return ExecutionResult::Deferred("runner_cleanup_uncertain".into()),
+                },
+            };
+            if self.store.record_spawned(placement_id, identity).is_err() {
                 return ExecutionResult::Deferred("spawn_state_unavailable".into());
             }
             return ExecutionResult::Applied;

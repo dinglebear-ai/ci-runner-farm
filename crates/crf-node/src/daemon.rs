@@ -144,6 +144,8 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         draining: false,
     };
 
+    let diagnostic_node_id = platform.node_id.clone();
+    let diagnostic_controller = config.controller_addr.to_string();
     let ledger = CommandLedger::new(platform.node_id, generation, config.command_ledger_capacity)
         .map_err(|_| DaemonError::CommandLedger)?;
     let processor = CommandProcessor::new(ledger, executor);
@@ -162,10 +164,18 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
     .map_err(|_| DaemonError::TlsClient)?;
 
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
+    let mut reconnect_log = ReconnectLog::default();
     while running.load(Ordering::SeqCst) {
         let transport = match tls_client.connect() {
             Ok(transport) => transport,
-            Err(_) => {
+            Err(error) => {
+                reconnect_log.failure(
+                    &diagnostic_node_id,
+                    &diagnostic_controller,
+                    "tls_connect",
+                    &format!("{error:?}"),
+                    backoff,
+                );
                 sleep_interruptible(backoff, &running);
                 backoff = next_backoff(backoff);
                 continue;
@@ -174,13 +184,27 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
 
         let mut session = AgentSession::new(transport, core);
         match session.register(now_unix_ms()?) {
-            Ok(_) => backoff = INITIAL_RECONNECT_BACKOFF,
+            Ok(_) => {
+                reconnect_log.recovered(&diagnostic_node_id, &diagnostic_controller);
+                backoff = INITIAL_RECONNECT_BACKOFF;
+            }
             Err(error) => {
                 let reconnect = matches!(error, AgentSessionError::Transport(_));
                 core = session.into_core();
                 if !reconnect {
+                    eprintln!(
+                        "crf-node: fatal registration failure node_id={} controller={} error={error:?}",
+                        diagnostic_node_id, diagnostic_controller
+                    );
                     return Err(DaemonError::FatalSession);
                 }
+                reconnect_log.failure(
+                    &diagnostic_node_id,
+                    &diagnostic_controller,
+                    "registration_transport",
+                    &format!("{error:?}"),
+                    backoff,
+                );
                 sleep_interruptible(backoff, &running);
                 backoff = next_backoff(backoff);
                 continue;
@@ -197,8 +221,19 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     let reconnect = matches!(error, AgentSessionError::Transport(_));
                     core = session.into_core();
                     if !reconnect {
+                        eprintln!(
+                            "crf-node: fatal heartbeat failure node_id={} controller={} error={error:?}",
+                            diagnostic_node_id, diagnostic_controller
+                        );
                         return Err(DaemonError::FatalSession);
                     }
+                    reconnect_log.failure(
+                        &diagnostic_node_id,
+                        &diagnostic_controller,
+                        "heartbeat_transport",
+                        &format!("{error:?}"),
+                        backoff,
+                    );
                     sleep_interruptible(backoff, &running);
                     backoff = next_backoff(backoff);
                     break;
@@ -207,6 +242,51 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ReconnectLog {
+    last_failure: Option<String>,
+    suppressed: u64,
+}
+
+impl ReconnectLog {
+    fn failure(
+        &mut self,
+        node_id: &str,
+        controller: &str,
+        stage: &str,
+        cause: &str,
+        retry_delay: Duration,
+    ) {
+        let fingerprint = format!("{stage}:{cause}");
+        if self.last_failure.as_deref() == Some(&fingerprint) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return;
+        }
+        if self.suppressed > 0 {
+            eprintln!(
+                "crf-node: suppressed {} repeated reconnect failures node_id={node_id} controller={controller}",
+                self.suppressed
+            );
+        }
+        eprintln!(
+            "crf-node: connection failure node_id={node_id} controller={controller} stage={stage} error={cause} retry_delay_ms={}",
+            retry_delay.as_millis()
+        );
+        self.last_failure = Some(fingerprint);
+        self.suppressed = 0;
+    }
+
+    fn recovered(&mut self, node_id: &str, controller: &str) {
+        if self.last_failure.take().is_some() {
+            eprintln!(
+                "crf-node: controller registration recovered node_id={node_id} controller={controller} suppressed_failures={}",
+                self.suppressed
+            );
+        }
+        self.suppressed = 0;
+    }
 }
 
 fn now_unix_ms() -> Result<u64, DaemonError> {
@@ -251,5 +331,28 @@ mod tests {
         let started = Instant::now();
         sleep_interruptible(Duration::from_secs(5), &running);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reconnect_diagnostics_suppress_duplicates_and_reset_after_recovery() {
+        let mut log = ReconnectLog::default();
+        log.failure(
+            "node-1",
+            "controller:9443",
+            "tls_connect",
+            "refused",
+            Duration::from_secs(1),
+        );
+        log.failure(
+            "node-1",
+            "controller:9443",
+            "tls_connect",
+            "refused",
+            Duration::from_secs(2),
+        );
+        assert_eq!(log.suppressed, 1);
+        log.recovered("node-1", "controller:9443");
+        assert_eq!(log.last_failure, None);
+        assert_eq!(log.suppressed, 0);
     }
 }

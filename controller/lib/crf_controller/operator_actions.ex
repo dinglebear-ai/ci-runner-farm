@@ -29,7 +29,7 @@ defmodule CrfController.OperatorActions do
 
   def force_abandon(placement_id, true, server) when is_binary(placement_id) do
     with true <- Identifier.valid?(placement_id),
-         {:ok, %Placement{} = placement} <-
+         {:ok, %{placement: %Placement{} = placement}} <-
            DemandCoordinator.force_abandon_placement(server, placement_id, force: true) do
       {:ok,
        %{

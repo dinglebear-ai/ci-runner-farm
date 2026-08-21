@@ -232,12 +232,41 @@ call_adapter "$(start_json placement-prepared command-prepared runner-prepared)"
 crf_assert_contains "$reply" '"result":"started"' 'prepared Start replay did not resume launch'
 [ "$run_calls" = $((before_runs + 1)) ] || crf_fail 'prepared replay did not create exactly once'
 
+# A real Docker client/daemon ambiguity is fenced before launch and never retried.
+fake_reset_container
+FAKE_RUN_NO_CREATE=1
+before_runs=$run_calls
+before_secret_calls="$(secret_call_count)"
+call_adapter "$(start_json placement-uncertain command-uncertain runner-uncertain)"
+crf_assert_contains "$reply" 'container_start_uncertain' 'failed Docker create was not durably fenced'
+[ "$run_calls" = $((before_runs + 1)) ] || crf_fail 'ambiguous create did not attempt Docker exactly once'
+uncertain_state="$(distributed_adapter_state_path placement-uncertain)"
+[ "$(distributed_adapter_state_field "$uncertain_state" phase)" = starting ] || crf_fail 'ambiguous create did not preserve starting fence'
+uncertain_reservation="$(distributed_adapter_state_field "$uncertain_state" reservation_id)"
+[ -f "$RESERVATION_DIR/$uncertain_reservation.state" ] || crf_fail 'ambiguous create released its reservation'
+[ "$(secret_call_count)" = "$before_secret_calls" ] || crf_fail 'ambiguous create attempted secret handoff'
+unset FAKE_RUN_NO_CREATE
+call_adapter "$(start_json placement-uncertain command-uncertain runner-uncertain)"
+crf_assert_contains "$reply" 'container_start_uncertain' 'ambiguous create replay was not deferred'
+[ "$run_calls" = $((before_runs + 1)) ] || crf_fail 'ambiguous create replay launched a duplicate'
+
+# A nonzero Docker client result can still be adopted when the daemon created the exact container.
+fake_reset_container
+FAKE_RUN_RC=42
+before_runs=$run_calls
+before_secret_calls="$(secret_call_count)"
+call_adapter "$(start_json placement-adopt command-adopt runner-adopt)"
+crf_assert_contains "$reply" '"result":"started"' 'created container was not adopted after Docker client failure'
+[ "$run_calls" = $((before_runs + 1)) ] || crf_fail 'adopted create did not invoke Docker exactly once'
+[ "$(secret_call_count)" = $((before_secret_calls + 1)) ] || crf_fail 'adopted create did not perform one secret handoff'
+unset FAKE_RUN_RC
+
 # Starting without an observed container is ambiguous forever: never issue a second docker run.
 fake_reset_container
-distributed_adapter_policy_prepare placement-uncertain command-uncertain default runner-uncertain 1000 1073741824
+distributed_adapter_policy_prepare placement-synthetic command-synthetic default runner-synthetic 1000 1073741824
 distributed_adapter_state_store "" starting
 before_runs=$run_calls
-call_adapter "$(start_json placement-uncertain command-uncertain runner-uncertain)"
+call_adapter "$(start_json placement-synthetic command-synthetic runner-synthetic)"
 crf_assert_contains "$reply" 'container_start_uncertain' 'ambiguous starting state was not deferred'
 [ "$run_calls" = "$before_runs" ] || crf_fail 'ambiguous starting state launched a duplicate'
 

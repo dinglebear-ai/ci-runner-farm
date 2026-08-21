@@ -55,8 +55,11 @@ DESTDIR="$rootfs" "$bundle/install.sh" >/dev/null
 DESTDIR="$rootfs" "$bundle/install.sh" >/dev/null
 
 test -L "$rootfs/opt/ci-runner-farm/current"
+# Generated bundle metadata is the contract under test.
+# shellcheck disable=SC1091
+source "$bundle/BUILD-INFO"
 case "$(readlink "$rootfs/opt/ci-runner-farm/current")" in
-  releases/*) ;;
+  "releases/${VERSION}-${PLATFORM}-${GIT_SHA}") ;;
   *) echo "installed current symlink is not release-relative" >&2; exit 1 ;;
 esac
 test -x "$rootfs/opt/ci-runner-farm/current/bin/crf-node"

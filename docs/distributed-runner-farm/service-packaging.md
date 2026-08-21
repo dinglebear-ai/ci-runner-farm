@@ -32,7 +32,7 @@ A bundle built on Ubuntu must not be assumed compatible with Fedora or another d
 
 The installer places immutable release payloads under:
 
-`/opt/ci-runner-farm/releases/<version>-<platform>/`
+`/opt/ci-runner-farm/releases/<version>-<platform>-<git-sha>/`
 
 and atomically updates the relative symlink:
 
