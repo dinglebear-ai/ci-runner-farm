@@ -1,6 +1,7 @@
 defmodule CrfController.DemandWork do
   alias CrfController.{
     Node,
+    NodeCommand,
     NodeMailbox,
     NodeRegistry,
     OfferLedger,
@@ -57,6 +58,28 @@ defmodule CrfController.DemandWork do
       |> case do
         {:ok, blocked, _slots} -> {:cont, {:ok, blocked}}
         {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  def reclaim_unassigned(snapshot, ctx, now_ms, now_unix_ms) do
+    assigned_by_pool = Map.new(snapshot.pools, &{&1.pool_id, &1.assigned_jobs})
+
+    ctx.placement_ledger
+    |> PlacementLedger.snapshot()
+    |> Enum.reduce_while({:ok, 0}, fn placement, {:ok, reclaimed} ->
+      idle =
+        Map.get(assigned_by_pool, placement.pool_id, 0) == 0 and
+          placement.state in [:observed, :running] and
+          now_ms - placement.updated_at_ms >= ctx.offer_ttl_ms
+
+      if idle do
+        case enqueue_idle_cancel(placement, ctx, now_unix_ms) do
+          :ok -> {:cont, {:ok, reclaimed + 1}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      else
+        {:cont, {:ok, reclaimed}}
       end
     end)
   end
@@ -157,13 +180,16 @@ defmodule CrfController.DemandWork do
   end
 
   defp adopt_active_placement(node, placement, ctx, now_ms) do
+    next_state = if placement.state == :running, do: :running, else: :observed
+
     cond do
       node.id != placement.node_id ->
         {:error, :placement_node_identity_conflict}
 
-      true ->
-        next_state = if placement.state == :running, do: :running, else: :observed
+      placement.state == next_state ->
+        discard_start_command(ctx.node_mailbox, placement.command_id)
 
+      true ->
         with {:ok, _updated} <-
                PlacementLedger.placement_update(
                  ctx.placement_ledger,
@@ -175,12 +201,34 @@ defmodule CrfController.DemandWork do
                  nil,
                  now_ms: now_ms
                ) do
-          case NodeMailbox.discard(ctx.node_mailbox, placement.command_id) do
-            {:ok, _command} -> :ok
-            {:error, :unknown_command} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
+          discard_start_command(ctx.node_mailbox, placement.command_id)
         end
+    end
+  end
+
+  defp discard_start_command(mailbox, command_id) do
+    case NodeMailbox.discard(mailbox, command_id) do
+      {:ok, _command} -> :ok
+      {:error, :unknown_command} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp enqueue_idle_cancel(placement, ctx, now_unix_ms) do
+    command_id = "cancel-#{placement.id}"
+    idempotency_key = "cancel-idle-#{placement.id}"
+
+    with {:ok, command} <-
+           NodeCommand.cancel_placement(
+             placement,
+             command_id,
+             idempotency_key,
+             now_unix_ms,
+             now_unix_ms + @command_ttl_ms
+           ),
+         {:ok, ^command} <-
+           NodeMailbox.enqueue(ctx.node_mailbox, command, now_unix_ms: now_unix_ms) do
+      :ok
     end
   end
 

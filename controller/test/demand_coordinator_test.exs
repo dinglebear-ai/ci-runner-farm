@@ -24,7 +24,10 @@ defmodule CrfController.DemandCoordinatorTest do
 
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
     def state(server), do: GenServer.call(server, :state)
-    def set_handles(server, handles), do: GenServer.call(server, {:set_handles, handles})
+
+    def set_handles(server, handles, assigned_jobs \\ nil),
+      do: GenServer.call(server, {:set_handles, handles, assigned_jobs})
+
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
@@ -45,9 +48,10 @@ defmodule CrfController.DemandCoordinatorTest do
     @impl true
     def handle_call(:state, _from, state), do: {:reply, state, state}
 
-    def handle_call({:set_handles, handles}, _from, state) do
+    def handle_call({:set_handles, handles, assigned_jobs}, _from, state) do
       [pool] = state.snapshot.pools
-      pool = %{pool | acquired_handles: handles, assigned_jobs: length(handles)}
+      assigned_jobs = if is_nil(assigned_jobs), do: length(handles), else: assigned_jobs
+      pool = %{pool | acquired_handles: handles, assigned_jobs: assigned_jobs}
       state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
       {:reply, :ok, state}
     end
@@ -264,6 +268,90 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
       assert placement.state == :observed
       assert FakeScaleSet.state(ctx.scale_set).issue_calls == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+    end
+  end
+
+  test "unassigned active JIT placement is cancelled after the idle timeout", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 502)
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [502], 0)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 502,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert {:ok, _} =
+               NodeRegistry.heartbeat(
+                 ctx.registry,
+                 "dookie",
+                 7,
+                 %{cpu_millis: 6_000, memory_bytes: 12 * @gib},
+                 active_placements: MapSet.new([identity.placement_id]),
+                 now_ms: 90
+               )
+
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.reclaimed_idle_placements == 0
+      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert placement.state == :observed
+      assert placement.updated_at_ms == 100
+
+      assert {:ok, before_timeout} = reconcile(ctx.demand, 90_099)
+      assert before_timeout.reclaimed_idle_placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert {:ok, unchanged} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert unchanged.updated_at_ms == 100
+
+      assert {:ok, after_timeout} = reconcile(ctx.demand, 90_100)
+      assert after_timeout.reclaimed_idle_placements == 1
+      assert NodeMailbox.size(ctx.mailbox) == 1
+
+      assert {:ok, command} =
+               NodeMailbox.next_for(ctx.mailbox, "dookie", 7, now_unix_ms: @now_unix_ms + 90_100)
+
+      assert command.payload == {:cancel_placement, identity.placement_id}
+    end
+  end
+
+  test "assigned active JIT placement is not reclaimed", ctx do
+    unless ctx.disabled do
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 503)
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [503], 1)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 503,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert {:ok, _} =
+               NodeRegistry.heartbeat(
+                 ctx.registry,
+                 "dookie",
+                 7,
+                 %{cpu_millis: 6_000, memory_bytes: 12 * @gib},
+                 active_placements: MapSet.new([identity.placement_id]),
+                 now_ms: 90
+               )
+
+      assert {:ok, _} = reconcile(ctx.demand, 100)
+      assert {:ok, result} = reconcile(ctx.demand, 200_000)
+      assert result.reclaimed_idle_placements == 0
       assert NodeMailbox.size(ctx.mailbox) == 0
     end
   end
