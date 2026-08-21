@@ -30,28 +30,70 @@ defmodule CrfController.DemandWork do
 
   def reconcile_acquired(snapshot, jit_states, ctx, now_ms, now_unix_ms) do
     issued = MapSet.new(jit_states, &{&1.pool_id, &1.work_handle})
+    placements = PlacementLedger.snapshot(ctx.placement_ledger)
 
     snapshot.pools
     |> Enum.sort_by(& &1.pool_id)
     |> Enum.reduce_while({:ok, MapSet.new()}, fn pool, {:ok, blocked} ->
+      policy = Map.get(ctx.policies, pool.pool_id)
+
+      service =
+        Enum.count(
+          placements,
+          &(&1.pool_id == pool.pool_id and not Placement.terminal?(&1))
+        )
+
+      available_slots = if policy, do: max(policy.max_concurrency - service, 0), else: 0
+
       pool.acquired_handles
       |> Enum.sort()
-      |> Enum.reduce_while({:ok, blocked}, fn handle, {:ok, blocked} ->
+      |> Enum.reduce_while({:ok, blocked, available_slots}, fn handle, {:ok, blocked, slots} ->
         if MapSet.member?(issued, {pool.pool_id, handle}) do
-          {:cont, {:ok, blocked}}
+          {:cont, {:ok, blocked, slots}}
         else
-          case reconcile_acquired_handle(pool, handle, ctx, now_ms, now_unix_ms) do
-            :ok -> {:cont, {:ok, blocked}}
-            :blocked -> {:cont, {:ok, MapSet.put(blocked, pool.pool_id)}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
+          reconcile_acquired_with_capacity(pool, handle, slots, ctx, now_ms, now_unix_ms, blocked)
         end
       end)
       |> case do
-        {:ok, blocked} -> {:cont, {:ok, blocked}}
+        {:ok, blocked, _slots} -> {:cont, {:ok, blocked}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp reconcile_acquired_with_capacity(
+         pool,
+         handle,
+         slots,
+         ctx,
+         now_ms,
+         now_unix_ms,
+         blocked
+       ) do
+    with {:ok, identity} <- WorkIdentity.for_handle(pool.pool_id, pool.scale_set_id, handle) do
+      case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
+        {:ok, %PlacementTombstone{}} ->
+          {:cont, {:ok, blocked, slots}}
+
+        {:ok, %Placement{}} ->
+          {:cont, {:ok, blocked, slots}}
+
+        {:error, :unknown_placement} when slots == 0 ->
+          {:cont, {:ok, MapSet.put(blocked, pool.pool_id), slots}}
+
+        {:error, :unknown_placement} ->
+          case reconcile_acquired_handle(pool, handle, ctx, now_ms, now_unix_ms) do
+            :ok -> {:cont, {:ok, blocked, slots - 1}}
+            :blocked -> {:cont, {:ok, MapSet.put(blocked, pool.pool_id), slots}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    else
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
   end
 
   defp reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
