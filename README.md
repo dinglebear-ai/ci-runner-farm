@@ -18,10 +18,11 @@ scripts/worktree-setup.sh codex/my-change
 The setup is idempotent: it trusts the repository config, installs all pinned
 tools, and verifies Go, Elixir, Erlang/OTP, and Mix before returning success.
 
-Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners** —
-multiple concurrent, resource-capped runners running as Docker containers, with
-warm shared caches, utilization-aware autoscaling, routed capacity pools, and Docker-in-Docker. No VM
-required.
+Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners**.
+The classic backend keeps persistent, resource-capped Docker runners with warm
+caches. The opt-in distributed backend adds one-job GitHub scale-set runners
+scheduled across authenticated Linux, Windows, WSL, and Unraid container nodes.
+No VM is required for the Unraid container node.
 
 Hosted CI minutes are slow and metered. Meanwhile, the Unraid server in your
 rack has spare cores and a fast cache pool sitting idle between media tasks.
@@ -52,6 +53,7 @@ dependency caches that stay hot between runs, at zero cost per minute.
 |---|---|
 | **N concurrent runners** | Each runner is its own container, optionally capped with `--cpus` / `--memory` so CI never starves the rest of the host. |
 | **Runner pools** | Reserve independently scaled Rust, Python, TypeScript, or other capacity behind derived `ci-pool-*` labels so quick jobs do not wait behind long builds. |
+| **Distributed scale sets** | Route one-job JIT runners across mTLS-authenticated heterogeneous nodes. The controller admits real CPU/memory reservations before advertising GitHub capacity. |
 | **Utilization-aware autoscaling** | An optional daemon maintains a warm idle buffer between a min and max, independently for every configured pool. |
 | **Warm shared caches** | npm, yarn, pnpm, and Playwright caches live on a fast pool and are reused across every run. Writable Cargo registry/git directories stay runner-local because concurrent extraction into one shared tree can corrupt dependencies; compiler artifacts belong in Kache, sccache, or another concurrency-safe backend. |
 | **Docker-in-Docker per runner** | Jobs that use `services:` or `docker compose` just work, with an optional shared pull-through registry mirror so images are pulled once for the whole fleet. |
@@ -63,11 +65,25 @@ dependency caches that stay hot between runs, at zero cost per minute.
 
 ## How it works
 
-The plugin provisions a set of Docker containers from a runner image — built
-in-plugin or pulled from a registry. Each container registers itself with GitHub
-as a self-hosted runner, either at **repo** scope or **org** scope (org scope
-registers organization-wide capacity that can be one shared fleet or multiple
-routed pools available to permitted repositories).
+The default classic backend provisions persistent Docker containers from a
+runner image built in-plugin or pulled from a registry. Each container registers
+as a self-hosted runner at repository or organization scope.
+
+The gated distributed backend uses GitHub runner scale sets for demand, a
+central controller for durable admission and placement, and mTLS node agents for
+execution. Scale-set jobs route by the pool's single custom label (for example
+`runs-on: ci-pool-rust`), not by a classic multi-label array containing
+`self-hosted`, OS, and architecture. OS, architecture, backend, capabilities,
+CPU, and memory are controller policy and are checked before a JIT runner is
+started. Tootie's distributed node keeps binary, configuration, TLS material,
+state, and logs on the configured cache dataset; high-churn node runtime never
+runs from or writes to the Unraid flash device.
+
+Classic runners are not replaced merely by selecting scale sets. The Fleet
+migration gate first proves compatibility and remote ownership, stops new
+classic admission without interrupting busy jobs, waits for those jobs to
+drain, and only then makes scale sets effective. Rollback reverses eligibility
+in the same fail-closed order.
 
 Persistent package caches and the build workspace are bind-mounted from a fast
 pool so they survive across jobs. An optional companion container runs a

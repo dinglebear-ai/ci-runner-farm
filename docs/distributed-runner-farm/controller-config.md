@@ -29,7 +29,7 @@ Top-level keys are mandatory:
 
 ### Scale-set adapter
 
-`scaleset` contains the Unix socket, controller identity, config/ownership revisions, and IPC timeout. The controller never stores the GitHub PAT or App private key; those remain inside the Go adapter's separate sealed runtime configuration.
+`scaleset` contains the Unix socket, controller identity, config/ownership revisions, and IPC timeout. The timeout accepts 100 to 120000 ms. Production should use 120000 ms because GitHub session close, handle retirement, and long-poll handoff can legitimately exceed 30 seconds; the Elixir call boundary allows an additional five seconds. The controller never stores the GitHub PAT or App private key; those remain inside the Go adapter's separate sealed runtime configuration.
 
 `sidecar` chooses adapter ownership:
 
@@ -65,6 +65,13 @@ Every pool declares:
 - GitHub runner work folder.
 
 The controller translates this boundary once into `PoolPolicy` values consumed by the Rust scheduler.
+
+The GitHub scale set itself has one routing label: the pool ID/selector. A
+workflow uses that selector alone (`runs-on: ci-pool-rust`). Do not copy classic
+runner label arrays such as `[self-hosted, Linux, X64, ci-pool-rust]` into a
+scale-set workflow: GitHub does not attach those classic labels to a JIT
+scale-set runner. Platform and resource requirements belong in this controller
+pool policy.
 
 On an Unraid node, `runner-farm.sh distributed-pools-json [x86_64|arm64]` renders the currently validated single-fleet or V2 pool snapshot as this exact JSON array. The export is read-only and selects the local `container` backend; it does not create a controller configuration, enable distributed mode, or start services. Operators insert the resulting array as `demand.pools` in the private controller configuration and review it before activation.
 
