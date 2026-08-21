@@ -61,6 +61,10 @@ defmodule CrfController.Wire do
           non_neg_integer()
         ) :: {:ok, binary()} | {:error, atom()}
   def encode_response(message_id, status, code, command, now_unix_ms) do
+    encode_response(message_id, status, code, command, nil, now_unix_ms)
+  end
+
+  def encode_response(message_id, status, code, command, operator_projection, now_unix_ms) do
     with {:ok, message_id} <- identifier(message_id, :invalid_message_id),
          true <- status in [:accepted, :duplicate, :rejected],
          {:ok, code} <- response_code(code),
@@ -72,6 +76,11 @@ defmodule CrfController.Wire do
         "code" => if(is_nil(code), do: :null, else: code),
         "command" => command
       }
+
+      json =
+        if is_nil(operator_projection),
+          do: json,
+          else: Map.put(json, "operator_projection", operator_projection)
 
       encoded = :json.encode(json) |> IO.iodata_to_binary()
 

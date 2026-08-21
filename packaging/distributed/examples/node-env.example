@@ -13,6 +13,9 @@ CRF_NODE_MEMORY_BYTES=17179869184
 
 # Durable/private node state. This is shared by both execution backends.
 CRF_STATE_DIR=/var/lib/ci-runner-farm/node/state
+# Optional secret-free fleet projection for an authenticated local operator UI.
+# Keep this on durable local storage; the node writes it atomically with mode 0600.
+CRF_OPERATOR_PROJECTION_PATH=/var/lib/ci-runner-farm/node/status/controller.json
 
 # Execution backend. Omit CRF_EXECUTION_BACKEND for the backward-compatible
 # native_process default. Configure exactly one backend contract.

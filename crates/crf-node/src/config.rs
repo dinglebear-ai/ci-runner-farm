@@ -44,6 +44,7 @@ pub struct NodeConfig {
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
     pub command_ledger_capacity: usize,
+    pub operator_projection_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +93,10 @@ impl NodeConfig {
         if command_ledger_capacity == 0 || command_ledger_capacity > 4_096 {
             return Err(ConfigError::InvalidLedgerCapacity);
         }
+        let operator_projection_path = optional(values, "CRF_OPERATOR_PROJECTION_PATH")
+            .filter(|value| !value.is_empty())
+            .map(absolute_path)
+            .transpose()?;
 
         Ok(Self {
             controller_addr,
@@ -106,6 +111,7 @@ impl NodeConfig {
             connect_timeout,
             io_timeout,
             command_ledger_capacity: command_ledger_capacity as usize,
+            operator_projection_path,
         })
     }
 }
@@ -314,6 +320,33 @@ mod tests {
         );
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(config.command_ledger_capacity, 4_096);
+        assert_eq!(config.operator_projection_path, None);
+    }
+
+    #[test]
+    fn operator_projection_path_is_optional_and_absolute() {
+        let mut configured = values();
+        configured.insert(
+            "CRF_OPERATOR_PROJECTION_PATH".into(),
+            test_path("/var/lib/crf/status/controller.json"),
+        );
+        assert_eq!(
+            NodeConfig::from_values(&configured)
+                .expect("projection config")
+                .operator_projection_path,
+            Some(PathBuf::from(test_path(
+                "/var/lib/crf/status/controller.json"
+            )))
+        );
+
+        configured.insert(
+            "CRF_OPERATOR_PROJECTION_PATH".into(),
+            "relative.json".into(),
+        );
+        assert_eq!(
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::InvalidPath)
+        );
     }
 
     #[test]

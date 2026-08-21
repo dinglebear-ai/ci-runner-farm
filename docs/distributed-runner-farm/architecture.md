@@ -28,14 +28,18 @@ The controller owns orchestration and reconciliation:
 - node ingress over TLS;
 - serialized optional automatic reconciliation;
 - authenticated operator snapshots and mutations through the controller-local
-  CLI; the Unraid WebUI projects only its local node and activation gate.
+  CLI;
+- a bounded secret-free operator projection for explicitly capable nodes,
+  delivered on the existing mTLS response path.
 
 The controller is platform-neutral and contains no Unraid filesystem, Docker, or shell assumptions.
 
-The authority boundary is intentional: remote node inventory, offers,
-placements, drains, and orphan remediation remain behind the controller's
-same-UID authenticated RPC. The Unraid page does not tunnel that channel or
-infer global health from its local node process.
+The authority boundary is intentional. The Unraid page reads a private local
+snapshot written atomically by its authenticated node; it does not tunnel the
+same-UID controller RPC. The projection contains read-only nodes, resources,
+offers, placements, demand/session, sidecar, and freshness data. Credentials,
+JIT descriptors, certificate material, and mutation capability are excluded.
+Drain/undrain and orphan remediation remain controller-local operations.
 
 ### Rust scheduler
 

@@ -4,30 +4,36 @@ Last updated: 2026-08-21
 
 ## Active checkpoint
 
-- PR #37 and all review remediations are merged. PR #57 fixed production
-  materialization of the official runner's read-only directories.
-- Live controller and Linux nodes run immutable release
-  `2f6eedaff86c77660760a41138a83f68c99f3b4b`; Steamy runs the native Windows
-  service. The acceptance controller remains manual while production pool
-  migration is prepared.
+- PR #37 and every review remediation are merged. Production follow-ups through
+  PR #64 fixed materialization, scale-set selectors, demand-driven capacity,
+  startup session health, fresh initial snapshots, and fairness-cursor drift.
+- The Dookie controller runs immutable clean release
+  `1935505eef4f2c6e79a230eab228f906f31b47da` from `/opt/ci-runner-farm`.
+  Controller configuration, sidecar state, placement state, and GitHub
+  credentials remain on Dookie, not Unraid flash.
 - Registered nodes: Dookie (Linux native), Squirts (Linux native), Steamy
   (Windows native), Steamy WSL (Linux native), and Tootie (Linux container).
-- Tootie advertises 8000 CPU millis and 10 GiB; its binary/config/TLS/state/logs
-  are on `/mnt/cache` ZFS and its PID is in tmpfs. Nineteen classic containers
-  remained running through enrollment.
-- Tootie's packaged compatibility operation passed with plugin digest
-  `0ea5f71c9d04cfcaae79dee1ac9757398aaa2162fe4ee5e749023859704249bf`;
-  helper digest `7557b5706b9887aa24d3454124af9afa466e9ecde544207990a642efa2abe860`;
-  and exact cleanup complete. Its distributed binary, configuration, TLS,
-  state, and logs remain under `/mnt/cache`; only PID/socket state is tmpfs.
+- Tootie advertises 16000 CPU millis and 16 GiB. Its node binary,
+  configuration, TLS, state, logs, and operator projection live under
+  `/mnt/cache/appdata/ci-runner-farm/distributed-node`; only the PID is tmpfs.
+- Production owns seven scale sets: Rust, Python, TypeScript, Go, Ops, System,
+  and Residential Egress. The clean post-deploy set on 2026-08-21 used IDs
+  192-198; IDs are runtime evidence, not durable configuration.
 - Real GitHub jobs passed on Dookie, Squirts, Steamy, Steamy WSL, and Tootie's
   container backend. A live Dookie cancellation observed TERM, completed as
   cancelled in GitHub, removed the complete runner process group, returned
   resources, and removed runner credentials.
-- The classic backend remains effective because several classic runners were
-  busy at the cutover checkpoint. No busy classic container was interrupted.
-- PR #57 CI: plugin, Shell/PHP, Ubuntu distributed core, and Windows distributed
-  core all green.
+- Classic replacement is complete. Busy classic jobs were quarantined and
+  allowed to finish; their exact registrations and containers were then retired.
+  GitHub and Docker both reported zero classic runners, and the temporary runner
+  group was empty before deletion.
+- Fresh main-branch Build Plugin and Release Please workflows completed through
+  distributed Ops runners after the PR #64 deployment. The Lint workflow's
+  distributed Ubuntu and Windows jobs passed; its shell job exposed an
+  unguarded acceptance-workflow selector, now corrected in this branch.
+- Current verification on the controller-projection/WebUI branch: **130 Rust
+  tests**, **122 Elixir tests**, distributed-status, Fleet UI behavior, shell
+  syntax, and UI JavaScript tests pass.
 
 ### Historical implementation checkpoint
 
@@ -54,7 +60,8 @@ Last updated: 2026-08-21
 - Controller-approved container executor checkpoint: `f1684b9d50fe4c0b85e88a975225c163e44f9cc8`; crash adoption, exact-ID cancellation, uncertain start, lost-container reporting, and cross-backend identity preservation are covered.
 - Current implementation checkpoint: the local Unraid adapter endpoint maps controller-approved Start/Inspect/Cancel requests onto `runner-runtime.sh`, with private crash-recovery state, exact container identity fencing, local resource/config validation, and no duplicate scheduler or GitHub JIT-retirement authority.
 - Unraid pool-policy mapping: validated legacy single-fleet or V2 pool configuration exports as the controller's exact typed `demand.pools` JSON for x86_64/arm64 container nodes; export is read-only and never enables distributed mode.
-- Deployment: staged live with five registered nodes; distributed demand remains disabled and classic admission remains effective
+- Historical deployment state at this checkpoint: five nodes were staged while
+  distributed demand remained disabled and classic admission remained effective.
 - Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **109 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
@@ -71,10 +78,9 @@ This document is the living implementation tracker. Update this checkpoint secti
 ## Current state
 
 The distributed control/data path exists end to end, five live nodes are
-registered, and real jobs plus cancellation have passed. It remains opt-in:
-the classic Unraid backend stays effective until production pool definitions
-replace the isolated acceptance pools and the migration state machine drains
-all busy classic jobs.
+registered, production scale sets are active, and classic production runners
+have been replaced. The classic implementation remains available as a guarded
+rollback/legacy backend, not as active production capacity.
 
 The implemented path is:
 
@@ -159,14 +165,13 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Replace the isolated `accept*` controller/scale-set definitions with the
-   reviewed production pool export and use the migration state machine to stop
-   classic admission, wait for every busy classic job, and activate scale sets.
+1. Merge, deploy, and browser-verify the capability-gated mTLS controller
+   projection and expanded Unraid distributed-fleet UI.
 2. Complete the controller/node restart and network-partition matrix plus
    orphan/force-abandon acceptance under production pool identities.
-3. Add a separately authenticated controller status projection before exposing
-   remote node/placement mutation in the Unraid WebUI. The local UI deliberately
-   does not proxy controller RPC today.
+3. Re-run real one-job lifecycle acceptance on Tootie, Dookie, Squirts, Steamy
+   WSL, and Steamy against the final merged release, including terminal ACK,
+   runner retirement, and resource return.
 4. Add automated CA/server-certificate rotation, more target-distribution Linux
    bundles, sustained fairness/load tests, and longer-horizon replay-fence
    archival if operational scale requires it.
@@ -175,6 +180,6 @@ The implemented path is:
 
 The controller and five nodes are deployed and registered. Tootie's node is
 cache-resident and integrated with Docker start/stop events. Compatibility,
-five-node execution, drain rotation, duplicate-handle fencing, and cancellation
-are proven. Effective backend remains classic only because production pool
-replacement and a non-disruptive busy-runner drain are still pending.
+five-node execution, drain rotation, duplicate-handle fencing, cancellation,
+production scale-set startup, and non-disruptive classic retirement are proven.
+The active production path is distributed.

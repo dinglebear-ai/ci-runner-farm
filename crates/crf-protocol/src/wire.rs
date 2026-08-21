@@ -149,6 +149,8 @@ pub struct NodeMessageResponse {
     pub status: MessageResponseStatus,
     pub code: Option<String>,
     pub command: Option<ControllerEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_projection: Option<serde_json::Value>,
 }
 
 impl NodeMessageResponse {
@@ -173,6 +175,11 @@ impl NodeMessageResponse {
         }
         if let Some(command) = &self.command {
             command.validate(now_unix_ms)?;
+        }
+        if let Some(projection) = &self.operator_projection
+            && !projection.is_object()
+        {
+            return Err(WireError::InvalidResponse);
         }
         Ok(())
     }
@@ -633,6 +640,7 @@ mod tests {
             status: MessageResponseStatus::Rejected,
             code: Some("controller_rejected".into()),
             command: Some(command),
+            operator_projection: None,
         };
         assert_eq!(
             rejected_with_command.validate(1_787_070_001_000),
@@ -645,6 +653,7 @@ mod tests {
             status: MessageResponseStatus::Accepted,
             code: Some("unexpected_code".into()),
             command: None,
+            operator_projection: None,
         };
         assert_eq!(
             accepted_with_code.validate(1_787_070_001_000),
@@ -657,6 +666,7 @@ mod tests {
             status: MessageResponseStatus::Rejected,
             code: None,
             command: None,
+            operator_projection: None,
         };
         assert_eq!(
             rejected_without_code.validate(1_787_070_001_000),

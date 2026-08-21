@@ -65,6 +65,7 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
 }
 
 pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result<(), DaemonError> {
+    let operator_projection_path = config.operator_projection_path.clone();
     let platform = probe_local_platform();
     let mut host = SystemProbe::new().map_err(|_| DaemonError::HostProbe)?;
     let host_memory = host
@@ -122,7 +123,10 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         }
     };
     let execution_backend = executor.execution_backend();
-    let capabilities = executor.capabilities();
+    let mut capabilities = executor.capabilities();
+    if config.operator_projection_path.is_some() {
+        capabilities.insert("operator-projection-v1".into());
+    }
 
     let mut available = config.resources;
     let reserved = executor
@@ -184,7 +188,11 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
 
         let mut session = AgentSession::new(transport, core);
         match session.register(now_unix_ms()?) {
-            Ok(_) => {
+            Ok(outcome) => {
+                persist_operator_projection(
+                    operator_projection_path.as_deref(),
+                    outcome.operator_projection.as_ref(),
+                )?;
                 reconnect_log.recovered(&diagnostic_node_id, &diagnostic_controller);
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
@@ -216,7 +224,13 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 return Ok(());
             }
             match session.runtime_heartbeat(now_unix_ms()?) {
-                Ok(_) => sleep_interruptible(config.heartbeat_interval, &running),
+                Ok(outcome) => {
+                    persist_operator_projection(
+                        operator_projection_path.as_deref(),
+                        outcome.heartbeat.operator_projection.as_ref(),
+                    )?;
+                    sleep_interruptible(config.heartbeat_interval, &running);
+                }
                 Err(error) => {
                     let reconnect = matches!(error, AgentSessionError::Transport(_));
                     core = session.into_core();
@@ -240,6 +254,17 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn persist_operator_projection(
+    path: Option<&std::path::Path>,
+    projection: Option<&serde_json::Value>,
+) -> Result<(), DaemonError> {
+    if let (Some(path), Some(projection)) = (path, projection) {
+        crate::operator_projection::write_atomic(path, projection)
+            .map_err(|_| DaemonError::PlacementState)?;
     }
     Ok(())
 }

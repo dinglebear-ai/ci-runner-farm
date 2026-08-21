@@ -5,6 +5,7 @@ defmodule CrfController.Ingress do
     NodeCommand,
     NodeMailbox,
     NodeRegistry,
+    OperatorProjection,
     PeerIdentity,
     PlacementLedger,
     Wire
@@ -41,7 +42,8 @@ defmodule CrfController.Ingress do
          node_mailbox: Keyword.get(opts, :node_mailbox, NodeMailbox),
          capacity: capacity,
          order: :queue.new(),
-         messages: %{}
+         messages: %{},
+         controller_instance_id: Keyword.get(opts, :controller_instance_id, "controller")
        }}
     end
   end
@@ -63,14 +65,17 @@ defmodule CrfController.Ingress do
         {:reply, {:ok, response}, state}
 
       %{fingerprint: _different} ->
-        {:reply, response(envelope.message_id, :rejected, :message_id_conflict, nil, now_unix_ms),
+        {:reply,
+         response(envelope.message_id, :rejected, :message_id_conflict, nil, nil, now_unix_ms),
          state}
 
       nil ->
         outcome = route(envelope, now_ms, state)
         command = pending_command(outcome, envelope, state, now_unix_ms)
 
-        case encode_outcome(envelope.message_id, outcome, command, now_unix_ms) do
+        projection = operator_projection(outcome, envelope, state, now_unix_ms)
+
+        case encode_outcome(envelope.message_id, outcome, command, projection, now_unix_ms) do
           {:ok, response} ->
             state = remember(state, key, fingerprint, response)
             {:reply, {:ok, response}, state}
@@ -228,15 +233,26 @@ defmodule CrfController.Ingress do
 
   defp pending_command({:rejected, _reason}, _envelope, _state, _now_unix_ms), do: nil
 
-  defp encode_outcome(message_id, :accepted, command, now_unix_ms),
-    do: response(message_id, :accepted, nil, command, now_unix_ms)
+  defp encode_outcome(message_id, :accepted, command, projection, now_unix_ms),
+    do: response(message_id, :accepted, nil, command, projection, now_unix_ms)
 
-  defp encode_outcome(message_id, {:rejected, reason}, _command, now_unix_ms),
-    do: response(message_id, :rejected, reason, nil, now_unix_ms)
+  defp encode_outcome(message_id, {:rejected, reason}, _command, _projection, now_unix_ms),
+    do: response(message_id, :rejected, reason, nil, nil, now_unix_ms)
 
-  defp response(message_id, status, code, command, now_unix_ms) do
-    Wire.encode_response(message_id, status, code, command, now_unix_ms)
+  defp response(message_id, status, code, command, projection, now_unix_ms) do
+    Wire.encode_response(message_id, status, code, command, projection, now_unix_ms)
   end
+
+  defp operator_projection(:accepted, envelope, state, now_unix_ms) do
+    with {:ok, node} <- NodeRegistry.get(state.node_registry, envelope.node_id),
+         true <- MapSet.member?(node.capabilities, "operator-projection-v1") do
+      OperatorProjection.build(state.controller_instance_id, now_unix_ms)
+    else
+      _ -> nil
+    end
+  end
+
+  defp operator_projection(_, _, _, _), do: nil
 
   defp remember(state, key, fingerprint, response) do
     {order, messages} = evict_if_full(state.order, state.messages, state.capacity)

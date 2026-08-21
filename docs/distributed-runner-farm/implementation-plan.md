@@ -73,10 +73,10 @@
 - [x] Preserve single-host behavior as the default local backend; the distributed adapter is reachable only through its dedicated stdin-only command and is not part of normal fleet startup.
 - [x] Map validated legacy single-fleet and V2 Unraid pool/resource configuration into strict distributed controller pool-policy JSON without enabling distributed mode.
 - [x] Add secret-free local distributed-node status and activation state to the
-  authenticated Unraid WebUI; keep global inventory and mutations on the
-  controller's authenticated operator RPC.
-- [ ] Design a separately authenticated controller projection before adding
-  remote inventory or mutations to the Unraid WebUI.
+  authenticated Unraid WebUI.
+- [x] Add a capability-gated, secret-free controller projection over the
+  existing mTLS node channel. Persist it atomically on cache-backed storage and
+  expose read-only fleet inventory in the WebUI; keep mutations controller-local.
 - [x] Add migration/default behavior so existing plugin installs, controller startup, and node execution remain legacy/native unless their dedicated distributed configuration is explicitly supplied.
 
 ## Phase 6: hardening and release

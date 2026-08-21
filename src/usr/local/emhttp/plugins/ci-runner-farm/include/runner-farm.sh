@@ -4504,14 +4504,14 @@ cmd_readiness_json() {
     "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON" "$cached_count"
 }
 
-# Local-only distributed node status for the authenticated Unraid WebUI. This
-# intentionally does not proxy the remote controller operator API or claim
-# remote-node health. The controller's authenticated local RPC remains the
-# source of truth for global node inventory, placements, and drain state.
+# Distributed status for the authenticated Unraid WebUI. Local process/storage
+# evidence is combined with the bounded secret-free projection written by this
+# node's mTLS session. This never proxies controller RPC; controller-local CLI
+# remains authoritative for mutations and full diagnostics.
 cmd_distributed_status_json() {
   local root=/mnt/cache/appdata/ci-runner-farm/distributed-node
   local service="$root/service.sh" env_file="$root/config/node.env"
-  local installed=false running=false pid=null node_id="" controller="" backend="" cpu=0 memory=0 generation=0 filesystem="" storage_safe=false
+  local installed=false running=false pid=null node_id="" controller="" backend="" cpu=0 memory=0 generation=0 filesystem="" storage_safe=false projection=null projection_path=""
   [ -x "$root/bin/crf-node" ] && [ -x "$service" ] && [ -f "$env_file" ] && [ ! -L "$env_file" ] && installed=true
   if [ "$installed" = true ]; then
     local status
@@ -4522,6 +4522,7 @@ cmd_distributed_status_json() {
     backend="$(sed -n 's/^CRF_EXECUTION_BACKEND=//p' "$env_file" | head -1)"
     cpu="$(sed -n 's/^CRF_NODE_CPU_MILLIS=//p' "$env_file" | head -1)"
     memory="$(sed -n 's/^CRF_NODE_MEMORY_BYTES=//p' "$env_file" | head -1)"
+    projection_path="$(sed -n 's/^CRF_OPERATOR_PROJECTION_PATH=//p' "$env_file" | head -1)"
     [[ "$cpu" =~ ^[0-9]+$ ]] || cpu=0
     [[ "$memory" =~ ^[0-9]+$ ]] || memory=0
     local generation_file
@@ -4532,10 +4533,24 @@ cmd_distributed_status_json() {
   if [ -d "$root" ]; then
     case "$(readlink -f "$root" 2>/dev/null)" in /mnt/cache/*) storage_safe=true;; esac
   fi
-  printf '{"schema_version":1,"installed":%s,"running":%s,"pid":%s,"node_id":"%s","controller":"%s","backend":"%s","cpu_millis":%s,"memory_bytes":%s,"generation":%s,"storage_root":"%s","filesystem":"%s","storage_cache_backed":%s,"remote_inventory":"controller_operator_rpc"}\n' \
+  [ -n "$projection_path" ] || projection_path="$root/status/controller.json"
+  case "$(readlink -f "$projection_path" 2>/dev/null)" in "$root"/*)
+    if status_state_file_valid "$projection_path" 262144; then
+      projection="$(php -r '
+        $value=json_decode(@file_get_contents($argv[1]),true);
+        $ok=is_array($value)&&($value["schema_version"]??0)===1&&
+          is_string($value["controller_instance_id"]??null)&&
+          is_int($value["observed_at_unix_ms"]??null)&&
+          is_array($value["nodes"]??null)&&is_array($value["placements"]??null);
+        echo $ok?json_encode($value,JSON_UNESCAPED_SLASHES):"null";
+      ' "$projection_path" 2>/dev/null)"
+      [ -n "$projection" ] || projection=null
+    fi;;
+  esac
+  printf '{"schema_version":2,"installed":%s,"running":%s,"pid":%s,"node_id":"%s","controller":"%s","backend":"%s","cpu_millis":%s,"memory_bytes":%s,"generation":%s,"storage_root":"%s","filesystem":"%s","storage_cache_backed":%s,"projection_path":"%s","projection":%s,"remote_inventory":"mtls_node_projection"}\n' \
     "$installed" "$running" "$pid" "$(printf '%s' "$node_id" | json_escape)" "$(printf '%s' "$controller" | json_escape)" \
     "$(printf '%s' "$backend" | json_escape)" "$cpu" "$memory" "$generation" "$(printf '%s' "$root" | json_escape)" \
-    "$(printf '%s' "$filesystem" | json_escape)" "$storage_safe"
+    "$(printf '%s' "$filesystem" | json_escape)" "$storage_safe" "$(printf '%s' "$projection_path" | json_escape)" "$projection"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.

@@ -56,6 +56,19 @@ Rust and Elixir use redacting secret wrappers. Debug/Inspect output never contai
 
 The node does not persist JIT. The controller placement ledger and scale-set sequence store do not persist JIT.
 
+## Operator projection
+
+A node configured with `CRF_OPERATOR_PROJECTION_PATH` advertises the
+`operator-projection-v1` capability. Only that authenticated node receives the
+optional projection field in controller responses, preserving rolling
+compatibility with older nodes. The projection is bounded by the normal 256 KiB
+wire frame, contains only the redacted operator snapshot plus controller ID and
+wall-clock observation time, and carries no JIT, GitHub credential, private key,
+or mutation token. The node writes the latest projection atomically to the
+configured absolute path; Unix files use mode `0600` and symlink targets are
+rejected. Unraid accepts projection files only beneath its fixed cache-backed
+distributed-node root.
+
 The central Go adapter may persist a descriptor solely for one-shot recovery:
 
 - descriptor directory: mode 0700;
