@@ -21,3 +21,10 @@ PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
 RUNDIR="/var/local/emhttp/ci-runner-farm"
 mkdir -p "$RUNDIR"
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$RUNDIR/boot.log" 2>&1 & ) || true
+
+# The optional distributed node is installed on the cache pool, never flash.
+# Its container adapter requires Docker, so start it only after docker_started.
+DISTRIBUTED_NODE_SERVICE="/mnt/cache/appdata/ci-runner-farm/distributed-node/service.sh"
+if [ -x "$DISTRIBUTED_NODE_SERVICE" ]; then
+  ( nohup "$DISTRIBUTED_NODE_SERVICE" start >>"$RUNDIR/distributed-node-boot.log" 2>&1 & ) || true
+fi
