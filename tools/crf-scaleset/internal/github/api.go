@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 )
@@ -47,10 +48,31 @@ type Statistics struct {
 	TotalBusyRunners       int
 	TotalIdleRunners       int
 }
+type JobMetadata struct {
+	OwnerName      string
+	RepositoryName string
+	JobWorkflowRef string
+	JobDisplayName string
+	QueueTime      time.Time
+}
+
+type AvailableJob struct {
+	RequestID int64
+	Metadata  JobMetadata
+}
+
+type CompletedJob struct {
+	Metadata         JobMetadata
+	RunnerAssignTime time.Time
+	FinishTime       time.Time
+}
+
 type MessageBatch struct {
 	MessageID       int64
 	Statistics      *Statistics
 	Available       []int64
+	AvailableJobs   []AvailableJob
+	CompletedJobs   []CompletedJob
 	AssignedHandles []int64
 	ReleasedHandles []int64
 }
@@ -313,6 +335,19 @@ func assignedJobHandle(scaleSetID int64, job *scaleset.JobAssigned) (int64, erro
 	return jobHandle(scaleSetID, &job.JobMessageBase)
 }
 
+func jobMetadata(job *scaleset.JobMessageBase) JobMetadata {
+	if job == nil {
+		return JobMetadata{}
+	}
+	return JobMetadata{
+		OwnerName:      job.OwnerName,
+		RepositoryName: job.RepositoryName,
+		JobWorkflowRef: job.JobWorkflowRef,
+		JobDisplayName: job.JobDisplayName,
+		QueueTime:      job.QueueTime,
+	}
+}
+
 func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64, max int) (MessageBatch, error) {
 	c, err := a.session(s)
 	if err != nil {
@@ -328,6 +363,9 @@ func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64
 			return MessageBatch{}, errors.New("invalid_available_job_identity")
 		}
 		out.Available = append(out.Available, job.RunnerRequestID)
+		out.AvailableJobs = append(out.AvailableJobs, AvailableJob{
+			RequestID: job.RunnerRequestID, Metadata: jobMetadata(&job.JobMessageBase),
+		})
 	}
 	for _, job := range v.JobAssignedMessages {
 		handle, err := assignedJobHandle(s.ScaleSetID, job)
@@ -344,6 +382,9 @@ func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64
 		if err != nil {
 			return MessageBatch{}, err
 		}
+		out.CompletedJobs = append(out.CompletedJobs, CompletedJob{
+			Metadata: jobMetadata(&job.JobMessageBase), RunnerAssignTime: job.RunnerAssignTime, FinishTime: job.FinishTime,
+		})
 		out.ReleasedHandles = append(out.ReleasedHandles, handle)
 	}
 	return out, nil

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 )
@@ -96,6 +97,23 @@ func TestLabelsForComparisonDistinguishesImplicitAndConfiguredName(t *testing.T)
 	stable := ScaleSet{Name: "ci-pool-ops", Labels: []string{"tailscale", "ci-pool-ops"}}
 	if got := LabelsForComparison(stable, []string{"ci-pool-ops", "tailscale"}); !slices.Equal(got, []string{"tailscale", "ci-pool-ops"}) {
 		t.Fatalf("configured routing-name label was removed: %#v", got)
+	}
+}
+
+func TestJobMetadataPreservesAdaptiveQueueSignals(t *testing.T) {
+	queued := time.Date(2026, 8, 21, 6, 12, 0, 0, time.UTC)
+	metadata := jobMetadata(&scaleset.JobMessageBase{
+		OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+		JobDisplayName: "unit", QueueTime: queued, EventName: "push",
+		RequestLabels: []string{"self-hosted", "linux"},
+	})
+	if metadata.OwnerName != "dinglebear-ai" || metadata.RepositoryName != "soma" ||
+		metadata.JobDisplayName != "unit" || metadata.QueueTime != queued {
+		t.Fatalf("adaptive scheduling identity was not preserved: %#v", metadata)
+	}
+	if metadata.JobWorkflowRef != "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main" {
+		t.Fatalf("workflow identity changed: %#v", metadata)
 	}
 }
 

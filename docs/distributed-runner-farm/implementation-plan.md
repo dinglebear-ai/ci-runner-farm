@@ -53,6 +53,11 @@
 - [x] Resource-backed node-specific offer ledger.
 - [x] Rust-scheduled fair bounded offer planning.
 - [x] Advertised capacity = resource-backed nonterminal placements + live offers.
+- [x] Runtime-aware ranking for visible GitHub `JobAvailable` candidates using pool-scoped learned history, with branch-normalized workflow identity.
+- [x] Bounded private SHA-256-keyed runtime-history persistence that avoids plaintext job metadata, cold-starts safely on missing/corrupt hints, and throttles completion writes.
+- [x] Starvation-safe visible-batch admission with a ten-minute aging override and strict remaining-capacity enforcement.
+- [ ] Add authenticated `acquirablejobs` queue introspection and a durable reserved-slot/fast-lane policy without inflating `X-ScaleSetMaxCapacity` or relying on long-poll timing.
+- [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity` to manufacture backlog lookahead; only rank candidates present in the current response.
 - [x] Acquired handle -> offer assignment -> JIT -> placement -> node mailbox flow.
 - [x] Controller restart recovery for lost JIT-bearing mailbox commands.
 - [x] Surviving node runner adoption across node-agent generation restart.
@@ -91,7 +96,8 @@
 - [x] Real GitHub scale-set execution across Dookie, Squirts, Steamy, Steamy WSL, and Tootie's container backend.
 - [x] Live GitHub cancellation with Unix process-group signal observation, terminal placement reporting, resource return, and credential cleanup.
 - [ ] Controller/node restart and network-partition matrix.
-- [ ] Resource fragmentation/oversubscription/fairness matrix at sustained load.
+- [x] Synthetic visible-batch convoy regression plus 64-job ranking microbenchmark with bounded allocation evidence.
+- [ ] Real scale-set validation of candidate-delivery/lookahead semantics and resource fragmentation/oversubscription/fairness matrix at sustained load.
 - [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.
 - [ ] Automated CA/server certificate rotation and revocation-provider integration policy.
 - [x] Security review of credentials, certificates, durable JIT cache,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
@@ -27,16 +28,18 @@ type Config struct {
 }
 
 type Poller struct {
-	cfg        Config
-	mu         sync.Mutex
-	journalMu  sync.Mutex
-	sessions   map[int64]crfgithub.Session
-	assigned   map[int64]int
-	advertised map[int64]int
-	pending    map[int64][]int64
-	replay     map[journal.Key]journal.Entry
-	consumed   map[string]bool
-	poolMu     map[int64]*sync.Mutex
+	cfg                Config
+	mu                 sync.Mutex
+	journalMu          sync.Mutex
+	sessions           map[int64]crfgithub.Session
+	assigned           map[int64]int
+	advertised         map[int64]int
+	pending            map[int64][]int64
+	replay             map[journal.Key]journal.Entry
+	consumed           map[string]bool
+	poolMu             map[int64]*sync.Mutex
+	runtimes           map[string]runtimeEstimate
+	lastRuntimePersist time.Time
 }
 
 type sessionCloser interface {
@@ -52,10 +55,11 @@ func New(cfg Config) (*Poller, error) {
 	if err != nil {
 		return nil, err
 	}
+	runtimes := loadRuntimeHints(cfg.Store)
 	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
-		poolMu: map[int64]*sync.Mutex{}}
+		poolMu: map[int64]*sync.Mutex{}, runtimes: runtimes}
 	for key, consumed := range cfg.ConsumedHandles {
 		if consumed {
 			p.consumed[key] = true
@@ -376,6 +380,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if p.advertisedChanged(pool.ScaleSetID, capacity) {
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
+	// Keep GitHub capacity honest. actions/scaleset defines X-ScaleSetMaxCapacity
+	// as the scale set capacity the backend may rely on for assignment. Runtime
+	// ranking therefore only reorders JobAvailable candidates already visible in
+	// this response; it must never inflate capacity merely to obtain lookahead.
 	batch, err := p.cfg.API.GetMessage(ctx, session, last, capacity)
 	if err != nil {
 		return supervisor.PollResult{}, err
@@ -414,13 +422,14 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			}
 			fallthrough
 		case "validated":
-			if len(batch.Available) > 0 {
+			selected := p.selectedAvailable(batch, pool.ID, capacity, time.Now().UTC())
+			if len(selected) > 0 {
 				base.Phase = "acquire_started"
 				if err := p.append(base); err != nil {
 					return supervisor.PollResult{}, err
 				}
 				if _, err := p.cfg.API.AcquireJobs(ctx, session,
-					crfgithub.AcquireRequest{RequestIDs: batch.Available}); err != nil {
+					crfgithub.AcquireRequest{RequestIDs: selected}); err != nil {
 					return supervisor.PollResult{}, err
 				}
 				base.Phase = "acquire_observed"
@@ -460,6 +469,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			if err := p.cfg.API.AcknowledgeMessage(ctx, session, batch.MessageID); err != nil {
 				return supervisor.PollResult{}, err
 			}
+			// Runtime hints are optional optimization state. Learn only after GitHub
+			// accepted the message acknowledgement so retries, ambiguous acquisition
+			// resets, and redelivery cannot count one completion more than once.
+			p.observeCompleted(pool.ID, batch.CompletedJobs)
 			base.Phase = "acked"
 			if err := p.append(base); err != nil {
 				return supervisor.PollResult{}, err
@@ -475,13 +488,14 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if err := p.append(base); err != nil {
 		return supervisor.PollResult{}, err
 	}
-	if len(batch.Available) > 0 {
+	selected := p.selectedAvailable(batch, pool.ID, capacity, time.Now().UTC())
+	if len(selected) > 0 {
 		base.Phase = "acquire_started"
 		if err := p.append(base); err != nil {
 			return supervisor.PollResult{}, err
 		}
 		if _, err := p.cfg.API.AcquireJobs(ctx, session,
-			crfgithub.AcquireRequest{RequestIDs: batch.Available}); err != nil {
+			crfgithub.AcquireRequest{RequestIDs: selected}); err != nil {
 			return supervisor.PollResult{}, err
 		}
 		base.Phase = "acquire_observed"
@@ -497,6 +511,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if err := p.cfg.API.AcknowledgeMessage(ctx, session, batch.MessageID); err != nil {
 		return supervisor.PollResult{}, err
 	}
+	p.observeCompleted(pool.ID, batch.CompletedJobs)
 	base.Phase = "acked"
 	if err := p.append(base); err != nil {
 		return supervisor.PollResult{}, err

@@ -16,20 +16,22 @@ import (
 )
 
 type fakeAPI struct {
-	mu           sync.Mutex
-	batch        crfgithub.MessageBatch
-	acquire      crfgithub.AcquireResult
-	acquireErr   error
-	sessionCalls int
-	acquireCalls int
-	acquireIDs   []int64
-	ackCalls     int
-	ackSawCommit bool
-	closeCalls   int
-	lastMessage  int64
-	store        journal.Store
-	started      chan int64
-	block        chan struct{}
+	mu              sync.Mutex
+	batch           crfgithub.MessageBatch
+	acquire         crfgithub.AcquireResult
+	acquireErr      error
+	sessionCalls    int
+	acquireCalls    int
+	acquireIDs      []int64
+	ackCalls        int
+	ackSawCommit    bool
+	ackErr          error
+	closeCalls      int
+	lastMessage     int64
+	messageCapacity int
+	store           journal.Store
+	started         chan int64
+	block           chan struct{}
 }
 
 func (*fakeAPI) CreateRunnerScaleSet(context.Context, crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -54,9 +56,10 @@ func (f *fakeAPI) CreateMessageSession(_ context.Context, id int64) (crfgithub.S
 	f.mu.Unlock()
 	return crfgithub.Session{ScaleSetID: id, ID: "session-1"}, nil
 }
-func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastMessage int64, _ int) (crfgithub.MessageBatch, error) {
+func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastMessage int64, capacity int) (crfgithub.MessageBatch, error) {
 	f.mu.Lock()
 	f.lastMessage = lastMessage
+	f.messageCapacity = capacity
 	batch := f.batch
 	f.mu.Unlock()
 	if f.started != nil {
@@ -84,7 +87,7 @@ func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id 
 			f.ackSawCommit = true
 		}
 	}
-	return nil
+	return f.ackErr
 }
 func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
 	return nil, nil
@@ -96,10 +99,39 @@ func (f *fakeAPI) CloseMessageSession(_ context.Context, _ crfgithub.Session) er
 	return nil
 }
 
+func TestPollAcquiresOnlyRankedVisibleSubset(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	now := time.Now().UTC()
+	longOne := testJob(101, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-3*time.Minute))
+	longTwo := testJob(102, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-2*time.Minute))
+	quick := testJob(103, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now.Add(-time.Minute))
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 12, Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0},
+		Available: []int64{101, 102, 103}, AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo, quick},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.runtimes[runtimeKey("build", longOne.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 10}
+	poller.runtimes[runtimeKey("build", quick.Metadata)] = runtimeEstimate{duration: 30 * time.Second, samples: 10}
+
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if api.messageCapacity != 2 {
+		t.Fatalf("poll inflated GitHub max capacity for lookahead: %d", api.messageCapacity)
+	}
+	if !slices.Equal(api.acquireIDs, []int64{103, 101}) {
+		t.Fatalf("poll did not acquire only the ranked visible subset: %v", api.acquireIDs)
+	}
+}
+
 func TestPollAcquiresOnlyAvailableJobsAndOffersAssignedJobs(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store,
-		batch: crfgithub.MessageBatch{MessageID: 9, Statistics: &crfgithub.Statistics{TotalAssignedJobs: 3},
+		batch: crfgithub.MessageBatch{MessageID: 9, Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0},
 			Available: []int64{101, 102}, AssignedHandles: []int64{501, 502}},
 		acquire: crfgithub.AcquireResult{AcquiredIDs: []int64{101, 102}},
 	}
@@ -112,7 +144,7 @@ func TestPollAcquiresOnlyAvailableJobsAndOffersAssignedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AssignedJobs != 3 || result.MessageID != 9 ||
+	if result.AssignedJobs != 0 || result.MessageID != 9 ||
 		!slices.Equal(result.AcquiredHandles, []int64{501, 502}) {
 		t.Fatalf("unexpected poll result: %#v", result)
 	}
@@ -128,10 +160,43 @@ func TestPollAcquiresOnlyAvailableJobsAndOffersAssignedJobs(t *testing.T) {
 	}
 }
 
+func TestCompletedRuntimeLearningWaitsForAckAndIsNotDuplicatedOnRedelivery(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	metadata := testJob(301, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC()).Metadata
+	completed := crfgithub.CompletedJob{Metadata: metadata,
+		RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}
+	api := &fakeAPI{store: store, ackErr: errors.New("ack failed"), batch: crfgithub.MessageBatch{
+		MessageID: 13, Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0},
+		CompletedJobs: []crfgithub.CompletedJob{completed},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 1); err == nil {
+		t.Fatal("ack failure was accepted")
+	}
+	key := runtimeKey("build", metadata)
+	if _, learned := poller.runtimes[key]; learned {
+		t.Fatal("completion influenced runtime hints before message acknowledgement")
+	}
+	api.mu.Lock()
+	api.ackErr = nil
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 1); err != nil {
+		t.Fatal(err)
+	}
+	if estimate := poller.runtimes[key]; estimate.samples != 1 || estimate.duration != 40*time.Second {
+		t.Fatalf("acknowledged redelivery was not learned exactly once: %#v", estimate)
+	}
+}
+
 func TestAcquireFailureIsNotAcknowledged(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{MessageID: 10,
-		Statistics: &crfgithub.Statistics{TotalAssignedJobs: 1}, Available: []int64{201}},
+		Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, Available: []int64{201}},
 		acquireErr: errors.New("timeout")}
 	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64)})

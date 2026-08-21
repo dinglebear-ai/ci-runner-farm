@@ -50,6 +50,13 @@ Last updated: 2026-08-21
 - Current verification on the controller-projection/WebUI branch: **130 Rust
   tests**, **122 Elixir tests**, distributed-status, Fleet UI behavior, shell
   syntax, and UI JavaScript tests pass.
+- Queue optimization integration is in progress on
+  `codex/integrate-pool-queue`. The Go scale-set boundary learns bounded,
+  pool-scoped runtime hints, applies starvation-safe admission, and ranks deep
+  GitHub backlog candidates obtained through authenticated `acquirablejobs`
+  without inflating the published scale-set capacity. This work is not yet
+  deployed and still requires current-main integration and live GitHub queue
+  validation.
 
 ### Historical implementation checkpoint
 
@@ -188,8 +195,9 @@ The implemented path is:
 2. Complete the controller/node restart and network-partition matrix plus
    orphan/force-abandon acceptance under production pool identities.
 3. Add automated CA/server-certificate rotation, more target-distribution Linux
-   bundles, sustained fairness/load tests, and longer-horizon replay-fence
-   archival if operational scale requires it.
+   bundles, live `acquirablejobs` queue-ordering proof, sustained fairness/load
+   tests, and longer-horizon replay-fence archival if operational scale requires
+   it.
 
 ## Deployment status
 
