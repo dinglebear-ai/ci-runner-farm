@@ -130,6 +130,13 @@ func validPollResult(result PollResult) bool {
 	return true
 }
 
+func acquiredHandles(handles []int64) []int64 {
+	if len(handles) == 0 {
+		return []int64{}
+	}
+	return slices.Clone(handles)
+}
+
 func (s *Supervisor) Snapshot() protocol.Snapshot {
 	if p := s.snapshot.Load(); p != nil {
 		return cloneSnapshot(*p)
@@ -172,7 +179,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				now := time.Now().UTC()
 				result := protocol.PoolSnapshot{PoolID: pool.ID, ScaleSetID: pool.ScaleSetID,
 					AssignedJobs: poll.AssignedJobs, AdvertisedCapacity: capacity, LastMessageID: poll.MessageID,
-					SessionHealthy: err == nil, AcquiredHandles: slices.Clone(poll.AcquiredHandles)}
+					SessionHealthy: err == nil, AcquiredHandles: acquiredHandles(poll.AcquiredHandles)}
 				if err == nil {
 					result.ObservedAt = now
 					result.ValidUntil = now.Add(s.cfg.DemandTTL)
