@@ -62,7 +62,8 @@ export CRF_SECRET_DIR="$task_tmp/run"
 export CRF_BASE_ENTRYPOINT="$task_tmp/base-entrypoint"
 export CRF_EXPECTED_SECRET="$sentinel"
 export CRF_TEST_RESULT="$task_tmp/result"
-"$entrypoint" "$task_tmp/final-command" >"$task_tmp/stdout" 2>"$task_tmp/stderr" &
+CRF_CREDENTIAL_KIND=registration \
+  "$entrypoint" "$task_tmp/final-command" >"$task_tmp/stdout" 2>"$task_tmp/stderr" &
 entry_pid=$!
 wait_for_secret_fifo registration "$task_tmp/stderr"
 printf '%s\n' "$sentinel" > "$CRF_SECRET_DIR/secret.in"
