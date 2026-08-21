@@ -172,6 +172,12 @@ call_adapter(){
   reply="$(cat "$tmp/reply")"
 }
 
+# A missing state record and missing container is a clean absence, not an
+# ambiguous inventory failure. This also protects the real exit status from
+# being lost through shell `!` negation.
+call_adapter "$(inspect_json placement-absent)"
+crf_assert_contains "$reply" '"result":"absent"' 'clean absence was misclassified as ambiguous'
+
 # Parser rejects unknown fields and produces no accepted request.
 if printf '%s' '{"schema_version":1,"payload":{"action":"inspect","placement_id":"p1","expected_id":null,"extra":true}}' | php "$PARSER" >/dev/null 2>&1; then
   crf_fail 'parser accepted an unknown field'

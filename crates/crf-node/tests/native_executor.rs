@@ -332,11 +332,33 @@ fn restarted_executor_rejects_reused_pid_with_different_birth_token() {
 
 #[cfg(unix)]
 #[test]
-fn symlink_in_runner_template_fails_before_process_creation() {
+fn in_tree_symlink_in_runner_template_is_preserved() {
     use std::os::unix::fs::symlink;
 
     let roots = TestRoots::success();
     symlink("run.sh", roots.template.join("linked-runner")).expect("runner symlink");
+    let materializer = RunnerMaterializer::new(
+        roots.os.clone(),
+        &roots.template,
+        &roots.runtime,
+        &roots.logs,
+    )
+    .expect("materializer");
+    let runner_root = materializer.prepare("placement-symlink").expect("prepare");
+
+    assert_eq!(
+        std::fs::read_link(runner_root.join("linked-runner")).expect("read symlink"),
+        std::path::PathBuf::from("run.sh")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn escaping_symlink_in_runner_template_fails_before_process_creation() {
+    use std::os::unix::fs::symlink;
+
+    let roots = TestRoots::success();
+    symlink("../outside", roots.template.join("linked-runner")).expect("runner symlink");
     let mut executor = roots.executor();
 
     assert_eq!(

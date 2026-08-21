@@ -510,6 +510,11 @@ pool_config_revision() {
 
 pool_runner_spec_hash() {
   local id="$1" rec
+  # Callers commonly capture this function through command substitution. Load
+  # the snapshot in this shell before pool_record uses its own substitution,
+  # otherwise POOL_CONFIG_VERSION remains empty and the same operation can
+  # compute two different hashes for one pool.
+  pool_snapshot_load || return 1
   rec="$(pool_record "$id")" || return 1
   printf '%s' "${RUNNER_MODE:-single}|${POOL_CONFIG_VERSION}|${POOL_BACKEND:-classic}|${AUTOSCALE:-false}|${POOL_AUTOSCALE-inherit}|$rec|${RUNNER_CPUS:-}|${RUNNER_MEMORY:-}" |
     sha256sum | cut -d' ' -f1

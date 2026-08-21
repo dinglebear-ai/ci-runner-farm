@@ -220,6 +220,21 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "acquired handles cannot exceed the pool concurrency policy", ctx do
+    unless ctx.disabled do
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.offers == 2
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [101, 102, 103, 104])
+
+      assert {:ok, second} = reconcile(ctx.demand, 200)
+      assert second.placements == 2
+      assert length(PlacementLedger.snapshot(ctx.placements)) == 2
+      assert NodeMailbox.size(ctx.mailbox) == 2
+      assert FakeScaleSet.state(ctx.scale_set).issue_calls == 2
+    end
+  end
+
   test "active deterministic placement is reconstructed without another JIT issuance", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 501)

@@ -37,7 +37,9 @@ jobs:
 
   distributed-linux:
     if: inputs.target == 'distributed-linux'
-    runs-on: [self-hosted, Linux, X64, accept]
+    # Runner scale sets route by their single scale-set label; platform
+    # requirements are enforced by the controller pool policy.
+    runs-on: accept
     timeout-minutes: 15
     steps:
       - name: Record distributed Linux placement
@@ -51,7 +53,7 @@ jobs:
 
   distributed-windows:
     if: inputs.target == 'distributed-windows'
-    runs-on: [self-hosted, Windows, X64, accept-windows]
+    runs-on: accept-windows
     timeout-minutes: 15
     steps:
       - name: Record distributed Windows placement
@@ -66,7 +68,7 @@ jobs:
 
   distributed-container:
     if: inputs.target == 'distributed-container'
-    runs-on: [self-hosted, Linux, X64, accept-container]
+    runs-on: accept-container
     timeout-minutes: 15
     steps:
       - name: Record distributed container placement
@@ -81,7 +83,7 @@ jobs:
 
   cancellation:
     if: inputs.target == 'cancellation'
-    runs-on: [self-hosted, Linux, X64, accept]
+    runs-on: accept
     timeout-minutes: 20
     steps:
       - name: Hold placement for cancellation and reassignment proof
