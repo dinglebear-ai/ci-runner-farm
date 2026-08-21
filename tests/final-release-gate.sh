@@ -23,7 +23,7 @@ grep -Fq 'len(cfg.Pools) > 8' "$supervisor" || crf_fail "session goroutine bound
 grep -Fq 'cfg.Heartbeat > 10*time.Second' "$supervisor" || crf_fail "heartbeat limit drifted"
 grep -Fq 'ValidUntil: now.Add(2 * s.cfg.Heartbeat)' "$supervisor" ||
   crf_fail "control snapshot two-heartbeat staleness missing"
-grep -Fq 'cfg.DemandTTL = 30 * time.Second' "$supervisor" ||
+grep -Fq 'cfg.DemandTTL = 90 * time.Second' "$supervisor" ||
   crf_fail "bounded GitHub long-poll demand TTL drifted"
 grep -Fq 'result.ValidUntil = now.Add(s.cfg.DemandTTL)' "$supervisor" ||
   crf_fail "pool demand expires before the bounded long-poll window"

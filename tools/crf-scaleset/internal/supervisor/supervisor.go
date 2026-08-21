@@ -53,7 +53,7 @@ type Supervisor struct {
 
 func New(cfg Config, poller Poller) (*Supervisor, error) {
 	if cfg.DemandTTL == 0 {
-		cfg.DemandTTL = 30 * time.Second
+		cfg.DemandTTL = 90 * time.Second
 	}
 	if poller == nil || !supervisorIdentifier.MatchString(cfg.ControllerInstanceID) ||
 		!supervisorRevision.MatchString(cfg.ConfigRevision) ||
