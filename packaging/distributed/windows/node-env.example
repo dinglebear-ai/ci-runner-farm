@@ -10,5 +10,6 @@ CRF_NODE_MEMORY_BYTES=17179869184
 CRF_STATE_DIR=C:\ProgramData\CiRunnerFarm\state
 CRF_RUNTIME_DIR=C:\ProgramData\CiRunnerFarm\runners
 CRF_LOG_DIR=C:\ProgramData\CiRunnerFarm\logs
+CRF_SERVICE_ERROR_LOG=C:\ProgramData\CiRunnerFarm\logs\service-errors.log
 CRF_RUNNER_MANIFEST=C:\ProgramData\CiRunnerFarm\runner-manifest.json
 CRF_RUNNER_CACHE_DIR=C:\ProgramData\CiRunnerFarm\runner-cache
