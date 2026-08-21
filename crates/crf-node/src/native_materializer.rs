@@ -178,9 +178,13 @@ fn copy_tree(
             create_symlink(&link_target, &target)?;
         } else if file_type.is_dir() {
             fs::create_dir(&target).map_err(|_| MaterializerError::MaterializationFailed)?;
+            copy_tree(template_root, &entry.path(), &target, depth + 1, budget)?;
+            // Cached runner templates are deliberately read-only. Applying the
+            // source mode before populating the destination makes directories
+            // such as 0555 runner folders impossible to copy as the service
+            // user. Populate first, then restore the template's final mode.
             fs::set_permissions(&target, metadata.permissions())
                 .map_err(|_| MaterializerError::MaterializationFailed)?;
-            copy_tree(template_root, &entry.path(), &target, depth + 1, budget)?;
         } else if file_type.is_file() {
             budget.bytes = budget.bytes.saturating_add(metadata.len());
             if budget.bytes > MAX_TEMPLATE_BYTES {
