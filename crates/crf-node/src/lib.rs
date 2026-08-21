@@ -14,6 +14,7 @@ pub mod generation;
 pub mod native_executor;
 pub mod native_materializer;
 pub mod node_executor;
+pub mod operator_projection;
 pub mod placement_state;
 pub mod process_identity;
 pub mod process_tree;

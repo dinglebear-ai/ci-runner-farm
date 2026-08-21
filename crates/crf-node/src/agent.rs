@@ -256,6 +256,7 @@ impl<E: CommandExecutor> AgentCore<E> {
 pub struct SessionOutcome {
     pub immediate_acks: usize,
     pub deferred: Option<(String, String)>,
+    pub operator_projection: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -339,11 +340,15 @@ where
         now_unix_ms: u64,
     ) -> Result<SessionOutcome, AgentSessionError<T::Error>> {
         let mut immediate_acks = 0_usize;
+        let mut operator_projection = None;
         loop {
             let response = self
                 .transport
                 .exchange(&request, now_unix_ms)
                 .map_err(AgentSessionError::Transport)?;
+            if response.operator_projection.is_some() {
+                operator_projection = response.operator_projection.clone();
+            }
             match self
                 .core
                 .handle_response(&response, now_unix_ms)
@@ -353,6 +358,7 @@ where
                     return Ok(SessionOutcome {
                         immediate_acks,
                         deferred: None,
+                        operator_projection,
                     });
                 }
                 AgentAction::Deferred {
@@ -362,6 +368,7 @@ where
                     return Ok(SessionOutcome {
                         immediate_acks,
                         deferred: Some((command_id, detail_code)),
+                        operator_projection,
                     });
                 }
                 AgentAction::Send(ack) => {
@@ -552,6 +559,7 @@ mod tests {
             status: MessageResponseStatus::Accepted,
             code: None,
             command,
+            operator_projection: None,
         }
     }
 
@@ -610,6 +618,24 @@ mod tests {
             }
             other => panic!("expected command ack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn heartbeat_returns_latest_authenticated_operator_projection() {
+        let executor = FakeExecutor {
+            new_result: ExecutionResult::Applied,
+            pending_result: ExecutionResult::Applied,
+        };
+        let projection = serde_json::json!({"schema_version": 1, "nodes": []});
+        let mut projected = response("msg-7-1", None);
+        projected.operator_projection = Some(projection.clone());
+        let mut session = session(executor, vec![projected]);
+
+        let outcome = session
+            .heartbeat(Resources::new(8_000, 16 * GIB), BTreeSet::new(), NOW)
+            .expect("heartbeat succeeds");
+
+        assert_eq!(outcome.operator_projection, Some(projection));
     }
 
     #[test]

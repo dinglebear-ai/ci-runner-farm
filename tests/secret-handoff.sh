@@ -6,10 +6,38 @@ cd "$(dirname "$0")/.."
 . tests/lib/assert.sh
 
 task_tmp="$(mktemp -d)"
-trap 'rm -rf "$task_tmp"' EXIT
+cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'secret-handoff: failed with status %s\n' "$status" >&2
+    for stderr_path in "$task_tmp"/stderr "$task_tmp"/*-stderr; do
+      if [ -s "$stderr_path" ]; then
+        printf '%s\n' "--- $stderr_path ---" >&2
+        cat "$stderr_path" >&2
+      fi
+    done
+  fi
+  rm -rf "$task_tmp"
+  exit "$status"
+}
+trap cleanup EXIT
 sentinel='crf_secret_SENTINEL_7f91'
 entrypoint=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-entrypoint.sh
 engine=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
+
+wait_for_secret_fifo() {
+  local label="$1" stderr_path="$2" attempt
+  attempt=0
+  while [ "$attempt" -lt 500 ]; do
+    if [ -f "$CRF_SECRET_DIR/ready" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.02
+  done
+  [ -f "$stderr_path" ] && cat "$stderr_path" >&2
+  crf_fail "$label entrypoint did not become ready"
+}
 
 cat > "$task_tmp/base-entrypoint" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -34,10 +62,10 @@ export CRF_SECRET_DIR="$task_tmp/run"
 export CRF_BASE_ENTRYPOINT="$task_tmp/base-entrypoint"
 export CRF_EXPECTED_SECRET="$sentinel"
 export CRF_TEST_RESULT="$task_tmp/result"
-"$entrypoint" "$task_tmp/final-command" >"$task_tmp/stdout" 2>"$task_tmp/stderr" &
+CRF_CREDENTIAL_KIND=registration \
+  "$entrypoint" "$task_tmp/final-command" >"$task_tmp/stdout" 2>"$task_tmp/stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
-[ -f "$CRF_SECRET_DIR/ready" ] || crf_fail "entrypoint did not become ready"
+wait_for_secret_fifo registration "$task_tmp/stderr"
 printf '%s\n' "$sentinel" > "$CRF_SECRET_DIR/secret.in"
 wait "$entry_pid"
 crf_assert_eq $'configured\nlistener' "$(cat "$task_tmp/result")" "entrypoint lifecycle"
@@ -130,7 +158,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   PATH="$task_tmp/bin:$PATH" \
   "$entrypoint" >"$task_tmp/jit-stdout" 2>"$task_tmp/jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+wait_for_secret_fifo JIT "$task_tmp/jit-stderr"
 printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
 if ! wait "$entry_pid"; then
   cat "$task_tmp/jit-stderr" >&2
@@ -153,7 +181,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" START_DOCKER_SERVICE=false \
   "$entrypoint" >"$task_tmp/bad-jit-stdout" 2>"$task_tmp/bad-jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+wait_for_secret_fifo bad-JIT "$task_tmp/bad-jit-stderr"
 printf '%s\n' "$bad_descriptor" >"$CRF_SECRET_DIR/secret.in"
 if wait "$entry_pid"; then
   crf_fail "JIT entrypoint accepted an unknown descriptor key"
@@ -176,7 +204,7 @@ CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   PATH="$task_tmp/fail-bin:$PATH" \
   "$entrypoint" >"$task_tmp/rename-jit-stdout" 2>"$task_tmp/rename-jit-stderr" &
 entry_pid=$!
-for _ in $(seq 1 50); do [ -f "$CRF_SECRET_DIR/ready" ] && break; sleep 0.02; done
+wait_for_secret_fifo rename-failure "$task_tmp/rename-jit-stderr"
 printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
 if wait "$entry_pid"; then
   crf_fail "JIT entrypoint ignored a credential rename failure"

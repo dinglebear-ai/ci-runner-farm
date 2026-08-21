@@ -99,6 +99,9 @@ The optional Unraid container node is not installed under `/opt` and never runs
 from flash. Its live layout is:
 
 - `/mnt/cache/appdata/ci-runner-farm/distributed-node/bin` — node binary;
+- `/mnt/cache/appdata/ci-runner-farm/distributed-node/status/controller.json` —
+  optional mode-0600 secret-free controller projection, atomically refreshed by
+  the authenticated node session;
 - `config` — mode-restricted node environment and mTLS material;
 - `state` and `logs` — durable ZFS-backed recovery and diagnostics;
 - `/var/run/ci-runner-farm-distributed-node` — transient PID only.

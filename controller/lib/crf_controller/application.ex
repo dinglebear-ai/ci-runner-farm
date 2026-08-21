@@ -42,7 +42,8 @@ defmodule CrfController.Application do
       {CrfController.NodeMailbox, []},
       {CrfController.SchedulerClient, config.scheduler_opts},
       {CrfController.PlacementCoordinator, []},
-      {CrfController.Ingress, []},
+      {CrfController.Ingress,
+       [controller_instance_id: Keyword.fetch!(config.scaleset_opts, :controller_instance_id)]},
       {CrfController.PeerRegistry, [peers: peers]},
       {Task.Supervisor, name: CrfController.ConnectionSupervisor}
     ] ++

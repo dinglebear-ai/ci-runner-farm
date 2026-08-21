@@ -108,6 +108,33 @@ defmodule CrfController.IngressTest do
     assert node.active_placements == MapSet.new(["placement-1"])
   end
 
+  test "authenticated projection-capable nodes receive a redacted fleet projection", context do
+    peer = TestFixtures.peer("dookie")
+
+    register =
+      TestFixtures.registration("dookie", 7, :linux, :container, "projection-register")
+      |> TestFixtures.decode_json()
+      |> put_in(["payload", "node", "capabilities"], [
+        "github-actions",
+        "operator-projection-v1"
+      ])
+      |> :json.encode()
+      |> IO.iodata_to_binary()
+
+    assert {:ok, response} =
+             Ingress.ingest(context.ingress, peer, register,
+               now_ms: 10,
+               now_unix_ms: @now_unix_ms
+             )
+
+    projection = TestFixtures.decode_json(response)["operator_projection"]
+    assert projection["schema_version"] == 1
+    assert projection["controller_instance_id"] == "controller"
+    assert projection["observed_at_unix_ms"] == @now_unix_ms
+    refute Map.has_key?(projection, "tls")
+    refute response =~ "jit_config"
+  end
+
   test "pending command is attached until ACK and exact heartbeat replay is stable", context do
     peer = TestFixtures.peer("dookie")
     register = TestFixtures.registration("dookie", 7, :linux, :container, "message-8")

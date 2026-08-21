@@ -337,6 +337,7 @@ mod tests {
             status: MessageResponseStatus::Accepted,
             code: None,
             command,
+            operator_projection: None,
         };
         let payload = encode_node_response(&response, NOW).expect("response encodes");
         encode_frame(&payload).expect("response frame encodes")

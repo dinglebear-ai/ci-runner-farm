@@ -18,25 +18,29 @@ The design extends the existing single-host Unraid runner farm into one logical 
 
 ## Operator surfaces
 
-- Unraid **Runners** shows local container-node process, generation, capacity,
-  controller target, cache-backed storage, and compatibility/migration state.
-- `runner-farm.sh distributed-status-json` returns that same local, secret-free
-  status. It never proxies the remote controller.
+- Unraid **Runners** shows the external controller projection (nodes, capacity,
+  offers, placements, demand sessions, and sidecar health) separately from the
+  local container-node process, generation, and cache-backed storage.
+- `runner-farm.sh distributed-status-json` combines local process evidence with
+  the bounded mode-0600 projection written by the node. The projection is
+  capability-gated and arrives over the existing authenticated mTLS session;
+  the WebUI never proxies or exposes controller RPC.
 - `runner-farm.sh distributed-pools-json` exports reviewed Unraid pool policy for
   controller configuration without activating it.
-- `crf-operator-status` on the controller is the authenticated source of truth
-  for all nodes, offers, placements, drains, orphans, replay fences, sidecar
-  health, and peer authorization.
+- `crf-operator-status` on the controller remains the authoritative mutation and
+  full diagnostic surface for drains, orphan remediation, replay fences, and
+  peer authorization.
 
 ## Activation boundary
 
-Code, registration, and node health are not proof that distributed scheduling
-is active. Activation requires a fresh compatibility record bound to the exact
+Code, registration, and node health alone are not proof that distributed
+scheduling is active. Activation requires a fresh compatibility record bound to the exact
 installed plugin, helper, module, image, runner groups, and host identity. The
 live workload evidence must prove assigned jobs, zero-to-one, cancel/reassign,
 ack replay, nested-cgroup charging, classic quarantine, and cleanup. Only then
 may the explicit migration state machine move effective admission from classic
-to scale sets.
+to scale sets. Production completed this cutover on 2026-08-21; the gate remains
+the required path for a new installation or rollback/re-activation.
 
 ## Core decision
 

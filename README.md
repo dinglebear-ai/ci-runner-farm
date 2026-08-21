@@ -19,9 +19,10 @@ The setup is idempotent: it trusts the repository config, installs all pinned
 tools, and verifies Go, Elixir, Erlang/OTP, and Mix before returning success.
 
 Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners**.
-The classic backend keeps persistent, resource-capped Docker runners with warm
-caches. The opt-in distributed backend adds one-job GitHub scale-set runners
-scheduled across authenticated Linux, Windows, WSL, and Unraid container nodes.
+The distributed backend runs one-job GitHub scale-set runners across
+authenticated Linux, Windows, WSL, and Unraid container nodes. It replaces the
+classic containers for production admission while retaining the classic engine
+as a supported rollback/legacy mode.
 No VM is required for the Unraid container node.
 
 Hosted CI minutes are slow and metered. Meanwhile, the Unraid server in your
@@ -65,11 +66,11 @@ dependency caches that stay hot between runs, at zero cost per minute.
 
 ## How it works
 
-The default classic backend provisions persistent Docker containers from a
+The supported classic backend provisions persistent Docker containers from a
 runner image built in-plugin or pulled from a registry. Each container registers
 as a self-hosted runner at repository or organization scope.
 
-The gated distributed backend uses GitHub runner scale sets for demand, a
+The production distributed backend uses GitHub runner scale sets for demand, a
 central controller for durable admission and placement, and mTLS node agents for
 execution. Scale-set jobs route by the pool's single custom label (for example
 `runs-on: ci-pool-rust`), not by a classic multi-label array containing
@@ -79,11 +80,11 @@ started. Tootie's distributed node keeps binary, configuration, TLS material,
 state, and logs on the configured cache dataset; high-churn node runtime never
 runs from or writes to the Unraid flash device.
 
-Classic runners are not replaced merely by selecting scale sets. The Fleet
-migration gate first proves compatibility and remote ownership, stops new
-classic admission without interrupting busy jobs, waits for those jobs to
-drain, and only then makes scale sets effective. Rollback reverses eligibility
-in the same fail-closed order.
+Migration is deliberately non-disruptive: the Fleet gate proves compatibility
+and remote ownership, stops new classic admission, waits for busy classic jobs
+to drain, and only then makes scale sets effective. The production cutover on
+2026-08-21 completed that sequence; no classic runner registration or container
+remains. Rollback support is retained, but it is not the active production path.
 
 Persistent package caches and the build workspace are bind-mounted from a fast
 pool so they survive across jobs. An optional companion container runs a
@@ -276,11 +277,16 @@ The GitHub PAT or App key remains in the central scale-set adapter. Nodes receiv
 only a one-shot JIT descriptor over TLS 1.3 mutual authentication. Durable node
 state never stores that descriptor.
 
-The **Runners** page shows the local Unraid distributed node, its execution
-backend, generation, advertised capacity, controller target, cache-backed
-storage, and compatibility/migration gate. Global node inventory, placements,
-drains, offers, and orphan remediation remain on the controller's authenticated
-local operator channel:
+The **Runners** page separates the external control plane from the local Unraid
+node. It shows controller freshness, every registered node and platform, total
+and free capacity, active offers/placements, pool-session health, and the local
+node's execution backend, generation, and cache-backed storage. The controller
+projection is secret-free, capability-gated, delivered over the existing mTLS
+node session, and atomically stored beneath the cache-resident node tree with
+mode `0600`. The page never opens or tunnels controller RPC and never runs the
+controller from Unraid flash.
+
+Mutations remain on the controller's authenticated local operator channel:
 
 ```sh
 /opt/ci-runner-farm/current/bin/crf-operator-status status
@@ -295,14 +301,12 @@ configuration, state, and logs do not run from or write to flash. Only ordinary
 plugin configuration/package persistence uses `/boot`; the process PID lives in
 tmpfs. Docker start/stop event hooks start and stop the cache-resident node.
 
-Distributed activation is fail-closed. The WebUI cannot begin migration until a
+Distributed activation is fail-closed. The migration gate cannot activate until a
 fresh live compatibility operation proves the exact plugin/helper/module/image
 identity, restricted runner groups, assigned-job accounting, zero-to-one scale,
 cancel/reassign, acknowledgement replay, nested-cgroup charging, classic
 quarantine, and exact cleanup. Changing any bound artifact invalidates the
-record. Classic runners remain effective until the explicit migration state
-machine completes; rollback makes scale sets ineligible before restoring
-classic admission.
+record. Rollback makes scale sets ineligible before restoring classic admission.
 
 Full architecture, configuration, packaging, certificates, current deployment
 evidence, and remaining acceptance work live in
