@@ -8,7 +8,7 @@ on:
         required: true
         type: choice
         options:
-          - classic
+          - production-ops
           - distributed-linux
           - distributed-container
           - distributed-windows
@@ -18,12 +18,12 @@ permissions:
   contents: read
 
 jobs:
-  classic:
-    if: inputs.target == 'classic'
-    runs-on: [self-hosted, Linux, X64, ci-pool-ops]
+  production-ops:
+    if: inputs.target == 'production-ops'
+    runs-on: ci-pool-ops
     timeout-minutes: 10
     steps:
-      - name: Record classic isolation and nested-cgroup evidence
+      - name: Record production ops isolation and nested-cgroup evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +39,7 @@ jobs:
     if: inputs.target == 'distributed-linux'
     # Runner scale sets route by their single scale-set label; platform
     # requirements are enforced by the controller pool policy.
-    runs-on: accept
+    runs-on: ci-pool-ops
     timeout-minutes: 15
     steps:
       - name: Record distributed Linux placement
@@ -53,7 +53,7 @@ jobs:
 
   distributed-windows:
     if: inputs.target == 'distributed-windows'
-    runs-on: accept-windows
+    runs-on: ci-pool-windows
     timeout-minutes: 15
     steps:
       - name: Record distributed Windows placement
@@ -68,7 +68,7 @@ jobs:
 
   distributed-container:
     if: inputs.target == 'distributed-container'
-    runs-on: accept-container
+    runs-on: ci-pool-residential-egress
     timeout-minutes: 15
     steps:
       - name: Record distributed container placement
@@ -83,7 +83,7 @@ jobs:
 
   cancellation:
     if: inputs.target == 'cancellation'
-    runs-on: accept
+    runs-on: ci-pool-ops
     timeout-minutes: 20
     steps:
       - name: Hold placement for cancellation and reassignment proof
