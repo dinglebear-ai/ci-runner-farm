@@ -27,9 +27,15 @@ The controller owns orchestration and reconciliation:
 - per-node command mailboxes;
 - node ingress over TLS;
 - serialized optional automatic reconciliation;
-- future distributed API/UI surfaces.
+- authenticated operator snapshots and mutations through the controller-local
+  CLI; the Unraid WebUI projects only its local node and activation gate.
 
 The controller is platform-neutral and contains no Unraid filesystem, Docker, or shell assumptions.
+
+The authority boundary is intentional: remote node inventory, offers,
+placements, drains, and orphan remediation remain behind the controller's
+same-UID authenticated RPC. The Unraid page does not tunnel that channel or
+infer global health from its local node process.
 
 ### Rust scheduler
 

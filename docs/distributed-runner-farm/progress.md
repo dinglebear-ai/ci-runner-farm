@@ -1,8 +1,27 @@
 # Distributed Runner Farm Progress
 
-Last updated: 2026-08-20
+Last updated: 2026-08-21
 
 ## Active checkpoint
+
+- PR #37 and all review remediations are merged.
+- Current main includes the worktree bootstrap, safe official runner archive
+  extraction, Windows PowerShell 5.1/7 service installation, and cache-resident
+  Unraid node lifecycle through PR #45.
+- Live controller: Dookie, TLS port 7443, automatic reconciliation disabled
+  pending the fresh compatibility gate.
+- Registered nodes: Dookie (Linux native), Squirts (Linux native), Steamy
+  (Windows native), Steamy WSL (Linux native), and Tootie (Linux container).
+- Tootie advertises 8000 CPU millis and 10 GiB; its binary/config/TLS/state/logs
+  are on `/mnt/cache` ZFS and its PID is in tmpfs. Nineteen classic containers
+  remained running through enrollment.
+- The previous live compatibility record and workload evidence expired. The
+  latest compatibility operation correctly failed `evidence_invalid`; no record
+  was synthesized and effective backend remains classic.
+- PR #45 CI: plugin, Shell/PHP, Ubuntu distributed core, and Windows distributed
+  core all green.
+
+### Historical implementation checkpoint
 
 - Worktree: `/home/jmagar/workspace/ci-runner-farm/.claude/worktrees/distributed-elixir-rust`
 - Branch: `worktree-distributed-elixir-rust`
@@ -27,7 +46,7 @@ Last updated: 2026-08-20
 - Controller-approved container executor checkpoint: `f1684b9d50fe4c0b85e88a975225c163e44f9cc8`; crash adoption, exact-ID cancellation, uncertain start, lost-container reporting, and cross-backend identity preservation are covered.
 - Current implementation checkpoint: the local Unraid adapter endpoint maps controller-approved Start/Inspect/Cancel requests onto `runner-runtime.sh`, with private crash-recovery state, exact container identity fencing, local resource/config validation, and no duplicate scheduler or GitHub JIT-retirement authority.
 - Unraid pool-policy mapping: validated legacy single-fleet or V2 pool configuration exports as the controller's exact typed `demand.pools` JSON for x86_64/arm64 container nodes; export is read-only and never enables distributed mode.
-- Deployment: not deployed; existing Unraid production behavior remains untouched
+- Deployment: staged live with five registered nodes; distributed demand remains disabled and classic admission remains effective
 - Verification: **120 Rust tests**, strict Clippy for all Rust crates, Windows GNU all-target checks plus Windows-target Clippy for node/scheduler, all Go scale-set packages, **109 Elixir controller tests**, Steamy WSL + Agent OS native process-tree/process-birth-identity/MagicDNS/node-GC proofs, live TLS 1.3 already-connected-session revocation proof, certificate/admin helper smokes, verified Linux service bundle install/runtime smoke, `actionlint`, shell syntax, and `git diff --check`
 - PR #37 first hosted run: Ubuntu distributed-core green; Windows Clippy and the legacy final-release constant assertion failed. Both were fixed in `5f65e77`.
 - PR #37 second hosted run on `5f65e77`: Windows Clippy passed, but native Windows config tests exposed Unix-only fixture paths; Ubuntu bundle build exposed a locally ignored/untracked node example; legacy regression exposed the intentional routed-workflow count increase from 7 to 8. All three landed in `b297b04`.
@@ -43,7 +62,10 @@ This document is the living implementation tracker. Update this checkpoint secti
 
 ## Current state
 
-The distributed control/data path now exists end to end in code but remains opt-in and is not deployed. Existing Unraid production behavior is unchanged.
+The distributed control/data path exists end to end and five live nodes are
+registered. It remains opt-in: automatic reconciliation is disabled and the
+classic Unraid backend remains effective until the fresh live compatibility and
+migration gates pass.
 
 The implemented path is:
 
@@ -128,12 +150,23 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Add automated CA/server-certificate rotation and additional target-distribution Linux bundles. Native Windows node service packaging is implemented; live Windows installation remains in the acceptance matrix.
-2. Complete live Unraid validation and opt-in node/controller service configuration for the local container adapter while keeping legacy single-host behavior as the default; pool/resource mapping is implemented.
-3. Add API/UI surfaces for distributed nodes, pools, offers, placements, orphans/remediation, drains, package versions, and recovery state.
-4. Run live Linux and Windows end-to-end GitHub Actions smokes, a real multi-node scale-set smoke, controller/node restart/partition matrix, sustained load/fairness tests, and adversarial release/security review.
-5. Add longer-horizon controller replay-fence archival/segmentation beyond the current bounded 65,536-record/16 MiB state file if operational scale requires it; node GC and controller hot-state compaction are implemented. Then move into the Unraid runtime abstraction and live GitHub multi-node smoke matrix.
+1. Build and install the final plugin digest, then rerun the complete live
+   compatibility workload gate and exact cleanup.
+2. Activate the sidecar and migration state machine, then run real GitHub jobs
+   across Tootie, Dookie, Squirts, Steamy, and Steamy WSL.
+3. Complete controller/node restart, reconnect, cancellation, drain/undrain,
+   orphan/remediation, and classic-isolation acceptance.
+4. Add a separately authenticated controller status projection before exposing
+   remote node/placement mutation in the Unraid WebUI. The local UI deliberately
+   does not proxy controller RPC today.
+5. Add automated CA/server-certificate rotation, more target-distribution Linux
+   bundles, sustained fairness/load tests, and longer-horizon replay-fence
+   archival if operational scale requires it.
 
 ## Deployment status
 
-Nothing in this worktree has been deployed. The distributed loop is opt-in and the existing live Unraid runner farm has not been restarted or altered by this work.
+The controller and five nodes are deployed and registered. Tootie's optional
+node is cache-resident and integrated with Docker start/stop events. Distributed
+reconciliation is still disabled, effective backend remains classic, and the
+expired compatibility evidence has not been bypassed. Final activation and
+five-node job proof remain pending.

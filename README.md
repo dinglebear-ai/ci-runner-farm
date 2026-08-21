@@ -242,6 +242,56 @@ Once started, the runners also show up as ordinary Docker containers
 with the warm-cache bind mounts you configured — register with GitHub, and start
 picking up jobs.
 
+## Distributed runner farm
+
+The optional distributed control plane extends the Unraid container farm with
+portable Linux and Windows nodes. One Elixir controller owns GitHub scale-set
+demand, Rust scheduling, placement state, and mTLS node sessions. Each Rust node
+advertises an explicit resource budget and exactly one execution backend:
+
+- `native_process` runs a pinned GitHub runner package directly on Linux or
+  Windows and contains cancellation to a Unix process group or Windows Job
+  Object;
+- `container` delegates an approved placement to the local Unraid adapter,
+  which reuses the plugin's resource, identity, cache, and Docker lifecycle
+  controls.
+
+The GitHub PAT or App key remains in the central scale-set adapter. Nodes receive
+only a one-shot JIT descriptor over TLS 1.3 mutual authentication. Durable node
+state never stores that descriptor.
+
+The **Runners** page shows the local Unraid distributed node, its execution
+backend, generation, advertised capacity, controller target, cache-backed
+storage, and compatibility/migration gate. Global node inventory, placements,
+drains, offers, and orphan remediation remain on the controller's authenticated
+local operator channel:
+
+```sh
+/opt/ci-runner-farm/current/bin/crf-operator-status status
+/opt/ci-runner-farm/current/bin/crf-operator-status drain NODE GENERATION
+/opt/ci-runner-farm/current/bin/crf-operator-status undrain NODE GENERATION
+/opt/ci-runner-farm/current/bin/crf-operator-status force-abandon PLACEMENT --force
+```
+
+On Unraid, the optional node is deliberately installed under
+`/mnt/cache/appdata/ci-runner-farm/distributed-node`. Its executable, TLS files,
+configuration, state, and logs do not run from or write to flash. Only ordinary
+plugin configuration/package persistence uses `/boot`; the process PID lives in
+tmpfs. Docker start/stop event hooks start and stop the cache-resident node.
+
+Distributed activation is fail-closed. The WebUI cannot begin migration until a
+fresh live compatibility operation proves the exact plugin/helper/module/image
+identity, restricted runner groups, assigned-job accounting, zero-to-one scale,
+cancel/reassign, acknowledgement replay, nested-cgroup charging, classic
+quarantine, and exact cleanup. Changing any bound artifact invalidates the
+record. Classic runners remain effective until the explicit migration state
+machine completes; rollback makes scale sets ineligible before restoring
+classic admission.
+
+Full architecture, configuration, packaging, certificates, current deployment
+evidence, and remaining acceptance work live in
+[`docs/distributed-runner-farm/`](docs/distributed-runner-farm/README.md).
+
 ---
 
 ## Security
@@ -286,7 +336,7 @@ for the full picture.
 Everything in the UI maps to the control script:
 
 ```
-include/runner-farm.sh {start|boot-autostart|stop|restart|scale [pool] N|status|status-json|logs i|validate|validate-pools|build-image|build-status|promote-image TAG IMAGE_ID|mutation-owner-{claim|status|release}|prune-cache|autoscale-*}
+include/runner-farm.sh {start|boot-autostart|stop|restart|scale [pool] N|status|status-json|readiness-json|distributed-status-json|distributed-pools-json|compatibility-start|begin-migration|rollback-backend|logs i|validate|validate-pools|build-image|build-status|promote-image TAG IMAGE_ID|mutation-owner-{claim|status|release}|prune-cache|autoscale-*}
 ```
 
 Use a mutation-owner lease when an operator or automation needs several fleet

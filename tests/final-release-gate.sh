@@ -137,6 +137,7 @@ bash tests/reconcile-stop-lifecycle.sh >/dev/null
 bash tests/reconcile-retry.sh >/dev/null
 bash tests/runner-runtime.sh >/dev/null
 bash tests/distributed-container-adapter.sh >/dev/null
+bash tests/distributed-status.sh >/dev/null
 bash tests/validate-runtime.sh >/dev/null
 bash tests/scale-set-control.sh >/dev/null
 bash tests/scale-set-supervisor.sh >/dev/null

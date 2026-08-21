@@ -111,6 +111,14 @@ grep -Fq "path==='/Settings/RunnerFarm'" src/usr/local/emhttp/plugins/ci-runner-
 grep -Fq "path==='/Settings/RunnerFarm/RunnerFarm'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarm.page
 grep -Fq '.crfl-line{min-width:0;width:100%' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmLogs.page
 grep -Fq 'grid-template-areas:"name phase menu" "job job menu"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'id="crf-distributed"' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'Distributed control plane' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'Global inventory stays on authenticated controller RPC' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq "action:'distributed-status-json'" src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+grep -Fq 'setInterval(crfDistributed,10000)' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page
+if grep -Fq '.replaceAll(' src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page; then
+  echo 'Fleet requires String.replaceAll, which is unavailable in older Unraid browsers' >&2; exit 1
+fi
 grep -Fq 'if(!Number.isInteger(key)||key<1||key>CRF_PRIMARY_ROUTES.length)return' src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 grep -Fq "const CRF_EMBEDDED = <?=crf_is_embedded() ? 'true' : 'false'?>;" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
 grep -Fq "parent.postMessage({type:'crf:frame-state'" src/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php
