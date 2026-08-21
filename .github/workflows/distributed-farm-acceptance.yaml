@@ -13,6 +13,14 @@ on:
           - distributed-container
           - distributed-windows
           - cancellation
+      linux_pool:
+        description: Linux scale-set routing label (use the isolated lane for fleet qualification)
+        required: true
+        type: choice
+        default: ci-pool-ops
+        options:
+          - ci-pool-ops
+          - ci-pool-acceptance-linux
 
 permissions:
   contents: read
@@ -39,7 +47,7 @@ jobs:
     if: inputs.target == 'distributed-linux'
     # Runner scale sets route by their single scale-set label; platform
     # requirements are enforced by the controller pool policy.
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-ops' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.linux_pool || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Record distributed Linux placement
