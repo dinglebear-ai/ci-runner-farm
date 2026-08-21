@@ -152,7 +152,8 @@ jobs:
             if ($required -notin $names) { throw "Archive is missing $required" }
           }
           $binary = (Get-ChildItem -LiteralPath $expanded -Recurse -Filter crf-node.exe -File).FullName
-          $expectedVersion = (Get-Content VERSION -Raw).Trim()
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $expectedVersion = ($metadata.packages | Where-Object name -eq 'crf-node').version
           $actualVersion = Invoke-CheckedText $binary @('--version')
           if ($actualVersion.Trim() -ne "crf-node $expectedVersion") { throw "Unexpected binary version: $actualVersion" }
 
