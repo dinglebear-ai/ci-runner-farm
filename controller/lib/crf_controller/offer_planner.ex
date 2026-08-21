@@ -60,7 +60,7 @@ defmodule CrfController.OfferPlanner do
         {pool_id, need}
       end)
 
-    {candidates, planner} = build_candidates(ctx.policies, needs, planner)
+    {candidates, next_planner} = build_candidates(ctx.policies, needs, planner)
 
     if candidates == [] do
       {:ok, planner}
@@ -71,7 +71,8 @@ defmodule CrfController.OfferPlanner do
         by_work = Map.new(candidates, &{&1.requirement.work_id, &1})
 
         case reserve_scheduled(schedule.placements, by_work, ctx, now_ms) do
-          :ok -> {:ok, planner}
+          :ok when schedule.placements == [] -> {:ok, planner}
+          :ok -> {:ok, next_planner}
           {:error, reason} -> {:error, reason}
         end
       end
@@ -142,13 +143,19 @@ defmodule CrfController.OfferPlanner do
           []
         )
 
-      next = %{
-        planner
-        | offer_sequence: sequence,
-          cursor: rem(cursor + 1, length(ordered))
-      }
+      case Enum.reverse(candidates) do
+        [] ->
+          {[], planner}
 
-      {Enum.reverse(candidates), next}
+        candidates ->
+          next = %{
+            planner
+            | offer_sequence: sequence,
+              cursor: rem(cursor + 1, length(ordered))
+          }
+
+          {candidates, next}
+      end
     end
   end
 
