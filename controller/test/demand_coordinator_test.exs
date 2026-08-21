@@ -28,6 +28,9 @@ defmodule CrfController.DemandCoordinatorTest do
     def set_handles(server, handles, assigned_jobs \\ nil),
       do: GenServer.call(server, {:set_handles, handles, assigned_jobs})
 
+    def set_assigned_jobs(server, assigned_jobs),
+      do: GenServer.call(server, {:set_assigned_jobs, assigned_jobs})
+
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
@@ -52,6 +55,13 @@ defmodule CrfController.DemandCoordinatorTest do
       [pool] = state.snapshot.pools
       assigned_jobs = if is_nil(assigned_jobs), do: length(handles), else: assigned_jobs
       pool = %{pool | acquired_handles: handles, assigned_jobs: assigned_jobs}
+      state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:set_assigned_jobs, assigned_jobs}, _from, state) do
+      [pool] = state.snapshot.pools
+      pool = %{pool | assigned_jobs: assigned_jobs}
       state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
       {:reply, :ok, state}
     end
@@ -199,6 +209,8 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "resource-backed offers become JIT placements without changing advertised capacity", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
+
       assert {:ok, first} = reconcile(ctx.demand, 100)
       assert first.leases == %{"build" => 2}
       assert first.offers == 2
@@ -226,6 +238,8 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "acquired handles cannot exceed the pool concurrency policy", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 4)
+
       assert {:ok, first} = reconcile(ctx.demand, 100)
       assert first.offers == 2
 
@@ -313,6 +327,13 @@ defmodule CrfController.DemandCoordinatorTest do
 
       assert {:ok, after_timeout} = reconcile(ctx.demand, 90_100)
       assert after_timeout.reclaimed_idle_placements == 1
+      assert NodeMailbox.size(ctx.mailbox) == 1
+      assert {:ok, cancelling} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert cancelling.updated_at_ms == 90_100
+      assert cancelling.detail_code == "idle_cancel_requested"
+
+      assert {:ok, pending} = reconcile(ctx.demand, 90_101)
+      assert pending.reclaimed_idle_placements == 0
       assert NodeMailbox.size(ctx.mailbox) == 1
 
       assert {:ok, command} =
@@ -598,6 +619,8 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "ambiguous JIT tombstone is retired before new capacity is offered", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
+
       :ok =
         FakeScaleSet.set_jit_states(ctx.scale_set, [
           %{
@@ -614,6 +637,16 @@ defmodule CrfController.DemandCoordinatorTest do
       sidecar = FakeScaleSet.state(ctx.scale_set)
       assert sidecar.retire_calls == 1
       assert sidecar.jit_states == []
+    end
+  end
+
+  test "pools without assigned jobs advertise no capacity", ctx do
+    unless ctx.disabled do
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.leases == %{"build" => 0}
+      assert result.offers == 0
+      assert result.placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
     end
   end
 

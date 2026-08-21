@@ -74,7 +74,7 @@ defmodule CrfController.DemandWork do
           now_ms - placement.updated_at_ms >= ctx.offer_ttl_ms
 
       if idle do
-        case enqueue_idle_cancel(placement, ctx, now_unix_ms) do
+        case enqueue_idle_cancel(placement, ctx, now_ms, now_unix_ms) do
           :ok -> {:cont, {:ok, reclaimed + 1}}
           {:error, reason} -> {:halt, {:error, reason}}
         end
@@ -214,7 +214,7 @@ defmodule CrfController.DemandWork do
     end
   end
 
-  defp enqueue_idle_cancel(placement, ctx, now_unix_ms) do
+  defp enqueue_idle_cancel(placement, ctx, now_ms, now_unix_ms) do
     command_id = "cancel-#{placement.id}"
     idempotency_key = "cancel-idle-#{placement.id}"
 
@@ -228,7 +228,23 @@ defmodule CrfController.DemandWork do
            ),
          {:ok, ^command} <-
            NodeMailbox.enqueue(ctx.node_mailbox, command, now_unix_ms: now_unix_ms) do
-      :ok
+      case PlacementLedger.placement_update(
+             ctx.placement_ledger,
+             placement.node_id,
+             placement.node_generation,
+             placement.id,
+             placement.command_id,
+             placement.state,
+             "idle_cancel_requested",
+             now_ms: now_ms
+           ) do
+        {:ok, _updated} ->
+          :ok
+
+        {:error, reason} ->
+          _ = NodeMailbox.discard(ctx.node_mailbox, command.command_id)
+          {:error, reason}
+      end
     end
   end
 

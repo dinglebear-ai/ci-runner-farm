@@ -104,8 +104,9 @@ defmodule CrfController.OperatorSnapshotTest do
   end
 
   test "reports optional processes as unavailable without failing the snapshot" do
-    dead_process = spawn(fn -> :ok end)
+    dead_process = spawn(fn -> receive do: (:stop -> :ok) end)
     monitor = Process.monitor(dead_process)
+    send(dead_process, :stop)
     assert_receive {:DOWN, ^monitor, :process, ^dead_process, :normal}
 
     snapshot =
