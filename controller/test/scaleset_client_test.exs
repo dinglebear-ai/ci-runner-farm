@@ -234,6 +234,13 @@ defmodule CrfController.ScaleSetClientTest do
   end
 
   defp socket_path do
-    Path.join(System.tmp_dir!(), "crf-scaleset-client-#{System.unique_integer([:positive])}.sock")
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "crf-scaleset-client-#{System.pid()}-#{System.unique_integer([:positive])}.sock"
+      )
+
+    File.rm(path)
+    path
   end
 end

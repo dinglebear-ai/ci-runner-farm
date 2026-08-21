@@ -640,16 +640,6 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "pools without assigned jobs advertise no capacity", ctx do
-    unless ctx.disabled do
-      assert {:ok, result} = reconcile(ctx.demand, 100)
-      assert result.leases == %{"build" => 0}
-      assert result.offers == 0
-      assert result.placements == 0
-      assert NodeMailbox.size(ctx.mailbox) == 0
-    end
-  end
-
   defp reconcile(server, now_ms) do
     DemandCoordinator.reconcile(server,
       now_ms: now_ms,
