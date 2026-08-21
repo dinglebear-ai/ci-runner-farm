@@ -252,6 +252,11 @@ func TestSnapshotHeartbeatContinuesWhileLongPollsWait(t *testing.T) {
 		t.Fatalf("want %d initialized pools, got %d", len(cfg.Pools), len(first.Pools))
 	}
 	for _, pool := range first.Pools {
+		if pool.AcquiredHandles == nil {
+			t.Fatalf("healthy empty poll serialized null acquired handles: %#v", pool)
+		}
+	}
+	for _, pool := range first.Pools {
 		if !pool.SessionHealthy {
 			cancel()
 			t.Fatalf("pool %s never became healthy", pool.PoolID)
