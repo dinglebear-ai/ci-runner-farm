@@ -6,15 +6,33 @@ cd "$(dirname "$0")/.."
 . tests/lib/assert.sh
 
 task_tmp="$(mktemp -d)"
-trap 'rm -rf "$task_tmp"' EXIT
+cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'secret-handoff: failed with status %s\n' "$status" >&2
+    for stderr_path in "$task_tmp"/stderr "$task_tmp"/*-stderr; do
+      if [ -s "$stderr_path" ]; then
+        printf '%s\n' "--- $stderr_path ---" >&2
+        cat "$stderr_path" >&2
+      fi
+    done
+  fi
+  rm -rf "$task_tmp"
+  exit "$status"
+}
+trap cleanup EXIT
 sentinel='crf_secret_SENTINEL_7f91'
 entrypoint=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-entrypoint.sh
 engine=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 
 wait_for_secret_fifo() {
   local label="$1" stderr_path="$2" attempt
-  for ((attempt = 0; attempt < 500; attempt++)); do
-    [ -f "$CRF_SECRET_DIR/ready" ] && return 0
+  attempt=0
+  while [ "$attempt" -lt 500 ]; do
+    if [ -f "$CRF_SECRET_DIR/ready" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
     sleep 0.02
   done
   [ -f "$stderr_path" ] && cat "$stderr_path" >&2
