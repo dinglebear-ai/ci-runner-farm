@@ -283,6 +283,9 @@ mod tests {
     use crf_protocol::wire::{ControllerCommand, PROTOCOL_VERSION};
 
     #[cfg(unix)]
+    static ADAPTER_PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
     struct TestAdapterScript {
         root: PathBuf,
         path: PathBuf,
@@ -411,6 +414,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_client_keeps_jit_secret_on_stdin_only() {
+        let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
         let script = TestAdapterScript::new(
             r#"
 [ "$#" -eq 0 ] || exit 21
@@ -442,6 +446,7 @@ printf "%s\n" '{"schema_version":1,"payload":{"result":"started","id":"container
     #[cfg(unix)]
     #[test]
     fn process_client_rejects_oversized_response() {
+        let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
         let script = TestAdapterScript::new(
             r#"
 yes x | head -c 131073
@@ -462,6 +467,7 @@ yes x | head -c 131073
     #[cfg(unix)]
     #[test]
     fn process_client_timeout_terminates_helper_tree() {
+        let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
         let script = TestAdapterScript::new(
             r#"
 dir=$(dirname "$0")
