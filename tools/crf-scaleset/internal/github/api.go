@@ -282,9 +282,18 @@ func jobHandle(scaleSetID int64, job *scaleset.JobMessageBase) (int64, error) {
 	if scaleSetID <= 0 || job == nil {
 		return 0, errors.New("invalid_assigned_job_identity")
 	}
-	identity := strings.TrimSpace(job.JobID)
-	if identity == "" && job.RunnerRequestID > 0 {
-		identity = "request:" + strconv.FormatInt(job.RunnerRequestID, 10)
+	identity := ""
+	if job.WorkflowRunID > 0 && strings.TrimSpace(job.JobDisplayName) != "" {
+		identity = strings.Join([]string{
+			"workflow-job",
+			strconv.FormatInt(job.WorkflowRunID, 10),
+			strings.TrimSpace(job.OwnerName),
+			strings.TrimSpace(job.RepositoryName),
+			strings.TrimSpace(job.JobWorkflowRef),
+			strings.TrimSpace(job.JobDisplayName),
+		}, "\x00")
+	} else if jobID := strings.TrimSpace(job.JobID); jobID != "" {
+		identity = "job-id\x00" + jobID
 	}
 	if identity == "" {
 		return 0, errors.New("invalid_assigned_job_identity")
