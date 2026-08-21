@@ -10,6 +10,7 @@ on:
         options:
           - classic
           - distributed-linux
+          - distributed-container
           - distributed-windows
           - cancellation
 
@@ -62,6 +63,21 @@ jobs:
           "os=$env:RUNNER_OS"
           "arch=$env:RUNNER_ARCH"
           if ($env:RUNNER_OS -ne 'Windows') { throw 'expected Windows runner' }
+
+  distributed-container:
+    if: inputs.target == 'distributed-container'
+    runs-on: [self-hosted, Linux, X64, accept-container]
+    timeout-minutes: 15
+    steps:
+      - name: Record distributed container placement
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner=%s\nhost=%s\nos=%s\narch=%s\n' "$RUNNER_NAME" "$(hostname)" "$RUNNER_OS" "$RUNNER_ARCH"
+          test "$RUNNER_OS" = Linux
+          test -r /.dockerenv
+          test -r /proc/self/cgroup
+          cat /proc/self/cgroup
 
   cancellation:
     if: inputs.target == 'cancellation'
