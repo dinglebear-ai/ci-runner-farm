@@ -183,6 +183,12 @@ switch ($action) {
     else emit_error(500, 'readiness_unavailable', 'scale-set readiness is unavailable');
     break;
 
+  case 'distributed-status-json':
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' distributed-status-json');
+    if ($rc === 0 && $out !== '') echo $out;
+    else emit_error(500, 'distributed_status_unavailable', 'local distributed node status is unavailable');
+    break;
+
   case 'start': case 'stop': case 'restart': case 'validate':
     [$out, $rc] = run(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action));
     echo json_encode(['ok' => $rc === 0, 'action' => $action, 'log' => $out]);

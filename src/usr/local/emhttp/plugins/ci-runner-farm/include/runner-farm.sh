@@ -4504,6 +4504,40 @@ cmd_readiness_json() {
     "$STATUS_BACKEND_JSON" "$STATUS_COMPATIBILITY_JSON" "$STATUS_OPERATION_JSON" "$cached_count"
 }
 
+# Local-only distributed node status for the authenticated Unraid WebUI. This
+# intentionally does not proxy the remote controller operator API or claim
+# remote-node health. The controller's authenticated local RPC remains the
+# source of truth for global node inventory, placements, and drain state.
+cmd_distributed_status_json() {
+  local root=/mnt/cache/appdata/ci-runner-farm/distributed-node
+  local service="$root/service.sh" env_file="$root/config/node.env"
+  local installed=false running=false pid=null node_id="" controller="" backend="" cpu=0 memory=0 generation=0 filesystem="" storage_safe=false
+  [ -x "$root/bin/crf-node" ] && [ -x "$service" ] && [ -f "$env_file" ] && [ ! -L "$env_file" ] && installed=true
+  if [ "$installed" = true ]; then
+    local status
+    status="$($service status 2>/dev/null || true)"
+    if [[ "$status" =~ ^running\ pid=([0-9]+)$ ]]; then running=true; pid="${BASH_REMATCH[1]}"; fi
+    node_id="$(sed -n 's/^CRF_NODE_ID=//p' "$env_file" | head -1)"
+    controller="$(sed -n 's/^CRF_CONTROLLER_ADDR=//p' "$env_file" | head -1)"
+    backend="$(sed -n 's/^CRF_EXECUTION_BACKEND=//p' "$env_file" | head -1)"
+    cpu="$(sed -n 's/^CRF_NODE_CPU_MILLIS=//p' "$env_file" | head -1)"
+    memory="$(sed -n 's/^CRF_NODE_MEMORY_BYTES=//p' "$env_file" | head -1)"
+    [[ "$cpu" =~ ^[0-9]+$ ]] || cpu=0
+    [[ "$memory" =~ ^[0-9]+$ ]] || memory=0
+    local generation_file
+    generation_file="$(find "$root/state/generations" -maxdepth 1 -type f -name 'generation-*.state' -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tail -1)"
+    if [[ "$generation_file" =~ ^generation-0*([0-9]+)\.state$ ]]; then generation="${BASH_REMATCH[1]}"; fi
+  fi
+  filesystem="$(stat -f -c %T "$root" 2>/dev/null || true)"
+  if [ -d "$root" ]; then
+    case "$(readlink -f "$root" 2>/dev/null)" in /mnt/cache/*) storage_safe=true;; esac
+  fi
+  printf '{"schema_version":1,"installed":%s,"running":%s,"pid":%s,"node_id":"%s","controller":"%s","backend":"%s","cpu_millis":%s,"memory_bytes":%s,"generation":%s,"storage_root":"%s","filesystem":"%s","storage_cache_backed":%s,"remote_inventory":"controller_operator_rpc"}\n' \
+    "$installed" "$running" "$pid" "$(printf '%s' "$node_id" | json_escape)" "$(printf '%s' "$controller" | json_escape)" \
+    "$(printf '%s' "$backend" | json_escape)" "$cpu" "$memory" "$generation" "$(printf '%s' "$root" | json_escape)" \
+    "$(printf '%s' "$filesystem" | json_escape)" "$storage_safe"
+}
+
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
 # Deliberately OMITS the per-runner repo/branch/pr/run_id/job detail that status-json
 # carries: the nchan "/sub/<channel>" endpoint is served by Unraid's nginx WITHOUT the
@@ -5144,6 +5178,7 @@ case "${1:-status}" in
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   readiness-json) cmd_readiness_json ;;
+  distributed-status-json) cmd_distributed_status_json ;;
   dashboard-json) cmd_dashboard_json ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;

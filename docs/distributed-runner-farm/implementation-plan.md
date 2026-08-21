@@ -72,7 +72,11 @@
 - [x] Add the local Unraid adapter endpoint that maps controller-approved placement requests onto `runner-runtime.sh` without duplicating scheduling/admission or GitHub JIT retirement authority.
 - [x] Preserve single-host behavior as the default local backend; the distributed adapter is reachable only through its dedicated stdin-only command and is not part of normal fleet startup.
 - [x] Map validated legacy single-fleet and V2 Unraid pool/resource configuration into strict distributed controller pool-policy JSON without enabling distributed mode.
-- [ ] Add distributed node status/configuration to API and UI.
+- [x] Add secret-free local distributed-node status and activation state to the
+  authenticated Unraid WebUI; keep global inventory and mutations on the
+  controller's authenticated operator RPC.
+- [ ] Design a separately authenticated controller projection before adding
+  remote inventory or mutations to the Unraid WebUI.
 - [x] Add migration/default behavior so existing plugin installs, controller startup, and node execution remain legacy/native unless their dedicated distributed configuration is explicitly supplied.
 
 ## Phase 6: hardening and release
@@ -80,14 +84,18 @@
 - [x] Windows-target GNU cross-check for node and scheduler.
 - [x] GitHub-hosted Ubuntu/Windows distributed-core CI wiring.
 - [x] Native Windows MSVC CI run from PR #37.
-- [ ] Live Linux node smoke.
-- [ ] Live Windows node smoke.
+- [x] Live Linux service/node registration smoke on Dookie, Squirts, Steamy WSL,
+  and cache-resident Tootie container execution.
+- [x] Live Windows service/node registration smoke on Steamy.
 - [x] Live Windows SCM install, mTLS registration, controller restart/reconnect, node restart generation fencing, drain/undrain, and authorization revoke/restore smoke.
 - [ ] Real GitHub scale-set two-node smoke.
 - [ ] Controller/node restart and network-partition matrix.
 - [ ] Resource fragmentation/oversubscription/fairness matrix at sustained load.
 - [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.
 - [ ] Automated CA/server certificate rotation and revocation-provider integration policy.
-- [ ] Security review of credentials, certificates, durable JIT cache, filesystem permissions, and logs.
-- [ ] Distributed API/UI production-readiness sweep.
-- [ ] Adversarial PR review and full existing plugin regression suite.
+- [x] Security review of credentials, certificates, durable JIT cache,
+  filesystem permissions, installer rollback, and failure diagnostics.
+- [x] Local distributed-node WebUI production-readiness and responsive-layout
+  implementation; authenticated real-browser proof remains environment-gated.
+- [x] Adversarial PR review and full existing plugin regression suite for the
+  implementation and review-remediation series.

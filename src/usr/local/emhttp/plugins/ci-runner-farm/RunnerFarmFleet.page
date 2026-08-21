@@ -68,6 +68,21 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
     </div>
   </section>
 
+  <section class="crf-distributed crf-surface" id="crf-distributed" aria-labelledby="crf-distributed-title">
+    <header class="crf-distributed-head">
+      <span class="crf-distributed-route" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><span class="crf-eyebrow">Distributed control plane</span><strong id="crf-distributed-title">This Unraid node</strong></span>
+      <span class="crf-distributed-state" id="crf-distributed-state">Checking&hellip;</span>
+    </header>
+    <div class="crf-distributed-grid">
+      <div><small>Node</small><strong id="crf-dist-node">&ndash;</strong><span id="crf-dist-generation">generation &ndash;</span></div>
+      <div><small>Execution</small><strong id="crf-dist-backend">&ndash;</strong><span id="crf-dist-capacity">&ndash;</span></div>
+      <div><small>Controller target</small><strong id="crf-dist-controller">&ndash;</strong><span>Global inventory stays on authenticated controller RPC</span></div>
+      <div><small>Durable storage</small><strong id="crf-dist-storage">&ndash;</strong><span id="crf-dist-filesystem">&ndash;</span></div>
+      <div><small>Activation gate</small><strong id="crf-dist-gate">&ndash;</strong><span id="crf-dist-gate-detail">Waiting for fleet status</span></div>
+    </div>
+  </section>
+
   <section class="crf-queue-panel crf-surface" id="crf-run-queue" aria-label="Run queue" hidden>
     <header class="crf-queue-head">
       <span class="crf-queue-icon" aria-hidden="true"><img src="/plugins/ci-runner-farm/assets/icons/clock.svg" alt=""></span>
@@ -114,6 +129,10 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
      here — a duplicate later in document order would win the cascade and silently
      mask edits to the shared source. Only Fleet-specific selectors belong below. */
   .crf-right{text-align:right}
+  .crf-distributed{margin:16px 0;overflow:hidden;border-left:4px solid #ff8c2f}
+  .crf-distributed-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--crf-border-soft);background:var(--crf-panel-soft)}
+  .crf-distributed-head strong{display:block;color:var(--crf-ink);font-size:15px}.crf-distributed-route{display:flex;align-items:center;gap:3px}.crf-distributed-route i{display:block;width:8px;height:8px;border-radius:50%;background:#ff8c2f}.crf-distributed-route i+ i:before{content:"";display:block;width:6px;height:1px;margin-left:-6px;background:#fdba74}.crf-distributed-state{margin-left:auto;border-radius:999px;padding:4px 9px;background:#f5f5f5;color:var(--crf-ink-3);font-size:11px;font-weight:600}
+  .crf-distributed-grid{display:grid;grid-template-columns:.75fr .9fr 1.35fr 1.25fr 1fr}.crf-distributed-grid>div{min-width:0;padding:13px 16px;border-right:1px solid var(--crf-border-soft)}.crf-distributed-grid>div:last-child{border-right:0}.crf-distributed-grid small,.crf-distributed-grid span{display:block}.crf-distributed-grid small{margin-bottom:5px;color:#8a8a8a;font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase}.crf-distributed-grid strong{display:block;overflow:hidden;color:var(--crf-ink);font-size:13px;text-overflow:ellipsis;white-space:nowrap}.crf-distributed-grid span{margin-top:3px;color:var(--crf-ink-3);font-size:10.5px;line-height:1.35}.crf-distributed.is-running .crf-distributed-state{background:var(--crf-success-soft);color:var(--crf-success-ink)}.crf-distributed.is-warning .crf-distributed-state{background:var(--crf-warning-soft);color:var(--crf-warning-ink)}
   .crf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:6px 0 8px}
   .crf-stat-inner{display:flex;flex-direction:column;gap:2px;padding:0}
   uui-card-wrapper.crf-stat:not(:defined){background:var(--shade-bg-color,var(--table-header-background-color));border:1px solid var(--border-color);border-radius:6px;display:block;padding:10px 14px}
@@ -314,6 +333,8 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
   button.crf-queue-cancel{appearance:none;box-sizing:border-box;justify-self:end;width:26px;min-width:26px;height:26px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;color:#d4d4d4;display:grid;place-items:center;letter-spacing:normal;text-transform:none;cursor:pointer;transition:all .15s}.crf-queue-cancel img{display:block;width:12px;height:12px}button.crf-queue-cancel:hover{background:#fef2f2;color:#bd1818;transform:scale(1.1)}button.crf-queue-cancel:disabled{opacity:.45;cursor:wait;transform:none}.crf-queue-empty{padding:18px 20px;display:flex;align-items:center;gap:8px;color:var(--crf-ink-4);font-size:12.5px}
   .crf-banner{width:100%;margin:0}
   @media(max-width:980px){.crf-bay-head,.crf-queue-grid-head{display:none}.crf-bay,.crf-queue-grid{display:flex;flex-wrap:wrap;gap:6px 16px}.crf-bay>.crf-usage{flex:1 1 180px}.crf-queue-workflow{flex:1 1 260px}.crf-queue-labels{flex:1 1 220px}.crf-pool-fleet-meta{flex-wrap:wrap}.crf-pool-fleet-meta .crf-pool-control{margin-left:0}.crf-fleet-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.crf-load-stat{grid-column:span 2!important}}
+  @media(max-width:980px){.crf-distributed-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.crf-distributed-grid>div{border-bottom:1px solid var(--crf-border-soft)}.crf-distributed-grid>div:nth-child(even){border-right:0}.crf-distributed-grid>div:last-child{grid-column:1/-1;border-bottom:0}}
+  @media(max-width:560px){.crf-distributed{border-left-width:3px}.crf-distributed-head{padding:12px}.crf-distributed-grid{grid-template-columns:1fr}.crf-distributed-grid>div,.crf-distributed-grid>div:nth-child(even){border-right:0}.crf-distributed-grid>div:last-child{grid-column:auto}}
   @media(max-width:760px){
     .crf-fleet-strip{top:64px;gap:10px;padding:8px 10px;border-radius:10px;overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:none;white-space:nowrap}
     .crf-fleet-strip::-webkit-scrollbar{display:none}
@@ -968,6 +989,24 @@ function crfQueued(){
 }
 crfQueued(); setInterval(crfQueued,30000);
 function crfBytes(b){ if(typeof b!=='number'||b<0) return '\u2013'; const u=['B','KB','MB','GB','TB']; let i=0,v=b; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i===0?v:(v>=10?Math.round(v):v.toFixed(1)))+' '+u[i]; }
+function crfDistributed(){
+  crfPost({action:'distributed-status-json'}).then(node=>{
+    const panel=document.getElementById('crf-distributed'),put=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};if(!panel)return;
+    panel.classList.toggle('is-running',!!node.running);panel.classList.toggle('is-warning',!!node.installed&&!node.running);
+    put('crf-distributed-state',!node.installed?'Not installed':node.running?'Node running':'Node stopped');
+    put('crf-dist-node',node.node_id||'Not configured');put('crf-dist-generation','generation '+(node.generation||'\u2013'));
+    put('crf-dist-backend',node.backend==='container'?'Container adapter':node.backend||'\u2013');
+    put('crf-dist-capacity',(node.cpu_millis?((node.cpu_millis/1000)+' CPU'):'\u2013')+' / '+crfBytes(Number(node.memory_bytes)||-1));
+    put('crf-dist-controller',node.controller||'Not configured');
+    put('crf-dist-storage',node.storage_cache_backed?'Cache-backed':'Unsafe or unavailable');put('crf-dist-filesystem',(node.filesystem||'unknown')+' \u00b7 '+(node.storage_root||'no path'));
+    const snapshot=window.CRF_LAST||{},compat=snapshot.compatibility||{},backend=snapshot.backend||{},operation=snapshot.operation||null;
+    let gate='Not proven',detail=compat.reason||'Run the live compatibility test';
+    if(operation&&operation.state==='running'){gate='Testing';detail='Compatibility operation '+operation.operation_id;}
+    else if(compat.valid){gate=backend.effective==='scaleset'?'Active':'Ready';detail=backend.effective==='scaleset'?'Distributed scale sets are effective':'Compatibility valid; migration not started';}
+    put('crf-dist-gate',gate);put('crf-dist-gate-detail',detail.replace(/_/g,' '));
+  }).catch(()=>{const panel=document.getElementById('crf-distributed');if(panel){panel.classList.remove('is-running');panel.classList.add('is-warning');}const state=document.getElementById('crf-distributed-state');if(state)state.textContent='Status unavailable';});
+}
+crfDistributed();setInterval(crfDistributed,10000);
 function crfCacheUsage(){
   if(!crfFleetActive()) return;
   crfPost({action:'cache-usage'}).then(d=>{
