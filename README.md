@@ -309,7 +309,7 @@ quarantine, and exact cleanup. Changing any bound artifact invalidates the
 record. Rollback makes scale sets ineligible before restoring classic admission.
 
 Full architecture, configuration, packaging, certificates, current deployment
-evidence, and remaining acceptance work live in
+evidence, fleet-qualification runs, and residual hardening work live in
 [`docs/distributed-runner-farm/`](docs/distributed-runner-farm/README.md).
 
 ---
