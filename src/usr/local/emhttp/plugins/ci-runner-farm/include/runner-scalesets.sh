@@ -300,6 +300,7 @@ scaleset_quarantine_ensure() {
 
 scaleset_probe_config_write() {
   local identity plugin image dockerfile entrypoint owner installation host_id tmp
+  local config_rev ownership_rev controller pools rec pool route labels
   [ "${GH_SCOPE:-}" = org ] && [ -n "${GH_OWNER:-}" ] && [ -n "${RUNNER_GROUP:-}" ] ||
     { err "compatibility testing requires organization scope and a restricted runner group"; return 1; }
   [ -f "$SCALESET_WORKLOAD_EVIDENCE" ] && [ ! -L "$SCALESET_WORKLOAD_EVIDENCE" ] &&
@@ -317,7 +318,26 @@ scaleset_probe_config_write() {
     { err "production runner-group policy is not restricted"; return 1; }
   scaleset_quarantine_ensure ||
     { err "could not establish the scale-set quarantine runner group"; return 1; }
+  if ! pool_snapshot_load || ! pool_is_v2; then
+    err "compatibility testing requires V2 runner pools"
+    return 1
+  fi
+  config_rev="$(config_revision)" || return 1
+  ownership_rev="$(scaleset_ownership_revision)" || return 1
+  controller="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)" || return 1
+  controller="crf-$controller"
   mkdir -p "$SCALESET_STATE_DIR" && chmod 0700 "$SCALESET_STATE_DIR" || return 1
+  mkdir -p "$SCALESET_DURABLE_STATE_DIR" && chmod 0700 "$SCALESET_DURABLE_STATE_DIR" || return 1
+  pools="$SCALESET_STATE_DIR/probe-pools.$$.tsv"
+  : >"$pools" || return 1
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    pool="${rec%%|*}"
+    route="$(pool_routing_label "$pool")" || { rm -f "$pools"; return 1; }
+    labels="$route"
+    [ -z "$(pool_additional_labels "$pool")" ] || labels="$labels,$(pool_additional_labels "$pool")"
+    printf '%s|%s|%s\n' "$pool" "$route" "$labels" >>"$pools"
+  done < <(pool_records)
   tmp="$SCALESET_PROBE_CONFIG.tmp.$$"
   php -r '
     $e=json_decode(file_get_contents($argv[1]),true);
@@ -333,7 +353,21 @@ scaleset_probe_config_write() {
     if($argv[12]==="pat")$auth["token_file"]=$argv[13];
     else{$auth["app_client_id"]=$argv[14];$auth["installation_id"]=(int)$argv[15];
       $auth["private_key_file"]=$argv[16];}
-    $runtime=["owner"=>$argv[2],"github_config_url"=>"https://github.com/".$argv[2],"auth"=>$auth];
+    $pools=[];
+    foreach(file($argv[26],FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $line){
+      $parts=explode("|",$line);if(count($parts)!==3)exit(4);
+      $labels=array_values(array_filter(explode(",",$parts[2]),fn($v)=>$v!==""));
+      $pools[]=["id"=>$parts[0],"routing_label"=>$parts[1],"labels"=>$labels];
+    }
+    $runtime=["schema_version"=>1,"controller_instance_id"=>$argv[22],
+      "config_revision"=>$argv[20],"ownership_revision"=>$argv[21],
+      "installation_id"=>$argv[4],"host_id"=>$argv[5],
+      "plugin_digest"=>$argv[6],"image_digest"=>$argv[7],
+      "dockerfile_digest"=>$argv[8],"entrypoint_digest"=>$argv[9],
+      "owner"=>$argv[2],"github_config_url"=>"https://github.com/".$argv[2],
+      "runner_group_id"=>(int)$argv[18],"quarantine_runner_group_id"=>(int)$argv[19],
+      "state_dir"=>$argv[25],"ownership_path"=>$argv[24],"heartbeat_seconds"=>10,
+      "auth"=>$auth,"pools"=>$pools];
     $live=["owner"=>$argv[2],"runner_group_name"=>$argv[3],
       "runner_group_id"=>(int)$argv[18],
       "quarantine_runner_group_name"=>$argv[17],
@@ -346,8 +380,11 @@ scaleset_probe_config_write() {
   ' "$SCALESET_WORKLOAD_EVIDENCE" "$GH_OWNER" "$RUNNER_GROUP" "$installation" "$host_id" \
     "$plugin" "$image" "$dockerfile" "$entrypoint" "$SCALESET_COMPAT" "$tmp" \
     "$AUTH_MODE" "$TOKEN_FILE" "${GITHUB_APP_ID:-}" "${GITHUB_APP_INSTALLATION_ID:-0}" \
-    "$GITHUB_APP_KEY_FILE" "$SCALESET_QUARANTINE_GROUP_NAME" "$SCALESET_PRODUCTION_GROUP_ID" ||
-    { rm -f "$tmp"; err "workload evidence is stale, incomplete, or identity-mismatched"; return 1; }
+    "$GITHUB_APP_KEY_FILE" "$SCALESET_QUARANTINE_GROUP_NAME" "$SCALESET_PRODUCTION_GROUP_ID" \
+    "$SCALESET_QUARANTINE_GROUP_ID" "$config_rev" "$ownership_rev" "$controller" \
+    "$SCALESET_STATE_DIR" "$SCALESET_OWNERSHIP" "$SCALESET_DURABLE_STATE_DIR" "$pools" ||
+    { rm -f "$tmp" "$pools"; err "workload evidence is stale, incomplete, or identity-mismatched"; return 1; }
+  rm -f "$pools"
   chmod 0600 "$tmp" && mv "$tmp" "$SCALESET_PROBE_CONFIG"
 }
 
