@@ -16,7 +16,7 @@
     "controller_instance_id": "controller-1",
     "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "ownership_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "timeout_ms": 30000
+    "timeout_ms": 120000
   },
   "sidecar": null,
   "tls": {

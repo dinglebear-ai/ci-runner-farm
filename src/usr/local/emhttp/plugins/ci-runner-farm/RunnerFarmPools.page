@@ -124,6 +124,10 @@ if (!function_exists('crfp_sel')) {
             <button type="button" class="crf-button crf-button-compact" id="crf-compat-run" onclick="crfRunCompatibility()">Run compatibility test</button>
           </div>
           <div class="crfp-readiness" id="crf-scaleset-readiness" aria-live="polite">Scale-set readiness has not been checked.</div>
+          <div class="crfp-routing-warn">
+            <img src="/plugins/ci-runner-farm/assets/icons/warning.svg" alt="">
+            <span><strong>Scale-set workflows use only the pool selector.</strong> Use <code>runs-on: ci-pool-name</code>; OS, architecture, execution backend, and resources are enforced by the distributed controller. Classic containers remain effective until Fleet migration proves the compatibility and drain gates.</span>
+          </div>
           <div class="crfp-single-fields crfp-single-only">
             <label>Runners <input type="number" name="RUNNER_COUNT" min="1" max="64" value="<?=crfp_g($cfg,'RUNNER_COUNT','4')?>"></label>
             <label>Labels <input type="text" name="RUNNER_LABELS" value="<?=crfp_g($cfg,'RUNNER_LABELS')?>"></label>

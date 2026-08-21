@@ -78,7 +78,7 @@ if (!crf_begin_embedded_page('RunnerFarmFleet', 'Runner Farm: Runners')) return;
       <div><small>Node</small><strong id="crf-dist-node">&ndash;</strong><span id="crf-dist-generation">generation &ndash;</span></div>
       <div><small>Execution</small><strong id="crf-dist-backend">&ndash;</strong><span id="crf-dist-capacity">&ndash;</span></div>
       <div><small>Controller target</small><strong id="crf-dist-controller">&ndash;</strong><span>Global inventory stays on authenticated controller RPC</span></div>
-      <div><small>Durable storage</small><strong id="crf-dist-storage">&ndash;</strong><span id="crf-dist-filesystem">&ndash;</span></div>
+      <div><small>Durable storage</small><strong id="crf-dist-storage">&ndash;</strong><span id="crf-dist-filesystem">Node runtime must be cache-backed, never flash-backed</span></div>
       <div><small>Activation gate</small><strong id="crf-dist-gate">&ndash;</strong><span id="crf-dist-gate-detail">Waiting for fleet status</span></div>
     </div>
   </section>

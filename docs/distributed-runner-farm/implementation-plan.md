@@ -88,7 +88,8 @@
   and cache-resident Tootie container execution.
 - [x] Live Windows service/node registration smoke on Steamy.
 - [x] Live Windows SCM install, mTLS registration, controller restart/reconnect, node restart generation fencing, drain/undrain, and authorization revoke/restore smoke.
-- [ ] Real GitHub scale-set two-node smoke.
+- [x] Real GitHub scale-set execution across Dookie, Squirts, Steamy, Steamy WSL, and Tootie's container backend.
+- [x] Live GitHub cancellation with Unix process-group signal observation, terminal placement reporting, resource return, and credential cleanup.
 - [ ] Controller/node restart and network-partition matrix.
 - [ ] Resource fragmentation/oversubscription/fairness matrix at sustained load.
 - [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.

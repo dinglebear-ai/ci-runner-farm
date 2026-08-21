@@ -4,21 +4,29 @@ Last updated: 2026-08-21
 
 ## Active checkpoint
 
-- PR #37 and all review remediations are merged.
-- Current main includes the worktree bootstrap, safe official runner archive
-  extraction, Windows PowerShell 5.1/7 service installation, and cache-resident
-  Unraid node lifecycle through PR #45.
-- Live controller: Dookie, TLS port 7443, automatic reconciliation disabled
-  pending the fresh compatibility gate.
+- PR #37 and all review remediations are merged. PR #57 fixed production
+  materialization of the official runner's read-only directories.
+- Live controller and Linux nodes run immutable release
+  `2f6eedaff86c77660760a41138a83f68c99f3b4b`; Steamy runs the native Windows
+  service. The acceptance controller remains manual while production pool
+  migration is prepared.
 - Registered nodes: Dookie (Linux native), Squirts (Linux native), Steamy
   (Windows native), Steamy WSL (Linux native), and Tootie (Linux container).
 - Tootie advertises 8000 CPU millis and 10 GiB; its binary/config/TLS/state/logs
   are on `/mnt/cache` ZFS and its PID is in tmpfs. Nineteen classic containers
   remained running through enrollment.
-- The previous live compatibility record and workload evidence expired. The
-  latest compatibility operation correctly failed `evidence_invalid`; no record
-  was synthesized and effective backend remains classic.
-- PR #45 CI: plugin, Shell/PHP, Ubuntu distributed core, and Windows distributed
+- Tootie's packaged compatibility operation passed with plugin digest
+  `0ea5f71c9d04cfcaae79dee1ac9757398aaa2162fe4ee5e749023859704249bf`;
+  helper digest `7557b5706b9887aa24d3454124af9afa466e9ecde544207990a642efa2abe860`;
+  and exact cleanup complete. Its distributed binary, configuration, TLS,
+  state, and logs remain under `/mnt/cache`; only PID/socket state is tmpfs.
+- Real GitHub jobs passed on Dookie, Squirts, Steamy, Steamy WSL, and Tootie's
+  container backend. A live Dookie cancellation observed TERM, completed as
+  cancelled in GitHub, removed the complete runner process group, returned
+  resources, and removed runner credentials.
+- The classic backend remains effective because several classic runners were
+  busy at the cutover checkpoint. No busy classic container was interrupted.
+- PR #57 CI: plugin, Shell/PHP, Ubuntu distributed core, and Windows distributed
   core all green.
 
 ### Historical implementation checkpoint
@@ -62,10 +70,11 @@ This document is the living implementation tracker. Update this checkpoint secti
 
 ## Current state
 
-The distributed control/data path exists end to end and five live nodes are
-registered. It remains opt-in: automatic reconciliation is disabled and the
-classic Unraid backend remains effective until the fresh live compatibility and
-migration gates pass.
+The distributed control/data path exists end to end, five live nodes are
+registered, and real jobs plus cancellation have passed. It remains opt-in:
+the classic Unraid backend stays effective until production pool definitions
+replace the isolated acceptance pools and the migration state machine drains
+all busy classic jobs.
 
 The implemented path is:
 
@@ -150,23 +159,22 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Build and install the final plugin digest, then rerun the complete live
-   compatibility workload gate and exact cleanup.
-2. Activate the sidecar and migration state machine, then run real GitHub jobs
-   across Tootie, Dookie, Squirts, Steamy, and Steamy WSL.
-3. Complete controller/node restart, reconnect, cancellation, drain/undrain,
-   orphan/remediation, and classic-isolation acceptance.
-4. Add a separately authenticated controller status projection before exposing
+1. Replace the isolated `accept*` controller/scale-set definitions with the
+   reviewed production pool export and use the migration state machine to stop
+   classic admission, wait for every busy classic job, and activate scale sets.
+2. Complete the controller/node restart and network-partition matrix plus
+   orphan/force-abandon acceptance under production pool identities.
+3. Add a separately authenticated controller status projection before exposing
    remote node/placement mutation in the Unraid WebUI. The local UI deliberately
    does not proxy controller RPC today.
-5. Add automated CA/server-certificate rotation, more target-distribution Linux
+4. Add automated CA/server-certificate rotation, more target-distribution Linux
    bundles, sustained fairness/load tests, and longer-horizon replay-fence
    archival if operational scale requires it.
 
 ## Deployment status
 
-The controller and five nodes are deployed and registered. Tootie's optional
-node is cache-resident and integrated with Docker start/stop events. Distributed
-reconciliation is still disabled, effective backend remains classic, and the
-expired compatibility evidence has not been bypassed. Final activation and
-five-node job proof remain pending.
+The controller and five nodes are deployed and registered. Tootie's node is
+cache-resident and integrated with Docker start/stop events. Compatibility,
+five-node execution, drain rotation, duplicate-handle fencing, and cancellation
+are proven. Effective backend remains classic only because production pool
+replacement and a non-disruptive busy-runner drain are still pending.
