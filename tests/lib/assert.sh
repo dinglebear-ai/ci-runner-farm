@@ -28,6 +28,12 @@ crf_go125() {
   local candidate="${CRF_GO:-}" version=""
   if [ -z "$candidate" ] && command -v go >/dev/null 2>&1; then
     candidate="$(command -v go)"
+    # A mise shim re-resolves from the subprocess working directory. Tests
+    # intentionally build from temporary copies, so pin the currently selected
+    # real binary before changing directories.
+    case "$candidate" in
+      */mise/shims/go) candidate="$(mise which go 2>/dev/null || true)" ;;
+    esac
     version="$("$candidate" version 2>/dev/null | awk '{print $3}')"
     [ "$version" = go1.25.3 ] || candidate=""
   fi

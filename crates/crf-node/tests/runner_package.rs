@@ -184,7 +184,7 @@ fn digest_and_size_mismatch_fail_before_extraction() {
 }
 
 #[test]
-fn tar_parent_traversal_and_symlink_are_rejected() {
+fn tar_parent_traversal_and_escaping_symlink_are_rejected() {
     let traversal_root = TestRoot::new("tar-traversal");
     let archive = malicious_parent_tar_gz();
     let manager = package_manager(
@@ -489,7 +489,7 @@ fn tar_gz_symlink() -> Vec<u8> {
     let mut header = tar::Header::new_gnu();
     header.set_path("linked").expect("path");
     header.set_entry_type(tar::EntryType::Symlink);
-    header.set_link_name("run.sh").expect("link");
+    header.set_link_name("../escape").expect("link");
     header.set_size(0);
     header.set_cksum();
     builder.append(&header, std::io::empty()).expect("append");
