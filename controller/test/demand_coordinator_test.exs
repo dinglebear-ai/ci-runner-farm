@@ -31,6 +31,11 @@ defmodule CrfController.DemandCoordinatorTest do
     def set_assigned_jobs(server, assigned_jobs),
       do: GenServer.call(server, {:set_assigned_jobs, assigned_jobs})
 
+    def add_pool(server, pool), do: GenServer.call(server, {:add_pool, pool})
+
+    def set_pool_health(server, pool_id, healthy),
+      do: GenServer.call(server, {:set_pool_health, pool_id, healthy})
+
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
@@ -64,6 +69,20 @@ defmodule CrfController.DemandCoordinatorTest do
       pool = %{pool | assigned_jobs: assigned_jobs}
       state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
       {:reply, :ok, state}
+    end
+
+    def handle_call({:add_pool, pool}, _from, state) do
+      pools = state.snapshot.pools ++ [pool]
+      {:reply, :ok, %{state | snapshot: %{state.snapshot | pools: pools}}}
+    end
+
+    def handle_call({:set_pool_health, pool_id, healthy}, _from, state) do
+      pools =
+        Enum.map(state.snapshot.pools, fn pool ->
+          if pool.pool_id == pool_id, do: %{pool | session_healthy: healthy}, else: pool
+        end)
+
+      {:reply, :ok, %{state | snapshot: %{state.snapshot | pools: pools}}}
     end
 
     def handle_call({:set_jit_states, states}, _from, state) do
@@ -614,6 +633,49 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, _} = reconcile(ctx.demand, 300)
       assert FakeScaleSet.state(ctx.scale_set).apply_calls == 2
       assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+    end
+  end
+
+  test "planning waits until every configured pool session is healthy", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.add_pool(ctx.scale_set, %{
+          pool_id: "other",
+          scale_set_id: 75,
+          assigned_jobs: 0,
+          advertised_capacity: 0,
+          last_message_id: 0,
+          session_healthy: false,
+          acquired_handles: []
+        })
+
+      demand =
+        start_supervised!(
+          Supervisor.child_spec(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(2), %{policy(1) | id: "other"}],
+             scale_set_client: ctx.scale_set,
+             scheduler_client: ctx.scheduler,
+             node_registry: ctx.registry,
+             placement_ledger: ctx.placements,
+             offer_ledger: ctx.offers,
+             node_mailbox: ctx.mailbox,
+             placement_coordinator: ctx.coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 1},
+            id: :session_barrier_demand
+          )
+        )
+
+      assert {:ok, waiting} = reconcile(demand, 100)
+      assert waiting.offers == 0
+      assert waiting.leases == %{"build" => 0, "other" => 0}
+
+      :ok = FakeScaleSet.set_pool_health(ctx.scale_set, "other", true)
+      assert {:ok, ready} = reconcile(demand, 200)
+      assert ready.offers == 1
+      assert ready.leases == %{"build" => 1, "other" => 0}
     end
   end
 
