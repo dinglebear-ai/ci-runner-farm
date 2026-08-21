@@ -201,7 +201,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	defer wg.Wait()
 	current := map[string]protocol.PoolSnapshot{}
 	for _, pool := range s.cfg.Pools {
-		current[pool.ID] = protocol.PoolSnapshot{PoolID: pool.ID, ScaleSetID: pool.ScaleSetID}
+		current[pool.ID] = protocol.PoolSnapshot{
+			PoolID: pool.ID, ScaleSetID: pool.ScaleSetID, AcquiredHandles: []int64{},
+		}
 	}
 	publish := func() {
 		pools := make([]protocol.PoolSnapshot, 0, len(s.cfg.Pools))
