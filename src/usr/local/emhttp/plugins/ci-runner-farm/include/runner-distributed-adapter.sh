@@ -459,7 +459,9 @@ distributed_adapter_inspect() {
         fi
         return 0 ;;
       starting)
-        if ! distributed_adapter_find_container "$placement"; then
+        if distributed_adapter_find_container "$placement"; then
+          :
+        else
           find_rc=$?
           distributed_adapter_reply_find_failure "$find_rc" container_start_uncertain
           return 0
@@ -468,7 +470,9 @@ distributed_adapter_inspect() {
         DA_CONTAINER_ID="$DISTRIBUTED_CONTAINER_ID"; distributed_adapter_state_store "$DA_CONTAINER_ID" observed || true; DA_PHASE=observed
         distributed_adapter_reply_observed "$expected"; return 0 ;;
       cancelling)
-        if ! distributed_adapter_find_container "$placement"; then
+        if distributed_adapter_find_container "$placement"; then
+          :
+        else
           find_rc=$?
           if [ "$find_rc" = 1 ]; then
             distributed_adapter_state_store "$DA_CONTAINER_ID" terminal cancelled "" || { distributed_adapter_reply_code deferred state_write_failed; return 0; }
@@ -484,7 +488,9 @@ distributed_adapter_inspect() {
         distributed_adapter_reply_code deferred container_cancel_pending
         return 0 ;;
       observed|running)
-        if ! distributed_adapter_find_container "$placement"; then
+        if distributed_adapter_find_container "$placement"; then
+          :
+        else
           find_rc=$?
           if [ "$find_rc" = 1 ]; then distributed_adapter_terminalize failed container_lost || true; distributed_adapter_reply_state_terminal; else distributed_adapter_reply_code deferred container_identity_ambiguous; fi
           return 0
@@ -496,7 +502,9 @@ distributed_adapter_inspect() {
     state_rc=$?
   fi
   [ "$state_rc" = 1 ] || { distributed_adapter_reply_code deferred state_corrupt; return 0; }
-  if ! distributed_adapter_find_container "$placement"; then
+  if distributed_adapter_find_container "$placement"; then
+    :
+  else
     find_rc=$?
     distributed_adapter_reply_find_failure "$find_rc" absent
     return 0
@@ -512,7 +520,9 @@ distributed_adapter_cancel() {
     if [ -n "$expected" ] && [ -n "$DA_CONTAINER_ID" ] && [ "$expected" != "$DA_CONTAINER_ID" ]; then
       distributed_adapter_reply_code deferred runtime_identity_mismatch; return 0
     fi
-    if ! distributed_adapter_find_container "$placement"; then
+    if distributed_adapter_find_container "$placement"; then
+      :
+    else
       find_rc=$?
       if [ "$find_rc" != 1 ]; then distributed_adapter_reply_code deferred container_identity_ambiguous; return 0; fi
       case "$DA_PHASE" in
@@ -526,7 +536,9 @@ distributed_adapter_cancel() {
   else
     state_rc=$?
     [ "$state_rc" = 1 ] || { distributed_adapter_reply_code deferred state_corrupt; return 0; }
-    if ! distributed_adapter_find_container "$placement"; then
+    if distributed_adapter_find_container "$placement"; then
+      :
+    else
       find_rc=$?
     distributed_adapter_reply_find_failure "$find_rc" absent
     return 0
