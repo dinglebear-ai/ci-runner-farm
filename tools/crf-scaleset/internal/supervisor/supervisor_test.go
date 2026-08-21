@@ -118,6 +118,49 @@ type staticPoller struct{ result PollResult }
 
 func (p *staticPoller) Poll(context.Context, Pool, int) (PollResult, error) { return p.result, nil }
 
+type blockingPoller struct{}
+
+func (p *blockingPoller) Poll(ctx context.Context, _ Pool, _ int) (PollResult, error) {
+	<-ctx.Done()
+	return PollResult{}, ctx.Err()
+}
+
+func TestInitialSnapshotIsFreshButUnhealthyWhileFirstPollWaits(t *testing.T) {
+	cfg := validSupervisorConfig()
+	cfg.Heartbeat = 5 * time.Millisecond
+	cfg.DemandTTL = 40 * time.Millisecond
+	s, err := New(cfg, &blockingPoller{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	deadline := time.Now().Add(time.Second)
+	var snapshot protocol.Snapshot
+	for snapshot.Sequence == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		snapshot = s.Snapshot()
+	}
+	if snapshot.Sequence == 0 || len(snapshot.Pools) != 1 {
+		cancel()
+		t.Fatalf("initial snapshot was not published: %#v", snapshot)
+	}
+	pool := snapshot.Pools[0]
+	if pool.SessionHealthy || pool.ObservedAt.IsZero() || !pool.ValidUntil.After(time.Now().UTC()) {
+		cancel()
+		t.Fatalf("initial pool must be fresh but unhealthy: %#v", pool)
+	}
+	if got := pool.ValidUntil.Sub(pool.ObservedAt); got != cfg.DemandTTL {
+		cancel()
+		t.Fatalf("initial pool validity drifted: got=%s want=%s", got, cfg.DemandTTL)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func validSupervisorConfig() Config {
 	return Config{ControllerInstanceID: "controller", ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64), Heartbeat: time.Second,

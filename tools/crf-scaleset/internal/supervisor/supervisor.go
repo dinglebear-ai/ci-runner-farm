@@ -207,9 +207,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 	defer wg.Wait()
 	current := map[string]protocol.PoolSnapshot{}
+	startedAt := time.Now().UTC()
 	for _, pool := range s.cfg.Pools {
 		current[pool.ID] = protocol.PoolSnapshot{
 			PoolID: pool.ID, ScaleSetID: pool.ScaleSetID, AcquiredHandles: []int64{},
+			ObservedAt: startedAt, ValidUntil: startedAt.Add(s.cfg.DemandTTL),
 		}
 	}
 	publish := func() {
