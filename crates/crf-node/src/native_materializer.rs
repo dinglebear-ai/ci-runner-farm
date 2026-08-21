@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use crf_protocol::OperatingSystem;
@@ -62,7 +62,15 @@ impl RunnerMaterializer {
             .map_err(|_| MaterializerError::MaterializationFailed)?;
 
         let mut budget = CopyBudget::default();
-        if copy_tree(&self.template_root, &temporary_root, 0, &mut budget).is_err() {
+        if copy_tree(
+            &self.template_root,
+            &self.template_root,
+            &temporary_root,
+            0,
+            &mut budget,
+        )
+        .is_err()
+        {
             let _ = fs::remove_dir_all(&temporary_root);
             return Err(MaterializerError::MaterializationFailed);
         }
@@ -136,6 +144,7 @@ fn expected_runner_entrypoint(root: &Path, os: &OperatingSystem) -> PathBuf {
 }
 
 fn copy_tree(
+    template_root: &Path,
     source: &Path,
     destination: &Path,
     depth: usize,
@@ -156,15 +165,22 @@ fn copy_tree(
         let file_type = entry
             .file_type()
             .map_err(|_| MaterializerError::MaterializationFailed)?;
-        if file_type.is_symlink() {
-            return Err(MaterializerError::MaterializationFailed);
-        }
         let target = destination.join(entry.file_name());
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            let link_target = fs::read_link(entry.path())
+                .map_err(|_| MaterializerError::MaterializationFailed)?;
+            let link_path = entry
+                .path()
+                .strip_prefix(template_root)
+                .map_err(|_| MaterializerError::MaterializationFailed)?
+                .to_path_buf();
+            validate_symlink_target(&link_path, &link_target)?;
+            create_symlink(&link_target, &target)?;
+        } else if file_type.is_dir() {
             fs::create_dir(&target).map_err(|_| MaterializerError::MaterializationFailed)?;
             fs::set_permissions(&target, metadata.permissions())
                 .map_err(|_| MaterializerError::MaterializationFailed)?;
-            copy_tree(&entry.path(), &target, depth + 1, budget)?;
+            copy_tree(template_root, &entry.path(), &target, depth + 1, budget)?;
         } else if file_type.is_file() {
             budget.bytes = budget.bytes.saturating_add(metadata.len());
             if budget.bytes > MAX_TEMPLATE_BYTES {
@@ -177,6 +193,49 @@ fn copy_tree(
         }
     }
     Ok(())
+}
+
+fn validate_symlink_target(link_path: &Path, link_target: &Path) -> Result<(), MaterializerError> {
+    if link_target.as_os_str().is_empty() || link_target.is_absolute() {
+        return Err(MaterializerError::MaterializationFailed);
+    }
+    let mut depth = link_path
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter(|component| matches!(component, Component::Normal(_)))
+                .count()
+        })
+        .unwrap_or(0);
+    for component in link_target.components() {
+        match component {
+            Component::Normal(_) => depth = depth.saturating_add(1),
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(MaterializerError::MaterializationFailed);
+            }
+        }
+        if depth > MAX_COPY_DEPTH {
+            return Err(MaterializerError::MaterializationFailed);
+        }
+    }
+    if depth == 0 {
+        return Err(MaterializerError::MaterializationFailed);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(link_target: &Path, target: &Path) -> Result<(), MaterializerError> {
+    std::os::unix::fs::symlink(link_target, target)
+        .map_err(|_| MaterializerError::MaterializationFailed)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_link_target: &Path, _target: &Path) -> Result<(), MaterializerError> {
+    Err(MaterializerError::MaterializationFailed)
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
