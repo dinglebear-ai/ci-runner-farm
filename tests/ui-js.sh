@@ -128,6 +128,10 @@ if grep -Fq 'const index=Number(event.key)-1' src/usr/local/emhttp/plugins/ci-ru
 fi
 grep -Fq '"$SRC/RunnerFarmHistory.page"' deploy.sh
 grep -Fq '"$SRC/RunnerFarmLogs.page"' deploy.sh
+grep -Fq "chmod 0755 '\$DEST/include/runner-container-adapter.sh'" deploy.sh ||
+  crf_fail 'raw deploy does not preserve the container adapter wrapper executable bit'
+grep -Fq "chmod 0755 '\$DEST/include/runner-distributed-adapter.sh'" deploy.sh ||
+  crf_fail 'raw deploy does not preserve the distributed adapter executable bit'
 
 # Execute the empty-state renderer from the page: invalid config must produce a
 # disabled mutation button, while a valid empty fleet remains startable.

@@ -38,6 +38,8 @@ ssh "$HOST" "
   find '$DEST' -type f -exec chmod 0644 {} +
   chmod 0755 '$DEST/include/runner-farm.sh'
   chmod 0755 '$DEST/include/runner-entrypoint.sh'
+  chmod 0755 '$DEST/include/runner-container-adapter.sh'
+  chmod 0755 '$DEST/include/runner-distributed-adapter.sh'
   [ ! -f '$DEST/bin/crf-scaleset' ] || chmod 0755 '$DEST/bin/crf-scaleset'
   find '$DEST/nchan' -type f -exec chmod 0755 {} + 2>/dev/null || true  # monitor_nchan execs the publisher
   find '$DEST/event' -type f -exec chmod 0755 {} + 2>/dev/null || true
