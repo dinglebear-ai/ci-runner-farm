@@ -21,6 +21,7 @@ fi
 # shellcheck disable=SC1091
 source "$bundle_root/BUILD-INFO"
 [[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "BUILD-INFO contains an invalid Git SHA" >&2; exit 1; }
+[[ "${GIT_DIRTY:-}" == "false" ]] || { echo "refusing to install a dirty-source bundle" >&2; exit 1; }
 release_id="${VERSION}-${PLATFORM}-${GIT_SHA}"
 release_root="$(rooted "$prefix/releases/$release_id")"
 current_link="$(rooted "$prefix/current")"

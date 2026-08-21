@@ -2,6 +2,8 @@
 
 This packaging is intentionally separate from the Unraid plugin package. It installs the distributed controller/node components under an immutable `/opt/ci-runner-farm/releases/<version>-<platform>-<git-sha>` directory and atomically repoints `/opt/ci-runner-farm/current`.
 
+Dirty-source bundles are for local validation only and are refused by the installer so different bytes can never reuse the same immutable release identity.
+
 The controller unit runs the self-contained OTP release and may supervise the Go scale-set adapter when the controller JSON contains a non-null `sidecar` block. The node unit runs `crf-node` directly. `systemctl reload ci-runner-farm-controller` atomically reloads the node-certificate fingerprint allowlist through the packaged `crf-peer-admin` helper without restarting the listener.
 
 The bundle is tagged with the build distribution/version/architecture because Mix releases and the Rust binaries are native artifacts. Do not treat an Ubuntu-built bundle as a generic Linux binary release.

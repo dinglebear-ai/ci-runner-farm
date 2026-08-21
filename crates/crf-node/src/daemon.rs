@@ -262,6 +262,13 @@ impl ReconnectLog {
         let fingerprint = format!("{stage}:{cause}");
         if self.last_failure.as_deref() == Some(&fingerprint) {
             self.suppressed = self.suppressed.saturating_add(1);
+            if self.suppressed.is_power_of_two() {
+                eprintln!(
+                    "crf-node: repeated reconnect failure node_id={node_id} controller={controller} stage={stage} repeated_count={} next_retry_delay_ms={}",
+                    self.suppressed,
+                    retry_delay.as_millis()
+                );
+            }
             return;
         }
         if self.suppressed > 0 {
