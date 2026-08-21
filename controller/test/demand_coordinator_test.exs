@@ -679,6 +679,50 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "planning preserves pool order while no eligible node can accept an offer", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.add_pool(ctx.scale_set, %{
+          pool_id: "other",
+          scale_set_id: 75,
+          assigned_jobs: 0,
+          advertised_capacity: 0,
+          last_message_id: 0,
+          session_healthy: true,
+          acquired_handles: []
+        })
+
+      demand =
+        start_supervised!(
+          Supervisor.child_spec(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(1), %{policy(1) | id: "other"}],
+             scale_set_client: ctx.scale_set,
+             scheduler_client: ctx.scheduler,
+             node_registry: ctx.registry,
+             placement_ledger: ctx.placements,
+             offer_ledger: ctx.offers,
+             node_mailbox: ctx.mailbox,
+             placement_coordinator: ctx.coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 1},
+            id: :eligible_node_barrier_demand
+          )
+        )
+
+      assert {:ok, _node} = NodeRegistry.set_draining(ctx.registry, "dookie", 7, true)
+      assert {:ok, waiting} = reconcile(demand, 100)
+      assert waiting.offers == 0
+      assert waiting.leases == %{"build" => 0, "other" => 0}
+
+      assert {:ok, _node} = NodeRegistry.set_draining(ctx.registry, "dookie", 7, false)
+      assert {:ok, ready} = reconcile(demand, 200)
+      assert ready.offers == 1
+      assert ready.leases == %{"build" => 1, "other" => 0}
+    end
+  end
+
   test "ambiguous JIT tombstone is retired before new capacity is offered", ctx do
     unless ctx.disabled do
       :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
