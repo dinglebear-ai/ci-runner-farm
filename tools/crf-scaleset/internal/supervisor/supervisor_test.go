@@ -103,8 +103,14 @@ func TestOneLongPollPerPool(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if len(seen) != len(cfg.Pools) || s.Snapshot().Sequence == 0 {
+	snapshot := s.Snapshot()
+	if len(seen) != len(cfg.Pools) || snapshot.Sequence == 0 {
 		t.Fatalf("incomplete supervisor startup: seen=%d snapshot=%#v", len(seen), s.Snapshot())
+	}
+	for _, pool := range snapshot.Pools {
+		if pool.AcquiredHandles == nil {
+			t.Fatalf("initial acquired handles must serialize as an empty array: %#v", pool)
+		}
 	}
 }
 
