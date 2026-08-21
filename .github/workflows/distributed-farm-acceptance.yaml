@@ -1,0 +1,77 @@
+name: Distributed Farm Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Acceptance surface to exercise
+        required: true
+        type: choice
+        options:
+          - classic
+          - distributed-linux
+          - distributed-windows
+          - cancellation
+
+permissions:
+  contents: read
+
+jobs:
+  classic:
+    if: inputs.target == 'classic'
+    runs-on: [self-hosted, Linux, X64, ci-pool-ops]
+    timeout-minutes: 10
+    steps:
+      - name: Record classic isolation and nested-cgroup evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner=%s\nhost=%s\nkernel=%s\n' "$RUNNER_NAME" "$(hostname)" "$(uname -srmo)"
+          test -r /proc/self/cgroup
+          cat /proc/self/cgroup
+          test -r /sys/fs/cgroup/cgroup.controllers
+          grep -Eq '(^| )cpu( |$)' /sys/fs/cgroup/cgroup.controllers
+          grep -Eq '(^| )memory( |$)' /sys/fs/cgroup/cgroup.controllers
+          docker info --format 'cgroup_driver={{.CgroupDriver}} cgroup_version={{.CgroupVersion}}'
+
+  distributed-linux:
+    if: inputs.target == 'distributed-linux'
+    runs-on: [self-hosted, Linux, X64, accept]
+    timeout-minutes: 15
+    steps:
+      - name: Record distributed Linux placement
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner=%s\nhost=%s\nos=%s\narch=%s\n' "$RUNNER_NAME" "$(hostname)" "$RUNNER_OS" "$RUNNER_ARCH"
+          test "$RUNNER_OS" = Linux
+          test -r /proc/self/cgroup
+          cat /proc/self/cgroup
+
+  distributed-windows:
+    if: inputs.target == 'distributed-windows'
+    runs-on: [self-hosted, Windows, X64, accept-windows]
+    timeout-minutes: 15
+    steps:
+      - name: Record distributed Windows placement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "runner=$env:RUNNER_NAME"
+          "host=$env:COMPUTERNAME"
+          "os=$env:RUNNER_OS"
+          "arch=$env:RUNNER_ARCH"
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'expected Windows runner' }
+
+  cancellation:
+    if: inputs.target == 'cancellation'
+    runs-on: [self-hosted, Linux, X64, accept]
+    timeout-minutes: 20
+    steps:
+      - name: Hold placement for cancellation and reassignment proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner=%s host=%s pid=%s\n' "$RUNNER_NAME" "$(hostname)" "$$"
+          trap 'echo cancellation-signal-observed; exit 0' TERM INT
+          for _ in $(seq 1 900); do sleep 1; done
