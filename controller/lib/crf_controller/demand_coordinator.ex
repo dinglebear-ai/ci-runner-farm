@@ -193,6 +193,7 @@ defmodule CrfController.DemandCoordinator do
          {:ok, snapshot} <- ScaleSetClient.read_snapshot(ctx.scale_set_client),
          {:ok, acquired_blocked} <-
            DemandWork.reconcile_acquired(snapshot, jit_states, ctx, now_ms, now_unix_ms),
+         {:ok, reclaimed} <- DemandWork.reclaim_unassigned(snapshot, ctx, now_ms, now_unix_ms),
          blocked <- MapSet.union(jit_blocked, acquired_blocked),
          :ok <- OfferPlanner.trim_excess(ctx, now_ms),
          {:ok, planner} <- OfferPlanner.plan(snapshot, blocked, ctx, state.planner, now_ms),
@@ -202,7 +203,8 @@ defmodule CrfController.DemandCoordinator do
         leases: leases,
         blocked_pools: blocked |> MapSet.to_list() |> Enum.sort(),
         offers: length(OfferLedger.snapshot(ctx.offer_ledger, now_ms: now_ms)),
-        placements: length(PlacementLedger.snapshot(ctx.placement_ledger))
+        placements: length(PlacementLedger.snapshot(ctx.placement_ledger)),
+        reclaimed_idle_placements: reclaimed
       }
 
       {:ok, result, %{state | planner: planner}}
