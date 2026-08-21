@@ -1,5 +1,23 @@
 # CI Runner Farm for Unraid
 
+## Worktree setup
+
+The repository pins its build toolchain in `.mise.toml`. Prepare an existing
+checkout (including a detached checkout) before building:
+
+```bash
+scripts/worktree-setup.sh
+```
+
+Create a fully prepared worktree from the current `origin/main`:
+
+```bash
+scripts/worktree-setup.sh codex/my-change
+```
+
+The setup is idempotent: it trusts the repository config, installs all pinned
+tools, and verifies Go, Elixir, Erlang/OTP, and Mix before returning success.
+
 Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners** —
 multiple concurrent, resource-capped runners running as Docker containers, with
 warm shared caches, utilization-aware autoscaling, routed capacity pools, and Docker-in-Docker. No VM
