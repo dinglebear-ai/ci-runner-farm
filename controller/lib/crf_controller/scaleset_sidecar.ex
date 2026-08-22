@@ -10,6 +10,7 @@ defmodule CrfController.ScaleSetSidecar do
   # a controller restart cannot strand remote scale-set sessions.
   @session_close_timeout_ms 15_000
   @shutdown_timeout_ms @session_close_timeout_ms + 5_000
+  @supervisor_shutdown_margin_ms 5_000
   @diagnostic_tail_bytes 4_096
   @diagnostic_buffer_bytes @diagnostic_tail_bytes * 2
 
@@ -17,6 +18,20 @@ defmodule CrfController.ScaleSetSidecar do
     name = Keyword.get(opts, :name, __MODULE__)
     genserver_opts = if is_nil(name), do: [], else: [name: name]
     GenServer.start_link(__MODULE__, opts, genserver_opts)
+  end
+
+  def child_spec(opts) do
+    shutdown_timeout_ms =
+      case Keyword.get(opts, :shutdown_timeout_ms, @shutdown_timeout_ms) do
+        value when is_integer(value) and value in 100..30_000 -> value
+        _invalid -> @shutdown_timeout_ms
+      end
+
+    %{
+      id: Keyword.get(opts, :name) || __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      shutdown: shutdown_timeout_ms + @supervisor_shutdown_margin_ms
+    }
   end
 
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)

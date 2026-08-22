@@ -102,20 +102,27 @@ defmodule CrfController.ScaleSetSidecarTest do
       File.write!(executable, delayed_cleanup_sidecar())
       File.chmod!(executable, 0o700)
 
-      {:ok, sidecar} =
-        ScaleSetSidecar.start_link(
-          name: nil,
-          executable: executable,
-          socket_path: socket_path,
-          runtime_config: runtime,
-          compatibility: compatibility,
-          startup_timeout_ms: 5_000
+      {:ok, supervisor} =
+        Supervisor.start_link(
+          [
+            {ScaleSetSidecar,
+             [
+               name: nil,
+               executable: executable,
+               socket_path: socket_path,
+               runtime_config: runtime,
+               compatibility: compatibility,
+               startup_timeout_ms: 5_000
+             ]}
+          ],
+          strategy: :one_for_one
         )
 
+      [{_, sidecar, _, _}] = Supervisor.which_children(supervisor)
+
       %{os_pid: os_pid} = ScaleSetSidecar.status(sidecar)
-      Process.unlink(sidecar)
       started_at = System.monotonic_time(:millisecond)
-      :ok = GenServer.stop(sidecar, :normal, 10_000)
+      :ok = Supervisor.stop(supervisor, :normal, 10_000)
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
 
       assert elapsed_ms >= 2_500
@@ -127,6 +134,27 @@ defmodule CrfController.ScaleSetSidecarTest do
       assert status != 0
       File.rm_rf!(root)
     end
+  end
+
+  test "sidecar child specification exceeds its graceful cleanup budget" do
+    assert %{shutdown: 25_000} =
+             ScaleSetSidecar.child_spec(
+               name: nil,
+               executable: "/fixture",
+               socket_path: "/fixture.sock",
+               runtime_config: "/runtime",
+               compatibility: "/compatibility"
+             )
+
+    assert %{shutdown: 35_000} =
+             ScaleSetSidecar.child_spec(
+               name: nil,
+               executable: "/fixture",
+               socket_path: "/fixture.sock",
+               runtime_config: "/runtime",
+               compatibility: "/compatibility",
+               shutdown_timeout_ms: 30_000
+             )
   end
 
   defp sealed(root, name) do
