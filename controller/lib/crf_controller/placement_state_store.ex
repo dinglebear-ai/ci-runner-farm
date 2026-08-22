@@ -387,7 +387,8 @@ defmodule CrfController.PlacementStateStore do
                :ok <- File.chmod(temporary, 0o600),
                :ok <- :file.close(file),
                :ok <- File.rename(temporary, path),
-               :ok <- File.chmod(path, 0o600) do
+               :ok <- File.chmod(path, 0o600),
+               :ok <- sync_directory(directory) do
             :ok
           else
             {:error, _reason} -> {:error, :placement_state_persist_failed}
@@ -402,6 +403,26 @@ defmodule CrfController.PlacementStateStore do
       {:error, _reason} ->
         _ = File.rm(temporary)
         {:error, :placement_state_persist_failed}
+    end
+  end
+
+  defp sync_directory(directory) do
+    case :os.type() do
+      {:win32, _} ->
+        :ok
+
+      _ ->
+        case :file.open(String.to_charlist(directory), [:read, :raw, :directory]) do
+          {:ok, directory_file} ->
+            try do
+              :file.sync(directory_file)
+            after
+              _ = :file.close(directory_file)
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   end
 end
