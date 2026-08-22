@@ -403,6 +403,33 @@ migration_quarantine_group_inventory() {
   return 1
 }
 
+# Migration owns only the fixed classic fleet. Distributed placements and JIT
+# runners share the managed label so the ordinary inventory can reconcile
+# them, but they are controlled by separate authorities and must never be
+# quarantined or retired as classic containers.
+migration_classic_names() {
+  local runner suffix pool index
+  while IFS= read -r runner; do
+    [ -n "$runner" ] || continue
+    case "$runner" in
+      "$NAME_PREFIX"-[0-9]*)
+        suffix="${runner#"$NAME_PREFIX"-}"
+        [[ "$suffix" =~ ^[0-9]+$ ]] && printf '%s\n' "$runner"
+        ;;
+      "$NAME_PREFIX"-*-*)
+        suffix="${runner#"$NAME_PREFIX"-}"
+        pool="${suffix%-*}"; index="${suffix##*-}"
+        [[ "$pool" =~ ^[a-z][a-z0-9-]*$ ]] && [[ "$index" =~ ^[0-9]+$ ]] &&
+          printf '%s\n' "$runner"
+        ;;
+    esac
+  done < <(managed_names)
+}
+
+migration_classic_count() {
+  migration_classic_names | grep -c . || true
+}
+
 migration_quarantine_move_all() {
   local inventory runner remote records group_inventory match id name
   migration_quarantine_ensure || return 1
@@ -411,7 +438,7 @@ migration_quarantine_move_all() {
     { err "could not inventory classic runner registrations before quarantine"; return 1; }
   records="$(mktemp "$RUNDIR/classic-quarantine-records.XXXXXX")" || return 1
   : >"$records"
-  for runner in $(managed_names); do
+  for runner in $(migration_classic_names); do
     [ -n "$runner" ] || continue
     remote="$(host)-$runner"
     match="$(printf '%s\n' "$inventory" |
@@ -480,7 +507,7 @@ migration_classic_quiesce() {
   fleet_inventory_refresh || { err "could not inventory classic runners during quiesce"; return 1; }
   migration_quarantine_move_all || return 1
   github_phase_refresh || { err "could not prove classic runner phases during quiesce"; return 1; }
-  for runner in $(managed_names); do
+  for runner in $(migration_classic_names); do
     [ -n "$runner" ] || continue
     case "$(runner_state "$runner")" in
       idle)
@@ -491,7 +518,7 @@ migration_classic_quiesce() {
     esac
   done
   fleet_inventory_refresh || return 1
-  if [ "$(current_count)" -ne 0 ] || [ "$busy" -ne 0 ]; then
+  if [ "$(migration_classic_count)" -ne 0 ] || [ "$busy" -ne 0 ]; then
     err "classic quiesce is waiting for $busy assigned, busy, or uncertain runner(s)"
     return 1
   fi
@@ -500,7 +527,7 @@ migration_classic_quiesce() {
 migration_classic_prove_ineligible() {
   local target name prefix inventory
   [ -f "$MIGRATION_CLASSIC_QUIESCE_FILE" ] || return 1
-  fleet_inventory_refresh && [ "$(current_count)" -eq 0 ] ||
+  fleet_inventory_refresh && [ "$(migration_classic_count)" -eq 0 ] ||
     { err "classic containers remain after quiesce"; return 1; }
   target="org:$GH_OWNER"
   prefix="$(host)-${NAME_PREFIX}-"
@@ -545,7 +572,7 @@ migration_classic_prove_effective() {
   [ ! -f "$MIGRATION_CLASSIC_QUIESCE_FILE" ] || return 1
   fleet_inventory_refresh || return 1
   github_phase_refresh || return 1
-  for runner in $(managed_names); do
+  for runner in $(migration_classic_names); do
     [ -n "$runner" ] || continue
     phase="$(runner_state "$runner")"
     case "$phase" in busy|idle) count=$((count + 1)) ;; esac
