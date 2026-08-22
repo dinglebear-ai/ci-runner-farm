@@ -70,7 +70,8 @@ defmodule CrfController.ScaleSetSidecarTest do
           socket_path: socket_path,
           runtime_config: runtime,
           compatibility: compatibility,
-          startup_timeout_ms: 5_000
+          startup_timeout_ms: 5_000,
+          shutdown_timeout_ms: 100
         )
 
       %{os_pid: os_pid} = ScaleSetSidecar.status(sidecar)
@@ -82,6 +83,78 @@ defmodule CrfController.ScaleSetSidecarTest do
       assert status != 0
       File.rm_rf!(root)
     end
+  end
+
+  test "managed sidecar allows session cleanup beyond the former two-second boundary" do
+    if elem(:os.type(), 0) == :win32 do
+      assert true
+    else
+      root =
+        Path.join(System.tmp_dir!(), "crf-sidecar-cleanup-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(root)
+      executable = Path.join(root, "fake-sidecar.py")
+      socket_path = Path.join(root, "control.sock")
+      cleanup_path = Path.join(root, "sessions-closed")
+      runtime = sealed(root, "runtime.json")
+      compatibility = sealed(root, "compatibility.json")
+
+      File.write!(executable, delayed_cleanup_sidecar())
+      File.chmod!(executable, 0o700)
+
+      {:ok, supervisor} =
+        Supervisor.start_link(
+          [
+            {ScaleSetSidecar,
+             [
+               name: nil,
+               executable: executable,
+               socket_path: socket_path,
+               runtime_config: runtime,
+               compatibility: compatibility,
+               startup_timeout_ms: 5_000
+             ]}
+          ],
+          strategy: :one_for_one
+        )
+
+      [{_, sidecar, _, _}] = Supervisor.which_children(supervisor)
+
+      %{os_pid: os_pid} = ScaleSetSidecar.status(sidecar)
+      started_at = System.monotonic_time(:millisecond)
+      :ok = Supervisor.stop(supervisor, :normal, 10_000)
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+      assert elapsed_ms >= 2_500
+      assert elapsed_ms < 15_000
+      assert File.read!(cleanup_path) == "all sessions closed\n"
+
+      kill = System.find_executable("kill")
+      assert {_output, status} = System.cmd(kill, ["-0", Integer.to_string(os_pid)])
+      assert status != 0
+      File.rm_rf!(root)
+    end
+  end
+
+  test "sidecar child specification exceeds its graceful cleanup budget" do
+    assert %{shutdown: 25_000} =
+             ScaleSetSidecar.child_spec(
+               name: nil,
+               executable: "/fixture",
+               socket_path: "/fixture.sock",
+               runtime_config: "/runtime",
+               compatibility: "/compatibility"
+             )
+
+    assert %{shutdown: 35_000} =
+             ScaleSetSidecar.child_spec(
+               name: nil,
+               executable: "/fixture",
+               socket_path: "/fixture.sock",
+               runtime_config: "/runtime",
+               compatibility: "/compatibility",
+               shutdown_timeout_ms: 30_000
+             )
   end
 
   defp sealed(root, name) do
@@ -160,5 +233,45 @@ defmodule CrfController.ScaleSetSidecarTest do
       "signal.signal(signal.SIGTERM, stop)",
       "signal.signal(signal.SIGTERM, signal.SIG_IGN)"
     )
+  end
+
+  defp delayed_cleanup_sidecar do
+    ~S"""
+    #!/usr/bin/env python3
+    import os
+    import signal
+    import socket
+    import sys
+    import time
+
+    args = sys.argv[1:]
+    path = args[args.index("--socket") + 1]
+    cleanup_path = args[args.index("--runtime-config") + 1].replace("runtime.json", "sessions-closed")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    os.chmod(path, 0o600)
+    server.listen(1)
+
+    def stop(_signum, _frame):
+        time.sleep(2.5)
+        with open(cleanup_path, "w") as marker:
+            marker.write("all sessions closed\n")
+        server.close()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    while True:
+        time.sleep(0.02)
+    """
   end
 end
