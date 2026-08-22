@@ -24,6 +24,7 @@ gc_remove_failure=
 slow_gc_rm_seconds=0
 gc_rm_started="$tmp/gc-rm-started"
 gc_rm_finished="$tmp/gc-rm-finished"
+gc_rm_gate="$tmp/gc-rm-gate"
 gc_rm_active="$tmp/gc-rm-active"
 gc_rm_max_active="$tmp/gc-rm-max-active"
 gc_inherited_fd5="$tmp/gc-inherited-fd5"
@@ -56,6 +57,7 @@ rm(){
         [ "$active" -le "$max" ] || printf '%s\n' "$active" >"$gc_rm_max_active"
       ) 9>"$tmp/gc-rm-count.lock"
       [ "$slow_gc_rm_seconds" = 0 ] || sleep "$slow_gc_rm_seconds"
+      while [ -e "$gc_rm_gate" ]; do sleep 0.01; done
       if [ -n "$gc_remove_failure" ] && [[ "${arg##*/}" == "$gc_remove_failure"* ]]; then
         (
           flock -x 9
@@ -283,26 +285,30 @@ fake_exists[$slow]=0; fake_status[$slow]=exited; fake_consumed[$slow]=1; fake_po
 mkdir -p "$CACHE_ROOT/work/$slow" "$CACHE_ROOT/docker/$slow"
 touch "$CACHE_ROOT/work/$slow/artifact" "$CACHE_ROOT/docker/$slow/layer" "$RESERVATION_DIR/$slow_reservation.state"
 write_state "$JIT_STATE_DIR/$slow.state" "$slow" terminal "$slow_reservation" 808 "$old" rust
-slow_gc_rm_seconds=1
-: >"$gc_rm_started"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
+slow_gc_rm_seconds=0
+wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || crf_fail "earlier GC sweep failed before blocked cleanup proof"
+: >"$gc_rm_started"; : >"$gc_rm_finished"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
+: >"$gc_rm_gate"
 exec 5>"$tmp/autoscale-tick.lock"
 flock 5
 exec 8>"$tmp/autoscale-fleet.lock"
 flock 8
-started_ns="$(date +%s%N)"
 jit_reconcile
-elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 flock -u 8; exec 8>&-
 flock -u 5; exec 5>&-
-[ "$elapsed_ms" -lt 500 ] || crf_fail "slow recursive deletion delayed JIT reconciliation (${elapsed_ms}ms)"
 [ ! -e "$JIT_STATE_DIR/$slow.state" ] || crf_fail "slow cleanup did not converge JIT state"
 [ ! -e "$RESERVATION_DIR/$slow_reservation.state" ] || crf_fail "slow cleanup did not release reservation"
 [ ! -e "$CACHE_ROOT/work/$slow" ] && [ ! -e "$CACHE_ROOT/docker/$slow" ] || crf_fail "slow cleanup left live runner paths attached"
 for _ in {1..100}; do [ -s "$gc_rm_started" ] && break; sleep 0.01; done
 [ -s "$gc_rm_started" ] || crf_fail "background GC sweep did not start"
+[ ! -s "$gc_rm_finished" ] || crf_fail "blocked recursive deletion completed before reconciliation returned"
 [ ! -s "$gc_inherited_fd5" ] || crf_fail "GC sweeper inherited the autoscale tick lock fd"
 [ ! -s "$gc_inherited_fd8" ] || crf_fail "GC sweeper inherited the autoscale lock fd"
-wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
+rm -f "$gc_rm_gate"
+wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || crf_fail "blocked GC sweep failed after release"
+[ -s "$gc_rm_finished" ] || crf_fail "released recursive deletion did not complete"
+find "$CACHE_ROOT/.jit-gc" -maxdepth 1 -name "$slow.*" | grep -q . &&
+  crf_fail "released recursive deletion left quarantined runner data"
 
 # The production command is commonly invoked through a pipe or output-capturing
 # caller. The detached sweeper must not retain those descriptors and delay EOF.
@@ -310,16 +316,23 @@ pipe_item="$CACHE_ROOT/.jit-gc/pipe-latency"
 mkdir -p "$pipe_item"; touch "$pipe_item/artifact"
 slow_gc_rm_seconds=1
 export CACHE_ROOT RUNDIR JIT_GC_SWEEP_MAX JIT_GC_SWEEPER_PID slow_gc_rm_seconds
-export gc_rm_started gc_rm_finished gc_rm_active gc_rm_max_active gc_inherited_fd5 gc_inherited_fd8
+export gc_rm_started gc_rm_finished gc_rm_gate gc_rm_active gc_rm_max_active gc_inherited_fd5 gc_inherited_fd8
 export safe_cache_root_mode detach_failure_runner gc_remove_failure
 export -f crf_safe_cache_root jit_gc_log jit_gc_root_prepare jit_gc_sweep_config_valid
 export -f jit_gc_sweep jit_gc_sweep_start rm mv
-started_ns="$(date +%s%N)"
-pipe_result="$(bash -c 'jit_gc_sweep_start; printf detached' | cat)"
-elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
+: >"$gc_rm_gate"
+pipe_result="$(timeout --kill-after=1 2 bash -c \
+  'bash -c "jit_gc_sweep_start; printf detached" | cat')" ||
+  crf_fail "piped caller retained background GC descriptors"
 [ "$pipe_result" = detached ] || crf_fail "piped GC start returned unexpected output"
-[ "$elapsed_ms" -lt 500 ] || crf_fail "piped caller waited for background GC (${elapsed_ms}ms)"
-for _ in {1..200}; do [ ! -e "$pipe_item" ] && break; sleep 0.01; done
+[ -e "$pipe_item" ] || crf_fail "blocked piped GC reclaimed its fixture before gate release"
+rm -f "$gc_rm_gate"
+for _ in {1..200}; do
+  grep -Fq "jit-gc: reclaimed item=pipe-latency" "$RUNDIR/autoscale.log" 2>/dev/null && break
+  sleep 0.01
+done
+grep -Fq "jit-gc: reclaimed item=pipe-latency" "$RUNDIR/autoscale.log" 2>/dev/null ||
+  crf_fail "detached piped GC did not report completion"
 [ ! -e "$pipe_item" ] || crf_fail "detached piped GC did not reclaim its fixture"
 
 # Configuration errors are rejected before a child is launched, allowing the
