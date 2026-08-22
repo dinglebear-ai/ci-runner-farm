@@ -29,6 +29,23 @@ on:
         options:
           - ci-pool-windows
           - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
+      container_pool:
+        description: Container scale-set routing label (use the isolated lane for fleet qualification)
+        required: true
+        type: choice
+        default: ci-pool-residential-egress
+        options:
+          - ci-pool-residential-egress
+          - ci-pool-acceptance-linux
+      cancellation_pool:
+        description: Scale-set routing label used for cancellation proof
+        required: true
+        type: choice
+        default: ci-pool-ops
+        options:
+          - ci-pool-ops
+          - ci-pool-acceptance-linux
 
 permissions:
   contents: read
@@ -86,7 +103,7 @@ jobs:
 
   distributed-container:
     if: inputs.target == 'distributed-container'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-residential-egress' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.container_pool || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Record distributed container placement
@@ -101,7 +118,7 @@ jobs:
 
   cancellation:
     if: inputs.target == 'cancellation'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-ops' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.cancellation_pool || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Hold placement for cancellation and reassignment proof
