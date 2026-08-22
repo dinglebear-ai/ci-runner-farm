@@ -3,6 +3,69 @@
 # output remains beneath RUNDIR; only bounded metadata is committed to flash.
 
 OPERATION_RUNTIME_DIR="${OPERATION_RUNTIME_DIR:-${RUNDIR:-/run/ci-runner-farm}/operations}"
+OPERATION_COMPATIBILITY_TIMEOUT_SECONDS="${OPERATION_COMPATIBILITY_TIMEOUT_SECONDS:-660}"
+OPERATION_PROVISIONING_TIMEOUT_SECONDS="${OPERATION_PROVISIONING_TIMEOUT_SECONDS:-300}"
+OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS="${OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS:-3600}"
+OPERATION_KILL_AFTER_SECONDS="${OPERATION_KILL_AFTER_SECONDS:-5}"
+OPERATION_COMMAND_LAUNCHER="${CRF_OPERATION_COMMAND_LAUNCHER:-$0}"
+
+operation_run_bounded() {
+  local seconds="$1" pid starttime deadline kill_deadline now rc=0 member member_start
+  local -a identities=()
+  shift
+  case "$seconds" in ''|*[!0-9]*) return 125 ;; esac
+  [ "$seconds" -ge 1 ] && [ "$seconds" -le 86400 ] || return 125
+  case "$OPERATION_KILL_AFTER_SECONDS" in ''|*[!0-9]*) return 125 ;; esac
+  [ "$OPERATION_KILL_AFTER_SECONDS" -ge 1 ] && [ "$OPERATION_KILL_AFTER_SECONDS" -le 60 ] || return 125
+  setsid "$@" &
+  pid=$!
+  starttime="$(operation_pid_starttime "$pid")" || { wait "$pid" || rc=$?; return "$rc"; }
+  deadline=$(($(date +%s) + seconds))
+  while operation_pid_matches "$pid" "$starttime"; do
+    now="$(date +%s)"
+    if [ "$now" -ge "$deadline" ]; then
+      while read -r member; do
+        [ -n "$member" ] || continue
+        member_start="$(operation_pid_starttime "$member" 2>/dev/null)" || continue
+        identities+=("$member:$member_start")
+      done < <(ps -eo pid=,pgid= | awk -v group="$pid" '$2 == group {print $1}')
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      kill_deadline=$((now + OPERATION_KILL_AFTER_SECONDS))
+      while operation_pid_matches "$pid" "$starttime" && [ "$(date +%s)" -lt "$kill_deadline" ]; do
+        sleep 0.1
+      done
+      if operation_pid_matches "$pid" "$starttime"; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        for member in "${identities[@]}"; do
+          operation_signal_identity KILL "$member"
+        done
+      fi
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
+operation_pid_starttime() {
+  local pid="$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  sed -E 's/^[0-9]+ \(.*\) [^ ]+ //' "/proc/$pid/stat" 2>/dev/null | awk '{print $19}'
+}
+
+operation_pid_matches() {
+  [ "$(operation_pid_starttime "$1" 2>/dev/null)" = "$2" ]
+}
+
+operation_signal_identity() {
+  local signal="$1" identity="$2" pid="${identity%%:*}" starttime="${identity#*:}"
+  operation_pid_matches "$pid" "$starttime" || return 0
+  kill -"$signal" "$pid" 2>/dev/null || true
+}
 
 operation_runtime_dir_ensure() {
   if [ -e "$OPERATION_RUNTIME_DIR" ]; then
@@ -135,7 +198,9 @@ operation_compatibility_worker() {
   fi
   evidence_tmp="${SCALESET_COMPAT}.operation.$id.tmp"
   rm -f -- "$evidence_tmp"
-  if "$SCALESET_HELPER" probe --config "$SCALESET_PROBE_CONFIG"       --output "$evidence_tmp" --timeout 10m >>"$log_path" 2>&1; then
+  if operation_run_bounded "$OPERATION_COMPATIBILITY_TIMEOUT_SECONDS" \
+      "$SCALESET_HELPER" probe --config "$SCALESET_PROBE_CONFIG" \
+      --output "$evidence_tmp" --timeout 10m >>"$log_path" 2>&1; then
     if ! operation_config_matches "$id"; then
       rm -f -- "$evidence_tmp"
       operation_finish "$id" failed stale_config         'Configuration changed while compatibility test was running.' "$log_path"
@@ -157,7 +222,11 @@ operation_compatibility_worker() {
     rm -f -- "$evidence_tmp"
     printf 'compatibility helper exit=%s
 ' "$rc" >>"$log_path"
-    operation_finish "$id" failed probe_failed       'Compatibility gate did not pass.' "$log_path"
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      operation_finish "$id" failed timed_out 'Compatibility test exceeded its wall-clock limit.' "$log_path"
+    else
+      operation_finish "$id" failed probe_failed 'Compatibility gate did not pass.' "$log_path"
+    fi
   fi
 }
 
@@ -208,14 +277,20 @@ operation_provisioning_worker() {
     operation_finish "$id" failed stale_config 'Configuration changed before provisioning validation.' "$log_path"
     return
   fi
-  if cmd_validate >>"$log_path" 2>&1; then
+  if operation_run_bounded "$OPERATION_PROVISIONING_TIMEOUT_SECONDS" \
+      "$OPERATION_COMMAND_LAUNCHER" validate >>"$log_path" 2>&1; then
     if ! operation_config_matches "$id"; then
       operation_finish "$id" failed stale_config 'Configuration changed while provisioning validation was running.' "$log_path"
       return
     fi
     operation_finish "$id" succeeded provisioning_valid 'Provisioning mechanics were verified.' "$log_path"
   else
-    operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+    local rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      operation_finish "$id" failed timed_out 'Provisioning validation exceeded its wall-clock limit.' "$log_path"
+    else
+      operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+    fi
   fi
 }
 
@@ -237,19 +312,19 @@ operation_image_source_hash() {
 
 operation_image_snapshot_path() {
   operation_id_valid "$1" || return 1
-  operation_runtime_dir_ensure || return 1
-  printf '%s/%s.Dockerfile' "$OPERATION_RUNTIME_DIR" "$1"
+  mkdir -p -- "$RUNDIR" || return 1
+  printf '%s/build.Dockerfile.%s' "$RUNDIR" "$1"
 }
 
 operation_image_snapshot_prepare() {
-  local id="$1" expected="$2" source actual path tmp
+  local id="$1" expected="$2" source actual path tmp companion validator endpoint
   operation_id_valid "$id" && [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
   source="$(operation_image_source_path)" || return 1
   actual="$(operation_image_source_hash)" || return 1
   [ "$actual" = "$expected" ] || return 2
   path="$(operation_image_snapshot_path "$id")" || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-  tmp="$(mktemp "$OPERATION_RUNTIME_DIR/$id.Dockerfile.tmp.XXXXXX")" || return 1
+  tmp="$(mktemp "$RUNDIR/build.Dockerfile.$id.tmp.XXXXXX")" || return 1
   if ! cp -- "$source" "$tmp" || ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     return 1
@@ -259,7 +334,29 @@ operation_image_snapshot_prepare() {
     rm -f -- "$tmp" "$path"
     return 2
   fi
+  if build_context_needs_kache_supervisor "$path"; then
+    companion="${source%/*}/kache-supervise.sh"
+    build_context_copy_kache_supervisor "$companion" "${path}.kache-supervise.sh" || {
+      operation_image_snapshot_cleanup "$path"; return 1;
+    }
+  fi
+  if build_context_needs_endpoint_validator "$path"; then
+    validator="${source%/*}/endpoint-validation.sh"
+    build_context_copy_companion "$validator" "${path}.endpoint-validation.sh" || {
+      operation_image_snapshot_cleanup "$path"; return 1;
+    }
+  fi
+  if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$path"; then
+    endpoint="${path}.kache-endpoint"
+    kache_endpoint_load && (umask 077; printf '%s\n' "$KACHE_REMOTE_ENDPOINT" >"$endpoint") &&
+      chmod 0600 "$endpoint" || { operation_image_snapshot_cleanup "$path"; return 1; }
+  fi
   printf '%s' "$path"
+}
+
+operation_image_snapshot_cleanup() {
+  local path="$1"
+  rm -f -- "$path" "${path}.kache-supervise.sh" "${path}.endpoint-validation.sh" "${path}.kache-endpoint"
 }
 
 operation_image_snapshot_valid() {
@@ -317,7 +414,7 @@ cmd_image_build_operation_start() {
     return 5
   fi
   if ! operation_worker_launch image-build-operation-worker "$id" "$expected"; then
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed launch_failed 'Image build worker could not be launched.' >/dev/null 2>&1 || true
     operation_start_error backend_unavailable 'image build worker could not be launched' "$id"
     return 5
@@ -331,53 +428,56 @@ operation_image_build_worker() {
   operation_mark_running "$id" 'Image build started.' || return 1
   snapshot="$(operation_image_snapshot_path "$id")" || return 1
   if ! operation_image_snapshot_valid "$id" "$expected"; then
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed stale_dockerfile 'Dockerfile snapshot did not match the requested SHA-256.' >/dev/null 2>&1 || true
     return
   fi
   mkdir -p -- "$RUNDIR" || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build runtime directory is unavailable.' >/dev/null 2>&1 || true
     return
   }
   lock="$RUNDIR/build.lock"
   [ ! -L "$lock" ] || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock is unsafe.' >/dev/null 2>&1 || true
     return
   }
   exec 9>"$lock" || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock could not be opened.' >/dev/null 2>&1 || true
     return
   }
   chmod 0600 "$lock" || {
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock could not be secured.' >/dev/null 2>&1 || true
     return
   }
   if ! flock -n 9; then
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed operation_running 'Another image build is already running.' >/dev/null 2>&1 || true
     return
   fi
   log_path="$(operation_output_log_prepare "$id" image_build_log)" || {
     flock -u 9 || true
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build log could not be created.' >/dev/null 2>&1 || true
     return
   }
-  if cmd_build_image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
-  rm -f -- "$snapshot"
+  if operation_run_bounded "$OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS" \
+      "$OPERATION_COMMAND_LAUNCHER" build-image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
+  operation_image_snapshot_cleanup "$snapshot"
   printf '__BUILD_RC__=%s\n' "$rc" >>"$log_path"
   chmod 0600 "$log_path" || true
   flock -u 9 || true
   exec 9>&-
   if [ "$rc" -eq 0 ]; then
     operation_finish "$id" succeeded image_built 'Runner image build completed.' "$log_path"
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    operation_finish "$id" failed timed_out 'Runner image build exceeded its wall-clock limit.' "$log_path"
   else
     operation_finish "$id" failed build_failed 'Runner image build failed.' "$log_path"
   fi

@@ -59,9 +59,14 @@ defmodule CrfController.PlacementLedger do
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
   def tombstone_snapshot(server \\ __MODULE__), do: GenServer.call(server, :tombstone_snapshot)
 
+  def prune_before_generation(server \\ __MODULE__, node_id, generation) do
+    GenServer.call(server, {:prune_before_generation, node_id, generation})
+  end
+
   @impl true
   def init(opts) do
     state_path = Keyword.get(opts, :state_path)
+    record_capacity = Keyword.get(opts, :record_capacity, 65_536)
 
     case PlacementStateStore.load(state_path) do
       {:ok, %{placements: placements, tombstones: tombstones}} ->
@@ -76,6 +81,7 @@ defmodule CrfController.PlacementLedger do
            placements: placements,
            tombstones: tombstones,
            commands: commands,
+           record_capacity: record_capacity,
            state_path: state_path
          }}
 
@@ -91,6 +97,21 @@ defmodule CrfController.PlacementLedger do
          {:ok, next_state} <- persist_placement(state, placement) do
       {:reply, {:ok, placement}, next_state}
     else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:prune_before_generation, node_id, generation}, _from, state)
+      when is_binary(node_id) and is_integer(generation) and generation > 0 do
+    retained =
+      Map.reject(state.tombstones, fn {_id, tombstone} ->
+        tombstone.node_id == node_id and tombstone.node_generation < generation
+      end)
+
+    next_state = %{state | tombstones: retained} |> rebuild_commands()
+
+    case persist_state(next_state) do
+      :ok -> {:reply, :ok, next_state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -228,8 +249,16 @@ defmodule CrfController.PlacementLedger do
       match?(%PlacementTombstone{}, tombstone) ->
         {:error, :placement_terminal}
 
-      is_nil(existing) and is_nil(command_owner) ->
+      is_nil(existing) and is_nil(command_owner) and
+          PlacementStateStore.capacity_available?(
+            state.placements,
+            state.tombstones,
+            state.record_capacity
+          ) ->
         {:ok, incoming}
+
+      is_nil(existing) and is_nil(command_owner) ->
+        {:error, :placement_state_capacity}
 
       match?(%Placement{}, existing) and Placement.same_command?(existing, incoming) and
           command_owner == incoming.id ->
@@ -298,8 +327,10 @@ defmodule CrfController.PlacementLedger do
         put_placement(state, placement)
       end
 
-    case persist_state(next_state) do
-      :ok -> {:ok, next_state}
+    compacted_state = compact_state(next_state)
+
+    case persist_state(compacted_state) do
+      :ok -> {:ok, compacted_state}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -307,14 +338,43 @@ defmodule CrfController.PlacementLedger do
   defp persist_tombstone(state, %PlacementTombstone{} = tombstone) do
     next_state = put_tombstone(state, tombstone)
 
-    case persist_state(next_state) do
-      :ok -> {:ok, next_state}
+    compacted_state = compact_state(next_state)
+
+    case persist_state(compacted_state) do
+      :ok -> {:ok, compacted_state}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp persist_state(state) do
     PlacementStateStore.persist(state.state_path, state.placements, state.tombstones)
+  end
+
+  defp compact_state(state) do
+    compacted = PlacementStateStore.compact(state.placements, state.tombstones)
+
+    commands =
+      Map.new(
+        Map.values(compacted.placements) ++ Map.values(compacted.tombstones),
+        &{&1.command_id, &1.id}
+      )
+
+    %{
+      state
+      | placements: compacted.placements,
+        tombstones: compacted.tombstones,
+        commands: commands
+    }
+  end
+
+  defp rebuild_commands(state) do
+    commands =
+      Map.new(
+        Map.values(state.placements) ++ Map.values(state.tombstones),
+        &{&1.command_id, &1.id}
+      )
+
+    %{state | commands: commands}
   end
 
   defp put_placement(state, %Placement{} = placement) do

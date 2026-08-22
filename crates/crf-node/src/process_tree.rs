@@ -52,6 +52,10 @@ impl ManagedProcess {
     pub fn terminate_tree(&mut self) -> io::Result<ExitStatus> {
         self.tree.terminate(&mut self.child)
     }
+
+    pub fn terminate_tree_now(&mut self) -> io::Result<ExitStatus> {
+        self.tree.terminate_now(&mut self.child)
+    }
 }
 
 #[cfg(unix)]
@@ -84,6 +88,11 @@ impl ProcessTree {
         if self.group_alive()? {
             self.signal_group(libc::SIGKILL)?;
         }
+        child.wait()
+    }
+
+    fn terminate_now(&self, child: &mut Child) -> io::Result<ExitStatus> {
+        self.signal_group(libc::SIGKILL)?;
         child.wait()
     }
 
@@ -163,6 +172,10 @@ impl ProcessTree {
             return Err(io::Error::last_os_error());
         }
         child.wait()
+    }
+
+    fn terminate_now(&self, child: &mut Child) -> io::Result<ExitStatus> {
+        self.terminate(child)
     }
 }
 

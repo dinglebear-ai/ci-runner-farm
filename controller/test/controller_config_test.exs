@@ -37,6 +37,7 @@ defmodule CrfController.ControllerConfigTest do
     assert parsed.scaleset_opts[:sequence_path] == Path.join(ctx.root, "sequence.json")
     assert parsed.scaleset_opts[:controller_instance_id] == "controller-1"
     assert parsed.tls_opts[:port] == 7443
+    assert parsed.tls_opts[:max_connections] == 128
     assert parsed.tls_opts[:peers] == [{String.downcase(@fingerprint), "dookie"}]
     assert parsed.demand_opts[:auto_reconcile]
     assert parsed.demand_opts[:reconcile_interval_ms] == 1_000
@@ -51,6 +52,36 @@ defmodule CrfController.ControllerConfigTest do
     [pool] = base["demand"]["pools"]
     duplicate = put_in(base, ["demand", "pools"], [pool, pool])
     assert {:error, :duplicate_pool_policy} = ControllerConfig.parse(duplicate)
+  end
+
+  test "TLS connection admission is finite and bounded", ctx do
+    assert {:error, :invalid_tls_max_connections} =
+             ctx
+             |> config()
+             |> put_in(["tls", "max_connections"], 0)
+             |> ControllerConfig.parse()
+
+    assert {:error, :invalid_tls_max_connections} =
+             ctx
+             |> config()
+             |> put_in(["tls", "max_connections"], 4_097)
+             |> ControllerConfig.parse()
+  end
+
+  test "TLS connection limit reserves a separate acceptor slot", ctx do
+    configured = put_in(config(ctx), ["tls", "max_connections"], 1)
+    path = write_config(ctx, configured)
+    System.put_env("CRF_CONTROLLER_CONFIG", path)
+
+    assert {:ok, children} = Application.children_from_environment()
+
+    assert {Task.Supervisor, supervisor_opts} =
+             Enum.find(children, fn
+               {Task.Supervisor, _opts} -> true
+               _ -> false
+             end)
+
+    assert supervisor_opts[:max_children] == 2
   end
 
   test "relative paths and malformed revisions fail closed", ctx do
@@ -199,6 +230,7 @@ defmodule CrfController.ControllerConfigTest do
         "keyfile" => ctx.key,
         "cacertfile" => ctx.ca,
         "handshake_timeout_ms" => 15_000,
+        "max_connections" => 128,
         "peers" => [
           %{"fingerprint" => @fingerprint, "node_id" => "dookie"}
         ]

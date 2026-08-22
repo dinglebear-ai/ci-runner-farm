@@ -71,9 +71,9 @@ The exact offer being converted into a placement is excluded from the final comm
 - resource and active-placement reporting;
 - idempotent command processing;
 - durable placement intent/runtime/terminal state with portable native-process or container identity;
-- native runner materialization and lifecycle;
+- retained native runner materialization code that is not selectable until a per-placement OS sandbox exists;
 - controller-approved container execution through a bounded local adapter process;
-- file-backed native stdout/stderr logs;
+- file-backed runner stdout/stderr logs;
 - durable terminal-report outbox;
 - durable resource accounting plus restarted-PID and container-ID recovery.
 

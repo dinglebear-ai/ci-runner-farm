@@ -10,7 +10,8 @@ defmodule CrfController.PlacementTombstone do
     :node_id,
     :node_generation,
     :state,
-    :detail_code
+    :detail_code,
+    :updated_at_ms
   ]
   defstruct @enforce_keys
 
@@ -21,7 +22,8 @@ defmodule CrfController.PlacementTombstone do
           node_id: String.t(),
           node_generation: pos_integer(),
           state: :finished | :failed | :cancelled,
-          detail_code: String.t() | nil
+          detail_code: String.t() | nil,
+          updated_at_ms: non_neg_integer()
         }
 
   def from_placement(%Placement{} = placement) do
@@ -34,7 +36,11 @@ defmodule CrfController.PlacementTombstone do
          node_id: placement.node_id,
          node_generation: placement.node_generation,
          state: placement.state,
-         detail_code: placement.detail_code
+         detail_code: placement.detail_code,
+         # Placement timestamps are monotonic and intentionally meaningful only
+         # within one controller boot. Tombstone retention crosses restarts, so
+         # it needs a restart-stable clock.
+         updated_at_ms: retention_timestamp_ms()
        }}
     else
       {:error, :placement_not_terminal}
@@ -60,7 +66,12 @@ defmodule CrfController.PlacementTombstone do
           {:ok, tombstone}
 
         :rejected when tombstone.state == :failed ->
-          {:ok, %{tombstone | detail_code: detail_code || tombstone.detail_code}}
+          {:ok,
+           %{
+             tombstone
+             | detail_code: detail_code || tombstone.detail_code,
+               updated_at_ms: max(tombstone.updated_at_ms, retention_timestamp_ms())
+           }}
 
         :rejected ->
           {:error, :terminal_state_conflict}
@@ -88,7 +99,12 @@ defmodule CrfController.PlacementTombstone do
       # (for example, an idle runner exits after an operator-side failure). Acknowledge the
       # identity-valid replay so the node can durably mark it reported, but never rewrite
       # the controller's terminal outcome or detail.
-      {:ok, %{tombstone | node_generation: generation}}
+      {:ok,
+       %{
+         tombstone
+         | node_generation: generation,
+           updated_at_ms: max(tombstone.updated_at_ms, retention_timestamp_ms())
+       }}
     else
       false -> {:error, :terminal_state_conflict}
       {:error, reason} -> {:error, reason}
@@ -99,13 +115,16 @@ defmodule CrfController.PlacementTombstone do
     Identifier.valid?(tombstone.id) and Identifier.valid?(tombstone.command_id) and
       valid_digest?(tombstone.idempotency_sha256) and Identifier.valid?(tombstone.node_id) and
       is_integer(tombstone.node_generation) and tombstone.node_generation > 0 and
-      tombstone.state in @terminal_states and valid_detail_code?(tombstone.detail_code)
+      tombstone.state in @terminal_states and valid_detail_code?(tombstone.detail_code) and
+      is_integer(tombstone.updated_at_ms) and tombstone.updated_at_ms >= 0
   end
 
   def digest(value) when is_binary(value) do
     :crypto.hash(:sha256, value)
     |> Base.url_encode64(padding: false)
   end
+
+  defp retention_timestamp_ms, do: System.system_time(:millisecond)
 
   defp command_identity(tombstone, node_id, generation, command_id, idempotency_key) do
     cond do

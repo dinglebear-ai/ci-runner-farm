@@ -83,8 +83,8 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
 
     let placement_store = PlacementStore::new(config.state_root.join("placements"))
         .map_err(|_| DaemonError::PlacementState)?;
-    placement_store
-        .prune_reported_before_generation(generation)
+    let pruned_placements = placement_store
+        .prune_reported_through_generation(generation)
         .map_err(|_| DaemonError::PlacementState)?;
     let executor = match &config.execution {
         NodeExecutionConfig::Native {
@@ -108,6 +108,11 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 log_root,
             )
             .map_err(|_| DaemonError::Materializer)?;
+            for placement_id in &pruned_placements {
+                materializer
+                    .cleanup(placement_id)
+                    .map_err(|_| DaemonError::Materializer)?;
+            }
             NodeExecutor::Native(Box::new(
                 NativeRunnerExecutor::new(platform.os.clone(), materializer, placement_store)
                     .map_err(|_| DaemonError::NativeExecutor)?,

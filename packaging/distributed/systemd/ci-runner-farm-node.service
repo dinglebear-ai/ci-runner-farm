@@ -23,6 +23,18 @@ LogsDirectory=ci-runner-farm
 LogsDirectoryMode=0700
 UMask=0022
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

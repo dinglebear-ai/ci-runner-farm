@@ -3,7 +3,8 @@ defmodule CrfController.PlacementStateStore do
 
   alias CrfController.{Placement, PlacementTombstone}
 
-  @schema_version 2
+  @schema_version 3
+  @previous_schema_version 2
   @legacy_schema_version 1
   @max_state_bytes 16 * 1024 * 1024
   @max_records 65_536
@@ -48,6 +49,14 @@ defmodule CrfController.PlacementStateStore do
   end
 
   def persist(_, _, _), do: {:error, :invalid_placement_state}
+
+  def compact(placements, tombstones) when is_map(placements) and is_map(tombstones) do
+    %{placements: placements, tombstones: tombstones}
+  end
+
+  def capacity_available?(placements, tombstones, limit \\ @max_records)
+      when is_map(placements) and is_map(tombstones) and is_integer(limit) and limit > 0,
+      do: map_size(placements) + map_size(tombstones) < min(limit, @max_records)
 
   defp read(path) do
     with {:ok, stat} <- File.stat(path),
@@ -99,13 +108,14 @@ defmodule CrfController.PlacementStateStore do
           {:ok, {:v1, placements}}
 
         %{
-          "schema_version" => @schema_version,
+          "schema_version" => version,
           "placements" => placements,
           "tombstones" => tombstones
         } = state
-        when map_size(state) == 3 and is_list(placements) and is_list(tombstones) and
+        when version in [@previous_schema_version, @schema_version] and map_size(state) == 3 and
+               is_list(placements) and is_list(tombstones) and
                length(placements) + length(tombstones) <= @max_records ->
-          {:ok, {:v2, placements, tombstones}}
+          {:ok, {version, placements, tombstones}}
 
         _ ->
           {:error, :invalid_placement_state}
@@ -136,9 +146,10 @@ defmodule CrfController.PlacementStateStore do
     end
   end
 
-  defp decode_state({:v2, placement_records, tombstone_records}) do
+  defp decode_state({version, placement_records, tombstone_records})
+       when version in [@previous_schema_version, @schema_version] do
     with {:ok, placements, placement_commands} <- decode_live_placements(placement_records),
-         {:ok, tombstones, tombstone_commands} <- decode_tombstones(tombstone_records),
+         {:ok, tombstones, tombstone_commands} <- decode_tombstones(tombstone_records, version),
          true <-
            MapSet.disjoint?(MapSet.new(Map.keys(placements)), MapSet.new(Map.keys(tombstones))),
          true <- MapSet.disjoint?(placement_commands, tombstone_commands) do
@@ -202,9 +213,9 @@ defmodule CrfController.PlacementStateStore do
     end)
   end
 
-  defp decode_tombstones(records) do
+  defp decode_tombstones(records, version) do
     Enum.reduce_while(records, {:ok, %{}, MapSet.new()}, fn record, {:ok, acc, commands} ->
-      case decode_tombstone(record) do
+      case decode_tombstone(record, version) do
         {:ok, tombstone} ->
           cond do
             Map.has_key?(acc, tombstone.id) ->
@@ -269,15 +280,19 @@ defmodule CrfController.PlacementStateStore do
 
   defp decode_placement(_), do: {:error, :invalid_placement_state}
 
-  defp decode_tombstone([
-         id,
-         command_id,
-         idempotency_sha256,
-         node_id,
-         node_generation,
-         state_value,
-         detail_value
-       ]) do
+  defp decode_tombstone(
+         [
+           id,
+           command_id,
+           idempotency_sha256,
+           node_id,
+           node_generation,
+           state_value,
+           detail_value,
+           updated_at_ms
+         ],
+         @schema_version
+       ) do
     detail = nullable_string(detail_value)
 
     tombstone = %PlacementTombstone{
@@ -287,7 +302,8 @@ defmodule CrfController.PlacementStateStore do
       node_id: node_id,
       node_generation: node_generation,
       state: Map.get(@terminal_states, state_value),
-      detail_code: if(detail == :invalid, do: nil, else: detail)
+      detail_code: if(detail == :invalid, do: nil, else: detail),
+      updated_at_ms: updated_at_ms
     }
 
     if detail != :invalid and PlacementTombstone.valid?(tombstone) do
@@ -297,7 +313,17 @@ defmodule CrfController.PlacementStateStore do
     end
   end
 
-  defp decode_tombstone(_), do: {:error, :invalid_placement_state}
+  defp decode_tombstone(
+         [id, command_id, digest, node_id, generation, state, detail],
+         @previous_schema_version
+       ) do
+    decode_tombstone(
+      [id, command_id, digest, node_id, generation, state, detail, 0],
+      @schema_version
+    )
+  end
+
+  defp decode_tombstone(_, _), do: {:error, :invalid_placement_state}
 
   defp restore_state(placement, :commanded, nil, _updated_at), do: {:ok, placement}
 
@@ -337,7 +363,8 @@ defmodule CrfController.PlacementStateStore do
       tombstone.node_id,
       tombstone.node_generation,
       Atom.to_string(tombstone.state),
-      if(is_nil(tombstone.detail_code), do: :null, else: tombstone.detail_code)
+      if(is_nil(tombstone.detail_code), do: :null, else: tombstone.detail_code),
+      tombstone.updated_at_ms
     ]
   end
 
@@ -387,7 +414,8 @@ defmodule CrfController.PlacementStateStore do
                :ok <- File.chmod(temporary, 0o600),
                :ok <- :file.close(file),
                :ok <- File.rename(temporary, path),
-               :ok <- File.chmod(path, 0o600) do
+               :ok <- File.chmod(path, 0o600),
+               :ok <- sync_directory(directory) do
             :ok
           else
             {:error, _reason} -> {:error, :placement_state_persist_failed}
@@ -402,6 +430,26 @@ defmodule CrfController.PlacementStateStore do
       {:error, _reason} ->
         _ = File.rm(temporary)
         {:error, :placement_state_persist_failed}
+    end
+  end
+
+  defp sync_directory(directory) do
+    case :os.type() do
+      {:win32, _} ->
+        :ok
+
+      _ ->
+        case :file.open(String.to_charlist(directory), [:read, :raw, :directory]) do
+          {:ok, directory_file} ->
+            try do
+              :file.sync(directory_file)
+            after
+              _ = :file.close(directory_file)
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   end
 end

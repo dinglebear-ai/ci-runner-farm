@@ -5,7 +5,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crf_node::{
@@ -92,6 +92,22 @@ fn start_command() -> ControllerEnvelope {
             jit_config: SecretString::new("jit-config-abc123==").expect("secret"),
         },
     }
+}
+
+fn start_command_for(placement_id: &str, command_id: &str) -> ControllerEnvelope {
+    let mut command = start_command();
+    command.command_id = command_id.to_owned();
+    command.idempotency_key = format!("idem-{command_id}");
+    if let ControllerCommand::StartPlacement {
+        placement_id: id,
+        runner_name,
+        ..
+    } = &mut command.payload
+    {
+        *id = placement_id.to_owned();
+        *runner_name = format!("runner-{placement_id}");
+    }
+    command
 }
 
 fn cancel_command() -> ControllerEnvelope {
@@ -338,6 +354,62 @@ printf '%s
         TerminalOutcome::Failed {
             detail_code: "container_lost".into(),
         }
+    );
+}
+
+#[test]
+fn concurrent_poll_commits_healthy_result_without_serial_timeout_multiplication() {
+    let root = TestRoot::new();
+    let script = root.script(
+        "adapter.sh",
+        r#"
+req=$(cat)
+case "$req" in
+  *'"placement_id":"placement-1"'*) sleep 5 ;;
+  *'"placement_id":"placement-2"'*) printf '%s\n' '{"schema_version":1,"payload":{"result":"absent"}}' ;;
+  *) exit 2 ;;
+esac
+"#,
+    );
+    let store = root.store();
+    for (placement, command, container) in [
+        ("placement-1", "command-1", "container-1"),
+        ("placement-2", "command-2", "container-2"),
+    ] {
+        store
+            .begin(&start_command_for(placement, command))
+            .expect("intent");
+        store
+            .record_runtime_started(
+                placement,
+                RuntimeIdentity::Container {
+                    id: container.into(),
+                },
+            )
+            .expect("spawned");
+    }
+    let mut executor = ContainerRunnerExecutor::new(
+        ProcessContainerAdapter::new(script, Duration::from_millis(200)).expect("adapter"),
+        store,
+    );
+
+    let started = Instant::now();
+    assert_eq!(
+        executor.poll_runtime_state(),
+        Err(ContainerExecutorError::AdapterUnavailable)
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "poll cycle multiplied adapter timeouts: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        executor.placement_state("placement-2"),
+        Ok(LocalPlacementState::Terminal {
+            outcome: TerminalOutcome::Failed {
+                detail_code: "container_lost".into(),
+            },
+        })
     );
 }
 

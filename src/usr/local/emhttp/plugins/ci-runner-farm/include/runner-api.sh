@@ -695,12 +695,108 @@ runner_api_operation_read() {
   return "$emit_rc"
 }
 
+runner_api_command_result() {
+  local request_id="$1" message="$2"
+  shift 2
+  local result rc=0 emit_rc
+  result="$(runner_api_result_file_create mutation.strict)" || {
+    runner_api_fail_backend_unavailable 'could not create mutation result buffer' "$request_id"
+    return
+  }
+  "$@" >"$result" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local failure code failure_message
+    failure="$(/usr/bin/php -r '
+      $j=json_decode((string)@file_get_contents($argv[1]),true);
+      $allowed=["invalid_request","invalid_revision","stale_config","stale_dockerfile","stale_transition","ownership_changed","compatibility_changed","invalid_config","invalid_pool","invalid_runner","backend_transition_in_progress","backend_not_ready","resource_capacity","operation_running","backend_unavailable"];
+      $code=is_array($j)&&is_string($j["code"]??null)?$j["code"]:"";
+      $message=is_array($j)&&is_string($j["message"]??null)?$j["message"]:"";
+      if(!in_array($code,$allowed,true)||$message===""||strlen($message)>512||preg_match("/[\\x00-\\x1F\\x7F]/",$message))exit(1);
+      echo base64_encode($code),"\t",base64_encode($message);
+    ' "$result" 2>/dev/null || true)"
+    runner_api_result_file_cleanup "$result" || true
+    if [ -n "$failure" ]; then
+      code="$(printf '%s' "${failure%%$'\t'*}" | base64 -d 2>/dev/null)" || code=""
+      failure_message="$(printf '%s' "${failure#*$'\t'}" | base64 -d 2>/dev/null)" || failure_message=""
+      if [ -n "$code" ] && [ -n "$failure_message" ]; then
+        runner_api_fail "$code" "$failure_message" "$rc" "$request_id"
+        return
+      fi
+    fi
+    case "$rc" in
+      2) runner_api_fail_invalid_request "$message was rejected" "$request_id" ;;
+      3) runner_api_fail_stale_transition "$message authority changed" "$request_id" ;;
+      4) runner_api_fail_backend_not_ready "$message could not start" "$request_id" ;;
+      *) runner_api_fail_backend_unavailable "$message failed" "$request_id" ;;
+    esac
+    return
+  fi
+  if [ ! -s "$result" ]; then
+    runner_api_result_file_cleanup "$result" || true
+    runner_api_emit "$request_id" true ok "$message" @null
+    return
+  fi
+  if ! runner_api_private_file_valid "$result" "$RUNNER_API_MAX_RESPONSE_BYTES"; then
+    runner_api_result_file_cleanup "$result" || true
+    runner_api_fail_output_too_large "$message output is invalid or too large" "$request_id"
+    return
+  fi
+  if runner_api_emit "$request_id" true ok "$message" "$result"; then emit_rc=0; else emit_rc=$?; fi
+  runner_api_result_file_cleanup "$result" || true
+  return "$emit_rc"
+}
+
+# Called only beneath the dispatch-owned fleet lock.
+runner_api_scale_locked() {
+  local request_id="$1" expected_config="$2" expected_inventory="$3" pool="$4" target="$5"
+  runner_api_fleet_guard "$expected_config" "$expected_inventory" "$request_id" || return $?
+  if [ "$pool" = null ]; then
+    runner_api_command_result "$request_id" 'fleet scaled' cmd_scale "$target"
+  else
+    runner_api_command_result "$request_id" 'fleet scaled' cmd_scale "$pool" "$target"
+  fi
+}
+
+# Called only beneath the dispatch-owned fleet lock.
+runner_api_recycle_locked() {
+  local request_id="$1" expected_config="$2" expected_inventory="$3" runner="$4"
+  runner_api_fleet_guard "$expected_config" "$expected_inventory" "$request_id" || return $?
+  runner_api_command_result "$request_id" 'runner recycled' cmd_recycle "$runner"
+}
+
+runner_api_prewarm_locked() {
+  local request_id="$1" expected_config="$2" pool="$3" target="$4"
+  runner_api_config_guard "$expected_config" "$request_id" || return $?
+  runner_api_command_result "$request_id" 'pool prewarmed' scheduler_prewarm_guarded \
+    "$pool" "$target" "$expected_config"
+}
+
+runner_api_maintenance_locked() {
+  local request_id="$1" expected_config="$2" action="$3"
+  runner_api_config_guard "$expected_config" "$request_id" || return $?
+  case "$action" in BEGIN) action=begin ;; RESUME) action=resume ;; esac
+  runner_api_command_result "$request_id" 'maintenance state changed' cmd_maintenance "$action"
+}
+
+runner_api_migration_locked() {
+  local operation="$1" request_id="$2"
+  shift 2
+  case "$operation" in
+    backend-migration-start)
+      runner_api_command_result "$request_id" 'backend migration advanced' migration_start "$@"
+      ;;
+    backend-rollback)
+      runner_api_command_result "$request_id" 'backend rollback advanced' migration_rollback "$@"
+      ;;
+  esac
+}
+
 runner_api_reject() {
   runner_api_fail_invalid_request 'unsupported API operation' ''
 }
 
 runner_api_dispatch() {
-  local operation="${1:-}"
+  local operation="${1:-}" command=""
   trap runner_api_cleanup_request EXIT
   case "$operation" in
     status) runner_api_status ;;
@@ -713,6 +809,53 @@ runner_api_dispatch() {
       runner_api_prepare_request "$operation" || return $?
       with_fleet_lock wait runner_api_lifecycle_locked "$operation" \
         "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" "${RUNNER_API_FIELDS[0]}"
+      ;;
+    scale)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_scale_locked "${RUNNER_API_FIELDS[0]}" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" \
+        "${RUNNER_API_FIELDS[3]}" "${RUNNER_API_FIELDS[4]}"
+      ;;
+    prewarm)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_prewarm_locked "${RUNNER_API_FIELDS[0]}" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" "${RUNNER_API_FIELDS[3]}"
+      ;;
+    recycle)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_recycle_locked "${RUNNER_API_FIELDS[0]}" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" "${RUNNER_API_FIELDS[3]}"
+      ;;
+    maintenance)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_maintenance_locked "${RUNNER_API_FIELDS[0]}" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}"
+      ;;
+    image-build-start|provisioning-validation-start|compatibility-test-start)
+      runner_api_prepare_request "$operation" || return $?
+      case "$operation" in
+        image-build-start) command=cmd_image_build_operation_start ;;
+        provisioning-validation-start) command=cmd_provisioning_operation_start ;;
+        compatibility-test-start) command=cmd_compatibility_operation_start ;;
+      esac
+      runner_api_command_result "${RUNNER_API_FIELDS[0]}" 'operation queued' \
+        "$command" "${RUNNER_API_FIELDS[1]}"
+      ;;
+    backend-migration-start|backend-rollback)
+      runner_api_prepare_request "$operation" || return $?
+      with_fleet_lock wait runner_api_migration_locked "$operation" "${RUNNER_API_FIELDS[0]}" \
+        "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}" \
+        "${RUNNER_API_FIELDS[3]}" "${RUNNER_API_FIELDS[4]}"
+      ;;
+    queue-cancel)
+      runner_api_prepare_request "$operation" || return $?
+      runner_api_command_result "${RUNNER_API_FIELDS[0]}" 'queued run cancelled' \
+        cmd_cancel_run "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[2]}"
+      ;;
+    cache-clear)
+      runner_api_prepare_request "$operation" || return $?
+      runner_api_guarded_config_action "${RUNNER_API_FIELDS[1]}" "${RUNNER_API_FIELDS[0]}" \
+        runner_api_command_result "${RUNNER_API_FIELDS[0]}" 'package cache cleared' cmd_cache_clear_pkg
       ;;
     operation-read)
       runner_api_prepare_request "$operation" || return $?

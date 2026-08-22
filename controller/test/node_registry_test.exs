@@ -55,6 +55,23 @@ defmodule CrfController.NodeRegistryTest do
              )
   end
 
+  test "failed durable precommit does not advance the registered generation", %{
+    registry: registry
+  } do
+    assert {:ok, _} =
+             NodeRegistry.register(registry, node_attrs("dookie", :linux, :container, 1),
+               now_ms: 10
+             )
+
+    assert {:error, :durability_failed} =
+             NodeRegistry.register(registry, node_attrs("dookie", :linux, :container, 2),
+               now_ms: 20,
+               before_commit: fn _node -> {:error, :durability_failed} end
+             )
+
+    assert {:ok, %{generation: 1}} = NodeRegistry.get(registry, "dookie")
+  end
+
   test "heartbeats refresh resources and stale nodes are pruned", %{registry: registry} do
     assert {:ok, _} =
              NodeRegistry.register(registry, node_attrs("squirts", :linux, :container),

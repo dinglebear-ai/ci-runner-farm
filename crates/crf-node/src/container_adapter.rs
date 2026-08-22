@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -206,53 +206,55 @@ impl ProcessContainerAdapter {
             return Err(ContainerAdapterError::RequestTooLarge);
         }
 
+        // Anonymous private files prevent adapter pipe backpressure and ensure
+        // an escaped descendant cannot retain a node-side I/O thread or JIT
+        // descriptor after the deadline.
+        let mut request_file =
+            tempfile::tempfile().map_err(|_| ContainerAdapterError::WriteFailed)?;
+        request_file
+            .write_all(&encoded)
+            .and_then(|()| request_file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .map_err(|_| ContainerAdapterError::WriteFailed)?;
+        let mut response_file =
+            tempfile::tempfile().map_err(|_| ContainerAdapterError::ReadFailed)?;
+
         let mut command = Command::new(&self.program);
         command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdin(Stdio::from(
+                request_file
+                    .try_clone()
+                    .map_err(|_| ContainerAdapterError::StdinUnavailable)?,
+            ))
+            .stdout(Stdio::from(
+                response_file
+                    .try_clone()
+                    .map_err(|_| ContainerAdapterError::StdoutUnavailable)?,
+            ))
             .stderr(Stdio::null());
+        let deadline = Instant::now() + self.timeout;
         let mut process =
             ManagedProcess::spawn(&mut command).map_err(|_| ContainerAdapterError::SpawnFailed)?;
-        let mut stdin = process
-            .take_stdin()
-            .ok_or(ContainerAdapterError::StdinUnavailable)?;
-        let stdout = process
-            .take_stdout()
-            .ok_or(ContainerAdapterError::StdoutUnavailable)?;
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take((MAX_ADAPTER_FRAME_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        if stdin.write_all(&encoded).is_err() {
-            let _ = process.terminate_tree();
-            let _ = reader.join();
-            return Err(ContainerAdapterError::WriteFailed);
-        }
-        drop(stdin);
-
-        let deadline = Instant::now() + self.timeout;
         let status = loop {
             match process.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
                 Ok(None) => {
-                    let _ = process.terminate_tree();
-                    let _ = reader.join();
+                    let _ = process.terminate_tree_now();
                     return Err(ContainerAdapterError::TimedOut);
                 }
                 Err(_) => {
-                    let _ = process.terminate_tree();
-                    let _ = reader.join();
+                    let _ = process.terminate_tree_now();
                     return Err(ContainerAdapterError::PollFailed);
                 }
             }
         };
-        let bytes = reader
-            .join()
-            .map_err(|_| ContainerAdapterError::ReadFailed)?
+        response_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| ContainerAdapterError::ReadFailed)?;
+        let mut bytes = Vec::new();
+        response_file
+            .take((MAX_ADAPTER_FRAME_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|_| ContainerAdapterError::ReadFailed)?;
         if !status.success() {
             return Err(ContainerAdapterError::ProcessFailed);
@@ -267,6 +269,10 @@ impl ProcessContainerAdapter {
         }
         envelope.payload.validate()?;
         Ok(envelope.payload)
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 
@@ -466,6 +472,33 @@ yes x | head -c 131073
 
     #[cfg(unix)]
     #[test]
+    fn process_client_does_not_wait_for_escaped_descendant_holding_output() {
+        let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
+        let script = TestAdapterScript::new(
+            r#"
+cat >/dev/null
+setsid sh -c 'sleep 10' &
+printf "%s\n" '{"schema_version":1,"payload":{"result":"started","id":"container-0123456789abcdef"}}'
+"#,
+        );
+        let client =
+            ProcessContainerAdapter::new(&script.path, Duration::from_millis(250)).expect("client");
+        let request = ContainerAdapterRequest::Inspect {
+            placement_id: "placement-1".into(),
+            expected_id: None,
+        };
+        let started = Instant::now();
+        assert_eq!(
+            client.call(&request),
+            Ok(ContainerAdapterResponse::Started {
+                id: "container-0123456789abcdef".into(),
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn process_client_timeout_terminates_helper_tree() {
         let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
         let script = TestAdapterScript::new(
@@ -499,5 +532,42 @@ wait
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out adapter child process remained alive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_client_timeout_covers_blocked_maximum_request_write() {
+        let _process_test = ADAPTER_PROCESS_TEST.lock().expect("process test lock");
+        let script = TestAdapterScript::new(
+            r#"
+dir=$(dirname "$0")
+if [ ! -e "$dir/blocked-once" ]; then
+  : > "$dir/blocked-once"
+  sleep 30
+  exit 24
+fi
+cat >/dev/null
+printf "%s\n" '{"schema_version":1,"payload":{"result":"started","id":"container-after-timeout"}}'
+"#,
+        );
+        let client =
+            ProcessContainerAdapter::new(&script.path, Duration::from_millis(250)).expect("client");
+        let maximum_secret = "A".repeat(64 * 1024);
+        let request = ContainerAdapterRequest::start_from(&start_command(
+            ExecutionBackend::Container,
+            &maximum_secret,
+        ))
+        .expect("maximum request");
+
+        let started = Instant::now();
+        assert_eq!(client.call(&request), Err(ContainerAdapterError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        assert_eq!(
+            client.call(&request),
+            Ok(ContainerAdapterResponse::Started {
+                id: "container-after-timeout".into(),
+            })
+        );
     }
 }

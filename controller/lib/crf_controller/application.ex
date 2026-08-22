@@ -33,7 +33,12 @@ defmodule CrfController.Application do
       end
 
     peers = Keyword.fetch!(config.tls_opts, :peers)
-    tls_opts = Keyword.put(config.tls_opts, :peer_registry, CrfController.PeerRegistry)
+    max_connections = Keyword.fetch!(config.tls_opts, :max_connections)
+
+    tls_opts =
+      config.tls_opts
+      |> Keyword.delete(:max_connections)
+      |> Keyword.put(:peer_registry, CrfController.PeerRegistry)
 
     [
       {CrfController.NodeRegistry, config.node_registry_opts},
@@ -45,7 +50,8 @@ defmodule CrfController.Application do
       {CrfController.Ingress,
        [controller_instance_id: Keyword.fetch!(config.scaleset_opts, :controller_instance_id)]},
       {CrfController.PeerRegistry, [peers: peers]},
-      {Task.Supervisor, name: CrfController.ConnectionSupervisor}
+      {Task.Supervisor,
+       name: CrfController.ConnectionSupervisor, max_children: max_connections + 1}
     ] ++
       sidecar_children ++
       [
@@ -80,7 +86,7 @@ defmodule CrfController.Application do
       [
         {CrfController.PlacementCoordinator, []},
         {CrfController.Ingress, []},
-        {Task.Supervisor, name: CrfController.ConnectionSupervisor}
+        {Task.Supervisor, name: CrfController.ConnectionSupervisor, max_children: 128}
       ]
   end
 end

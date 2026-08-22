@@ -28,15 +28,20 @@ public_code(){ operation_read_public "$1" | php -r '$j=json_decode(stream_get_co
 public_state(){ operation_read_public "$1" | php -r '$j=json_decode(stream_get_contents(STDIN),true);echo $j["state"]??"";'; }
 
 validate_calls="$root/validate.calls"
-cmd_validate(){
+cat >"$root/command" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = validate ] || exit 64
   printf 'called\n' >>"$validate_calls"
   printf 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n'
   printf 'github_pat_abcdefghijklmnopqrstuvwxyz\n'
-  [ "${CRF_TEST_VALIDATE_RC:-0}" -eq 0 ] || return "$CRF_TEST_VALIDATE_RC"
+  [ "${CRF_TEST_VALIDATE_RC:-0}" -eq 0 ] || exit "$CRF_TEST_VALIDATE_RC"
   if [ -n "${CRF_TEST_MUTATE_CONFIG_FILE:-}" ]; then
     printf '%s\n' "$CRF_TEST_MUTATE_CONFIG_SHA" >"$CRF_TEST_MUTATE_CONFIG_FILE"
   fi
-}
+EOF
+chmod 0755 "$root/command"
+export CRF_OPERATION_COMMAND_LAUNCHER="$root/command" validate_calls
+OPERATION_COMMAND_LAUNCHER="$CRF_OPERATION_COMMAND_LAUNCHER"
 
 success_id='20000001-0000-0000-0000-000000000001'
 CRF_OPERATION_ID="$success_id" operation_create provisioning_validation "$sha" provisioning_log >/dev/null
@@ -51,7 +56,9 @@ exit(strpos($text,"abcdefghijklmnopqrstuvwxyz")===false&&strpos($text,"[REDACTED
 
 failure_id='20000002-0000-0000-0000-000000000002'
 CRF_OPERATION_ID="$failure_id" operation_create provisioning_validation "$sha" provisioning_log >/dev/null
-CRF_TEST_VALIDATE_RC=9 operation_provisioning_worker "$failure_id"
+export CRF_TEST_VALIDATE_RC=9
+operation_provisioning_worker "$failure_id"
+unset CRF_TEST_VALIDATE_RC
 crf_assert_eq failed "$(public_state "$failure_id")" 'provisioning failure state'
 crf_assert_eq provisioning_failed "$(public_code "$failure_id")" 'provisioning failure code'
 
@@ -65,7 +72,9 @@ crf_assert_eq stale_config "$(public_code "$stale_id")" 'pre-validation stale co
 
 mutated_id='20000004-0000-0000-0000-000000000004'
 CRF_OPERATION_ID="$mutated_id" operation_create provisioning_validation "$sha" provisioning_log >/dev/null
-CRF_TEST_MUTATE_CONFIG_FILE="$root/current.sha" CRF_TEST_MUTATE_CONFIG_SHA="$old_sha" operation_provisioning_worker "$mutated_id"
+export CRF_TEST_MUTATE_CONFIG_FILE="$root/current.sha" CRF_TEST_MUTATE_CONFIG_SHA="$old_sha"
+operation_provisioning_worker "$mutated_id"
+unset CRF_TEST_MUTATE_CONFIG_FILE CRF_TEST_MUTATE_CONFIG_SHA
 crf_assert_eq stale_config "$(public_code "$mutated_id")" 'post-validation stale code'
 printf '%s\n' "$sha" >"$root/current.sha"
 

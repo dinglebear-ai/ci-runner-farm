@@ -68,18 +68,10 @@ foreach ($line in [System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $Env
 foreach ($key in $requiredKeys) {
     if (-not $values.ContainsKey($key)) { throw "Missing required node environment key: $key" }
 }
-$backend = if ($values.ContainsKey('CRF_EXECUTION_BACKEND')) { $values['CRF_EXECUTION_BACKEND'] } else { 'native_process' }
+$backend = if ($values.ContainsKey('CRF_EXECUTION_BACKEND')) { $values['CRF_EXECUTION_BACKEND'] } else { throw 'Missing required node environment key: CRF_EXECUTION_BACKEND' }
 switch ($backend) {
     'native_process' {
-        foreach ($key in @('CRF_RUNTIME_DIR', 'CRF_LOG_DIR')) {
-            if (-not $values.ContainsKey($key)) { throw "Missing required node environment key: $key" }
-        }
-        $hasTemplate = $values.ContainsKey('CRF_RUNNER_TEMPLATE')
-        $hasManifest = $values.ContainsKey('CRF_RUNNER_MANIFEST')
-        $hasCache = $values.ContainsKey('CRF_RUNNER_CACHE_DIR')
-        if (-not (($hasTemplate -and -not $hasManifest -and -not $hasCache) -or (-not $hasTemplate -and $hasManifest -and $hasCache))) {
-            throw 'Native execution requires exactly CRF_RUNNER_TEMPLATE or the CRF_RUNNER_MANIFEST/CRF_RUNNER_CACHE_DIR pair'
-        }
+        throw 'Native execution is disabled because workflow code would share the node service identity; configure the container backend'
     }
     'container' {
         if (-not $values.ContainsKey('CRF_CONTAINER_ADAPTER_PROGRAM')) { throw 'Container execution requires CRF_CONTAINER_ADAPTER_PROGRAM' }

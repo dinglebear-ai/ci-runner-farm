@@ -370,7 +370,7 @@ impl PlacementStore {
         sync_directory(&directory)
     }
 
-    pub fn prune_reported_before_generation(
+    pub fn prune_reported_through_generation(
         &self,
         current_generation: u64,
     ) -> Result<Vec<String>, PlacementStoreError> {
@@ -391,7 +391,7 @@ impl PlacementStore {
             {
                 return Err(PlacementStoreError::CorruptState);
             }
-            if intent.node_generation >= current_generation {
+            if intent.node_generation > current_generation {
                 continue;
             }
 
@@ -418,6 +418,32 @@ impl PlacementStore {
         }
         self.placement_ids()?;
         Ok(pruned)
+    }
+
+    pub fn prune_reported(&self, placement_id: &str) -> Result<(), PlacementStoreError> {
+        self.ensure_root()?;
+        self.ensure_gc_root()?;
+        let directory = self.placement_directory(placement_id)?;
+        let intent: IntentRecord = read_json(&directory.join("intent.json"))?;
+        if intent.schema_version != SCHEMA_VERSION
+            || intent.placement_id != placement_id
+            || intent.node_generation == 0
+        {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        if !directory.join("terminal.json").exists() || !directory.join("reported.json").exists() {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        validate_gc_candidate(&directory, placement_id, intent.node_generation)?;
+        let quarantine = self.gc_root.join(placement_id);
+        if quarantine.exists() {
+            return Err(PlacementStoreError::CorruptState);
+        }
+        fs::rename(&directory, &quarantine).map_err(|_| PlacementStoreError::MoveState)?;
+        sync_directory(&self.root)?;
+        prepare_gc_directory(&quarantine, placement_id, intent.node_generation)?;
+        remove_gc_directory(&quarantine)?;
+        sync_directory(&self.gc_root)
     }
 
     fn clean_quarantine(&self, current_generation: u64) -> Result<(), PlacementStoreError> {
@@ -569,7 +595,7 @@ fn validate_gc_candidate(
     if intent.schema_version != SCHEMA_VERSION
         || intent.placement_id != placement_id
         || intent.node_generation == 0
-        || intent.node_generation >= current_generation
+        || intent.node_generation > current_generation
     {
         return Err(PlacementStoreError::CorruptState);
     }
@@ -599,7 +625,7 @@ fn prepare_gc_directory(
         if marker.schema_version != SCHEMA_VERSION
             || marker.placement_id != placement_id
             || marker.node_generation == 0
-            || marker.node_generation >= current_generation
+            || marker.node_generation > current_generation
         {
             return Err(PlacementStoreError::CorruptState);
         }
@@ -1039,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_prunes_only_reported_terminal_state_from_older_generation() {
+    fn gc_prunes_reported_terminal_state_from_current_generation() {
         let directory = TestDirectory::new();
         let store = PlacementStore::new(&directory.0).expect("store");
         store.begin(&command("jit-config-abc123==")).expect("begin");
@@ -1050,16 +1076,42 @@ mod tests {
             .mark_terminal_reported("placement-1")
             .expect("reported");
 
-        assert_eq!(store.prune_reported_before_generation(3), Ok(Vec::new()));
-        assert!(directory.0.join("placement-1").is_dir());
-
         assert_eq!(
-            store.prune_reported_before_generation(4),
+            store.prune_reported_through_generation(3),
             Ok(vec!["placement-1".into()])
         );
         assert!(!directory.0.join("placement-1").exists());
         assert!(store.gc_root().is_dir());
         assert_eq!(fs::read_dir(store.gc_root()).expect("gc root").count(), 0);
+    }
+
+    #[test]
+    fn acknowledged_placements_do_not_accumulate_past_scan_limit_in_one_generation() {
+        let directory = TestDirectory::new();
+        let store = PlacementStore::new(&directory.0).expect("store");
+
+        for index in 0..=MAX_PLACEMENTS {
+            let placement_id = format!("placement-{index}");
+            let command_id = format!("command-{index}");
+            let mut command = command("jit-config-abc123==");
+            command.command_id = command_id;
+            if let ControllerCommand::StartPlacement {
+                placement_id: id, ..
+            } = &mut command.payload
+            {
+                *id = placement_id.clone();
+            }
+            store.begin(&command).expect("begin");
+            store
+                .record_terminal(&placement_id, TerminalOutcome::Finished)
+                .expect("terminal");
+            store
+                .mark_terminal_reported(&placement_id)
+                .expect("reported");
+            store.prune_reported(&placement_id).expect("pruned");
+        }
+
+        assert_eq!(store.placement_ids(), Ok(Vec::new()));
     }
 
     #[test]
@@ -1071,7 +1123,7 @@ mod tests {
             .record_terminal("placement-1", TerminalOutcome::Cancelled)
             .expect("terminal");
 
-        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert_eq!(store.prune_reported_through_generation(4), Ok(Vec::new()));
         assert!(directory.0.join("placement-1").is_dir());
         assert_eq!(store.pending_terminal_reports().expect("pending").len(), 1);
     }
@@ -1085,7 +1137,7 @@ mod tests {
             .record_spawned("placement-1", process_identity(4242))
             .expect("spawned");
 
-        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert_eq!(store.prune_reported_through_generation(4), Ok(Vec::new()));
         assert!(directory.0.join("placement-1").is_dir());
         assert_eq!(
             store.active_placements(),
@@ -1109,7 +1161,7 @@ mod tests {
         let quarantine = store.gc_root().join("placement-1");
         fs::rename(source, &quarantine).expect("simulate atomic move");
 
-        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert_eq!(store.prune_reported_through_generation(4), Ok(Vec::new()));
         assert!(!quarantine.exists());
     }
 
@@ -1135,7 +1187,7 @@ mod tests {
         fs::remove_file(quarantine.join("reported.json")).expect("simulate partial delete");
         fs::remove_file(quarantine.join("terminal.json")).expect("simulate partial delete");
 
-        assert_eq!(store.prune_reported_before_generation(4), Ok(Vec::new()));
+        assert_eq!(store.prune_reported_through_generation(4), Ok(Vec::new()));
         assert!(!quarantine.exists());
     }
 
@@ -1149,7 +1201,7 @@ mod tests {
         fs::write(quarantine.join("unexpected.txt"), b"do not delete").expect("unexpected file");
 
         assert_eq!(
-            store.prune_reported_before_generation(4),
+            store.prune_reported_through_generation(4),
             Err(PlacementStoreError::CorruptState)
         );
         assert!(quarantine.join("unexpected.txt").exists());

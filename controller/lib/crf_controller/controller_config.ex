@@ -174,7 +174,15 @@ defmodule CrfController.ControllerConfig do
   defp sidecar(_value, _socket_path), do: {:error, :invalid_scaleset_sidecar_config}
 
   defp tls(map) when is_map(map) do
-    keys = ["port", "certfile", "keyfile", "cacertfile", "handshake_timeout_ms", "peers"]
+    keys = [
+      "port",
+      "certfile",
+      "keyfile",
+      "cacertfile",
+      "handshake_timeout_ms",
+      "max_connections",
+      "peers"
+    ]
 
     with :ok <- exact_keys(map, keys),
          {:ok, port} <- integer(map, "port", 0..65_535, :invalid_tls_port),
@@ -183,6 +191,8 @@ defmodule CrfController.ControllerConfig do
          {:ok, cacertfile} <- required_absolute_file(map, "cacertfile", :invalid_tls_cacertfile),
          {:ok, handshake} <-
            integer(map, "handshake_timeout_ms", 1..120_000, :invalid_tls_handshake_timeout),
+         {:ok, max_connections} <-
+           integer(map, "max_connections", 1..4096, :invalid_tls_max_connections),
          {:ok, peers} <- peers(map["peers"]),
          {:ok, _authorizer} <- PeerAuthorizer.new(peers) do
       {:ok,
@@ -192,6 +202,7 @@ defmodule CrfController.ControllerConfig do
          keyfile: keyfile,
          cacertfile: cacertfile,
          handshake_timeout: handshake,
+         max_connections: max_connections,
          peers: peers
        ]}
     end
