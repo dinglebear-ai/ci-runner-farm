@@ -46,6 +46,7 @@ on:
         options:
           - ci-pool-ops
           - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
 
 permissions:
   contents: read
