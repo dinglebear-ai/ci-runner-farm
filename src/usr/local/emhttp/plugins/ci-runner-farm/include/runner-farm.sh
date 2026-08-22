@@ -505,6 +505,12 @@ inventory_names() {
   else cut -d'|' -f1 "$INVENTORY_FILE"; fi
 }
 
+inventory_backend_names() {
+  local backend="$1"
+  [ -f "$INVENTORY_FILE" ] || return 0
+  awk -F'|' -v b="$backend" '$11 == "valid" && $12 == b { print $1 }' "$INVENTORY_FILE"
+}
+
 inventory_field() {
   local name="$1" field="$2" col
   case "$field" in
@@ -3550,7 +3556,10 @@ cmd_stop() {
   # effective backend still reads classic.
   scaleset_supervisor_stop
   fleet_inventory_refresh || { : > "$RUNDIR/usage.cache"; return 1; }
-  local names; names="$(inventory_names)"
+  local names teardown_backend=classic
+  migration_load >/dev/null 2>&1 && [ "$MIGRATION_EFFECTIVE_BACKEND" = scaleset ] &&
+    teardown_backend=scaleset
+  names="$(inventory_backend_names "$teardown_backend")"
   if [ -z "$names" ]; then
     log "no managed runners running"
   else
