@@ -20,9 +20,9 @@ tools, and verifies Go, Elixir, Erlang/OTP, and Mix before returning success.
 
 Turn your Unraid server into a fleet of **GitHub Actions self-hosted runners**.
 The distributed backend runs one-job GitHub scale-set runners across
-authenticated Linux, Windows, WSL, and Unraid container nodes. It replaces the
-classic containers for production admission while retaining the classic engine
-as a supported rollback/legacy mode.
+authenticated Linux, Windows, WSL, and Unraid container nodes. The guarded
+Fleet migration can replace classic production admission without interrupting
+busy jobs, while retaining the classic engine as a supported rollback mode.
 No VM is required for the Unraid container node.
 
 Hosted CI minutes are slow and metered. Meanwhile, the Unraid server in your
@@ -70,7 +70,7 @@ The supported classic backend provisions persistent Docker containers from a
 runner image built in-plugin or pulled from a registry. Each container registers
 as a self-hosted runner at repository or organization scope.
 
-The production distributed backend uses GitHub runner scale sets for demand, a
+The distributed backend uses GitHub runner scale sets for demand, a
 central controller for durable admission and placement, and mTLS node agents for
 execution. Scale-set jobs route by the pool's single custom label (for example
 `runs-on: ci-pool-rust`), not by a classic multi-label array containing
@@ -82,9 +82,9 @@ runs from or writes to the Unraid flash device.
 
 Migration is deliberately non-disruptive: the Fleet gate proves compatibility
 and remote ownership, stops new classic admission, waits for busy classic jobs
-to drain, and only then makes scale sets effective. The production cutover on
-2026-08-21 completed that sequence; no classic runner registration or container
-remains. Rollback support is retained, but it is not the active production path.
+to drain, and only then makes scale sets effective. Do not manually delete
+classic runners or claim cutover from registered nodes alone: completion
+requires `scaleset_active` plus zero classic registrations and containers.
 
 Persistent package caches and the build workspace are bind-mounted from a fast
 pool so they survive across jobs. An optional companion container runs a
@@ -167,6 +167,13 @@ Candidate** rechecks that exact image ID. The Rust preset includes stable Rust,
 Clippy, rustfmt, native build tooling, and a verified prebuilt `sccache`
 configured as `RUSTC_WRAPPER`. Restart the fleet to roll onto the promoted
 image. No registry needed.
+
+Dockerfiles may deliberately use a host-local base such as
+`local/github-runner:ubuntu-resolute`. That image must already exist on the
+Unraid host. The builder checks literal `local/...` bases before invoking
+BuildKit and reports the missing image directly; it never treats Docker Hub
+authentication failure as a successful local build. A candidate still requires
+explicit image-ID verification and promotion before the production tag moves.
 
 ![The Runner image tab — a syntax-highlighted Dockerfile editor, one-click Rust / Python / Node·TS / Android toolchain blocks, and a live build log](docs/images/runner-image.png)
 
