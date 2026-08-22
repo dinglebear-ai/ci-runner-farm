@@ -38,6 +38,7 @@ on:
         options:
           - ci-pool-residential-egress
           - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
       cancellation_pool:
         description: Scale-set routing label used for cancellation proof
         required: true
