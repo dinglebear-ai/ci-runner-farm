@@ -8,8 +8,9 @@ CRF_CLIENT_KEY=C:\ProgramData\CiRunnerFarm\tls\node-key.pem
 CRF_NODE_CPU_MILLIS=8000
 CRF_NODE_MEMORY_BYTES=17179869184
 CRF_STATE_DIR=C:\ProgramData\CiRunnerFarm\state
-CRF_RUNTIME_DIR=C:\ProgramData\CiRunnerFarm\runners
-CRF_LOG_DIR=C:\ProgramData\CiRunnerFarm\logs
 CRF_SERVICE_ERROR_LOG=C:\ProgramData\CiRunnerFarm\logs\service-errors.log
-CRF_RUNNER_MANIFEST=C:\ProgramData\CiRunnerFarm\runner-manifest.json
-CRF_RUNNER_CACHE_DIR=C:\ProgramData\CiRunnerFarm\runner-cache
+# Native execution is rejected because workflow code would share the node
+# service identity. Install a compatible isolated adapter before starting.
+CRF_EXECUTION_BACKEND=container
+CRF_CONTAINER_ADAPTER_PROGRAM=C:\ProgramData\CiRunnerFarm\container-adapter.exe
+CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
