@@ -127,6 +127,42 @@ defmodule CrfController.ScaleSetWireTest do
     assert {:error, :invalid_scaleset_snapshot} = ScaleSetWire.decode_snapshot(stale, now)
   end
 
+  test "fast lane policy fields are strict and bounded" do
+    now = ~U[2026-08-18 23:15:00Z]
+    snapshot = snapshot(now)
+    [pool] = snapshot["pools"]
+
+    assert {:ok, parsed} = ScaleSetWire.decode_snapshot(snapshot, now)
+    assert [%{fast_lane_state: "holding", fast_lane_long_threshold_ms: 360_000}] = parsed.pools
+
+    for invalid <- [
+          %{pool | "fast_lane_state" => "teleporting"},
+          %{pool | "fast_lane_long_threshold_ms" => 239_999},
+          %{pool | "fast_lane_long_threshold_ms" => 480_001},
+          %{pool | "fast_lane_hold_duration_ms" => 4_999},
+          %{pool | "fast_lane_hold_duration_ms" => 30_001},
+          %{pool | "fast_lane_hold_until_ms" => 0},
+          %{
+            pool
+            | "fast_lane_hold_until_ms" =>
+                DateTime.to_unix(DateTime.add(now, 121, :second), :millisecond)
+          }
+        ] do
+      assert {:error, :invalid_scaleset_snapshot} =
+               ScaleSetWire.decode_snapshot(%{snapshot | "pools" => [invalid]}, now)
+    end
+
+    inactive = %{
+      pool
+      | "fast_lane_state" => "inactive",
+        "fast_lane_long_threshold_ms" => 0,
+        "fast_lane_hold_duration_ms" => 0,
+        "fast_lane_hold_until_ms" => 0
+    }
+
+    assert {:ok, _} = ScaleSetWire.decode_snapshot(%{snapshot | "pools" => [inactive]}, now)
+  end
+
   test "duplicate acquired handles fail closed" do
     now = ~U[2026-08-18 23:15:00Z]
     snapshot = snapshot(now)
@@ -189,6 +225,11 @@ defmodule CrfController.ScaleSetWireTest do
           "last_message_id" => 99,
           "session_healthy" => true,
           "acquired_handles" => [101, 102],
+          "fast_lane_state" => "holding",
+          "fast_lane_long_threshold_ms" => 360_000,
+          "fast_lane_hold_duration_ms" => 15_000,
+          "fast_lane_hold_until_ms" =>
+            DateTime.to_unix(DateTime.add(now, 14, :second), :millisecond),
           "observed_at" => DateTime.to_iso8601(observed),
           "valid_until" => DateTime.to_iso8601(valid_until)
         }

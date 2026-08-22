@@ -229,6 +229,42 @@ func TestPollRanksHiddenAcquirableBacklog(t *testing.T) {
 	}
 }
 
+func TestFastLaneUsesDynamicThresholdForModerateConvoy(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	now := time.Now().UTC()
+	jobs := []crfgithub.AvailableJob{
+		testJob(91, "soma", "workflow@refs/heads/main", "moderate", now.Add(-4*time.Minute)),
+		testJob(92, "soma", "workflow@refs/heads/main", "moderate", now.Add(-3*time.Minute)),
+		testJob(93, "soma", "workflow@refs/heads/main", "moderate", now.Add(-2*time.Minute)),
+		testJob(94, "soma", "workflow@refs/heads/main", "moderate", now.Add(-time.Minute)),
+	}
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 39, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 4, TotalAssignedJobs: 0},
+		Available: []int64{91, 92, 93, 94}, AvailableJobs: jobs,
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.runtimes[runtimeKey("build", jobs[0].Metadata)] = runtimeEstimate{duration: 6 * time.Minute, samples: 20}
+	result, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FastLaneState != "holding" || result.FastLaneLongThresholdMillis != 360_000 ||
+		result.FastLaneHoldDurationMillis != 20_000 || result.FastLaneHoldUntilMillis <= 0 {
+		t.Fatalf("poll result did not expose tuned fast lane: %#v", result)
+	}
+	if len(api.acquireIDs) != 1 {
+		t.Fatalf("dynamic six-minute convoy did not reserve one slot: %v", api.acquireIDs)
+	}
+	lane, ok := poller.fastLanes[7]
+	if !ok || lane.longThreshold != 6*time.Minute {
+		t.Fatalf("dynamic threshold was not attached to reservation: %#v", lane)
+	}
+}
+
 func TestFastLaneHoldsLongConvoyThenAdmitsQuickArrival(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	now := time.Now().UTC()

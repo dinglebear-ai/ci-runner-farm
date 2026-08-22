@@ -59,7 +59,8 @@
 - [x] Add authenticated `acquirablejobs` queue introspection through the scale-set admin client, with a two-second best-effort deadline, a 16 MiB pre-decode transport-body limit, a separate 10,000-job post-decode semantic fuse, merge-safe visible fallback, and truthful `X-ScaleSetMaxCapacity`.
 - [x] Add O(N log K) top-K admission so deep queue ranking scales with remaining runner slots rather than sorting the full backlog.
 - [x] Add durable proactive one-slot fast-lane hold + one-shot borrow scheduling on top of `acquirablejobs`, using the existing <=10-second supervisor heartbeat rather than GitHub long-poll timing.
-- [ ] Dynamically tune the long-work threshold and hold duration from bounded runtime-history/backlog pressure, with hard min/max clamps and hysteresis so adaptation cannot oscillate or starve work.
+- [x] Dynamically tune the long-work threshold and hold duration from a <=64-candidate queue sample and backlog pressure, with a 4–8 minute threshold, 5–30 second hold bounds, step-limited hysteresis, and the existing ten-minute starvation override.
+- [x] Expose strict secret-free fast-lane state/threshold/hold/deadline in the Go/Elixir pool snapshot and operator `pool_status`, without exposing acquired handles or GitHub job metadata.
 - [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity`; obtain hidden backlog visibility only through the authenticated admin `acquirablejobs` endpoint.
 - [x] Acquired handle -> offer assignment -> JIT -> placement -> node mailbox flow.
 - [x] Controller restart recovery for lost JIT-bearing mailbox commands.

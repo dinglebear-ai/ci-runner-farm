@@ -55,21 +55,29 @@ Last updated: 2026-08-22
   bounded, pool-scoped runtime hints, applies starvation-safe admission, and
   ranks deep GitHub backlog candidates obtained through authenticated
   `acquirablejobs` without inflating published scale-set capacity. This branch
-  adds a durable borrowable fast lane: a learned >=8-minute marginal job may
-  leave exactly one slot open for 20 seconds; <=10-second supervisor heartbeats
-  probe `acquirablejobs` without a second message long-poll; unknown, quick, or
-  starved work releases the lane; expiry or lookup degradation grants one long
-  borrow pass. Reservations persist privately across restart and never call
-  `AcquireJobs` outside the existing replay-fenced message transaction. Exact-tree
-  verification is green: every Go package, `go vet`, session/GitHub race tests,
-  Rust formatting + workspace Clippy `-D warnings` + **131 Rust tests**, Elixir
-  formatting + warnings-as-errors compilation + **122 controller tests** against
-  the real Rust scheduler, `actionlint`, tracked shell/PHP syntax, scale-set
-  autoscale/control/probe/runtime/supervisor regressions, scheduler integration,
-  and package reproducibility. The latest Dookie benchmark selects the best 64
-  from 10,000 candidates at ~3.39 ms median with 9,376 B/op and 8 allocs/op;
-  64-job full ranking is ~75.8 us median with 14,904 B/op and 5 allocs/op. Live
-  fast-lane ordering and sustained-load validation remain release follow-ups.
+  adds a durable, dynamically tuned borrowable fast lane. It samples at most 64
+  queue candidates, derives a known-runtime P75 threshold clamped to 4–8 minutes,
+  and adjusts the hold target to 10/15/20/25 seconds from backlog pressure with
+  a hard 5–30 second bound and step-limited hysteresis. A learned non-starved
+  marginal job at or above the tuned threshold may leave exactly one slot open;
+  <=10-second supervisor heartbeats probe `acquirablejobs` without a second
+  message long-poll; unknown, quicker, or starved work releases the lane; expiry
+  or lookup degradation grants one long borrow pass. Active threshold, duration,
+  deadline, and borrow state persist privately across restart, while `AcquireJobs`
+  remains inside the existing replay-fenced message transaction. The strict
+  Go/Elixir pool snapshot now reports secret-free lane state, threshold, hold
+  duration, and deadline, and `DemandCoordinator.status/1` exposes a compact
+  `pool_status` projection that intentionally omits acquired handles. Current
+  exact-tree verification is green across every Go package, `go vet`, session /
+  GitHub / protocol / supervisor race tests; Rust formatting + workspace Clippy
+  `-D warnings` + **131 Rust tests**; Elixir formatting + warnings-as-errors
+  compilation + **124 controller tests** against the real Rust scheduler;
+  `actionlint`; tracked shell/PHP syntax; scale-set autoscale/control/probe/runtime/
+  supervisor regressions; scheduler integration; and package reproducibility.
+  The latest tuned 10,000-job / 64-slot admission benchmark is conservatively
+  ~3.51 ms median with 9,944 B/op and 11 allocs/op across five runs. Live
+  fast-lane ordering and sustained-load fairness validation remain release
+  follow-ups.
 - Tootie's saved runner Dockerfile referenced the missing host-local base
   `local/github-runner:ubuntu-resolute`, which BuildKit misleadingly tried to
   pull from Docker Hub. The base was restored from the verified glibc-2.43

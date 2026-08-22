@@ -47,6 +47,46 @@ func TestSnapshotFreshnessAndPoolBound(t *testing.T) {
 	}
 }
 
+func TestSnapshotFastLaneContract(t *testing.T) {
+	now := time.Now().UTC()
+	base := Snapshot{SchemaVersion: 1, ControllerInstanceID: "controller-1",
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64),
+		ObservedAt: now, ValidUntil: now.Add(10 * time.Second)}
+	valid := PoolSnapshot{PoolID: "python", FastLaneState: "holding",
+		FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000,
+		FastLaneHoldUntilMS: now.Add(15 * time.Second).UnixMilli()}
+	base.Pools = []PoolSnapshot{valid}
+	if err := base.Validate(now); err != nil {
+		t.Fatalf("valid fast lane snapshot rejected: %v", err)
+	}
+	inactive := valid
+	inactive.FastLaneState = "inactive"
+	inactive.FastLaneHoldUntilMS = 0
+	base.Pools = []PoolSnapshot{inactive}
+	if err := base.Validate(now); err != nil {
+		t.Fatalf("valid inactive tuned snapshot rejected: %v", err)
+	}
+	zeroInactive := PoolSnapshot{PoolID: "python", FastLaneState: "inactive"}
+	base.Pools = []PoolSnapshot{zeroInactive}
+	if err := base.Validate(now); err != nil {
+		t.Fatalf("valid inactive zero snapshot rejected: %v", err)
+	}
+	invalid := []PoolSnapshot{
+		{PoolID: "python", FastLaneState: ""},
+		{PoolID: "python", FastLaneState: "teleporting"},
+		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 239_999, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 30_001, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: 0},
+		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: now.Add(3 * time.Minute).UnixMilli()},
+	}
+	for _, pool := range invalid {
+		base.Pools = []PoolSnapshot{pool}
+		if err := base.Validate(now); err == nil {
+			t.Fatalf("accepted invalid fast lane snapshot: %#v", pool)
+		}
+	}
+}
+
 func TestSnapshotRejectsDuplicatePoolsAndUnboundedValues(t *testing.T) {
 	now := time.Now()
 	base := Snapshot{SchemaVersion: 1, ControllerInstanceID: "controller-1",

@@ -17,6 +17,7 @@ import (
 var (
 	benchmarkRanked   []crfgithub.AvailableJob
 	benchmarkSelected []int64
+	benchmarkDecision admissionDecision
 )
 
 func testJob(id int64, repository, workflow, name string, queued time.Time) crfgithub.AvailableJob {
@@ -362,6 +363,51 @@ func TestRuntimeKeyNormalizesAsciiCaseAndBranchRef(t *testing.T) {
 	}
 }
 
+func TestDerivedFastLanePolicyAdaptsToQueueShapeWithinBounds(t *testing.T) {
+	now := time.Date(2026, 8, 22, 17, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 8)
+	runtimes := map[runtimeDigest]runtimeEstimate{}
+	for i := 0; i < 8; i++ {
+		job := testJob(int64(i+1), "dinglebear-ai/soma", "workflow@refs/heads/main", "moderate", now)
+		jobs = append(jobs, job)
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 6 * time.Minute, samples: 10}
+	}
+	moderate := deriveFastLanePolicy("build", jobs, runtimes, len(jobs), 4, now)
+	if moderate.longThreshold != 6*time.Minute || moderate.holdDuration != fastLaneHoldDuration {
+		t.Fatalf("moderate queue policy = %#v", moderate)
+	}
+
+	for _, job := range jobs {
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 30 * time.Minute, samples: 10}
+	}
+	heavy := deriveFastLanePolicy("build", jobs, runtimes, 64, 4, now)
+	if heavy.longThreshold != fastLaneMaxLongThreshold || heavy.holdDuration != 10*time.Second {
+		t.Fatalf("heavy queue policy = %#v", heavy)
+	}
+
+	for _, job := range jobs {
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: time.Minute, samples: 10}
+	}
+	short := deriveFastLanePolicy("build", jobs[:4], runtimes, 4, 4, now)
+	if short.longThreshold != fastLaneMinLongThreshold || short.holdDuration != 25*time.Second {
+		t.Fatalf("short sparse queue policy = %#v", short)
+	}
+}
+
+func TestFastLanePolicyHysteresisUsesBoundedSteps(t *testing.T) {
+	current := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second}
+	target := fastLanePolicy{longThreshold: 4 * time.Minute, holdDuration: 10 * time.Second}
+	got := stabilizeFastLanePolicy(current, target)
+	if got.longThreshold != 6*time.Minute || got.holdDuration != 15*time.Second {
+		t.Fatalf("policy moved too aggressively: %#v", got)
+	}
+	withinDeadband := stabilizeFastLanePolicy(current,
+		fastLanePolicy{longThreshold: 7 * time.Minute, holdDuration: 19 * time.Second})
+	if withinDeadband != current {
+		t.Fatalf("policy ignored hysteresis deadband: %#v", withinDeadband)
+	}
+}
+
 func TestFastLaneReservesOnlyMarginalKnownLongWork(t *testing.T) {
 	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
 	jobs := []crfgithub.AvailableJob{
@@ -416,6 +462,33 @@ func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testin
 		AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo, quick}}
 	if selected := poller.selectedAvailable(batch, "build", 2, now); !slices.Equal(selected, []int64{3, 1}) {
 		t.Fatalf("quick work remained behind visible long builds: %v", selected)
+	}
+}
+
+func BenchmarkTunedAdmission10000Jobs64Slots(b *testing.B) {
+	now := time.Date(2026, 8, 22, 17, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 10_000)
+	for i := 0; i < 10_000; i++ {
+		name := "unit"
+		if i%4 == 0 {
+			name = "rust-build"
+		}
+		jobs = append(jobs, testJob(int64(i+1), "dinglebear-ai/soma",
+			"dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", name,
+			now.Add(-time.Duration(i%300)*time.Second)))
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", jobs[0].Metadata): {duration: 20 * time.Minute, samples: 100},
+		runtimeKey("build", jobs[1].Metadata): {duration: 30 * time.Second, samples: 100},
+	}, fastLaneTunings: map[int64]fastLanePolicy{}}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAvailableJobs: len(jobs)}, AvailableJobs: jobs}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		runtimeSnapshot := poller.runtimeSnapshot()
+		target := deriveFastLanePolicy("build", jobs, runtimeSnapshot, len(jobs), 64, now)
+		policy := poller.stabilizeFastLaneTuning(7, target)
+		benchmarkDecision = poller.admissionSelectionWithRuntimes(
+			batch, "build", 64, now, false, policy, runtimeSnapshot)
 	}
 }
 

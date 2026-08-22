@@ -27,7 +27,8 @@ func TestFastLaneStatePersistsAcrossPollerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now().UTC().Truncate(time.Millisecond)
-	poller.startFastLane(7, 4, started)
+	policy := fastLanePolicy{longThreshold: 6 * time.Minute, holdDuration: 15 * time.Second}
+	poller.startFastLaneWithPolicy(7, 4, started, policy)
 
 	info, err := os.Stat(fastLaneStatePath(store))
 	if err != nil {
@@ -42,7 +43,8 @@ func TestFastLaneStatePersistsAcrossPollerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	lane, ok := restarted.fastLanes[7]
-	if !ok || lane.capacity != 4 || lane.borrowPending || !lane.holdUntil.Equal(started.Add(fastLaneHoldDuration)) {
+	if !ok || lane.capacity != 4 || lane.borrowPending || lane.longThreshold != policy.longThreshold ||
+		lane.holdDuration != policy.holdDuration || !lane.holdUntil.Equal(started.Add(policy.holdDuration)) {
 		t.Fatalf("fast lane did not survive restart: %#v", restarted.fastLanes)
 	}
 }
@@ -136,6 +138,19 @@ func TestFastLaneLookupFailurePersistsOneShotBorrowAcrossRestart(t *testing.T) {
 	lane, ok := restarted.fastLanes[7]
 	if !ok || !lane.borrowPending {
 		t.Fatalf("borrow-on-degradation state did not survive restart: %#v", restarted.fastLanes)
+	}
+}
+
+func TestFastLaneRejectsOverflowingPersistedThreshold(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	path := filepath.Join(t.TempDir(), "fast-lanes.json")
+	payload := []byte(`{"schema_version":1,"entries":[{"scale_set_id":7,"capacity":4,"hold_until_ms":` +
+		`1,"long_threshold_ms":9223372036854775807,"borrow_pending":true}]}`)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadFastLaneState(path, now); err == nil {
+		t.Fatal("overflowing persisted threshold was accepted")
 	}
 }
 

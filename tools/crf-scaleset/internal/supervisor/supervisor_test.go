@@ -240,12 +240,26 @@ func TestSupervisorClonesConfigurationPollResultsAndSnapshots(t *testing.T) {
 	if second.Pools[0].PoolID != "rust" || second.Pools[0].AcquiredHandles[0] != 41 {
 		t.Fatalf("snapshot exposed mutable internal state: %#v", second)
 	}
-	if !validPollResult(PollResult{AssignedJobs: 1, MessageID: 1, AcquiredHandles: []int64{7}}) {
+	valid := PollResult{AssignedJobs: 1, MessageID: 1, AcquiredHandles: []int64{7},
+		FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000,
+		FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: time.Now().Add(15 * time.Second).UnixMilli()}
+	if !validPollResult(valid) {
 		t.Fatal("valid poll result rejected")
 	}
+	if normalized := normalizePollResult(PollResult{}); normalized.FastLaneState != "inactive" {
+		t.Fatalf("empty synthetic poll result did not normalize inactive: %#v", normalized)
+	}
 	for _, result := range []PollResult{
-		{AssignedJobs: -1}, {MessageID: -1}, {AcquiredHandles: []int64{0}},
-		{AcquiredHandles: []int64{7, 7}}, {AcquiredHandles: make([]int64, 65)},
+		{AssignedJobs: -1, FastLaneState: "inactive"},
+		{MessageID: -1, FastLaneState: "inactive"},
+		{AcquiredHandles: []int64{0}, FastLaneState: "inactive"},
+		{AcquiredHandles: []int64{7, 7}, FastLaneState: "inactive"},
+		{AcquiredHandles: make([]int64, 65), FastLaneState: "inactive"},
+		{FastLaneState: "teleporting"},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 239_999, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 4_999, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: 0},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: time.Now().Add(3 * time.Minute).UnixMilli()},
 	} {
 		if validPollResult(result) {
 			t.Fatalf("accepted invalid poll result: %#v", result)

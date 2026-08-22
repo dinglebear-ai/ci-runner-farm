@@ -35,6 +35,8 @@ type Config struct {
 type fastLaneState struct {
 	capacity      int
 	holdUntil     time.Time
+	holdDuration  time.Duration
+	longThreshold time.Duration
 	borrowPending bool
 }
 
@@ -59,6 +61,7 @@ type Poller struct {
 	runtimeGeneration  uint64
 	acquirableHealth   map[int64]string
 	fastLanes          map[int64]fastLaneState
+	fastLaneTunings    map[int64]fastLanePolicy
 	fastLanePersistMu  sync.Mutex
 }
 
@@ -81,7 +84,7 @@ func New(cfg Config) (*Poller, error) {
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
 		poolMu: map[int64]*sync.Mutex{}, pollCancels: map[int64]context.CancelFunc{}, pollActive: map[int64]int{}, runtimes: runtimes,
-		acquirableHealth: map[int64]string{}, fastLanes: fastLanes}
+		acquirableHealth: map[int64]string{}, fastLanes: fastLanes, fastLaneTunings: map[int64]fastLanePolicy{}}
 	for key, consumed := range cfg.ConsumedHandles {
 		if consumed {
 			p.consumed[key] = true
@@ -190,13 +193,42 @@ func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capac
 	return nil
 }
 
+func (p *Poller) fastLaneStatus(scaleSetID int64) (string, int64, int64, int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	policy := p.fastLaneTunings[scaleSetID]
+	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
+		policy = defaultFastLanePolicy()
+	}
+	lane, active := p.fastLanes[scaleSetID]
+	if !active {
+		return "inactive", policy.longThreshold.Milliseconds(), policy.holdDuration.Milliseconds(), 0
+	}
+	longThreshold := lane.longThreshold
+	if longThreshold <= 0 {
+		longThreshold = policy.longThreshold
+	}
+	holdDuration := lane.holdDuration
+	if holdDuration <= 0 {
+		holdDuration = policy.holdDuration
+	}
+	state := "holding"
+	if lane.borrowPending {
+		state = "borrow_pending"
+	}
+	return state, longThreshold.Milliseconds(), holdDuration.Milliseconds(), lane.holdUntil.UnixMilli()
+}
+
 func (p *Poller) result(scaleSetID int64, sessionID string, capacity int,
 	messageID int64) (supervisor.PollResult, error) {
 	if err := p.ensureCapacityHandles(scaleSetID, sessionID, capacity); err != nil {
 		return supervisor.PollResult{}, err
 	}
+	state, thresholdMS, holdDurationMS, holdUntilMS := p.fastLaneStatus(scaleSetID)
 	return supervisor.PollResult{AssignedJobs: p.assignedCount(scaleSetID),
-		MessageID: messageID, AcquiredHandles: p.pendingSnapshot(scaleSetID)}, nil
+		MessageID: messageID, AcquiredHandles: p.pendingSnapshot(scaleSetID),
+		FastLaneState: state, FastLaneLongThresholdMillis: thresholdMS,
+		FastLaneHoldDurationMillis: holdDurationMS, FastLaneHoldUntilMillis: holdUntilMS}, nil
 }
 
 func (p *Poller) assignedCount(scaleSetID int64) int {
@@ -517,15 +549,27 @@ func (p *Poller) clearFastLane(scaleSetID int64) {
 }
 
 func (p *Poller) startFastLane(scaleSetID int64, capacity int, now time.Time) {
+	p.startFastLaneWithPolicy(scaleSetID, capacity, now, defaultFastLanePolicy())
+}
+
+func (p *Poller) startFastLaneWithPolicy(scaleSetID int64, capacity int, now time.Time, policy fastLanePolicy) {
 	if capacity < 2 {
 		p.clearFastLane(scaleSetID)
 		return
 	}
+	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
+		policy = defaultFastLanePolicy()
+	}
+	policy.longThreshold = clampFastLaneDuration(
+		policy.longThreshold, fastLaneMinLongThreshold, fastLaneMaxLongThreshold)
+	policy.holdDuration = clampFastLaneDuration(
+		policy.holdDuration, fastLaneMinHoldDuration, fastLaneMaxHoldDuration)
 	p.mu.Lock()
 	if p.fastLanes == nil {
 		p.fastLanes = map[int64]fastLaneState{}
 	}
-	p.fastLanes[scaleSetID] = fastLaneState{capacity: capacity, holdUntil: now.Add(fastLaneHoldDuration)}
+	p.fastLanes[scaleSetID] = fastLaneState{capacity: capacity, holdUntil: now.Add(policy.holdDuration),
+		holdDuration: policy.holdDuration, longThreshold: policy.longThreshold}
 	p.mu.Unlock()
 	p.persistFastLanes()
 }
@@ -533,7 +577,8 @@ func (p *Poller) startFastLane(scaleSetID int64, capacity int, now time.Time) {
 func (p *Poller) markFastLaneBorrowPending(scaleSetID int64, expected fastLaneState) bool {
 	p.mu.Lock()
 	current, exists := p.fastLanes[scaleSetID]
-	if !exists || current.capacity != expected.capacity || !current.holdUntil.Equal(expected.holdUntil) {
+	if !exists || current.capacity != expected.capacity || !current.holdUntil.Equal(expected.holdUntil) ||
+		current.holdDuration != expected.holdDuration || current.longThreshold != expected.longThreshold {
 		p.mu.Unlock()
 		return false
 	}
@@ -590,7 +635,7 @@ func (p *Poller) fastLanePreflight(ctx context.Context, pool supervisor.Pool, ca
 	}
 	p.recordAcquirableHealth(pool.ScaleSetID, "healthy", nil)
 	best := topCandidates(pool.ID, jobs, p.runtimeSnapshot(), now, 1)
-	if len(best) == 0 || fastLaneEligible(best[0]) {
+	if len(best) == 0 || fastLaneEligible(best[0], state.longThreshold) {
 		p.clearFastLane(pool.ScaleSetID)
 		return false, false
 	}
@@ -600,7 +645,7 @@ func (p *Poller) fastLanePreflight(ctx context.Context, pool supervisor.Pool, ca
 func (p *Poller) finishFastLane(scaleSetID int64, capacity int, decision admissionDecision, now time.Time) {
 	switch {
 	case decision.reserveFastLane:
-		p.startFastLane(scaleSetID, capacity, now)
+		p.startFastLaneWithPolicy(scaleSetID, capacity, now, decision.policy)
 	case decision.borrowFastLane:
 		p.clearFastLane(scaleSetID)
 	}
@@ -642,13 +687,34 @@ func (p *Poller) acquire(ctx context.Context, scaleSetID int64, session crfgithu
 	return nil
 }
 
+func (p *Poller) stabilizeFastLaneTuning(scaleSetID int64, target fastLanePolicy) fastLanePolicy {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fastLaneTunings == nil {
+		p.fastLaneTunings = map[int64]fastLanePolicy{}
+	}
+	current := p.fastLaneTunings[scaleSetID]
+	tuned := stabilizeFastLanePolicy(current, target)
+	p.fastLaneTunings[scaleSetID] = tuned
+	return tuned
+}
+
 func (p *Poller) selectForAcquire(ctx context.Context, pool supervisor.Pool, batch crfgithub.MessageBatch,
 	capacity int, borrowFastLane bool) admissionDecision {
 	if capacity <= 0 || (batch.Statistics != nil && batch.Statistics.TotalAssignedJobs >= capacity) {
-		return admissionDecision{borrowFastLane: borrowFastLane}
+		return admissionDecision{borrowFastLane: borrowFastLane, policy: defaultFastLanePolicy()}
 	}
-	return p.admissionSelection(p.acquisitionBatch(ctx, pool, batch), pool.ID, capacity,
-		time.Now().UTC(), borrowFastLane)
+	candidateBatch := p.acquisitionBatch(ctx, pool, batch)
+	now := time.Now().UTC()
+	runtimes := p.runtimeSnapshot()
+	totalAvailable := len(candidateBatch.AvailableJobs)
+	if candidateBatch.Statistics != nil && candidateBatch.Statistics.TotalAvailableJobs > totalAvailable {
+		totalAvailable = candidateBatch.Statistics.TotalAvailableJobs
+	}
+	target := deriveFastLanePolicy(pool.ID, candidateBatch.AvailableJobs, runtimes, totalAvailable, capacity, now)
+	policy := p.stabilizeFastLaneTuning(pool.ScaleSetID, target)
+	return p.admissionSelectionWithRuntimes(candidateBatch, pool.ID, capacity, now,
+		borrowFastLane, policy, runtimes)
 }
 
 func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (supervisor.PollResult, error) {

@@ -202,6 +202,10 @@ defmodule CrfController.ScaleSetWire do
              "last_message_id",
              "session_healthy",
              "acquired_handles",
+             "fast_lane_state",
+             "fast_lane_long_threshold_ms",
+             "fast_lane_hold_duration_ms",
+             "fast_lane_hold_until_ms",
              "observed_at",
              "valid_until"
            ]),
@@ -213,6 +217,22 @@ defmodule CrfController.ScaleSetWire do
            pool["last_message_id"],
          true <- is_boolean(pool["session_healthy"]),
          {:ok, handles} <- handles(pool["acquired_handles"]),
+         fast_lane_state when fast_lane_state in ["inactive", "holding", "borrow_pending"] <-
+           pool["fast_lane_state"],
+         fast_lane_threshold when is_integer(fast_lane_threshold) <-
+           pool["fast_lane_long_threshold_ms"],
+         fast_lane_hold_duration when is_integer(fast_lane_hold_duration) <-
+           pool["fast_lane_hold_duration_ms"],
+         fast_lane_hold_until when is_integer(fast_lane_hold_until) <-
+           pool["fast_lane_hold_until_ms"],
+         :ok <-
+           fast_lane(
+             fast_lane_state,
+             fast_lane_threshold,
+             fast_lane_hold_duration,
+             fast_lane_hold_until,
+             now
+           ),
          {:ok, observed_at} <- parse_time(pool["observed_at"]),
          {:ok, valid_until} <- parse_time(pool["valid_until"]),
          :ok <- pool_fresh(observed_at, valid_until, now) do
@@ -225,6 +245,10 @@ defmodule CrfController.ScaleSetWire do
          last_message_id: last_message_id,
          session_healthy: pool["session_healthy"],
          acquired_handles: handles,
+         fast_lane_state: fast_lane_state,
+         fast_lane_long_threshold_ms: fast_lane_threshold,
+         fast_lane_hold_duration_ms: fast_lane_hold_duration,
+         fast_lane_hold_until_ms: fast_lane_hold_until,
          observed_at: observed_at,
          valid_until: valid_until
        }}
@@ -243,6 +267,23 @@ defmodule CrfController.ScaleSetWire do
   end
 
   defp handles(_), do: {:error, :invalid_scaleset_snapshot}
+
+  defp fast_lane("inactive", 0, 0, 0, _now), do: :ok
+
+  defp fast_lane(state, threshold, hold_duration, hold_until, now)
+       when state in ["inactive", "holding", "borrow_pending"] and
+              threshold >= 240_000 and threshold <= 480_000 and
+              hold_duration >= 5_000 and hold_duration <= 30_000 do
+    max_hold_until = DateTime.to_unix(DateTime.add(now, 120, :second), :millisecond)
+
+    cond do
+      state == "inactive" and hold_until == 0 -> :ok
+      state != "inactive" and hold_until > 0 and hold_until <= max_hold_until -> :ok
+      true -> {:error, :invalid_scaleset_snapshot}
+    end
+  end
+
+  defp fast_lane(_, _, _, _, _), do: {:error, :invalid_scaleset_snapshot}
 
   defp fresh(observed_at, valid_until, now, max_ttl_ms) do
     cond do

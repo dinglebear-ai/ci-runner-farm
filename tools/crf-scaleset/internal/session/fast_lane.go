@@ -20,10 +20,12 @@ const (
 )
 
 type fastLaneStateEntry struct {
-	ScaleSetID     int64 `json:"scale_set_id"`
-	Capacity       int   `json:"capacity"`
-	HoldUntilMilli int64 `json:"hold_until_ms"`
-	BorrowPending  bool  `json:"borrow_pending"`
+	ScaleSetID          int64 `json:"scale_set_id"`
+	Capacity            int   `json:"capacity"`
+	HoldUntilMilli      int64 `json:"hold_until_ms"`
+	LongThresholdMillis int64 `json:"long_threshold_ms,omitempty"`
+	HoldDurationMillis  int64 `json:"hold_duration_ms,omitempty"`
+	BorrowPending       bool  `json:"borrow_pending"`
 }
 
 type fastLaneStateFile struct {
@@ -67,7 +69,7 @@ func loadFastLaneState(path string, now time.Time) (map[int64]fastLaneState, err
 	if state.SchemaVersion != fastLaneStateSchemaVersion || len(state.Entries) > maxFastLaneStateEntries {
 		return out, errors.New("invalid_fast_lane_state_schema")
 	}
-	latestAllowed := now.Add(fastLaneHoldDuration + time.Minute)
+	latestAllowed := now.Add(fastLaneMaxHoldDuration + time.Minute)
 	for _, entry := range state.Entries {
 		if entry.ScaleSetID <= 0 || entry.Capacity < 2 || entry.Capacity > 64 || entry.HoldUntilMilli <= 0 {
 			return map[int64]fastLaneState{}, errors.New("invalid_fast_lane_state_entry")
@@ -79,7 +81,24 @@ func loadFastLaneState(path string, now time.Time) (map[int64]fastLaneState, err
 		if holdUntil.After(latestAllowed) {
 			return map[int64]fastLaneState{}, errors.New("fast_lane_state_deadline_out_of_range")
 		}
-		lane := fastLaneState{capacity: entry.Capacity, holdUntil: holdUntil, borrowPending: entry.BorrowPending}
+		longThreshold := fastLaneLongRuntimeThreshold
+		if entry.LongThresholdMillis != 0 {
+			if entry.LongThresholdMillis < int64(fastLaneMinLongThreshold/time.Millisecond) ||
+				entry.LongThresholdMillis > int64(fastLaneMaxLongThreshold/time.Millisecond) {
+				return map[int64]fastLaneState{}, errors.New("fast_lane_state_threshold_out_of_range")
+			}
+			longThreshold = time.Duration(entry.LongThresholdMillis) * time.Millisecond
+		}
+		holdDuration := fastLaneHoldDuration
+		if entry.HoldDurationMillis != 0 {
+			if entry.HoldDurationMillis < int64(fastLaneMinHoldDuration/time.Millisecond) ||
+				entry.HoldDurationMillis > int64(fastLaneMaxHoldDuration/time.Millisecond) {
+				return map[int64]fastLaneState{}, errors.New("fast_lane_state_hold_duration_out_of_range")
+			}
+			holdDuration = time.Duration(entry.HoldDurationMillis) * time.Millisecond
+		}
+		lane := fastLaneState{capacity: entry.Capacity, holdUntil: holdUntil,
+			holdDuration: holdDuration, longThreshold: longThreshold, borrowPending: entry.BorrowPending}
 		if !lane.borrowPending && !now.Before(lane.holdUntil) {
 			lane.borrowPending = true
 		}
@@ -94,8 +113,24 @@ func saveFastLaneState(path string, lanes map[int64]fastLaneState) error {
 		if scaleSetID <= 0 || lane.capacity < 2 || lane.capacity > 64 || lane.holdUntil.IsZero() {
 			return errors.New("invalid_fast_lane_state_entry")
 		}
+		longThreshold := lane.longThreshold
+		if longThreshold == 0 {
+			longThreshold = fastLaneLongRuntimeThreshold
+		}
+		holdDuration := lane.holdDuration
+		if holdDuration == 0 {
+			holdDuration = fastLaneHoldDuration
+		}
+		if longThreshold < fastLaneMinLongThreshold || longThreshold > fastLaneMaxLongThreshold {
+			return errors.New("invalid_fast_lane_state_threshold")
+		}
+		if holdDuration < fastLaneMinHoldDuration || holdDuration > fastLaneMaxHoldDuration {
+			return errors.New("invalid_fast_lane_state_hold_duration")
+		}
 		entries = append(entries, fastLaneStateEntry{
-			ScaleSetID: scaleSetID, Capacity: lane.capacity, HoldUntilMilli: lane.holdUntil.UnixMilli(), BorrowPending: lane.borrowPending,
+			ScaleSetID: scaleSetID, Capacity: lane.capacity, HoldUntilMilli: lane.holdUntil.UnixMilli(),
+			LongThresholdMillis: longThreshold.Milliseconds(), HoldDurationMillis: holdDuration.Milliseconds(),
+			BorrowPending: lane.borrowPending,
 		})
 	}
 	if len(entries) > maxFastLaneStateEntries {

@@ -195,5 +195,6 @@ defmodule CrfController.OperatorSnapshotTest do
 
     assert snapshot.demand.orphaned_placements == []
     assert snapshot.demand.pools == ["acceptance"]
+    assert snapshot.demand.pool_status == []
   end
 end
