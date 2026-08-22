@@ -38,12 +38,12 @@ Last updated: 2026-08-22
   `ci-pool-acceptance-linux` dispatch choice. Its default remains
   `ci-pool-ops` for ordinary production-ops checks; fleet qualification should
   provision and select the isolated label.
-- Classic replacement is draining non-disruptively. A recovery rollback exposed
+- Classic replacement is complete. A recovery rollback exposed
   and fixed an inventory bug that allowed `ci-runner-dist-*` containers into
   classic quarantine. Exact classic selection now excludes distributed and JIT
-  authorities; idle registrations/containers are retired while genuinely busy
-  jobs continue. Do not call the classic fleet retired until GitHub and Docker
-  both report zero classic identities.
+  authorities. After assigned work cleared, classic boot admission was disabled
+  and both Docker and GitHub reported zero `tootie-ci-runner-*` identities. The
+  cache-resident distributed node remained running throughout final cleanup.
 - Fresh main-branch Build Plugin and Release Please workflows completed through
   distributed Ops runners after the PR #64 deployment. The Lint workflow's
   distributed Ubuntu and Windows jobs passed; its shell job exposed an
@@ -108,10 +108,11 @@ This document is the living implementation tracker. Update this checkpoint secti
 ## Current state
 
 The distributed control/data path exists end to end, five live nodes are
-registered, and production scale sets are active. Classic capacity is still
-active during the guarded migration window; do not describe the distributed
-backend as the sole production path until the Fleet migration reaches
-`scaleset_active` and both GitHub and Docker report zero classic runners.
+registered, and production scale sets are active. Tootie classic boot admission
+is disabled, with zero classic GitHub registrations and zero classic Docker
+containers. The distributed controller is the sole active production admission
+path; the local Unraid `scaleset` backend remains a separate rollback-era engine
+and was deliberately not activated during cutover.
 
 The implemented path is:
 
@@ -201,14 +202,11 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Execute the supported Fleet backend migration, drain current classic jobs,
-   remove their exact registrations/containers, and prove zero classic capacity
-   through both GitHub and Docker.
-2. Complete authenticated real-browser verification of the expanded Unraid
+1. Complete authenticated real-browser verification of the expanded Unraid
    distributed-fleet UI.
-3. Complete the controller/node restart and network-partition matrix plus
+2. Complete the remaining network-partition matrix plus
    orphan/force-abandon acceptance under production pool identities.
-4. Add automated CA/server-certificate rotation, more target-distribution Linux
+3. Add automated CA/server-certificate rotation, more target-distribution Linux
    bundles, live `acquirablejobs` queue-ordering proof, sustained fairness/load
    tests, and longer-horizon replay-fence archival if operational scale requires
    it.
@@ -218,6 +216,8 @@ The implemented path is:
 The controller and five nodes are deployed and registered. Tootie's node is
 cache-resident and integrated with Docker start/stop events. Four native-host
 execution paths, Dookie cancellation, and Tootie container execution are proven
-on the closeout branch. Temporary acceptance sets are removed. Authenticated
-WebUI acceptance and completion of the non-disruptive classic drain remain
-before the distributed backend becomes the sole active production path.
+on the closeout branch. Temporary acceptance sets and the final acceptance
+container are removed through controller-authoritative cancellation. Classic
+Docker and GitHub inventories are zero and boot admission is disabled.
+The packaged Fleet WebUI deployed to Tootie matches the closeout source hash;
+authenticated real-browser visual acceptance remains a presentation-only gate.

@@ -319,6 +319,14 @@ Full architecture, configuration, packaging, certificates, current deployment
 evidence, fleet-qualification runs, and residual hardening work live in
 [`docs/distributed-runner-farm/`](docs/distributed-runner-farm/README.md).
 
+As of 2026-08-22, exact-branch jobs have completed on Dookie, Squirts, Steamy
+WSL, Steamy Windows, and Tootie's container backend. Tootie has zero classic
+Docker runners and zero classic GitHub registrations, classic boot admission is
+disabled, and the distributed controller's seven production scale sets are the
+sole active admission path. The optional Unraid node and all of its executable,
+TLS, state, log, and projection data remain cache-resident under
+`/mnt/cache/appdata/ci-runner-farm/distributed-node`; they do not run from flash.
+
 ---
 
 ## Security
