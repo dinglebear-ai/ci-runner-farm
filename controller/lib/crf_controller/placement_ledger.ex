@@ -298,8 +298,10 @@ defmodule CrfController.PlacementLedger do
         put_placement(state, placement)
       end
 
-    case persist_state(next_state) do
-      :ok -> {:ok, next_state}
+    compacted_state = compact_state(next_state)
+
+    case persist_state(compacted_state) do
+      :ok -> {:ok, compacted_state}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -307,14 +309,33 @@ defmodule CrfController.PlacementLedger do
   defp persist_tombstone(state, %PlacementTombstone{} = tombstone) do
     next_state = put_tombstone(state, tombstone)
 
-    case persist_state(next_state) do
-      :ok -> {:ok, next_state}
+    compacted_state = compact_state(next_state)
+
+    case persist_state(compacted_state) do
+      :ok -> {:ok, compacted_state}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp persist_state(state) do
     PlacementStateStore.persist(state.state_path, state.placements, state.tombstones)
+  end
+
+  defp compact_state(state) do
+    compacted = PlacementStateStore.compact(state.placements, state.tombstones)
+
+    commands =
+      Map.new(
+        Map.values(compacted.placements) ++ Map.values(compacted.tombstones),
+        &{&1.command_id, &1.id}
+      )
+
+    %{
+      state
+      | placements: compacted.placements,
+        tombstones: compacted.tombstones,
+        commands: commands
+    }
   end
 
   defp put_placement(state, %Placement{} = placement) do

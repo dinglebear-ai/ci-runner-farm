@@ -1,7 +1,7 @@
 defmodule CrfController.PlacementStateStoreTest do
   use ExUnit.Case, async: true
 
-  alias CrfController.{PlacementLedger, PlacementTombstone}
+  alias CrfController.{PlacementLedger, PlacementStateStore, PlacementTombstone}
 
   test "terminal placement compacts to a durable replay tombstone" do
     root =
@@ -41,10 +41,10 @@ defmodule CrfController.PlacementStateStoreTest do
     assert PlacementLedger.snapshot(second) == []
 
     decoded = path |> File.read!() |> :json.decode()
-    assert decoded["schema_version"] == 2
+    assert decoded["schema_version"] == 3
     assert decoded["placements"] == []
 
-    assert [["placement-1", "command-1", digest, "dookie", 7, "finished", :null]] =
+    assert [["placement-1", "command-1", digest, "dookie", 7, "finished", :null, 20]] =
              decoded["tombstones"]
 
     assert digest == PlacementTombstone.digest("idempotency-1")
@@ -61,7 +61,7 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
-  test "legacy schema v1 terminal placement loads as tombstone and late ACK upgrades to v2" do
+  test "legacy schema v1 terminal placement loads as tombstone and late ACK upgrades to v3" do
     root =
       Path.join(System.tmp_dir!(), "crf-placement-v1-#{System.unique_integer([:positive])}")
 
@@ -88,11 +88,94 @@ defmodule CrfController.PlacementStateStoreTest do
              )
 
     decoded = path |> File.read!() |> :json.decode()
-    assert decoded["schema_version"] == 2
+    assert decoded["schema_version"] == 3
     assert decoded["placements"] == []
     assert length(decoded["tombstones"]) == 1
 
     GenServer.stop(ledger)
+    File.rm_rf!(root)
+  end
+
+  test "tombstone compaction retains a bounded newest replay window across restart" do
+    root =
+      Path.join(System.tmp_dir!(), "crf-placement-compact-#{System.unique_integer([:positive])}")
+
+    path = Path.join(root, "placements.json")
+
+    tombstones =
+      Map.new(0..8_192, fn index ->
+        id = "placement-#{index}"
+
+        {id,
+         %PlacementTombstone{
+           id: id,
+           command_id: "command-#{index}",
+           idempotency_sha256: PlacementTombstone.digest("key-#{index}"),
+           node_id: "dookie",
+           node_generation: 7,
+           state: :finished,
+           detail_code: nil,
+           updated_at_ms: index
+         }}
+      end)
+
+    compacted = PlacementStateStore.compact(%{}, tombstones)
+    assert map_size(compacted.tombstones) == 8_192
+    refute Map.has_key?(compacted.tombstones, "placement-0")
+    assert Map.has_key?(compacted.tombstones, "placement-8192")
+    assert :ok = PlacementStateStore.persist(path, %{}, compacted.tombstones)
+
+    {:ok, ledger} = PlacementLedger.start_link(name: nil, state_path: path)
+
+    assert {:ok, %PlacementTombstone{}} =
+             PlacementLedger.command_ack(
+               ledger,
+               "dookie",
+               7,
+               "command-8192",
+               "key-8192",
+               :duplicate,
+               nil,
+               now_ms: 9_000
+             )
+
+    assert {:error, :unknown_placement} = PlacementLedger.get(ledger, "placement-0")
+    GenServer.stop(ledger)
+    File.rm_rf!(root)
+  end
+
+  test "persistence remains bounded at 10x 100x and 1000x record counts" do
+    root =
+      Path.join(System.tmp_dir!(), "crf-placement-scale-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+
+    for count <- [10, 100, 1_000] do
+      tombstones =
+        Map.new(1..count, fn index ->
+          id = "placement-#{index}"
+
+          {id,
+           %PlacementTombstone{
+             id: id,
+             command_id: "command-#{index}",
+             idempotency_sha256: PlacementTombstone.digest("key-#{index}"),
+             node_id: "dookie",
+             node_generation: 7,
+             state: :finished,
+             detail_code: nil,
+             updated_at_ms: index
+           }}
+        end)
+
+      {elapsed_us, :ok} =
+        :timer.tc(fn ->
+          PlacementStateStore.persist(Path.join(root, "#{count}.json"), %{}, tombstones)
+        end)
+
+      assert elapsed_us < 2_000_000
+    end
+
     File.rm_rf!(root)
   end
 
