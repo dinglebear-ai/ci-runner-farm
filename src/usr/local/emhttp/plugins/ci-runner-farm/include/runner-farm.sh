@@ -131,8 +131,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/runner-jit.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-distributed-adapter.sh
 . "$SCRIPT_DIR/runner-distributed-adapter.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh
+. "$SCRIPT_DIR/runner-operations.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh
+. "$SCRIPT_DIR/runner-operation-workers.sh"
 # shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh
 . "$SCRIPT_DIR/runner-status.sh"
+# shellcheck source=src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh
+. "$SCRIPT_DIR/runner-api.sh"
 
 # Allowlist of keys the settings page may set. load_cfg only ever assigns these.
 CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP AUTH_MODE GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID RUNNER_COUNT RUNNER_LABELS RUNNER_MODE RUNNER_POOLS POOL_BACKEND \
@@ -2641,8 +2647,8 @@ with_fleet_lock() {
 }
 cmd_restart() {
   validate_runtime_config || { err "$POOL_CONFIG_ERROR"; return 1; }
-  cmd_stop || return 1
-  cmd_start
+  cmd_stop || return 10
+  cmd_start || return 11
 }
 
 # Stop reconciliation before contending for fleet.lock. The worker owns that
@@ -3747,7 +3753,7 @@ cmd_image_info_json() {
     cid="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)"
     [ "$cid" = "$id" ] && inuse=$((inuse+1))
   done
-  echo "{\"exists\":true,\"image\":\"$(echo "$img"|json_escape)\",\"id\":\"$(echo "$id" | cut -c8-19)\",\"created\":\"$created\",\"size_mb\":$(( ${size:-0}/1024/1024 )),\"base\":\"$(echo "$base"|json_escape)\",\"in_use\":$inuse,\"dockerfile\":\"$(echo "$df"|json_escape)\",\"source\":\"$(echo "$IMAGE_SOURCE"|json_escape)\"}"
+  echo "{\"exists\":true,\"image\":\"$(echo "$img"|json_escape)\",\"id\":\"$(echo "$id" | cut -c8-19)\",\"image_id\":\"$(echo "$id"|json_escape)\",\"created\":\"$created\",\"size_mb\":$(( ${size:-0}/1024/1024 )),\"size_bytes\":${size:-0},\"base\":\"$(echo "$base"|json_escape)\",\"in_use\":$inuse,\"dockerfile\":\"$(echo "$df"|json_escape)\",\"source\":\"$(echo "$IMAGE_SOURCE"|json_escape)\"}"
 }
 
 # "1.5GiB" / "512MiB" / "900kB" -> integer MiB (docker stats human units)
@@ -3895,9 +3901,14 @@ cmd_queued_refresh() {
         // routing-label match is the authoritative farm-membership test here.
         if ($pool==="") continue;
         if (count($rows)>=40) { $rowTruncated=true; break 2; }
+        $jobId=(string)($job["id"] ?? "");
+        if (!preg_match("/^[1-9][0-9]*$/",$runId) || !preg_match("/^[1-9][0-9]*$/",$jobId)) {
+          $detailComplete=false;
+          continue;
+        }
         $rows[]=[
-          "run_id"=>(int)$runId,
-          "job_id"=>(int)($job["id"] ?? 0),
+          "run_id"=>$runId,
+          "job_id"=>$jobId,
           "repo"=>$repo,
           "workflow"=>"#".$runNumber." · ".(string)($job["name"] ?? $workflow),
           "labels"=>implode(", ",$labels),
@@ -4607,15 +4618,16 @@ cmd_logs() { docker logs --tail "${2:-100}" -f "${NAME_PREFIX}-${1:-1}"; }
 
 cmd_validate() {
   # Prove the provisioning mechanics WITHOUT a GitHub token: launch the image
-  # with an inert entrypoint, verify mounts/limits, then tear it down.
+  # with an inert entrypoint, verify mounts/limits, then tear it down. Every path
+  # after docker run owns cleanup so a failed inspect cannot leave a container.
+  local name="${NAME_PREFIX}-validate" errf rc=0 created=false a eimg artifact
+  local NO_REGISTER=1 validate_pool=default validate_scope="" rec
+  local -a injected=()
   check_cache_root || return 1
-  ensure_dirs
-  registry_login
-  local name="${NAME_PREFIX}-validate"
-  docker rm -f "$name" >/dev/null 2>&1
-  local NO_REGISTER=1               # validate swaps the entrypoint for a sleep — never registers
-  local validate_pool=default validate_scope="" rec
-  if pool_mode_enabled; then
+  ensure_dirs || return 1
+  registry_login || return 1
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  if declare -F pool_mode_enabled >/dev/null && pool_mode_enabled; then
     while IFS= read -r rec; do
       validate_pool="${rec%%|*}"
       break
@@ -4628,31 +4640,42 @@ cmd_validate() {
     return 1
   }
   # swap real entrypoint for an inert sleep so no registration is attempted
-  local injected=(); local a; local eimg; eimg="$(effective_image)"
+  eimg="$(effective_image)" || return 1
   for a in "${ARGS[@]}"; do
     [ "$a" = "$eimg" ] && injected+=( --entrypoint /bin/sh "$eimg" -c "sleep 30" ) || injected+=( "$a" )
   done
   log "validate: launching inert container to verify mounts/limits..."
-  local errf; errf="$(mktemp /tmp/crf-validate.XXXXXX)"
-  if ! docker run "${injected[@]}" >/dev/null 2>"$errf"; then
-    err "docker run failed:"; cat "$errf" >&2; rm -f "$errf"; return 1
+  errf="$(mktemp "${RUNDIR:-/tmp}/crf-validate.XXXXXX" 2>/dev/null)" || return 1
+  chmod 0600 "$errf" || { rm -f -- "$errf"; return 1; }
+  if docker run "${injected[@]}" >/dev/null 2>"$errf"; then
+    created=true
+  else
+    err "docker run failed:"
+    cat "$errf" >&2
+    rc=1
   fi
-  rm -f "$errf"
-  echo "--- resource limits ---"
-  docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name"
-  echo "--- mounts ---"
-  docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name"
-  echo "--- tmpfs ---"
-  docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name"
-  echo "--- docker.sock reachable inside container ---"
-  docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
-  docker rm -f "$name" >/dev/null 2>&1
-  local artifact
+  rm -f -- "$errf"
+  if [ "$created" = true ]; then
+    echo "--- resource limits ---"
+    docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name" || rc=1
+    echo "--- mounts ---"
+    docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name" || rc=1
+    echo "--- tmpfs ---"
+    docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name" || rc=1
+    echo "--- docker.sock reachable inside container ---"
+    docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null || rc=1
+  fi
+  docker rm -f "$name" >/dev/null 2>&1 || true
   for artifact in docker work dind-logs; do
     [ -n "$name" ] && [ -n "$CACHE_ROOT" ] &&
       rm -rf "${CACHE_ROOT:?}/${artifact:?}/${name:?}" 2>/dev/null || true
   done
-  log "validate: OK (container removed). Provisioning mechanics verified on this host."
+  if [ "$rc" -eq 0 ]; then
+    log "validate: OK (container removed). Provisioning mechanics verified on this host."
+  else
+    err "validate: provisioning mechanics did not pass; container removed"
+  fi
+  return "$rc"
 }
 
 # Clear the plugin's caches under CACHE_ROOT. Two independent safeguards: (1) the
@@ -5170,6 +5193,12 @@ cmd_boot_autostart() {
     exec {boot_lock_fd}>&-
     return 0
   fi
+  operation_reconcile_interrupted || {
+    err "boot-autostart: durable operation reconciliation failed"
+    flock -u "$boot_lock_fd" 2>/dev/null || true
+    exec {boot_lock_fd}>&-
+    return 1
+  }
   boot_autostart_locked
   rc=$?
   flock -u "$boot_lock_fd" 2>/dev/null || true
@@ -5215,6 +5244,7 @@ migration_continue_guarded() {
 }
 
 case "${1:-status}" in
+  api)          runner_api_dispatch "${2:-}" ;;
   start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   cmd_boot_autostart ;;
   stop)         cmd_stop_fenced ;;
@@ -5263,8 +5293,8 @@ case "${1:-status}" in
   build-async)      cmd_build_async "${2:-}" ;;
   build-status)     cmd_build_status ;;
   promote-image)    with_fleet_lock wait cmd_promote_image "${2:?usage: promote-image <candidate-tag> <image-id>}" "${3:?usage: promote-image <candidate-tag> <image-id>}" ;;
-  farm-log)         cmd_farm_log ;;
-  history-log)      cmd_history_log "${2:?usage: history-log <name>}" ;;
+  farm-log)         cmd_farm_log "${2:-60}" ;;
+  history-log)      cmd_history_log "${2:?usage: history-log <name> [lines]}" "${3:-150}" ;;
   prune-cache)      cmd_prune_cache ;;
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   with_fleet_lock wait autoscale_tick ;;
@@ -5283,6 +5313,12 @@ case "${1:-status}" in
   rollback-backend) with_fleet_lock wait migration_rollback "${2:?config}" "${3:?ownership}" "${4:?compatibility}" "${5:?transition}" ;;
   compatibility-start) with_fleet_lock wait scaleset_compatibility_start ;;
   compatibility-worker) scaleset_compatibility_worker "${2:?operation id}" ;;
+  compatibility-operation-start) cmd_compatibility_operation_start "${2:?expected config revision}" ;;
+  compatibility-operation-worker) operation_compatibility_worker "${2:?operation id}" ;;
+  provisioning-operation-start) cmd_provisioning_operation_start "${2:?expected config revision}" ;;
+  provisioning-operation-worker) operation_provisioning_worker "${2:?operation id}" ;;
+  image-build-operation-start) cmd_image_build_operation_start "${2:?expected Dockerfile SHA-256}" ;;
+  image-build-operation-worker) operation_image_build_worker "${2:?operation id}" "${3:?expected Dockerfile SHA-256}" ;;
   operation-status) scaleset_operation_status "${2:?operation id}" ;;
   autoscale-start)  with_fleet_lock wait autoscale_start ;;
   autoscale-stop)   with_fleet_lock wait autoscale_stop ;;

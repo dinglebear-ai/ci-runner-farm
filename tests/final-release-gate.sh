@@ -39,6 +39,51 @@ grep -Fq 'SCALESET_HELPER_LOG_MAX_BYTES="${SCALESET_HELPER_LOG_MAX_BYTES:-838860
   "$scalesets" || crf_fail "eight MiB helper-log cap drifted"
 grep -Fq 'SCALESET_OPERATION_MAX_FILES="${SCALESET_OPERATION_MAX_FILES:-32}"' \
   "$scalesets" || crf_fail "operation-record cap drifted"
+grep -Fq 'OPERATION_MAX_FILES=64' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh ||
+  crf_fail "generic operation-record cap drifted"
+grep -Fq 'OPERATION_MAX_AGE_SECONDS=2592000' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operations.sh ||
+  crf_fail "generic operation retention age drifted"
+grep -Fq 'compatibility-operation-worker' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "durable compatibility worker dispatch is missing"
+grep -Fq 'operation_create_unique compatibility_test' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh ||
+  crf_fail "compatibility start does not create a unique durable operation"
+grep -Fq 'operation_create_unique provisioning_validation' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh ||
+  crf_fail "provisioning start does not create a unique durable operation"
+grep -Fq 'provisioning-operation-worker' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "durable provisioning worker dispatch is missing"
+grep -Fq 'operation_create_unique image_build' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-operation-workers.sh ||
+  crf_fail "image build start does not create a unique durable operation"
+grep -Fq 'image-build-operation-worker' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "durable image build worker dispatch is missing"
+grep -Fq 'operation_latest_public' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-status.sh ||
+  crf_fail "status does not project the generic durable operation journal"
+grep -Fq 'runner_api_operation_read' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict operation-read dispatch is missing"
+grep -Fq 'runner_api_fleet_guard' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "fleet revision guard is missing"
+grep -Fq 'caller must be the sole fleet-lock owner' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict fleet lock ownership contract is missing"
+grep -Fq 'runner_api_lifecycle_locked' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
+  crf_fail "strict lifecycle adapter is missing"
+grep -Fq 'cmd_stop || return 10' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "restart stop-phase mapping is missing"
+grep -Fq 'cmd_start || return 11' \
+  src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
+  crf_fail "restart start-phase mapping is missing"
 grep -Fq 'SCALESET_DEMAND_TTL_MAX_SECONDS="${SCALESET_DEMAND_TTL_MAX_SECONDS:-120}"' \
   "$scalesets" || crf_fail "bounded shell demand TTL drifted"
 grep -Fq "find . -type f ! -path './bin/.crf-scaleset.rollback-*' -print0" \
@@ -132,6 +177,21 @@ bash tests/job-visibility.sh >/dev/null
 bash tests/jit-recovery.sh >/dev/null
 bash tests/recent-activity.sh >/dev/null
 bash tests/readiness-json.sh >/dev/null
+php tests/api-request.php >/dev/null
+php tests/api-status.php >/dev/null
+php tests/api-auxiliary.php >/dev/null
+bash tests/graphql-controller-api.sh >/dev/null
+bash tests/graphql-status-api.sh >/dev/null
+bash tests/graphql-auxiliary-api.sh >/dev/null
+php tests/api-log.php >/dev/null
+bash tests/graphql-log-api.sh >/dev/null
+bash tests/operations.sh >/dev/null
+bash tests/compatibility-operations.sh >/dev/null
+bash tests/provisioning-operations.sh >/dev/null
+bash tests/image-build-operations.sh >/dev/null
+bash tests/operation-api.sh >/dev/null
+bash tests/revision-guards.sh >/dev/null
+bash tests/lifecycle-api.sh >/dev/null
 bash tests/recycle-runtime.sh >/dev/null
 bash tests/release-publication-guard.sh >/dev/null
 bash tests/stalled-credential-handoff.sh >/dev/null
