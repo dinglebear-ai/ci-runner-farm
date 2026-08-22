@@ -107,6 +107,7 @@ type Adapter struct {
 	client        *scaleset.Client
 	owner         string
 	clientFactory ScaleSetClientFactory
+	closeSession  func(context.Context, *scaleset.MessageSessionClient) error
 	mu            sync.Mutex
 	sessions      map[int64]*scaleset.MessageSessionClient
 }
@@ -281,12 +282,25 @@ func (a *Adapter) CreateMessageSession(ctx context.Context, id int64) (Session, 
 func (a *Adapter) CloseMessageSession(ctx context.Context, session Session) error {
 	a.mu.Lock()
 	client := a.sessions[session.ScaleSetID]
-	delete(a.sessions, session.ScaleSetID)
 	a.mu.Unlock()
 	if client == nil {
 		return nil
 	}
-	return client.Close(ctx)
+	closeSession := a.closeSession
+	if closeSession == nil {
+		closeSession = func(ctx context.Context, client *scaleset.MessageSessionClient) error {
+			return client.Close(ctx)
+		}
+	}
+	if err := closeSession(ctx, client); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.sessions[session.ScaleSetID] == client {
+		delete(a.sessions, session.ScaleSetID)
+	}
+	a.mu.Unlock()
+	return nil
 }
 func (a *Adapter) session(s Session) (*scaleset.MessageSessionClient, error) {
 	a.mu.Lock()

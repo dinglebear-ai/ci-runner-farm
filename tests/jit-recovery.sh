@@ -302,6 +302,39 @@ for _ in {1..100}; do [ -s "$gc_rm_started" ] && break; sleep 0.01; done
 [ -s "$gc_rm_started" ] || crf_fail "background GC sweep did not start"
 [ ! -s "$gc_inherited_fd5" ] || crf_fail "GC sweeper inherited the autoscale tick lock fd"
 [ ! -s "$gc_inherited_fd8" ] || crf_fail "GC sweeper inherited the autoscale lock fd"
+wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
+
+# The production command is commonly invoked through a pipe or output-capturing
+# caller. The detached sweeper must not retain those descriptors and delay EOF.
+pipe_item="$CACHE_ROOT/.jit-gc/pipe-latency"
+mkdir -p "$pipe_item"; touch "$pipe_item/artifact"
+slow_gc_rm_seconds=1
+export CACHE_ROOT RUNDIR JIT_GC_SWEEP_MAX JIT_GC_SWEEPER_PID slow_gc_rm_seconds
+export gc_rm_started gc_rm_finished gc_rm_active gc_rm_max_active gc_inherited_fd5 gc_inherited_fd8
+export safe_cache_root_mode detach_failure_runner gc_remove_failure
+export -f crf_safe_cache_root jit_gc_log jit_gc_root_prepare jit_gc_sweep_config_valid
+export -f jit_gc_sweep jit_gc_sweep_start rm mv
+started_ns="$(date +%s%N)"
+pipe_result="$(bash -c 'jit_gc_sweep_start; printf detached' | cat)"
+elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
+[ "$pipe_result" = detached ] || crf_fail "piped GC start returned unexpected output"
+[ "$elapsed_ms" -lt 500 ] || crf_fail "piped caller waited for background GC (${elapsed_ms}ms)"
+for _ in {1..200}; do [ ! -e "$pipe_item" ] && break; sleep 0.01; done
+[ ! -e "$pipe_item" ] || crf_fail "detached piped GC did not reclaim its fixture"
+
+# Configuration errors are rejected before a child is launched, allowing the
+# caller to emit sweeper_start_failed telemetry synchronously.
+JIT_GC_SWEEP_MAX=0
+before_gc_log="$(wc -l <"$RUNDIR/autoscale.log")"
+if jit_gc_sweep_start; then
+  crf_fail "invalid GC sweep maximum started a background child"
+fi
+invalid_gc_telemetry="$(jit_gc_sweep_start 2>&1 || jit_gc_log "sweeper_start_failed test-invalid-config" 2>&1)"
+[[ "$invalid_gc_telemetry" == *"jit-gc: sweeper_start_failed test-invalid-config"* ]] ||
+  crf_fail "invalid GC configuration did not emit synchronous failure telemetry"
+[ "$(wc -l <"$RUNDIR/autoscale.log")" = "$before_gc_log" ] ||
+  crf_fail "invalid GC configuration launched an asynchronous sweeper"
+JIT_GC_SWEEP_MAX=8
 
 # A failed sweep remains quarantined and is retried by a later reconcile, which
 # models daemon restart recovery. Only one sweeper may reclaim at a time.

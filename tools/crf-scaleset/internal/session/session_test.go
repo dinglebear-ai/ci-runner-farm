@@ -32,6 +32,7 @@ type fakeAPI struct {
 	ackErr             error
 	ackHook            func()
 	closeCalls         int
+	closeErr           error
 	messageCalls       int
 	lastMessage        int64
 	messageCapacity    int
@@ -120,7 +121,7 @@ func (f *fakeAPI) CloseMessageSession(_ context.Context, _ crfgithub.Session) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closeCalls++
-	return nil
+	return f.closeErr
 }
 
 func TestPollAcquiresOnlyRankedVisibleSubset(t *testing.T) {
@@ -492,6 +493,57 @@ func TestFreshPollRejectsNegativeStatisticsWithoutChangingNextPollControlFlow(t 
 		api.acquireCalls != 1 || api.ackCalls != 1 {
 		t.Fatalf("rejected first message changed follow-up control flow: messages=%d sessions=%d capacity=%d acquire=%d ack=%d",
 			api.messageCalls, api.sessionCalls, api.messageCapacity, api.acquireCalls, api.ackCalls)
+	}
+}
+
+func TestRejectedProvisionalSessionCloseFailureBlocksNewSessionUntilRetrySucceeds(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	closeFailure := errors.New("close failed")
+	api := &fakeAPI{store: store, closeErr: closeFailure, batch: crfgithub.MessageBatch{
+		MessageID: 42, Statistics: &crfgithub.Statistics{TotalAvailableJobs: -1},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 2); !errors.Is(err, crfgithub.ErrInvalidResponse) || !errors.Is(err, closeFailure) {
+		t.Fatalf("rejection did not preserve validation and close errors: %v", err)
+	}
+	if got := poller.rejectedSessions[7]; got.ID != "session-1" {
+		t.Fatalf("failed provisional close lost cleanup ownership: %#v", poller.rejectedSessions)
+	}
+	if _, ok := poller.sessions[7]; ok {
+		t.Fatal("rejected provisional session became an active session")
+	}
+	if _, ok := poller.advertised[7]; ok {
+		t.Fatal("rejected provisional session persisted advertised capacity")
+	}
+
+	if _, err := poller.Poll(context.Background(), pool, 3); !errors.Is(err, closeFailure) {
+		t.Fatalf("failed cleanup retry did not block polling: %v", err)
+	}
+	if api.sessionCalls != 1 || api.messageCalls != 1 || api.closeCalls != 2 {
+		t.Fatalf("cleanup retry created a competing session: sessions=%d messages=%d closes=%d",
+			api.sessionCalls, api.messageCalls, api.closeCalls)
+	}
+
+	api.mu.Lock()
+	api.closeErr = nil
+	api.batch = crfgithub.MessageBatch{MessageID: 43, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1},
+		Available: []int64{102}}
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 3); err != nil {
+		t.Fatalf("poll did not recover after provisional close retry: %v", err)
+	}
+	if _, ok := poller.rejectedSessions[7]; ok {
+		t.Fatal("successful cleanup retry retained provisional ownership")
+	}
+	if api.sessionCalls != 2 || api.messageCalls != 2 || api.closeCalls != 3 ||
+		api.acquireCalls != 1 || api.ackCalls != 1 {
+		t.Fatalf("recovered poll calls unexpected: sessions=%d messages=%d closes=%d acquire=%d ack=%d",
+			api.sessionCalls, api.messageCalls, api.closeCalls, api.acquireCalls, api.ackCalls)
 	}
 }
 

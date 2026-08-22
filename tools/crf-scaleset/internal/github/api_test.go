@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -9,6 +10,33 @@ import (
 
 	"github.com/actions/scaleset"
 )
+
+func TestAdapterRetainsMessageSessionUntilCloseSucceeds(t *testing.T) {
+	client := &scaleset.MessageSessionClient{}
+	closeFailure := errors.New("close failed")
+	attempts := 0
+	adapter := &Adapter{sessions: map[int64]*scaleset.MessageSessionClient{7: client},
+		closeSession: func(context.Context, *scaleset.MessageSessionClient) error {
+			attempts++
+			if attempts == 1 {
+				return closeFailure
+			}
+			return nil
+		}}
+	session := Session{ScaleSetID: 7, ID: "session-1"}
+	if err := adapter.CloseMessageSession(context.Background(), session); !errors.Is(err, closeFailure) {
+		t.Fatalf("close failure was not returned: %v", err)
+	}
+	if adapter.sessions[7] != client {
+		t.Fatal("adapter discarded message-session mapping after failed close")
+	}
+	if err := adapter.CloseMessageSession(context.Background(), session); err != nil {
+		t.Fatalf("close retry failed: %v", err)
+	}
+	if _, ok := adapter.sessions[7]; ok || attempts != 2 {
+		t.Fatalf("successful close did not remove mapping exactly once: attempts=%d sessions=%v", attempts, adapter.sessions)
+	}
+}
 
 func TestAdapterSelectsDedicatedScaleSetClient(t *testing.T) {
 	admin, err := scaleset.NewClientWithPersonalAccessToken(

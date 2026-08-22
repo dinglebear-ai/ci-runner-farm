@@ -256,11 +256,15 @@ jit_gc_root_prepare() {
   printf '%s\n' "$gc_root"
 }
 
+jit_gc_sweep_config_valid() {
+  [[ "$JIT_GC_SWEEP_MAX" =~ ^[1-9][0-9]*$ ]] && [ "$JIT_GC_SWEEP_MAX" -le 64 ]
+}
+
 jit_gc_sweep() {
   local root gc_root item retry count=0 rc=0
   root="$(crf_safe_cache_root)" || return 1
   gc_root="$(jit_gc_root_prepare "$root")" || return 1
-  [[ "$JIT_GC_SWEEP_MAX" =~ ^[1-9][0-9]*$ ]] && [ "$JIT_GC_SWEEP_MAX" -le 64 ] || return 1
+  jit_gc_sweep_config_valid || return 1
   for item in "$gc_root"/*; do
     [ -e "$item" ] || [ -L "$item" ] || continue
     [ "$item" != "$gc_root/.sweep.lock" ] || continue
@@ -279,7 +283,8 @@ jit_gc_sweep() {
 }
 
 jit_gc_sweep_start() {
-  local root gc_root lock
+  local root gc_root lock log_file
+  jit_gc_sweep_config_valid || return 1
   if [[ "$JIT_GC_SWEEPER_PID" =~ ^[1-9][0-9]*$ ]] &&
      kill -0 "$JIT_GC_SWEEPER_PID" 2>/dev/null; then
     return 0
@@ -287,6 +292,8 @@ jit_gc_sweep_start() {
   root="$(crf_safe_cache_root)" || return 1
   gc_root="$(jit_gc_root_prepare "$root")" || return 1
   lock="$gc_root/.sweep.lock"
+  log_file="$RUNDIR/autoscale.log"
+  mkdir -p -- "$RUNDIR" && : >>"$log_file" || return 1
   (
     # Reconciliation may run under the autoscale tick lock on fd 5 or the
     # explicit fleet lock on fd 8. Async inode walks must extend neither.
@@ -297,7 +304,7 @@ jit_gc_sweep_start() {
     command -v renice >/dev/null 2>&1 && renice 10 -p "$BASHPID" >/dev/null 2>&1 || true
     command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$BASHPID" >/dev/null 2>&1 || true
     jit_gc_sweep
-  ) &
+  ) </dev/null >>"$log_file" 2>&1 &
   JIT_GC_SWEEPER_PID=$!
 }
 

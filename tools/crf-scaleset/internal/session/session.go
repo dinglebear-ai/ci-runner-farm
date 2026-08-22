@@ -36,6 +36,7 @@ type Poller struct {
 	mu                 sync.Mutex
 	journalMu          sync.Mutex
 	sessions           map[int64]crfgithub.Session
+	rejectedSessions   map[int64]crfgithub.Session
 	assigned           map[int64]int
 	advertised         map[int64]int
 	pending            map[int64][]int64
@@ -64,7 +65,7 @@ func New(cfg Config) (*Poller, error) {
 		return nil, err
 	}
 	runtimes := loadRuntimeHints(cfg.Store)
-	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
+	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, rejectedSessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
 		poolMu: map[int64]*sync.Mutex{}, runtimes: runtimes,
@@ -252,12 +253,45 @@ func (p *Poller) rejectSession(ctx context.Context, created crfgithub.Session, i
 	}
 	closer, ok := p.cfg.API.(sessionCloser)
 	if !ok {
-		return cause
+		p.retainRejectedSession(created)
+		return errors.Join(cause, errors.New("close_rejected_message_session_unsupported"))
 	}
 	if err := closer.CloseMessageSession(ctx, created); err != nil {
+		p.retainRejectedSession(created)
 		return errors.Join(cause, fmt.Errorf("close_rejected_message_session: %w", err))
 	}
 	return cause
+}
+
+func (p *Poller) retainRejectedSession(session crfgithub.Session) {
+	p.mu.Lock()
+	if p.rejectedSessions == nil {
+		p.rejectedSessions = map[int64]crfgithub.Session{}
+	}
+	p.rejectedSessions[session.ScaleSetID] = session
+	p.mu.Unlock()
+}
+
+func (p *Poller) retryRejectedSession(ctx context.Context, scaleSetID int64) error {
+	p.mu.Lock()
+	rejected, exists := p.rejectedSessions[scaleSetID]
+	p.mu.Unlock()
+	if !exists {
+		return nil
+	}
+	closer, ok := p.cfg.API.(sessionCloser)
+	if !ok {
+		return errors.New("close_rejected_message_session_unsupported")
+	}
+	if err := closer.CloseMessageSession(ctx, rejected); err != nil {
+		return fmt.Errorf("close_rejected_message_session: %w", err)
+	}
+	p.mu.Lock()
+	if p.rejectedSessions[scaleSetID] == rejected {
+		delete(p.rejectedSessions, scaleSetID)
+	}
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *Poller) resetAmbiguousAcquire(ctx context.Context, scaleSetID int64,
@@ -502,6 +536,9 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := p.retryRejectedSession(ctx, pool.ScaleSetID); err != nil {
+		return supervisor.PollResult{}, err
+	}
 	session, sessionIsNew, err := p.session(ctx, pool.ScaleSetID)
 	if err != nil {
 		return supervisor.PollResult{}, err
@@ -730,16 +767,31 @@ func (p *Poller) Close(ctx context.Context) error {
 		p.mu.Unlock()
 		return first
 	}
-	sessions := make([]crfgithub.Session, 0, len(p.sessions))
+	sessions := make(map[int64]crfgithub.Session, len(p.sessions)+len(p.rejectedSessions))
 	for scaleSetID, active := range p.sessions {
-		sessions = append(sessions, active)
-		delete(p.sessions, scaleSetID)
+		sessions[scaleSetID] = active
+	}
+	for scaleSetID, rejected := range p.rejectedSessions {
+		if _, active := sessions[scaleSetID]; !active {
+			sessions[scaleSetID] = rejected
+		}
 	}
 	p.mu.Unlock()
-	for _, active := range sessions {
-		if err := closer.CloseMessageSession(ctx, active); err != nil && first == nil {
-			first = err
+	for scaleSetID, active := range sessions {
+		if err := closer.CloseMessageSession(ctx, active); err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
 		}
+		p.mu.Lock()
+		if p.sessions[scaleSetID] == active {
+			delete(p.sessions, scaleSetID)
+		}
+		if p.rejectedSessions[scaleSetID] == active {
+			delete(p.rejectedSessions, scaleSetID)
+		}
+		p.mu.Unlock()
 	}
 	return first
 }
