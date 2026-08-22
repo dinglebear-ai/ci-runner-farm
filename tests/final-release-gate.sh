@@ -79,6 +79,7 @@ grep -Fq 'runner_api_lifecycle_locked' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-api.sh ||
   crf_fail "strict lifecycle adapter is missing"
 bash tests/graphql-mutation-dispatch.sh
+bash tests/operation-worker-timeouts.sh
 grep -Fq 'cmd_stop || return 10' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "restart stop-phase mapping is missing"

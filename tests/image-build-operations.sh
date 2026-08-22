@@ -32,15 +32,20 @@ public_code(){ operation_read_public "$1" | php -r '$j=json_decode(stream_get_co
 public_state(){ operation_read_public "$1" | php -r '$j=json_decode(stream_get_contents(STDIN),true);echo $j["state"]??"";'; }
 
 build_calls="$root/build.calls"
-cmd_build_image(){
-  local snapshot="$1"
+cat >"$root/command" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = build-image ] || exit 64
+  snapshot="$2"
   printf '%s\n' "$snapshot" >>"$build_calls"
   crf_assert_file_mode "$snapshot" 600
   crf_assert_eq "$CRF_TEST_EXPECTED_SHA" "$(sha256sum "$snapshot" | cut -d' ' -f1)" 'worker snapshot SHA'
   printf 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n'
   printf 'github_pat_abcdefghijklmnopqrstuvwxyz\n'
-  return "${CRF_TEST_BUILD_RC:-0}"
-}
+  exit "${CRF_TEST_BUILD_RC:-0}"
+EOF
+chmod 0755 "$root/command"
+export CRF_OPERATION_COMMAND_LAUNCHER="$root/command" build_calls
+OPERATION_COMMAND_LAUNCHER="$CRF_OPERATION_COMMAND_LAUNCHER"
 export CRF_TEST_EXPECTED_SHA="$expected"
 
 success_id='30000001-0000-0000-0000-000000000001'
@@ -76,7 +81,9 @@ crf_assert_contains "$status" '"rc":0' 'durable build status lost success code'
 failure_id='30000002-0000-0000-0000-000000000002'
 CRF_OPERATION_ID="$failure_id" operation_create image_build "$config_sha" image_build_log >/dev/null
 operation_image_snapshot_prepare "$failure_id" "$expected" >/dev/null
-CRF_TEST_BUILD_RC=7 operation_image_build_worker "$failure_id" "$expected"
+export CRF_TEST_BUILD_RC=7
+operation_image_build_worker "$failure_id" "$expected"
+unset CRF_TEST_BUILD_RC
 crf_assert_eq failed "$(public_state "$failure_id")" 'image build failure state'
 crf_assert_eq build_failed "$(public_code "$failure_id")" 'image build failure code'
 grep -Fq '__BUILD_RC__=7' "$RUNDIR/build.log" || crf_fail 'failed image build sentinel missing'

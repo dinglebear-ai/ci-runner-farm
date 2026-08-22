@@ -3,6 +3,39 @@
 # output remains beneath RUNDIR; only bounded metadata is committed to flash.
 
 OPERATION_RUNTIME_DIR="${OPERATION_RUNTIME_DIR:-${RUNDIR:-/run/ci-runner-farm}/operations}"
+OPERATION_COMPATIBILITY_TIMEOUT_SECONDS="${OPERATION_COMPATIBILITY_TIMEOUT_SECONDS:-660}"
+OPERATION_PROVISIONING_TIMEOUT_SECONDS="${OPERATION_PROVISIONING_TIMEOUT_SECONDS:-300}"
+OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS="${OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS:-3600}"
+OPERATION_KILL_AFTER_SECONDS="${OPERATION_KILL_AFTER_SECONDS:-5}"
+OPERATION_COMMAND_LAUNCHER="${CRF_OPERATION_COMMAND_LAUNCHER:-$0}"
+
+operation_run_bounded() {
+  local seconds="$1" pid deadline kill_deadline now rc=0
+  shift
+  case "$seconds" in ''|*[!0-9]*) return 125 ;; esac
+  [ "$seconds" -ge 1 ] && [ "$seconds" -le 86400 ] || return 125
+  case "$OPERATION_KILL_AFTER_SECONDS" in ''|*[!0-9]*) return 125 ;; esac
+  [ "$OPERATION_KILL_AFTER_SECONDS" -ge 1 ] && [ "$OPERATION_KILL_AFTER_SECONDS" -le 60 ] || return 125
+  setsid "$@" &
+  pid=$!
+  deadline=$(($(date +%s) + seconds))
+  while kill -0 -- "-$pid" 2>/dev/null; do
+    now="$(date +%s)"
+    if [ "$now" -ge "$deadline" ]; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      kill_deadline=$((now + OPERATION_KILL_AFTER_SECONDS))
+      while kill -0 -- "-$pid" 2>/dev/null && [ "$(date +%s)" -lt "$kill_deadline" ]; do
+        sleep 0.1
+      done
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
 
 operation_runtime_dir_ensure() {
   if [ -e "$OPERATION_RUNTIME_DIR" ]; then
@@ -135,7 +168,9 @@ operation_compatibility_worker() {
   fi
   evidence_tmp="${SCALESET_COMPAT}.operation.$id.tmp"
   rm -f -- "$evidence_tmp"
-  if "$SCALESET_HELPER" probe --config "$SCALESET_PROBE_CONFIG"       --output "$evidence_tmp" --timeout 10m >>"$log_path" 2>&1; then
+  if operation_run_bounded "$OPERATION_COMPATIBILITY_TIMEOUT_SECONDS" \
+      "$SCALESET_HELPER" probe --config "$SCALESET_PROBE_CONFIG" \
+      --output "$evidence_tmp" --timeout 10m >>"$log_path" 2>&1; then
     if ! operation_config_matches "$id"; then
       rm -f -- "$evidence_tmp"
       operation_finish "$id" failed stale_config         'Configuration changed while compatibility test was running.' "$log_path"
@@ -157,7 +192,11 @@ operation_compatibility_worker() {
     rm -f -- "$evidence_tmp"
     printf 'compatibility helper exit=%s
 ' "$rc" >>"$log_path"
-    operation_finish "$id" failed probe_failed       'Compatibility gate did not pass.' "$log_path"
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      operation_finish "$id" failed timed_out 'Compatibility test exceeded its wall-clock limit.' "$log_path"
+    else
+      operation_finish "$id" failed probe_failed 'Compatibility gate did not pass.' "$log_path"
+    fi
   fi
 }
 
@@ -208,14 +247,20 @@ operation_provisioning_worker() {
     operation_finish "$id" failed stale_config 'Configuration changed before provisioning validation.' "$log_path"
     return
   fi
-  if cmd_validate >>"$log_path" 2>&1; then
+  if operation_run_bounded "$OPERATION_PROVISIONING_TIMEOUT_SECONDS" \
+      "$OPERATION_COMMAND_LAUNCHER" validate >>"$log_path" 2>&1; then
     if ! operation_config_matches "$id"; then
       operation_finish "$id" failed stale_config 'Configuration changed while provisioning validation was running.' "$log_path"
       return
     fi
     operation_finish "$id" succeeded provisioning_valid 'Provisioning mechanics were verified.' "$log_path"
   else
-    operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+    local rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      operation_finish "$id" failed timed_out 'Provisioning validation exceeded its wall-clock limit.' "$log_path"
+    else
+      operation_finish "$id" failed provisioning_failed 'Provisioning mechanics did not pass.' "$log_path"
+    fi
   fi
 }
 
@@ -392,7 +437,8 @@ operation_image_build_worker() {
     operation_finish "$id" failed backend_unavailable 'Build log could not be created.' >/dev/null 2>&1 || true
     return
   }
-  if cmd_build_image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
+  if operation_run_bounded "$OPERATION_IMAGE_BUILD_TIMEOUT_SECONDS" \
+      "$OPERATION_COMMAND_LAUNCHER" build-image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
   operation_image_snapshot_cleanup "$snapshot"
   printf '__BUILD_RC__=%s\n' "$rc" >>"$log_path"
   chmod 0600 "$log_path" || true
@@ -400,6 +446,8 @@ operation_image_build_worker() {
   exec 9>&-
   if [ "$rc" -eq 0 ]; then
     operation_finish "$id" succeeded image_built 'Runner image build completed.' "$log_path"
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    operation_finish "$id" failed timed_out 'Runner image build exceeded its wall-clock limit.' "$log_path"
   else
     operation_finish "$id" failed build_failed 'Runner image build failed.' "$log_path"
   fi
