@@ -55,6 +55,7 @@ pub enum ConfigError {
     InvalidPath,
     InvalidRunnerSource,
     InvalidExecutionBackend,
+    UnsafeNativeExecution,
     UnsafePathLayout,
     InvalidResources,
     InvalidDuration,
@@ -120,18 +121,12 @@ fn execution_config(
     values: &BTreeMap<String, String>,
     state_root: &Path,
 ) -> Result<NodeExecutionConfig, ConfigError> {
-    match optional(values, "CRF_EXECUTION_BACKEND").unwrap_or("native_process") {
-        "native_process" => {
-            let runtime_root = absolute_path(required(values, "CRF_RUNTIME_DIR")?)?;
-            let log_root = absolute_path(required(values, "CRF_LOG_DIR")?)?;
-            let runner_source = runner_source(values)?;
-            validate_path_layout(&runner_source, state_root, &runtime_root, &log_root)?;
-            Ok(NodeExecutionConfig::Native {
-                runner_source,
-                runtime_root,
-                log_root,
-            })
-        }
+    match required(values, "CRF_EXECUTION_BACKEND")? {
+        // Native workflow code would inherit the node agent's OS identity and
+        // could read mTLS credentials/control state or inspect sibling jobs.
+        // Keep the implementation unavailable to production configuration until
+        // each placement has a real platform sandbox and distinct identity.
+        "native_process" => Err(ConfigError::UnsafeNativeExecution),
         "container" => {
             let adapter_program =
                 absolute_path(required(values, "CRF_CONTAINER_ADAPTER_PROGRAM")?)?;
@@ -151,21 +146,6 @@ fn execution_config(
             })
         }
         _ => Err(ConfigError::InvalidExecutionBackend),
-    }
-}
-
-fn runner_source(values: &BTreeMap<String, String>) -> Result<RunnerSourceConfig, ConfigError> {
-    let template = optional(values, "CRF_RUNNER_TEMPLATE");
-    let manifest = optional(values, "CRF_RUNNER_MANIFEST");
-    let cache = optional(values, "CRF_RUNNER_CACHE_DIR");
-
-    match (template, manifest, cache) {
-        (Some(template), None, None) => Ok(RunnerSourceConfig::Template(absolute_path(template)?)),
-        (None, Some(manifest), Some(cache)) => Ok(RunnerSourceConfig::Managed {
-            manifest_path: absolute_path(manifest)?,
-            cache_root: absolute_path(cache)?,
-        }),
-        _ => Err(ConfigError::InvalidRunnerSource),
     }
 }
 
@@ -190,46 +170,6 @@ fn absolute_path(value: &str) -> Result<PathBuf, ConfigError> {
         return Err(ConfigError::InvalidPath);
     }
     Ok(path)
-}
-
-fn validate_path_layout(
-    source: &RunnerSourceConfig,
-    state: &Path,
-    runtime: &Path,
-    logs: &Path,
-) -> Result<(), ConfigError> {
-    let mut writable = vec![state, runtime, logs];
-    match source {
-        RunnerSourceConfig::Template(template) => {
-            if writable
-                .iter()
-                .any(|path| path == &template.as_path() || path.starts_with(template))
-            {
-                return Err(ConfigError::UnsafePathLayout);
-            }
-        }
-        RunnerSourceConfig::Managed {
-            manifest_path,
-            cache_root,
-        } => {
-            writable.push(cache_root.as_path());
-            if writable
-                .iter()
-                .any(|path| manifest_path == *path || manifest_path.starts_with(path))
-            {
-                return Err(ConfigError::UnsafePathLayout);
-            }
-        }
-    }
-
-    for (index, left) in writable.iter().enumerate() {
-        for right in writable.iter().skip(index + 1) {
-            if left == right || left.starts_with(right) || right.starts_with(left) {
-                return Err(ConfigError::UnsafePathLayout);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn positive_u64(value: &str) -> Result<u64, ()> {
@@ -290,12 +230,11 @@ mod tests {
             ("CRF_CLIENT_CERT".into(), test_path("/etc/crf/node.pem")),
             ("CRF_CLIENT_KEY".into(), test_path("/etc/crf/node-key.pem")),
             ("CRF_STATE_DIR".into(), test_path("/var/lib/crf/state")),
+            ("CRF_EXECUTION_BACKEND".into(), "container".into()),
             (
-                "CRF_RUNNER_TEMPLATE".into(),
-                test_path("/opt/crf/runner-template"),
+                "CRF_CONTAINER_ADAPTER_PROGRAM".into(),
+                test_path("/usr/local/libexec/crf-container-adapter"),
             ),
-            ("CRF_RUNTIME_DIR".into(), test_path("/var/lib/crf/runners")),
-            ("CRF_LOG_DIR".into(), test_path("/var/log/crf")),
             ("CRF_NODE_CPU_MILLIS".into(), "8000".into()),
             ("CRF_NODE_MEMORY_BYTES".into(), "17179869184".into()),
         ])
@@ -306,12 +245,11 @@ mod tests {
         let config = NodeConfig::from_values(&values()).expect("config");
         assert_eq!(
             config.execution,
-            NodeExecutionConfig::Native {
-                runner_source: RunnerSourceConfig::Template(PathBuf::from(test_path(
-                    "/opt/crf/runner-template",
-                ))),
-                runtime_root: PathBuf::from(test_path("/var/lib/crf/runners")),
-                log_root: PathBuf::from(test_path("/var/log/crf")),
+            NodeExecutionConfig::Container {
+                adapter_program: PathBuf::from(test_path(
+                    "/usr/local/libexec/crf-container-adapter",
+                )),
+                adapter_timeout: Duration::from_secs(15),
             }
         );
         assert_eq!(
@@ -378,16 +316,7 @@ mod tests {
 
     #[test]
     fn container_backend_requires_only_adapter_runtime_configuration() {
-        let mut container = values();
-        container.remove("CRF_RUNNER_TEMPLATE");
-        container.remove("CRF_RUNTIME_DIR");
-        container.remove("CRF_LOG_DIR");
-        container.insert("CRF_EXECUTION_BACKEND".into(), "container".into());
-        container.insert(
-            "CRF_CONTAINER_ADAPTER_PROGRAM".into(),
-            test_path("/usr/local/libexec/crf-container-adapter"),
-        );
-
+        let container = values();
         assert_eq!(
             NodeConfig::from_values(&container)
                 .expect("container config")
@@ -411,10 +340,6 @@ mod tests {
         );
 
         let mut overlapping = values();
-        overlapping.remove("CRF_RUNNER_TEMPLATE");
-        overlapping.remove("CRF_RUNTIME_DIR");
-        overlapping.remove("CRF_LOG_DIR");
-        overlapping.insert("CRF_EXECUTION_BACKEND".into(), "container".into());
         overlapping.insert(
             "CRF_CONTAINER_ADAPTER_PROGRAM".into(),
             test_path("/var/lib/crf/state/bin/adapter"),
@@ -428,14 +353,6 @@ mod tests {
     #[test]
     fn container_adapter_timeout_is_bounded() {
         let mut container = values();
-        container.remove("CRF_RUNNER_TEMPLATE");
-        container.remove("CRF_RUNTIME_DIR");
-        container.remove("CRF_LOG_DIR");
-        container.insert("CRF_EXECUTION_BACKEND".into(), "container".into());
-        container.insert(
-            "CRF_CONTAINER_ADAPTER_PROGRAM".into(),
-            test_path("/usr/local/libexec/crf-container-adapter"),
-        );
         container.insert("CRF_CONTAINER_ADAPTER_TIMEOUT_MS".into(), "121000".into());
         assert_eq!(
             NodeConfig::from_values(&container),
@@ -444,9 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_runner_source_requires_manifest_and_cache_only() {
+    fn native_execution_is_rejected_before_runner_paths_are_opened() {
         let mut managed = values();
-        managed.remove("CRF_RUNNER_TEMPLATE");
+        managed.insert("CRF_EXECUTION_BACKEND".into(), "native_process".into());
+        managed.remove("CRF_CONTAINER_ADAPTER_PROGRAM");
         managed.insert(
             "CRF_RUNNER_MANIFEST".into(),
             test_path("/etc/crf/runner-manifest.json"),
@@ -457,57 +375,18 @@ mod tests {
         );
 
         assert_eq!(
-            NodeConfig::from_values(&managed)
-                .expect("managed")
-                .execution,
-            NodeExecutionConfig::Native {
-                runner_source: RunnerSourceConfig::Managed {
-                    manifest_path: PathBuf::from(test_path("/etc/crf/runner-manifest.json")),
-                    cache_root: PathBuf::from(test_path("/var/cache/crf/runner")),
-                },
-                runtime_root: PathBuf::from(test_path("/var/lib/crf/runners")),
-                log_root: PathBuf::from(test_path("/var/log/crf")),
-            }
-        );
-
-        managed.insert(
-            "CRF_RUNNER_TEMPLATE".into(),
-            test_path("/opt/crf/runner-template"),
-        );
-        assert_eq!(
             NodeConfig::from_values(&managed),
-            Err(ConfigError::InvalidRunnerSource)
+            Err(ConfigError::UnsafeNativeExecution)
         );
     }
 
     #[test]
-    fn writable_paths_cannot_live_inside_runner_template() {
-        let mut values = values();
-        values.insert(
-            "CRF_RUNTIME_DIR".into(),
-            test_path("/opt/crf/runner-template/runners"),
-        );
+    fn execution_backend_must_be_explicit() {
+        let mut configured = values();
+        configured.remove("CRF_EXECUTION_BACKEND");
         assert_eq!(
-            NodeConfig::from_values(&values),
-            Err(ConfigError::UnsafePathLayout)
-        );
-    }
-
-    #[test]
-    fn managed_cache_cannot_overlap_other_writable_roots() {
-        let mut values = values();
-        values.remove("CRF_RUNNER_TEMPLATE");
-        values.insert(
-            "CRF_RUNNER_MANIFEST".into(),
-            test_path("/etc/crf/runner-manifest.json"),
-        );
-        values.insert(
-            "CRF_RUNNER_CACHE_DIR".into(),
-            test_path("/var/lib/crf/runners/cache"),
-        );
-        assert_eq!(
-            NodeConfig::from_values(&values),
-            Err(ConfigError::UnsafePathLayout)
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::MissingValue)
         );
     }
 

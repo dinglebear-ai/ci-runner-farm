@@ -17,26 +17,12 @@ CRF_STATE_DIR=/var/lib/ci-runner-farm/node/state
 # Keep this on durable local storage; the node writes it atomically with mode 0600.
 CRF_OPERATOR_PROJECTION_PATH=/var/lib/ci-runner-farm/node/status/controller.json
 
-# Execution backend. Omit CRF_EXECUTION_BACKEND for the backward-compatible
-# native_process default. Configure exactly one backend contract.
-#
-# Native process backend:
-# CRF_EXECUTION_BACKEND=native_process
-CRF_RUNTIME_DIR=/var/lib/ci-runner-farm/node/runners
-CRF_LOG_DIR=/var/log/ci-runner-farm/node
-# Choose exactly ONE native runner source.
-# Managed pinned package (recommended):
-CRF_RUNNER_MANIFEST=/etc/ci-runner-farm/runner-manifest.json
-CRF_RUNNER_CACHE_DIR=/var/lib/ci-runner-farm/node/runner-cache
-# Pre-staged template alternative:
-# CRF_RUNNER_TEMPLATE=/opt/ci-runner-farm/runner-template
-#
-# Controller-approved container backend alternative:
-# CRF_EXECUTION_BACKEND=container
-# CRF_CONTAINER_ADAPTER_PROGRAM=/usr/local/libexec/ci-runner-farm/container-adapter
-# CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
-# Native CRF_RUNTIME_DIR / CRF_LOG_DIR / runner-source settings are not required
-# in container mode. The adapter receives the JIT descriptor only over stdin.
+# A backend is mandatory. Native processes are rejected because repository code
+# would share the node agent identity and could read its mTLS/control state.
+CRF_EXECUTION_BACKEND=container
+CRF_CONTAINER_ADAPTER_PROGRAM=/usr/local/libexec/ci-runner-farm/container-adapter
+CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
+# The adapter receives the JIT descriptor only over bounded stdin.
 
 # Optional bounded tuning.
 CRF_HEARTBEAT_MS=5000

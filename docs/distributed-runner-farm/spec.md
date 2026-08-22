@@ -25,7 +25,7 @@ Run one CI Runner Farm across heterogeneous devices while preserving global pool
 
 ## Initial execution path
 
-Portable nodes execute native GitHub Actions runners on Linux and Windows. The existing Unraid Docker/container runtime remains the current local backend until it is moved behind the same execution interface.
+Portable nodes execute GitHub Actions runners through an isolated container adapter. Native process execution is disabled because it cannot safely separate workflow code from node credentials and control state.
 
 ## Admission model
 

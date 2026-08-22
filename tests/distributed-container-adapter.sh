@@ -318,8 +318,8 @@ grep -Fq 'exec bash "$SCRIPT_DIR/runner-farm.sh" distributed-adapter' "$WRAPPER"
 if grep -Eq '^DISTRIBUTED_|^CRF_(CONTROLLER|EXECUTION_BACKEND|CONTAINER_ADAPTER)' src/usr/local/emhttp/plugins/ci-runner-farm/default.cfg; then
   crf_fail 'distributed mode was added to the legacy default configuration'
 fi
-grep -Fq 'Omit `CRF_EXECUTION_BACKEND` or set it to `native_process`' docs/distributed-runner-farm/runner-packages.md ||
-  crf_fail 'backward-compatible native node default is undocumented'
+grep -Fq 'there is no unsafe override' docs/distributed-runner-farm/runner-packages.md ||
+  crf_fail 'fail-closed native execution policy is undocumented'
 grep -Fq 'If the variable is absent or empty, the controller preserves the legacy/minimal startup path.' docs/distributed-runner-farm/controller-config.md ||
   crf_fail 'backward-compatible controller startup default is undocumented'
 [ -x "$WRAPPER" ] || crf_fail 'source adapter wrapper is not executable'

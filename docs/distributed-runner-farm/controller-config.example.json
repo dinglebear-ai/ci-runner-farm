@@ -48,7 +48,7 @@
         },
         "required_os": "linux",
         "required_arch": "x86_64",
-        "required_backend": "native_process",
+        "required_backend": "container",
         "required_capabilities": ["github-actions"],
         "work_folder": "_work"
       }
