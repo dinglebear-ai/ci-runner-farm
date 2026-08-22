@@ -4805,6 +4805,25 @@ build_candidate_tag_valid() {
   [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$ ]]
 }
 
+# A literal local/... FROM is an operator-managed, host-local prerequisite.
+# Fail before invoking BuildKit: otherwise it treats the missing name as a
+# Docker Hub reference and emits a misleading pull/authentication failure.
+build_local_base_images_available() {
+  local dockerfile="$1" image
+  while IFS= read -r image; do
+    [ -z "$image" ] || docker image inspect "$image" >/dev/null 2>&1 || {
+      err "local base image '$image' is unavailable; build or restore it on this host before rebuilding the runner image"
+      return 1
+    }
+  done < <(awk '
+    toupper($1) == "FROM" {
+      image = $2
+      if (image ~ /^--platform=/) image = $3
+      if (image ~ /^local\//) print image
+    }
+  ' "$dockerfile")
+}
+
 # The plugin image builder intentionally creates a minimal context. Nashost's
 # supported deployment recipes need a small allowlisted set of companions; do
 # not copy the Dockerfile's
@@ -4990,6 +5009,7 @@ cmd_build_image() {
   local -a build_args=()
   ctx="$(mktemp -d)" || return 1
   cp "$df" "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
+  build_local_base_images_available "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
   if build_context_needs_kache_supervisor "$ctx/Dockerfile"; then
     if [ -n "${1:-}" ]; then companion_source="${df}.kache-supervise.sh"
     else companion_source="${df%/*}/kache-supervise.sh"
