@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [1.10.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.2...v1.10.0) (2026-08-22)
+
 ### Changed
 
 * Build local runner images under immutable candidate tags and require an explicit exact-image-ID promotion before changing the production `ci-runner-farm-runner:latest` tag.
@@ -17,8 +19,6 @@
 * Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Nashost runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
 * Document the final feasible 16-runner Nashost pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
 * Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
-
-## [1.10.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.2...v1.10.0) (2026-08-22)
 
 
 ### Features
