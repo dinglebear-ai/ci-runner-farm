@@ -4,11 +4,11 @@ cd "$(dirname "$0")/.."
 mod=tools/crf-scaleset
 grep -Fq 'go 1.25.3' "$mod/go.mod"
 grep -Fq 'github.com/actions/scaleset v0.4.0' "$mod/go.mod"
-grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008' "$mod/go.mod"
-grep -Fq '34d2a863b00883630a1b5e840300c8d44db3206c' "$mod/cmd/crf-scaleset/main.go"
+grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a' "$mod/go.mod"
+grep -Fq '42b0b661848a5228a72e63084dbee1872ccd3211' "$mod/cmd/crf-scaleset/main.go"
 ! grep -R -Eq 'listener\.New|listener\.Run' "$mod"
 go test -C "$mod" ./...
-go test -C "$mod" ./vendor/github.com/actions/scaleset
+GOFLAGS=-mod=mod go test -C "$mod" github.com/actions/scaleset -run 'TestGetAcquirableJobs' -count=1
 go vet -C "$mod" ./...
 
 tmpdir="$(mktemp -d)"

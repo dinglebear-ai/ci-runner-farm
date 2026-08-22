@@ -57,11 +57,11 @@ grep -Fq 'JIT_LOG_MAX_DAYS="${JIT_LOG_MAX_DAYS:-7}"' \
   crf_fail "seven-day diagnostic cap drifted"
 grep -Fq '30*24*time.Hour' tools/crf-scaleset/cmd/crf-scaleset/main.go ||
   crf_fail "30-day compatibility age drifted"
-grep -Fq '34d2a863b00883630a1b5e840300c8d44db3206c' \
+grep -Fq '42b0b661848a5228a72e63084dbee1872ccd3211' \
   tools/crf-scaleset/cmd/crf-scaleset/main.go || crf_fail "scale-set module revision drifted"
 grep -Fq 'github.com/actions/scaleset v0.4.0' tools/crf-scaleset/go.mod ||
   crf_fail "scale-set module version drifted"
-grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008' \
+grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a' \
   tools/crf-scaleset/go.mod || crf_fail "scale-set fork backport drifted"
 grep -Fq 'go 1.25.3' tools/crf-scaleset/go.mod || crf_fail "Go version drifted"
 
@@ -175,7 +175,7 @@ grep -Fq 'statically linked' <<<"$helper_type" || crf_fail "packaged helper is n
 php -r '
   $j=json_decode(file_get_contents($argv[1]),true);
   exit(is_array($j)&&($j["go_version"]??"")==="go1.25.3"&&
-    ($j["module_revision"]??"")==="34d2a863b00883630a1b5e840300c8d44db3206c"?0:1);
+    ($j["module_revision"]??"")==="42b0b661848a5228a72e63084dbee1872ccd3211"?0:1);
 ' "$tmp/version.json" || crf_fail "packaged helper identity mismatch"
 
 record="${CRF_LIVE_COMPAT_RECORD:-}"

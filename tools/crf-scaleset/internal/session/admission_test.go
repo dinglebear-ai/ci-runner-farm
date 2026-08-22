@@ -139,6 +139,28 @@ func TestRuntimeHistoryIsDeterministicallyBoundedInMemory(t *testing.T) {
 	}
 }
 
+func TestRuntimeHistoryEvictionRetainsHotEstimate(t *testing.T) {
+	hotMetadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "hot"}
+	hotKey := runtimeKey("build", hotMetadata)
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		hotKey: {duration: 15 * time.Second, samples: 100},
+	}}
+	for i := 0; i < maxRuntimeHistoryEntries+64; i++ {
+		metadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+			JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+			JobDisplayName: fmt.Sprintf("cold-%04d", i)}
+		poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata,
+			RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}})
+	}
+	if len(poller.runtimes) != maxRuntimeHistoryEntries {
+		t.Fatalf("runtime map grew to %d entries", len(poller.runtimes))
+	}
+	if got := poller.runtimes[hotKey]; got.samples != 100 || got.duration != 15*time.Second {
+		t.Fatalf("hot estimate was evicted or mutated: %#v", got)
+	}
+}
+
 func TestCloseFlushesDirtyRuntimeHints(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay", "messages.jsonl")}
 	poller := &Poller{cfg: Config{API: &fakeAPI{}, Store: store},
@@ -185,6 +207,30 @@ func TestRuntimePersistenceFailureRemainsDirtyUntilSuccessfulRetry(t *testing.T)
 	if poller.runtimeDirty || poller.lastRuntimePersist.IsZero() {
 		t.Fatalf("successful retry did not clear dirty state: dirty=%v persisted=%v",
 			poller.runtimeDirty, poller.lastRuntimePersist)
+	}
+}
+
+func TestClosePersistenceFailureStillClosesActiveSession(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{}
+	poller := &Poller{
+		cfg:      Config{API: api, Store: journal.Store{Path: filepath.Join(blocked, "messages.jsonl")}},
+		sessions: map[int64]crfgithub.Session{7: {ScaleSetID: 7, ID: "session-1"}},
+		runtimes: map[runtimeDigest]runtimeEstimate{
+			runtimeDigest{1}: {duration: time.Minute, samples: 1},
+		},
+		runtimeDirty: true, runtimeGeneration: 1,
+	}
+	err := poller.Close(context.Background())
+	if err == nil {
+		t.Fatal("Close hid runtime persistence failure")
+	}
+	if api.closeCalls != 1 {
+		t.Fatalf("CloseMessageSession calls=%d, want 1", api.closeCalls)
 	}
 }
 

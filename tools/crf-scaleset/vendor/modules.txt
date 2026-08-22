@@ -1,4 +1,4 @@
-# github.com/actions/scaleset v0.4.0 => github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008
+# github.com/actions/scaleset v0.4.0 => github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a
 ## explicit; go 1.25.3
 github.com/actions/scaleset
 # github.com/golang-jwt/jwt/v4 v4.5.2
@@ -13,4 +13,4 @@ github.com/hashicorp/go-cleanhttp
 # github.com/hashicorp/go-retryablehttp v0.7.8
 ## explicit; go 1.23
 github.com/hashicorp/go-retryablehttp
-# github.com/actions/scaleset => github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008
+# github.com/actions/scaleset => github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a

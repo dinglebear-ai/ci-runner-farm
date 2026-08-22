@@ -1,7 +1,7 @@
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008 h1:KMNBCEa6ehDCdEUWaD7T5KqSL8ZpZZl2rpL/YwdfOsg=
-github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008/go.mod h1:2L2I6rggFWV+zprDet6y7y7Vkm3HPudaup78eSc79Uo=
+github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a h1:j/XqeH7q+S04otuiqeR9lh/m79JJB9KNSoEEX4gG2QU=
+github.com/dinglebear-ai/scaleset v0.4.1-0.20260822014606-42b0b661848a/go.mod h1:2L2I6rggFWV+zprDet6y7y7Vkm3HPudaup78eSc79Uo=
 github.com/fatih/color v1.16.0 h1:zmkK9Ngbjj+K0yRhTVONQh1p/HknKYSlNT+vZCzyokM=
 github.com/fatih/color v1.16.0/go.mod h1:fL2Sau1YI5c0pdGEVCbKQbLXB6edEj1ZgiY4NijnWvE=
 github.com/golang-jwt/jwt/v4 v4.5.2 h1:YtQM7lnr8iZ+j5q71MGKkNw9Mn7AjHM68uc9g5fXeUI=

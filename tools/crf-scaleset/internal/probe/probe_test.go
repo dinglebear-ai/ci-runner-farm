@@ -15,7 +15,7 @@ func completeRecord() Record {
 		caps[name] = true
 	}
 	return Record{PluginDigest: strings.Repeat("a", 64), HelperDigest: strings.Repeat("b", 64),
-		ModuleRevision: "34d2a863b00883630a1b5e840300c8d44db3206c", GoVersion: "go1.25.3",
+		ModuleRevision: "42b0b661848a5228a72e63084dbee1872ccd3211", GoVersion: "go1.25.3",
 		ImageDigest: strings.Repeat("c", 64), DockerfileDigest: strings.Repeat("d", 64),
 		EntrypointDigest: strings.Repeat("e", 64), Owner: "acme", APIURL: "https://api.github.com",
 		InstallationID: "installation", HostID: "host", RunnerGroupID: 42,

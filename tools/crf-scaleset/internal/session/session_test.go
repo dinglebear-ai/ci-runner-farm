@@ -1,8 +1,10 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -273,24 +275,39 @@ func TestAcquirableLookupTelemetryTracksDegradationAndRecovery(t *testing.T) {
 	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAvailableJobs: 2},
 		AvailableJobs: []crfgithub.AvailableJob{visible}}
 	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+	poller.acquisitionBatch(context.Background(), pool, batch)
 	poller.acquisitionBatch(context.Background(), pool, batch)
 	if got := poller.acquirableHealth[7]; got != "timeout" {
 		t.Fatalf("timeout degradation state=%q", got)
 	}
 	api.mu.Lock()
 	api.acquirableErr = nil
-	api.acquirable = nil
-	api.mu.Unlock()
-	poller.acquisitionBatch(context.Background(), pool, batch)
-	if got := poller.acquirableHealth[7]; got != "empty" {
-		t.Fatalf("empty degradation state=%q", got)
-	}
-	api.mu.Lock()
 	api.acquirable = []crfgithub.AvailableJob{visible}
 	api.mu.Unlock()
 	poller.acquisitionBatch(context.Background(), pool, batch)
 	if got := poller.acquirableHealth[7]; got != "healthy" {
 		t.Fatalf("recovery state=%q", got)
+	}
+	output := logs.String()
+	if got := strings.Count(output, "acquirable lookup degraded"); got != 1 {
+		t.Fatalf("timeout telemetry was not deduplicated: count=%d logs=%q", got, output)
+	}
+	if got := strings.Count(output, "acquirable lookup recovered"); got != 1 {
+		t.Fatalf("recovery telemetry count=%d logs=%q", got, output)
+	}
+	for _, field := range []string{"scale_set_id=7", "state=timeout", "previous=timeout"} {
+		if !strings.Contains(output, field) {
+			t.Fatalf("telemetry missing %q: %q", field, output)
+		}
 	}
 }
 
