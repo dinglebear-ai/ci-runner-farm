@@ -24,6 +24,7 @@ gc_remove_failure=
 slow_gc_rm_seconds=0
 gc_rm_started="$tmp/gc-rm-started"
 gc_rm_finished="$tmp/gc-rm-finished"
+gc_rm_gate="$tmp/gc-rm-gate"
 gc_rm_active="$tmp/gc-rm-active"
 gc_rm_max_active="$tmp/gc-rm-max-active"
 gc_inherited_fd5="$tmp/gc-inherited-fd5"
@@ -56,6 +57,7 @@ rm(){
         [ "$active" -le "$max" ] || printf '%s\n' "$active" >"$gc_rm_max_active"
       ) 9>"$tmp/gc-rm-count.lock"
       [ "$slow_gc_rm_seconds" = 0 ] || sleep "$slow_gc_rm_seconds"
+      while [ -e "$gc_rm_gate" ]; do sleep 0.01; done
       if [ -n "$gc_remove_failure" ] && [[ "${arg##*/}" == "$gc_remove_failure"* ]]; then
         (
           flock -x 9
@@ -283,25 +285,25 @@ fake_exists[$slow]=0; fake_status[$slow]=exited; fake_consumed[$slow]=1; fake_po
 mkdir -p "$CACHE_ROOT/work/$slow" "$CACHE_ROOT/docker/$slow"
 touch "$CACHE_ROOT/work/$slow/artifact" "$CACHE_ROOT/docker/$slow/layer" "$RESERVATION_DIR/$slow_reservation.state"
 write_state "$JIT_STATE_DIR/$slow.state" "$slow" terminal "$slow_reservation" 808 "$old" rust
-slow_gc_rm_seconds=1
-: >"$gc_rm_started"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
+slow_gc_rm_seconds=0
+: >"$gc_rm_started"; : >"$gc_rm_finished"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
+: >"$gc_rm_gate"
 exec 5>"$tmp/autoscale-tick.lock"
 flock 5
 exec 8>"$tmp/autoscale-fleet.lock"
 flock 8
-started_ns="$(date +%s%N)"
 jit_reconcile
-elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 flock -u 8; exec 8>&-
 flock -u 5; exec 5>&-
-[ "$elapsed_ms" -lt 500 ] || crf_fail "slow recursive deletion delayed JIT reconciliation (${elapsed_ms}ms)"
 [ ! -e "$JIT_STATE_DIR/$slow.state" ] || crf_fail "slow cleanup did not converge JIT state"
 [ ! -e "$RESERVATION_DIR/$slow_reservation.state" ] || crf_fail "slow cleanup did not release reservation"
 [ ! -e "$CACHE_ROOT/work/$slow" ] && [ ! -e "$CACHE_ROOT/docker/$slow" ] || crf_fail "slow cleanup left live runner paths attached"
 for _ in {1..100}; do [ -s "$gc_rm_started" ] && break; sleep 0.01; done
 [ -s "$gc_rm_started" ] || crf_fail "background GC sweep did not start"
+[ ! -s "$gc_rm_finished" ] || crf_fail "blocked recursive deletion completed before reconciliation returned"
 [ ! -s "$gc_inherited_fd5" ] || crf_fail "GC sweeper inherited the autoscale tick lock fd"
 [ ! -s "$gc_inherited_fd8" ] || crf_fail "GC sweeper inherited the autoscale lock fd"
+rm -f "$gc_rm_gate"
 wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
 
 # The production command is commonly invoked through a pipe or output-capturing
