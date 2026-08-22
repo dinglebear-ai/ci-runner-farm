@@ -321,7 +321,8 @@ export safe_cache_root_mode detach_failure_runner gc_remove_failure
 export -f crf_safe_cache_root jit_gc_log jit_gc_root_prepare jit_gc_sweep_config_valid
 export -f jit_gc_sweep jit_gc_sweep_start rm mv
 : >"$gc_rm_gate"
-pipe_result="$(timeout 2 bash -c 'jit_gc_sweep_start; printf detached' | cat)" ||
+pipe_result="$(timeout --kill-after=1 2 bash -c \
+  'bash -c "jit_gc_sweep_start; printf detached" | cat')" ||
   crf_fail "piped caller retained background GC descriptors"
 [ "$pipe_result" = detached ] || crf_fail "piped GC start returned unexpected output"
 [ -e "$pipe_item" ] || crf_fail "blocked piped GC reclaimed its fixture before gate release"
