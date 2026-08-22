@@ -21,6 +21,14 @@ on:
         options:
           - ci-pool-ops
           - ci-pool-acceptance-linux
+      windows_pool:
+        description: Windows scale-set routing label (use the isolated lane for fleet qualification)
+        required: true
+        type: choice
+        default: ci-pool-windows
+        options:
+          - ci-pool-windows
+          - ci-pool-acceptance-linux
 
 permissions:
   contents: read
@@ -61,7 +69,9 @@ jobs:
 
   distributed-windows:
     if: inputs.target == 'distributed-windows'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-windows' || 'windows-latest' }}
+    # The isolated acceptance label is platform-neutral; the controller pool
+    # policy selects Windows or Linux nodes for each qualification phase.
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.windows_pool || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - name: Record distributed Windows placement
