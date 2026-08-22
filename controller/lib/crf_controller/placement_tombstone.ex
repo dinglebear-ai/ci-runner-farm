@@ -81,9 +81,14 @@ defmodule CrfController.PlacementTombstone do
         _now_ms
       ) do
     with :ok <- placement_identity(tombstone, node_id, generation, command_id),
-         true <- state == tombstone.state,
+         true <- state in @terminal_states,
          :ok <- validate_detail_code(detail_code) do
-      {:ok, %{tombstone | node_generation: generation, detail_code: detail_code}}
+      # The tombstone is controller-authoritative. A node can legitimately discover a
+      # different terminal outcome after the controller has already fenced the placement
+      # (for example, an idle runner exits after an operator-side failure). Acknowledge the
+      # identity-valid replay so the node can durably mark it reported, but never rewrite
+      # the controller's terminal outcome or detail.
+      {:ok, %{tombstone | node_generation: generation}}
     else
       false -> {:error, :terminal_state_conflict}
       {:error, reason} -> {:error, reason}
