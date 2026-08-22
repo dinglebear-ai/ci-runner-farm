@@ -286,6 +286,7 @@ mkdir -p "$CACHE_ROOT/work/$slow" "$CACHE_ROOT/docker/$slow"
 touch "$CACHE_ROOT/work/$slow/artifact" "$CACHE_ROOT/docker/$slow/layer" "$RESERVATION_DIR/$slow_reservation.state"
 write_state "$JIT_STATE_DIR/$slow.state" "$slow" terminal "$slow_reservation" 808 "$old" rust
 slow_gc_rm_seconds=0
+wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || crf_fail "earlier GC sweep failed before blocked cleanup proof"
 : >"$gc_rm_started"; : >"$gc_rm_finished"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
 : >"$gc_rm_gate"
 exec 5>"$tmp/autoscale-tick.lock"
@@ -304,7 +305,10 @@ for _ in {1..100}; do [ -s "$gc_rm_started" ] && break; sleep 0.01; done
 [ ! -s "$gc_inherited_fd5" ] || crf_fail "GC sweeper inherited the autoscale tick lock fd"
 [ ! -s "$gc_inherited_fd8" ] || crf_fail "GC sweeper inherited the autoscale lock fd"
 rm -f "$gc_rm_gate"
-wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
+wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || crf_fail "blocked GC sweep failed after release"
+[ -s "$gc_rm_finished" ] || crf_fail "released recursive deletion did not complete"
+find "$CACHE_ROOT/.jit-gc" -maxdepth 1 -name "$slow.*" | grep -q . &&
+  crf_fail "released recursive deletion left quarantined runner data"
 
 # The production command is commonly invoked through a pipe or output-capturing
 # caller. The detached sweeper must not retain those descriptors and delay EOF.
