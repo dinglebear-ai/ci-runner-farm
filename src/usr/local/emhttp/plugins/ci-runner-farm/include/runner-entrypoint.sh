@@ -133,8 +133,33 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
   trap - EXIT
   jit_json=""
   unset jit_json jit_tmp jit_tmp_files jit_final_files jit_allowed_files jit_file jit_final jit_index jit_committed
-  export RUNNER_ALLOW_RUNASROOT=1
-  exec "$jit_runner"
+  case "${RUN_AS_ROOT:-false}" in
+    true)
+      export RUNNER_ALLOW_RUNASROOT=1
+      exec "$jit_runner"
+      ;;
+    false)
+      command -v gosu >/dev/null 2>&1 && id -u runner >/dev/null 2>&1 || {
+        echo "ci-runner-farm: non-root JIT execution requires the runner account and gosu" >&2
+        exit 1
+      }
+      runner_workdir="${RUNNER_WORKDIR:-/_work}"
+      [ -d "$runner_workdir" ] && [ ! -L "$runner_workdir" ] || {
+        echo "ci-runner-farm: runner work directory is invalid" >&2
+        exit 1
+      }
+      chown runner:runner \
+        "$jit_config_dir/.runner" \
+        "$jit_config_dir/.credentials" \
+        "$jit_config_dir/.credentials_rsaparams" \
+        "$runner_workdir"
+      exec gosu runner env HOME=/home/runner USER=runner LOGNAME=runner "$jit_runner"
+      ;;
+    *)
+      echo "ci-runner-farm: RUN_AS_ROOT must be true or false" >&2
+      exit 1
+      ;;
+  esac
 else
   # The base image consumes RUNNER_TOKEN while configuring, unexports it before
   # subprocesses, and UNSET_CONFIG_VARS removes it before the long-lived listener.

@@ -126,6 +126,12 @@ set -euo pipefail
 [ "$(cat "$CRF_JIT_CONFIG_DIR/.credentials")" = credential-config ]
 [ "$(cat "$CRF_JIT_CONFIG_DIR/.credentials_rsaparams")" = rsa-config ]
 [ -f "$CRF_DOCKER_READY_MARKER" ]
+if [ "${CRF_TEST_EFFECTIVE_USER:-}" = runner ]; then
+  [ "$HOME" = /home/runner ]
+  [ "$USER" = runner ]
+  [ "$LOGNAME" = runner ]
+  [ -w "$RUNNER_WORKDIR" ]
+fi
 printf 'jit\n' > "$CRF_TEST_RESULT"
 SCRIPT
 chmod 0755 "$task_tmp/jit-runner"
@@ -152,6 +158,7 @@ descriptor="$(php -r 'echo base64_encode(json_encode([
 rm -rf "$CRF_SECRET_DIR"; mkdir -p "$task_tmp/jit-config"; : >"$CRF_TEST_RESULT"
 CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
   CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" \
+  RUN_AS_ROOT=true \
   START_DOCKER_SERVICE=true CRF_DOCKER_SUPERVISE=false \
   CRF_DOCKER_READY_MARKER="$task_tmp/docker-ready" CRF_DOCKER_LOG="$task_tmp/dockerd.log" \
   CRF_DOCKER_PID_FILE="$task_tmp/docker.pid" \
@@ -168,6 +175,65 @@ crf_assert_eq jit "$(cat "$CRF_TEST_RESULT")" "JIT entrypoint lifecycle"
 if grep -Fq "$descriptor" "$task_tmp/jit-stdout" "$task_tmp/jit-stderr"; then
   crf_fail "JIT descriptor leaked to output"
 fi
+
+# Non-root JIT mode keeps privileged bootstrap in the wrapper, then transfers
+# only the listener files and workdir before dropping to the runner account.
+cat > "$task_tmp/bin/id" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -u ] && [ "$2" = runner ]
+printf '1001\n'
+SCRIPT
+cat > "$task_tmp/bin/chown" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > "$CRF_TEST_CHOWN"
+SCRIPT
+cat > "$task_tmp/bin/gosu" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = runner ]; shift
+[ "$1" = env ]; shift
+export CRF_TEST_EFFECTIVE_USER=runner
+exec env "$@"
+SCRIPT
+chmod 0755 "$task_tmp/bin/id" "$task_tmp/bin/chown" "$task_tmp/bin/gosu"
+rm -rf "$CRF_SECRET_DIR" "$task_tmp/jit-config" "$task_tmp/jit-work"
+mkdir -p "$task_tmp/jit-config" "$task_tmp/jit-work"
+: >"$CRF_TEST_RESULT"; : >"$task_tmp/chown-args"; : >"$task_tmp/docker-ready"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
+  CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" RUNNER_WORKDIR="$task_tmp/jit-work" \
+  RUN_AS_ROOT=false START_DOCKER_SERVICE=false CRF_TEST_CHOWN="$task_tmp/chown-args" \
+  CRF_DOCKER_READY_MARKER="$task_tmp/docker-ready" \
+  PATH="$task_tmp/bin:$PATH" \
+  "$entrypoint" >"$task_tmp/nonroot-jit-stdout" 2>"$task_tmp/nonroot-jit-stderr" &
+entry_pid=$!
+wait_for_secret_fifo nonroot-JIT "$task_tmp/nonroot-jit-stderr"
+printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
+wait "$entry_pid" || { cat "$task_tmp/nonroot-jit-stderr" >&2; crf_fail 'non-root JIT entrypoint failed'; }
+crf_assert_eq jit "$(cat "$CRF_TEST_RESULT")" 'non-root JIT lifecycle'
+grep -Fxq runner:runner "$task_tmp/chown-args" || crf_fail 'non-root JIT ownership did not target runner:runner'
+for owned_path in .runner .credentials .credentials_rsaparams; do
+  grep -Fxq "$task_tmp/jit-config/$owned_path" "$task_tmp/chown-args" || crf_fail "non-root JIT did not transfer $owned_path"
+done
+grep -Fxq "$task_tmp/jit-work" "$task_tmp/chown-args" || crf_fail 'non-root JIT did not transfer its workdir'
+
+# Invalid privilege configuration fails closed before the listener starts.
+rm -rf "$CRF_SECRET_DIR" "$task_tmp/jit-config"
+mkdir -p "$task_tmp/jit-config"
+: >"$CRF_TEST_RESULT"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_RUNNER="$task_tmp/jit-runner" \
+  CRF_JIT_CONFIG_DIR="$task_tmp/jit-config" RUNNER_WORKDIR="$task_tmp/jit-work" \
+  RUN_AS_ROOT=unexpected START_DOCKER_SERVICE=false \
+  CRF_DOCKER_READY_MARKER="$task_tmp/docker-ready" PATH="$task_tmp/bin:$PATH" \
+  "$entrypoint" >"$task_tmp/invalid-user-stdout" 2>"$task_tmp/invalid-user-stderr" &
+entry_pid=$!
+wait_for_secret_fifo invalid-user-JIT "$task_tmp/invalid-user-stderr"
+printf '%s\n' "$descriptor" >"$CRF_SECRET_DIR/secret.in"
+if wait "$entry_pid"; then crf_fail 'JIT entrypoint accepted an invalid RUN_AS_ROOT value'; fi
+[ ! -s "$CRF_TEST_RESULT" ] || crf_fail 'invalid RUN_AS_ROOT started the listener'
+grep -Fq 'RUN_AS_ROOT must be true or false' "$task_tmp/invalid-user-stderr" ||
+  crf_fail 'invalid RUN_AS_ROOT did not report its configuration error'
 
 # Unknown JIT payload keys are never materialized or ignored silently.
 bad_descriptor="$(php -r 'echo base64_encode(json_encode([
