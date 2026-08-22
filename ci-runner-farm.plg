@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name          "ci-runner-farm">
 <!ENTITY author        "Lime Technology">
-<!ENTITY version       "2026.08.10.2331.44-1.9.2">
-<!ENTITY pluginVersion "1.9.2">
-<!ENTITY releaseTag    "v1.9.2">
+<!ENTITY version       "2026.08.22.2152.80-1.10.0">
+<!ENTITY pluginVersion "1.10.0">
+<!ENTITY releaseTag    "v1.10.0">
 <!ENTITY pluginURL     "https://github.com/dinglebear-ai/ci-runner-farm/releases/latest/download/ci-runner-farm.plg">
-<!ENTITY packageName   "ci-runner-farm-2026.08.10.2331.44-1.9.2.tgz">
-<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.9.2/ci-runner-farm-2026.08.10.2331.44-1.9.2.tgz">
-<!ENTITY packageMD5    "a5e284ab436d2cf25d0c8fea2be49af2">
+<!ENTITY packageName   "ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz">
+<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.10.0/ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz">
+<!ENTITY packageMD5    "ea165fc7e3789ef10b60221e8dde5b71">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
 ]>
@@ -52,15 +52,18 @@ CFGDIR="/boot/config/plugins/ci-runner-farm"
 RUNDIR="/var/local/emhttp/ci-runner-farm"
 mkdir -p "$CFGDIR" "$PLGDIR" "$RUNDIR"
 # Sweep any older package versions off flash, keeping this build's package.
-find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.08.10.2331.44-1.9.2.tgz' -delete 2>/dev/null || true
+find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz' -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
-tar -xzf "$CFGDIR/ci-runner-farm-2026.08.10.2331.44-1.9.2.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
+tar -xzf "$CFGDIR/ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
 chmod 0755 "$PLGDIR/include/runner-farm.sh"
+chmod 0755 "$PLGDIR/include/runner-runtime.sh"
+chmod 0755 "$PLGDIR/include/runner-container-adapter.sh"
+chmod 0755 "$PLGDIR/include/runner-distributed-adapter.sh"
 chmod 0755 "$PLGDIR/include/runner-entrypoint.sh"
 [ ! -f "$PLGDIR/bin/crf-scaleset" ] || chmod 0755 "$PLGDIR/bin/crf-scaleset"
 [ -d "$PLGDIR/nchan" ] && find "$PLGDIR/nchan" -type f -exec chmod 0755 {} +
@@ -107,7 +110,7 @@ fi
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
-echo "| ci-runner-farm 2026.08.10.2331.44-1.9.2 installed.                         "
+echo "| ci-runner-farm 2026.08.22.2152.80-1.10.0 installed.                         "
 echo "| Settings > Utilities > CI Runner Farm                        "
 echo "| Set a GitHub PAT, then Start (or Validate without a token).  "
 echo "+=============================================================+"
