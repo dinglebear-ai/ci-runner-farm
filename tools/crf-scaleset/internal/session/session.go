@@ -512,6 +512,9 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if batch.Statistics == nil {
 		return supervisor.PollResult{}, errors.New("message_statistics_required")
 	}
+	if err := crfgithub.ValidateStatistics(batch.Statistics); err != nil {
+		return supervisor.PollResult{}, err
+	}
 	p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)
 	if p.assignedCount(pool.ScaleSetID) == 0 {

@@ -277,6 +277,23 @@ func TestAdmissionNeverExceedsRemainingCapacity(t *testing.T) {
 	}
 }
 
+func TestAdmissionDefenseNeverExceedsCapacityForNegativeAssigned(t *testing.T) {
+	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
+	jobs := []crfgithub.AvailableJob{
+		testJob(1, "dinglebear-ai/soma", "workflow@refs/heads/main", "one", now),
+		testJob(2, "dinglebear-ai/soma", "workflow@refs/heads/main", "two", now),
+		testJob(3, "dinglebear-ai/soma", "workflow@refs/heads/main", "three", now),
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
+	minInt := -int(^uint(0)>>1) - 1
+	for _, assigned := range []int{-1, minInt} {
+		batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: assigned}, AvailableJobs: jobs}
+		if selected := poller.selectedAvailable(batch, "build", 2, now); len(selected) != 2 {
+			t.Fatalf("negative assigned count escaped capacity bound: assigned=%d selected=%v", assigned, selected)
+		}
+	}
+}
+
 func TestRuntimeKeyScopesOwnersAndBoundsUntrustedMetadata(t *testing.T) {
 	base := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
 		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "unit"}

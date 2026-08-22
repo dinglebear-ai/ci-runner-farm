@@ -23,6 +23,8 @@ JIT_LOG_MAX_DAYS="${JIT_LOG_MAX_DAYS:-7}"
 JIT_HANDOFF_GRACE_SECONDS="${JIT_HANDOFF_GRACE_SECONDS:-300}"
 JIT_RECENT_ACTIVITY_FILE="${JIT_RECENT_ACTIVITY_FILE:-$RUNDIR/recent-jobs.jsonl}"
 JIT_RECENT_ACTIVITY_MAX="${JIT_RECENT_ACTIVITY_MAX:-50}"
+JIT_GC_SWEEP_MAX="${JIT_GC_SWEEP_MAX:-8}"
+JIT_GC_SWEEPER_PID="${JIT_GC_SWEEPER_PID:-}"
 
 jit_paths_refresh() {
   if [ "$JIT_STATE_DIR_PINNED" = x ]; then
@@ -237,11 +239,86 @@ jit_retire_handle() {
   return "$validation_rc"
 }
 
+jit_gc_log() {
+  if declare -F log >/dev/null 2>&1; then
+    log "jit-gc: $*"
+  else
+    printf 'jit-gc: %s\n' "$*" >&2
+  fi
+}
+
+jit_gc_root_prepare() {
+  local root="$1" gc_root="$1/.jit-gc"
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  [ ! -e "$gc_root" ] || { [ -d "$gc_root" ] && [ ! -L "$gc_root" ]; } || return 1
+  mkdir -p -- "$gc_root" && chmod 0700 "$gc_root" || return 1
+  [ -d "$gc_root" ] && [ ! -L "$gc_root" ] || return 1
+  printf '%s\n' "$gc_root"
+}
+
+jit_gc_sweep() {
+  local root gc_root item count=0 rc=0
+  root="$(crf_safe_cache_root)" || return 1
+  gc_root="$(jit_gc_root_prepare "$root")" || return 1
+  [[ "$JIT_GC_SWEEP_MAX" =~ ^[1-9][0-9]*$ ]] && [ "$JIT_GC_SWEEP_MAX" -le 64 ] || return 1
+  for item in "$gc_root"/*; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    [ "$item" != "$gc_root/.sweep.lock" ] || continue
+    [ "$count" -lt "$JIT_GC_SWEEP_MAX" ] || break
+    count=$((count + 1))
+    if rm -rf -- "$item"; then
+      jit_gc_log "reclaimed item=${item##*/}"
+    else
+      jit_gc_log "reclaim_failed item=${item##*/}"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+jit_gc_sweep_start() {
+  local root gc_root lock
+  if [[ "$JIT_GC_SWEEPER_PID" =~ ^[1-9][0-9]*$ ]] &&
+     kill -0 "$JIT_GC_SWEEPER_PID" 2>/dev/null; then
+    return 0
+  fi
+  root="$(crf_safe_cache_root)" || return 1
+  gc_root="$(jit_gc_root_prepare "$root")" || return 1
+  lock="$gc_root/.sweep.lock"
+  (
+    # Reconciliation normally owns the autoscale fleet lock on fd 8. The
+    # asynchronous inode walk must never extend that lock's lifetime.
+    exec 8>&-
+    exec 9>"$lock" || exit 1
+    flock -n 9 || exit 0
+    command -v renice >/dev/null 2>&1 && renice 10 -p "$BASHPID" >/dev/null 2>&1 || true
+    command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$BASHPID" >/dev/null 2>&1 || true
+    jit_gc_sweep
+  ) &
+  JIT_GC_SWEEPER_PID=$!
+}
+
 jit_runner_data_remove() {
-  local runner_id="$1" root
+  local runner_id="$1" root gc_root kind parent source target detached=0
   jit_pool_from_runner_id "$runner_id" >/dev/null 2>&1 || return 1
   root="$(crf_safe_cache_root)" || return 1
-  rm -rf -- "${root:?}/work/${runner_id:?}" "${root:?}/docker/${runner_id:?}"
+  gc_root="$(jit_gc_root_prepare "$root")" || return 1
+  for kind in work docker; do
+    parent="$root/$kind"
+    [ ! -e "$parent" ] || { [ -d "$parent" ] && [ ! -L "$parent" ]; } || return 1
+    source="$parent/$runner_id"
+    [ -e "$source" ] || [ -L "$source" ] || continue
+    target="$gc_root/$runner_id.$kind.$(date +%s).$$.$RANDOM"
+    mv -- "$source" "$target" || {
+      jit_gc_log "detach_failed runner=$runner_id kind=$kind"
+      return 1
+    }
+    detached=$((detached + 1))
+    jit_gc_log "detached runner=$runner_id kind=$kind item=${target##*/}"
+  done
+  [ "$detached" -eq 0 ] || jit_gc_sweep_start ||
+    jit_gc_log "sweeper_start_failed runner=$runner_id"
+  return 0
 }
 
 jit_cleanup_observed() {
@@ -413,4 +490,7 @@ jit_reconcile() {
     esac
   done
   jit_reconcile_orphan_containers
+  # Also drains quarantine after daemon restart when no live runner path needed
+  # detaching during this reconciliation pass.
+  jit_gc_sweep_start || jit_gc_log "sweeper_start_failed reconciliation"
 }

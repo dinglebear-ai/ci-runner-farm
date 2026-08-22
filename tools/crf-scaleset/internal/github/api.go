@@ -297,11 +297,27 @@ func (a *Adapter) session(s Session) (*scaleset.MessageSessionClient, error) {
 	}
 	return v, nil
 }
-func stats(v *scaleset.RunnerScaleSetStatistic) *Statistics {
+func stats(v *scaleset.RunnerScaleSetStatistic) (*Statistics, error) {
+	if v == nil {
+		return nil, nil
+	}
+	decoded := &Statistics{v.TotalAvailableJobs, v.TotalAcquiredJobs, v.TotalAssignedJobs, v.TotalRunningJobs, v.TotalRegisteredRunners, v.TotalBusyRunners, v.TotalIdleRunners}
+	if err := ValidateStatistics(decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func ValidateStatistics(v *Statistics) error {
 	if v == nil {
 		return nil
 	}
-	return &Statistics{v.TotalAvailableJobs, v.TotalAcquiredJobs, v.TotalAssignedJobs, v.TotalRunningJobs, v.TotalRegisteredRunners, v.TotalBusyRunners, v.TotalIdleRunners}
+	if v.TotalAvailableJobs < 0 || v.TotalAcquiredJobs < 0 || v.TotalAssignedJobs < 0 ||
+		v.TotalRunningJobs < 0 || v.TotalRegisteredRunners < 0 || v.TotalBusyRunners < 0 ||
+		v.TotalIdleRunners < 0 {
+		return ErrInvalidResponse
+	}
+	return nil
 }
 
 func jobHandle(scaleSetID int64, job *scaleset.JobMessageBase) (int64, error) {
@@ -394,7 +410,11 @@ func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64
 	if err != nil || v == nil {
 		return MessageBatch{}, err
 	}
-	out := MessageBatch{MessageID: int64(v.MessageID), Statistics: stats(v.Statistics)}
+	statistics, err := stats(v.Statistics)
+	if err != nil {
+		return MessageBatch{}, err
+	}
+	out := MessageBatch{MessageID: int64(v.MessageID), Statistics: statistics}
 	for _, job := range v.JobAvailableMessages {
 		if job == nil || job.RunnerRequestID <= 0 {
 			return MessageBatch{}, errors.New("invalid_available_job_identity")

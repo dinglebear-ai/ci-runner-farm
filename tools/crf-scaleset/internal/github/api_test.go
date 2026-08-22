@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -160,6 +161,44 @@ func TestDecodeAcquirableJobsEnforcesResponseFuse(t *testing.T) {
 	}
 	if _, err := decodeAcquirableJobs(jobs); !errors.Is(err, ErrInvalidResponse) {
 		t.Fatalf("oversized acquirable list was accepted: err=%v", err)
+	}
+}
+
+func TestStatsRejectsEveryNegativeCounter(t *testing.T) {
+	minInt := -int(^uint(0)>>1) - 1
+	fields := []struct {
+		name string
+		set  func(*scaleset.RunnerScaleSetStatistic, int)
+	}{
+		{"available", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAvailableJobs = n }},
+		{"acquired", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAcquiredJobs = n }},
+		{"assigned", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAssignedJobs = n }},
+		{"running", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalRunningJobs = n }},
+		{"registered_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalRegisteredRunners = n }},
+		{"busy_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalBusyRunners = n }},
+		{"idle_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalIdleRunners = n }},
+	}
+	for _, field := range fields {
+		for _, negative := range []int{-1, minInt} {
+			t.Run(fmt.Sprintf("%s_%d", field.name, negative), func(t *testing.T) {
+				statistics := &scaleset.RunnerScaleSetStatistic{
+					TotalAvailableJobs: 1, TotalAcquiredJobs: 1, TotalAssignedJobs: 1,
+					TotalRunningJobs: 1, TotalRegisteredRunners: 1, TotalBusyRunners: 1,
+					TotalIdleRunners: 1,
+				}
+				field.set(statistics, negative)
+				if _, err := stats(statistics); !errors.Is(err, ErrInvalidResponse) {
+					t.Fatalf("negative %s counter was accepted: %v", field.name, err)
+				}
+			})
+		}
+	}
+}
+
+func TestStatsRejectsContradictoryNegativeAvailableCount(t *testing.T) {
+	value := &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: -1, TotalAssignedJobs: 4}
+	if _, err := stats(value); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("contradictory statistics were accepted: %v", err)
 	}
 }
 

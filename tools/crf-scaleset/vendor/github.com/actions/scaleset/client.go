@@ -44,7 +44,8 @@ const HeaderScaleSetMaxCapacity = "X-ScaleSetMaxCapacity"
 
 // Client implements a GitHub Actions Scale Set client.
 type Client struct {
-	mu sync.Mutex // guards every public call
+	mu               sync.Mutex // guards every public call
+	actionsRequestMu sync.Mutex // guards Actions request preparation and token refresh
 
 	// admin session info
 	actionsServiceAdminToken          string
@@ -211,6 +212,8 @@ func newClient(systemInfo SystemInfo, githubConfigURL string, creds actionsAuth,
 func (c *Client) SetSystemInfo(info SystemInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.actionsRequestMu.Lock()
+	defer c.actionsRequestMu.Unlock()
 	c.setSystemInfo(info)
 }
 
@@ -242,6 +245,9 @@ func (c *Client) newGitHubAPIRequest(ctx context.Context, method, path string, b
 }
 
 func (c *Client) newActionsServiceRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	c.actionsRequestMu.Lock()
+	defer c.actionsRequestMu.Unlock()
+
 	err := c.updateTokenIfNeeded(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to issue update token if needed: %w", err)
@@ -320,9 +326,6 @@ func (c *Client) GetRunnerScaleSet(ctx context.Context, runnerGroupID int, runne
 
 // GetAcquirableJobs returns jobs that are currently available for acquisition by a runner scale set.
 func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([]*JobAvailable, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	path := fmt.Sprintf("/%s/%d/acquirablejobs", scaleSetEndpoint, runnerScaleSetID)
 	req, err := c.newActionsServiceRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -341,8 +344,6 @@ func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([
 	if err != nil {
 		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to read acquirable jobs response: %w", err))
 	}
-	resp.Body = io.NopCloser(bytes.NewReader(boundedBody))
-	resp.ContentLength = int64(len(boundedBody))
 	if len(boundedBody) > maxAcquirableJobsResponseBytes {
 		resp.Body = http.NoBody
 		resp.ContentLength = 0
@@ -364,6 +365,9 @@ func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([
 		resp.Body = http.NoBody
 		resp.ContentLength = 0
 		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to decode acquirable jobs: %w", err))
+	}
+	if list.Count < 0 || list.Count != len(list.Jobs) {
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("invalid acquirable jobs count: count=%d jobs=%d", list.Count, len(list.Jobs)))
 	}
 
 	return list.Jobs, nil

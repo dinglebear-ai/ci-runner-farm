@@ -398,6 +398,56 @@ func TestAcquireFailureIsNotAcknowledged(t *testing.T) {
 	}
 }
 
+func TestPollRejectsNegativeStatisticsBeforeStateMutation(t *testing.T) {
+	minInt := -int(^uint(0)>>1) - 1
+	tests := []struct {
+		name       string
+		statistics crfgithub.Statistics
+	}{
+		{name: "assigned_minus_one", statistics: crfgithub.Statistics{TotalAvailableJobs: 2, TotalAssignedJobs: -1}},
+		{name: "assigned_min_int", statistics: crfgithub.Statistics{TotalAvailableJobs: 2, TotalAssignedJobs: minInt}},
+		{name: "contradictory_negative_available", statistics: crfgithub.Statistics{TotalAvailableJobs: -1, TotalAssignedJobs: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+			api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+				MessageID: 42, Statistics: &tt.statistics, Available: []int64{101, 102},
+				ReleasedHandles: []int64{91},
+			}}
+			key := journal.Key{ScaleSetID: 7, MessageID: 40}
+			entry := journal.Entry{ScaleSetID: 7, SessionID: "session-1", MessageID: 40,
+				Phase: "acked", AssignedCount: 1, AcquiredHandles: []int64{91}}
+			poller := &Poller{
+				cfg: Config{API: api, Store: store}, sessions: map[int64]crfgithub.Session{7: {ScaleSetID: 7, ID: "session-1"}},
+				assigned: map[int64]int{7: 1}, advertised: map[int64]int{7: 2}, pending: map[int64][]int64{7: {91}},
+				replay: map[journal.Key]journal.Entry{key: entry}, consumed: map[string]bool{}, poolMu: map[int64]*sync.Mutex{},
+				runtimes: map[runtimeDigest]runtimeEstimate{}, acquirableHealth: map[int64]string{},
+			}
+			beforeSize, err := store.Size()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2); !errors.Is(err, crfgithub.ErrInvalidResponse) {
+				t.Fatalf("negative statistics did not fail closed: %v", err)
+			}
+			afterSize, err := store.Size()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if poller.assigned[7] != 1 || !slices.Equal(poller.pending[7], []int64{91}) ||
+				poller.replay[key].Phase != "acked" || poller.advertised[7] != 2 || beforeSize != afterSize {
+				t.Fatalf("invalid statistics mutated poller state: assigned=%d pending=%v replay=%#v advertised=%d sizes=%d/%d",
+					poller.assigned[7], poller.pending[7], poller.replay, poller.advertised[7], beforeSize, afterSize)
+			}
+			if api.acquireCalls != 0 || api.ackCalls != 0 || api.acquirableCalls != 0 {
+				t.Fatalf("invalid statistics triggered external side effects: acquire=%d ack=%d acquirable=%d",
+					api.acquireCalls, api.ackCalls, api.acquirableCalls)
+			}
+		})
+	}
+}
+
 func TestAcquireResultMustExactlyMatchRequest(t *testing.T) {
 	tests := []struct {
 		name string

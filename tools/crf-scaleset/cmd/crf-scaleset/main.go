@@ -25,7 +25,7 @@ import (
 
 const (
 	moduleVersion  = "v0.4.0"
-	moduleRevision = "42b0b661848a5228a72e63084dbee1872ccd3211"
+	moduleRevision = "958c47c4357da4cf53d7619c7401129b81fa0d60"
 )
 
 func main() {

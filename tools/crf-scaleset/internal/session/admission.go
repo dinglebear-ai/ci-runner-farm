@@ -237,18 +237,13 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 		}
 		changed = true
 	}
-	now := time.Now().UTC()
 	if changed {
 		p.runtimeDirty = true
 		p.runtimeGeneration++
 	}
-	shouldPersist := changed && p.cfg.Store.Path != "" &&
-		(p.lastRuntimePersist.IsZero() || now.Sub(p.lastRuntimePersist) >= runtimePersistInterval)
 	p.mu.Unlock()
-	if shouldPersist {
-		if err := p.persistRuntimeHints(false); err != nil {
-			log.Printf("runtime history persistence failed: %v", err)
-		}
+	if err := p.persistRuntimeHints(false); err != nil {
+		log.Printf("runtime history persistence failed: %v", err)
 	}
 }
 
@@ -405,7 +400,14 @@ func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, 
 	}
 	remaining := capacity
 	if batch.Statistics != nil {
-		remaining = max(0, capacity-batch.Statistics.TotalAssignedJobs)
+		switch assigned := batch.Statistics.TotalAssignedJobs; {
+		case assigned <= 0:
+			remaining = capacity
+		case assigned >= capacity:
+			remaining = 0
+		default:
+			remaining = capacity - assigned
+		}
 	}
 	if remaining == 0 {
 		return nil
