@@ -77,7 +77,9 @@ grep -Fxq 'kache-watchdog: restored supervisor in runner-missing' "$logs"
 # watchdog startup.
 sed -n '/^kache_watchdog_pid_active()/,/^}/p' "$ENGINE" >"$tmpdir/pid-functions.sh"
 sed -n '/^kache_watchdog_daemon_pids()/,/^}/p' "$ENGINE" >>"$tmpdir/pid-functions.sh"
+sed -n '/^kache_watchdog_stop_unlocked()/,/^}/p' "$ENGINE" >>"$tmpdir/pid-functions.sh"
 sed -n '/^kache_watchdog_stop()/,/^}/p' "$ENGINE" >>"$tmpdir/pid-functions.sh"
+sed -n '/^kache_watchdog_start()/,/^}/p' "$ENGINE" >>"$tmpdir/pid-functions.sh"
 # shellcheck disable=SC1090
 . "$tmpdir/pid-functions.sh"
 
@@ -123,11 +125,64 @@ if kill -0 "$live" 2>/dev/null; then
   exit 1
 fi
 
+# Two simultaneous Start requests must serialize through the control lock and
+# launch exactly one daemon. The fake daemon closes fd 9 just like production.
+KACHE_WATCHDOG_PID="$tmpdir/concurrent-watchdog.pid"
+KACHE_WATCHDOG_PROC_ROOT="$tmpdir/empty-proc"
+RUNDIR="$tmpdir/run"
+mkdir -p "$KACHE_WATCHDOG_PROC_ROOT" "$RUNDIR"
+start_log="$tmpdir/concurrent-starts"
+error_log="$tmpdir/concurrent-errors"
+kache_watchdog_pid_active() {
+  local pid
+  [ -f "$KACHE_WATCHDOG_PID" ] || return 1
+  pid="$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+kache_watchdog_daemon_pids() { :; }
+kache_watchdog_stop_unlocked() {
+  local pid=""
+  [ ! -f "$KACHE_WATCHDOG_PID" ] || pid="$(cat "$KACHE_WATCHDOG_PID" 2>/dev/null)"
+  rm -f "$KACHE_WATCHDOG_PID"
+  case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+}
+nohup() { exec 9>&-; exec sleep 30; }
+log() {
+  case "$*" in "kache-watchdog: started"*) printf '%s
+' "$*" >>"$start_log" ;; esac
+}
+err() { printf '%s
+' "$*" >>"$error_log"; }
+kache_watchdog_start & first_start=$!
+kache_watchdog_start & second_start=$!
+wait "$first_start"
+wait "$second_start"
+[ "$(wc -l <"$start_log")" -eq 1 ] || {
+  echo 'FAIL: concurrent watchdog starts launched more than one daemon' >&2
+  cat "$start_log" >&2
+  exit 1
+}
+[ ! -s "$error_log" ] || {
+  echo 'FAIL: concurrent watchdog start reported a control error' >&2
+  cat "$error_log" >&2
+  exit 1
+}
+started_pid="$(cat "$KACHE_WATCHDOG_PID")"
+kill "$started_pid" 2>/dev/null || true
+rm -f "$KACHE_WATCHDOG_PID"
+unset -f nohup log err
+
 # Lifecycle contract: watchdog is independent of autoscaling, starts for both
 # classic and scale-set fleets, stops before teardown, and is operator-visible.
 [ "$(grep -Fc 'kache_watchdog_start || true' "$ENGINE")" -eq 2 ]
 sed -n '/^cmd_stop()/,/^}/p' "$ENGINE" | grep -Fq 'kache_watchdog_stop'
 grep -Fq 'kache-watchdog-daemon) kache_watchdog_daemon' "$ENGINE"
+! sed -n '/^kache_watchdog_daemon()/,/^}/p' "$ENGINE" | grep -Fq 'rm -f "$KACHE_WATCHDOG_PID"'
+[ "$(grep -Fc 'flock -w 20 9' "$ENGINE")" -eq 2 ] || {
+  echo 'FAIL: watchdog start/stop are not serialized through one control lock' >&2
+  exit 1
+}
 grep -Fq 'with_fleet_lock try recover_stalled_credential_handoffs reuse' "$ENGINE"
 grep -Fq 'kache-watchdog-status) kache_watchdog_status' "$ENGINE"
 

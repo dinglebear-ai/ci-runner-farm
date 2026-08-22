@@ -6,7 +6,7 @@
 STATUS_OBSERVED_AT=0
 STATUS_INVENTORY_REVISION=""
 STATUS_CONFIG_REVISION=""
-STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
+STATUS_RESOURCES_JSON='{"available":false,"reason":"resource_state_unavailable","cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
 STATUS_RESERVATIONS_JSON='[]'
 STATUS_BACKEND_JSON='{"requested":"classic","effective":"classic","transition_phase":"classic_active","transition_id":"","transition_revision":"","ownership_revision":""}'
 STATUS_COMPATIBILITY_JSON='{"valid":false,"reason":"not_checked"}'
@@ -129,8 +129,8 @@ status_recent_activity_json() {
 }
 
 status_model_refresh() {
-  local cpu_reserve=0 memory_reserve=0
-  STATUS_RESOURCES_JSON='{"cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
+  local cpu_reserve=0 memory_reserve=0 resource_reason
+  STATUS_RESOURCES_JSON='{"available":false,"reason":"resource_state_unavailable","cpu_milli":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0},"memory_bytes":{"budget":0,"reserve":0,"configured":0,"configured_headroom":0,"reserved":0,"admissible":0}}'
   STATUS_OBSERVED_AT="$(date +%s)"
   STATUS_CONFIG_REVISION="$(config_revision)"
   if [ -f "$INVENTORY_FILE" ] && [ ! -L "$INVENTORY_FILE" ]; then
@@ -141,7 +141,10 @@ status_model_refresh() {
   if resource_snapshot_refresh "$INVENTORY_FILE" >/dev/null 2>&1; then
     cpu_reserve="$(parse_cpu_milli "${RESOURCE_CPU_RESERVE:-1}" 2>/dev/null || echo 0)"
     memory_reserve="$(parse_memory_bytes "${RESOURCE_MEMORY_RESERVE:-1g}" 2>/dev/null || echo 0)"
-    STATUS_RESOURCES_JSON="{\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"configured\":${RESOURCE_CONFIGURED_CPU_MILLI:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI:-0},\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"configured\":${RESOURCE_CONFIGURED_MEMORY_BYTES:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES:-0},\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
+    STATUS_RESOURCES_JSON="{\"available\":true,\"reason\":null,\"cpu_milli\":{\"budget\":$RESOURCE_CPU_BUDGET_MILLI,\"reserve\":$cpu_reserve,\"configured\":${RESOURCE_CONFIGURED_CPU_MILLI:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_CPU_HEADROOM_MILLI:-0},\"reserved\":$RESOURCE_CPU_RESERVED_MILLI,\"admissible\":$RESOURCE_CPU_ADMISSIBLE_MILLI},\"memory_bytes\":{\"budget\":$RESOURCE_MEMORY_BUDGET_BYTES,\"reserve\":$memory_reserve,\"configured\":${RESOURCE_CONFIGURED_MEMORY_BYTES:-0},\"configured_headroom\":${RESOURCE_CONFIGURED_MEMORY_HEADROOM_BYTES:-0},\"reserved\":$RESOURCE_MEMORY_RESERVED_BYTES,\"admissible\":$RESOURCE_MEMORY_ADMISSIBLE_BYTES}}"
+  else
+    resource_reason="$(printf '%s' "${RESOURCE_REASON:-resource_state_unavailable}" | json_escape)"
+    STATUS_RESOURCES_JSON="{\"available\":false,\"reason\":\"$resource_reason\",\"cpu_milli\":{\"budget\":0,\"reserve\":0,\"configured\":0,\"configured_headroom\":0,\"reserved\":0,\"admissible\":0},\"memory_bytes\":{\"budget\":0,\"reserve\":0,\"configured\":0,\"configured_headroom\":0,\"reserved\":0,\"admissible\":0}}"
   fi
   STATUS_RESERVATIONS_JSON="$(status_reservations_json)"
   status_recent_activity_json || STATUS_RECENT_ACTIVITY_JSON='[]'
@@ -150,7 +153,7 @@ status_model_refresh() {
 
 status_backend_refresh() {
   local effective=invalid phase=invalid transition_id="" transition_revision="" ownership=""
-  local compat_reason=missing valid=false helper_json='{}' operation=null latest
+  local compat_reason=missing valid=false helper_json='{}' operation=null
   : "${SCALESET_STATE_DIR:=${RUNDIR:-/run/ci-runner-farm}/scalesets}"
   : "${SCALESET_COMPAT:=${CFGDIR:-/boot/config/plugins/ci-runner-farm}/scaleset-compatibility.json}"
   : "${SCALESET_HELPER:=${SCRIPT_DIR:-/usr/local/emhttp/plugins/ci-runner-farm/include}/../bin/crf-scaleset}"
@@ -217,12 +220,12 @@ status_backend_refresh() {
     fi
     STATUS_COMPATIBILITY_JSON="{\"valid\":false,\"reason\":\"$escaped_reason\",\"auth_mode\":\"$(printf '%s' "${AUTH_MODE:-pat}"|json_escape)\",\"private_key_configured\":$private_key_configured}"
   fi
-  latest="$(find "$SCALESET_STATE_DIR/operations" -maxdepth 1 -type f -name '*.json' -printf '%T@ %p\n' 2>/dev/null |
-    sort -nr | head -1 | cut -d' ' -f2- || true)"
-  if [ -n "$latest" ] && status_state_file_valid "$latest" 262144; then
-    operation="$(cat "$latest" 2>/dev/null)"
-    printf '%s' "$operation" | php -r 'exit(is_array(json_decode(stream_get_contents(STDIN),true))?0:1);' ||
-      operation=null
+  if declare -F operation_latest_public >/dev/null; then
+    operation="$(operation_latest_public 2>/dev/null)" || operation=null
+    printf '%s' "$operation" | php -r '
+      $j=json_decode(stream_get_contents(STDIN),true);
+      exit($j===null||is_array($j)?0:1);
+    ' || operation=null
   fi
   STATUS_OPERATION_JSON="$operation"
 }

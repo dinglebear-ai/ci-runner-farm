@@ -117,6 +117,11 @@ grep -Fxq 'try|recover_stalled_credential_handoffs|reuse' "$watchdog_calls" || {
   echo 'FAIL: watchdog did not run credential recovery under the nonblocking fleet lock' >&2
   exit 1
 }
+# A replacement may commit its PID before the previous daemon processes TERM.
+# The exiting daemon must never erase the replacement's singleton record.
+replacement_pid=424242
+printf '%s
+' "$replacement_pid" >"$KACHE_WATCHDOG_PID"
 command kill -TERM "$daemon_pid"
 for _ in $(seq 1 20); do
   command kill -0 "$daemon_pid" 2>/dev/null || break
@@ -128,6 +133,10 @@ if command kill -0 "$daemon_pid" 2>/dev/null; then
   exit 1
 fi
 wait "$daemon_pid" 2>/dev/null || true
-[ ! -f "$KACHE_WATCHDOG_PID" ]
+[ "$(cat "$KACHE_WATCHDOG_PID")" = "$replacement_pid" ] || {
+  echo 'FAIL: exiting watchdog erased a replacement PID record' >&2
+  exit 1
+}
+rm -f "$KACHE_WATCHDOG_PID"
 
 echo 'kache-supervisor-health: OK'

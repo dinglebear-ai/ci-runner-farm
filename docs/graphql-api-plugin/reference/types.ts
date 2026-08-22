@@ -278,8 +278,8 @@ export interface RawRunStatistics {
 }
 
 export interface RawCacheUsage {
-    total: number;
-    pkg: number;
+    total: number | string;
+    pkg: number | string;
     age: number;
 }
 
@@ -291,7 +291,7 @@ export interface RawImageInfo {
     image_id?: string;
     created?: string;
     size_mb?: number;
-    size_bytes?: number;
+    size_bytes?: number | string;
     base?: string;
     in_use?: number;
     dockerfile?: string;

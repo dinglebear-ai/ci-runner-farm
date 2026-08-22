@@ -51,7 +51,7 @@ TEST_ROOT="$tmp"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_local_base_images_available build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_local_base_images_available build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_farm_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090

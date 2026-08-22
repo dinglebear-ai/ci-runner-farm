@@ -193,6 +193,7 @@ unset -f backend_effective
 # Boot autostart retries a transient partial start before waiting beyond the
 # handoff window and invoking recovery under the same fleet lock as all other
 # mutations.
+operation_reconcile_interrupted() { return 0; }
 (
   boot_calls="$tmpdir/boot-calls"
   sleep_calls="$tmpdir/sleep-calls"
