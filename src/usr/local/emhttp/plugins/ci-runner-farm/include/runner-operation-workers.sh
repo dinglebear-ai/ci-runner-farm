@@ -237,19 +237,19 @@ operation_image_source_hash() {
 
 operation_image_snapshot_path() {
   operation_id_valid "$1" || return 1
-  operation_runtime_dir_ensure || return 1
-  printf '%s/%s.Dockerfile' "$OPERATION_RUNTIME_DIR" "$1"
+  mkdir -p -- "$RUNDIR" || return 1
+  printf '%s/build.Dockerfile.%s' "$RUNDIR" "$1"
 }
 
 operation_image_snapshot_prepare() {
-  local id="$1" expected="$2" source actual path tmp
+  local id="$1" expected="$2" source actual path tmp companion validator endpoint
   operation_id_valid "$id" && [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
   source="$(operation_image_source_path)" || return 1
   actual="$(operation_image_source_hash)" || return 1
   [ "$actual" = "$expected" ] || return 2
   path="$(operation_image_snapshot_path "$id")" || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-  tmp="$(mktemp "$OPERATION_RUNTIME_DIR/$id.Dockerfile.tmp.XXXXXX")" || return 1
+  tmp="$(mktemp "$RUNDIR/build.Dockerfile.$id.tmp.XXXXXX")" || return 1
   if ! cp -- "$source" "$tmp" || ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     return 1
@@ -259,7 +259,29 @@ operation_image_snapshot_prepare() {
     rm -f -- "$tmp" "$path"
     return 2
   fi
+  if build_context_needs_kache_supervisor "$path"; then
+    companion="${source%/*}/kache-supervise.sh"
+    build_context_copy_kache_supervisor "$companion" "${path}.kache-supervise.sh" || {
+      operation_image_snapshot_cleanup "$path"; return 1;
+    }
+  fi
+  if build_context_needs_endpoint_validator "$path"; then
+    validator="${source%/*}/endpoint-validation.sh"
+    build_context_copy_companion "$validator" "${path}.endpoint-validation.sh" || {
+      operation_image_snapshot_cleanup "$path"; return 1;
+    }
+  fi
+  if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$path"; then
+    endpoint="${path}.kache-endpoint"
+    kache_endpoint_load && (umask 077; printf '%s\n' "$KACHE_REMOTE_ENDPOINT" >"$endpoint") &&
+      chmod 0600 "$endpoint" || { operation_image_snapshot_cleanup "$path"; return 1; }
+  fi
   printf '%s' "$path"
+}
+
+operation_image_snapshot_cleanup() {
+  local path="$1"
+  rm -f -- "$path" "${path}.kache-supervise.sh" "${path}.endpoint-validation.sh" "${path}.kache-endpoint"
 }
 
 operation_image_snapshot_valid() {
@@ -317,7 +339,7 @@ cmd_image_build_operation_start() {
     return 5
   fi
   if ! operation_worker_launch image-build-operation-worker "$id" "$expected"; then
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed launch_failed 'Image build worker could not be launched.' >/dev/null 2>&1 || true
     operation_start_error backend_unavailable 'image build worker could not be launched' "$id"
     return 5
@@ -331,47 +353,47 @@ operation_image_build_worker() {
   operation_mark_running "$id" 'Image build started.' || return 1
   snapshot="$(operation_image_snapshot_path "$id")" || return 1
   if ! operation_image_snapshot_valid "$id" "$expected"; then
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed stale_dockerfile 'Dockerfile snapshot did not match the requested SHA-256.' >/dev/null 2>&1 || true
     return
   fi
   mkdir -p -- "$RUNDIR" || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build runtime directory is unavailable.' >/dev/null 2>&1 || true
     return
   }
   lock="$RUNDIR/build.lock"
   [ ! -L "$lock" ] || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock is unsafe.' >/dev/null 2>&1 || true
     return
   }
   exec 9>"$lock" || {
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock could not be opened.' >/dev/null 2>&1 || true
     return
   }
   chmod 0600 "$lock" || {
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build lock could not be secured.' >/dev/null 2>&1 || true
     return
   }
   if ! flock -n 9; then
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed operation_running 'Another image build is already running.' >/dev/null 2>&1 || true
     return
   fi
   log_path="$(operation_output_log_prepare "$id" image_build_log)" || {
     flock -u 9 || true
     exec 9>&-
-    rm -f -- "$snapshot"
+    operation_image_snapshot_cleanup "$snapshot"
     operation_finish "$id" failed backend_unavailable 'Build log could not be created.' >/dev/null 2>&1 || true
     return
   }
   if cmd_build_image "$snapshot" >>"$log_path" 2>&1; then rc=0; else rc=$?; fi
-  rm -f -- "$snapshot"
+  operation_image_snapshot_cleanup "$snapshot"
   printf '__BUILD_RC__=%s\n' "$rc" >>"$log_path"
   chmod 0600 "$log_path" || true
   flock -u 9 || true

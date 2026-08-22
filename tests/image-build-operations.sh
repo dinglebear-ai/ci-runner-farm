@@ -21,6 +21,9 @@ OPERATION_RUNTIME_DIR="$RUNDIR/operations"
 # shellcheck disable=SC1090
 . "$SCRIPT_DIR/runner-operation-workers.sh"
 
+build_context_needs_kache_supervisor(){ return 1; }
+build_context_needs_endpoint_validator(){ return 1; }
+
 printf 'FROM scratch\nLABEL version=1\n' >"$CFGDIR/Dockerfile"
 expected="$(sha256sum "$CFGDIR/Dockerfile" | cut -d' ' -f1)"
 config_sha="$(printf config | sha256sum | cut -d' ' -f1)"
@@ -44,6 +47,10 @@ success_id='30000001-0000-0000-0000-000000000001'
 CRF_OPERATION_ID="$success_id" operation_create image_build "$config_sha" image_build_log >/dev/null
 success_snapshot="$(operation_image_snapshot_prepare "$success_id" "$expected")"
 crf_assert_file_mode "$success_snapshot" 600
+case "$success_snapshot" in
+  "$RUNDIR"/build.Dockerfile.*) ;;
+  *) crf_fail 'operation snapshot is outside the cmd_build_image allowlist' ;;
+esac
 operation_image_build_worker "$success_id" "$expected"
 crf_assert_eq succeeded "$(public_state "$success_id")" 'image build success state'
 crf_assert_eq image_built "$(public_code "$success_id")" 'image build success code'
@@ -150,7 +157,7 @@ for _ in $(seq 1 100); do [ -s "$root/launch.pid" ] && break; sleep 0.02; done
 [ -s "$root/launch.pid" ] || crf_fail 'image build launcher did not start'
 worker_pid="$(cat "$root/launch.pid")"
 crf_assert_eq "image-build-operation-worker $start_id $expected" "$(cat "$root/launch.args")" 'image build launcher arguments'
-start_snapshot="$OPERATION_RUNTIME_DIR/$start_id.Dockerfile"
+start_snapshot="$(operation_image_snapshot_path "$start_id")"
 crf_assert_file_mode "$start_snapshot" 600
 crf_assert_eq "$expected" "$(sha256sum "$start_snapshot" | cut -d' ' -f1)" 'queued image snapshot identity'
 kill "$worker_pid" 2>/dev/null || true
