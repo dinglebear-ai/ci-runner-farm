@@ -375,8 +375,8 @@ func topCandidates(poolID string, jobs []crfgithub.AvailableJob, runtimes map[ru
 		return rankCandidates(poolID, jobs, runtimes, now)
 	}
 	selected := make(candidateMaxHeap, limit)
-	for i := 0; i < limit; i++ {
-		selected[i] = makeRankedCandidate(poolID, jobs[i], runtimes, now)
+	for i, job := range jobs[:limit] {
+		selected[i] = makeRankedCandidate(poolID, job, runtimes, now)
 	}
 	heap.Init(&selected)
 	for _, job := range jobs[limit:] {
@@ -417,7 +417,7 @@ func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, 
 	limit := min(remaining, len(batch.AvailableJobs))
 	ranked := topCandidates(poolID, batch.AvailableJobs, p.runtimeSnapshot(), now, limit)
 	selected := make([]int64, 0, limit)
-	for _, candidate := range ranked[:limit] {
+	for _, candidate := range ranked {
 		selected = append(selected, candidate.job.RequestID)
 	}
 	return selected

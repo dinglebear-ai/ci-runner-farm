@@ -440,27 +440,23 @@ func exactAcquiredIDs(requested, acquired []int64) bool {
 	if len(requested) == 0 || len(requested) != len(acquired) {
 		return false
 	}
-	want := make(map[int64]struct{}, len(requested))
+	remaining := make(map[int64]struct{}, len(requested))
 	for _, id := range requested {
 		if id <= 0 {
 			return false
 		}
-		want[id] = struct{}{}
+		remaining[id] = struct{}{}
 	}
-	if len(want) != len(requested) {
+	if len(remaining) != len(requested) {
 		return false
 	}
-	seen := make(map[int64]struct{}, len(acquired))
 	for _, id := range acquired {
-		if _, ok := want[id]; !ok {
+		if _, ok := remaining[id]; !ok {
 			return false
 		}
-		if _, duplicate := seen[id]; duplicate {
-			return false
-		}
-		seen[id] = struct{}{}
+		delete(remaining, id)
 	}
-	return len(seen) == len(want)
+	return len(remaining) == 0
 }
 
 func (p *Poller) acquire(ctx context.Context, scaleSetID int64, session crfgithub.Session,
