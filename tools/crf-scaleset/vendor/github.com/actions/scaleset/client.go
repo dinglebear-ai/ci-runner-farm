@@ -315,6 +315,38 @@ func (c *Client) GetRunnerScaleSet(ctx context.Context, runnerGroupID int, runne
 	}
 }
 
+// GetAcquirableJobs returns jobs that are currently available for acquisition by a runner scale set.
+func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([]*JobAvailable, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	path := fmt.Sprintf("/%s/%d/acquirablejobs", scaleSetEndpoint, runnerScaleSetID)
+	req, err := c.newActionsServiceRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new actions service request: %w", err)
+	}
+
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to issue the request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return []*JobAvailable{}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("unexpected status code: %d", resp.StatusCode))
+	}
+
+	var list acquirableJobsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to decode acquirable jobs: %w", err))
+	}
+
+	return list.Jobs, nil
+}
+
 // GetRunnerScaleSetByID fetches a runner scale set by its ID.
 func (c *Client) GetRunnerScaleSetByID(ctx context.Context, runnerScaleSetID int) (*RunnerScaleSet, error) {
 	c.mu.Lock()

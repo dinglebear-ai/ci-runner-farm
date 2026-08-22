@@ -4,6 +4,8 @@ go 1.25.3
 
 require github.com/actions/scaleset v0.4.0
 
+replace github.com/actions/scaleset => github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008
+
 require (
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect

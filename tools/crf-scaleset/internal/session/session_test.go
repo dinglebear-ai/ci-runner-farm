@@ -16,22 +16,26 @@ import (
 )
 
 type fakeAPI struct {
-	mu              sync.Mutex
-	batch           crfgithub.MessageBatch
-	acquire         crfgithub.AcquireResult
-	acquireErr      error
-	sessionCalls    int
-	acquireCalls    int
-	acquireIDs      []int64
-	ackCalls        int
-	ackSawCommit    bool
-	ackErr          error
-	closeCalls      int
-	lastMessage     int64
-	messageCapacity int
-	store           journal.Store
-	started         chan int64
-	block           chan struct{}
+	mu                 sync.Mutex
+	batch              crfgithub.MessageBatch
+	acquire            crfgithub.AcquireResult
+	acquireErr         error
+	sessionCalls       int
+	acquireCalls       int
+	acquireIDs         []int64
+	ackCalls           int
+	ackSawCommit       bool
+	ackErr             error
+	closeCalls         int
+	lastMessage        int64
+	messageCapacity    int
+	acquirable         []crfgithub.AvailableJob
+	acquirableErr      error
+	acquirableCalls    int
+	acquirableDeadline bool
+	store              journal.Store
+	started            chan int64
+	block              chan struct{}
 }
 
 func (*fakeAPI) CreateRunnerScaleSet(context.Context, crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -69,6 +73,13 @@ func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastM
 		<-f.block
 	}
 	return batch, nil
+}
+func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.AvailableJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acquirableCalls++
+	_, f.acquirableDeadline = ctx.Deadline()
+	return slices.Clone(f.acquirable), f.acquirableErr
 }
 func (f *fakeAPI) AcquireJobs(_ context.Context, _ crfgithub.Session, req crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
 	f.mu.Lock()
@@ -125,6 +136,119 @@ func TestPollAcquiresOnlyRankedVisibleSubset(t *testing.T) {
 	}
 	if !slices.Equal(api.acquireIDs, []int64{103, 101}) {
 		t.Fatalf("poll did not acquire only the ranked visible subset: %v", api.acquireIDs)
+	}
+}
+
+func TestPollRanksHiddenAcquirableBacklog(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	now := time.Now().UTC()
+	longVisible := testJob(101, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-2*time.Minute))
+	quickHidden := testJob(102, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now.Add(-time.Minute))
+	longHidden := testJob(103, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-30*time.Second))
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 14, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 3, TotalAssignedJobs: 0},
+		Available: []int64{101}, AvailableJobs: []crfgithub.AvailableJob{longVisible},
+	}, acquirable: []crfgithub.AvailableJob{longVisible, quickHidden, longHidden}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.runtimes[runtimeKey("build", longVisible.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 10}
+	poller.runtimes[runtimeKey("build", quickHidden.Metadata)] = runtimeEstimate{duration: 30 * time.Second, samples: 10}
+
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if api.messageCapacity != 1 {
+		t.Fatalf("deep lookahead inflated GitHub max capacity: %d", api.messageCapacity)
+	}
+	if api.acquirableCalls != 1 || !api.acquirableDeadline {
+		t.Fatalf("hidden backlog lookup was not bounded: calls=%d deadline=%v", api.acquirableCalls, api.acquirableDeadline)
+	}
+	if !slices.Equal(api.acquireIDs, []int64{102}) {
+		t.Fatalf("hidden quick job was not acquired ahead of visible long work: %v", api.acquireIDs)
+	}
+}
+
+func TestPollAcquirableLookupFailureFallsBackToVisibleBatch(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	visible := testJob(201, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", time.Now().UTC())
+	api := &fakeAPI{store: store, acquirableErr: errors.New("lookup failed"), batch: crfgithub.MessageBatch{
+		MessageID: 15, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 2, TotalAssignedJobs: 0},
+		Available: []int64{201}, AvailableJobs: []crfgithub.AvailableJob{visible},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1); err != nil {
+		t.Fatalf("optional lookahead failure blocked pool: %v", err)
+	}
+	if api.acquirableCalls != 1 || !slices.Equal(api.acquireIDs, []int64{201}) {
+		t.Fatalf("visible fallback failed: calls=%d acquired=%v", api.acquirableCalls, api.acquireIDs)
+	}
+}
+
+func TestPollSkipsAcquirableLookupWhenPoolIsFull(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	visible := testJob(251, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC())
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 18, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 10, TotalAssignedJobs: 2},
+		Available: []int64{251}, AvailableJobs: []crfgithub.AvailableJob{visible},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if api.acquirableCalls != 0 || api.acquireCalls != 0 {
+		t.Fatalf("full pool performed unnecessary admission work: lookups=%d acquires=%d", api.acquirableCalls, api.acquireCalls)
+	}
+}
+
+func TestPollSkipsAcquirableLookupWhenVisibleBatchCoversQueue(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	visible := testJob(301, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC())
+	hidden := testJob(302, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC())
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 16, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1, TotalAssignedJobs: 0},
+		Available: []int64{301}, AvailableJobs: []crfgithub.AvailableJob{visible},
+	}, acquirable: []crfgithub.AvailableJob{hidden}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if api.acquirableCalls != 0 || !slices.Equal(api.acquireIDs, []int64{301}) {
+		t.Fatalf("covered visible queue caused unnecessary lookahead: calls=%d acquired=%v", api.acquirableCalls, api.acquireIDs)
+	}
+}
+
+func TestPollEmptyAcquirableRaceKeepsVisibleCandidate(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	visible := testJob(401, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC())
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 17, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 2, TotalAssignedJobs: 0},
+		Available: []int64{401}, AvailableJobs: []crfgithub.AvailableJob{visible},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if api.acquirableCalls != 1 || !slices.Equal(api.acquireIDs, []int64{401}) {
+		t.Fatalf("empty lookahead erased visible candidate: calls=%d acquired=%v", api.acquirableCalls, api.acquireIDs)
 	}
 }
 

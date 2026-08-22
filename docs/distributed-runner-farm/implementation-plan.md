@@ -56,8 +56,10 @@
 - [x] Runtime-aware ranking for visible GitHub `JobAvailable` candidates using pool-scoped learned history, with branch-normalized workflow identity.
 - [x] Bounded private SHA-256-keyed runtime-history persistence that avoids plaintext job metadata, cold-starts safely on missing/corrupt hints, and throttles completion writes.
 - [x] Starvation-safe visible-batch admission with a ten-minute aging override and strict remaining-capacity enforcement.
-- [ ] Add authenticated `acquirablejobs` queue introspection and a durable reserved-slot/fast-lane policy without inflating `X-ScaleSetMaxCapacity` or relying on long-poll timing.
-- [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity` to manufacture backlog lookahead; only rank candidates present in the current response.
+- [x] Add authenticated `acquirablejobs` queue introspection through the scale-set admin client, with a two-second best-effort deadline, 10,000-job fuse, merge-safe visible fallback, and truthful `X-ScaleSetMaxCapacity`.
+- [x] Add O(N log K) top-K admission so deep queue ranking scales with remaining runner slots rather than sorting the full backlog.
+- [ ] Add durable proactive reserved-slot/fast-lane hold + borrow scheduling on top of `acquirablejobs`, without relying on GitHub long-poll timing.
+- [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity`; obtain hidden backlog visibility only through the authenticated admin `acquirablejobs` endpoint.
 - [x] Acquired handle -> offer assignment -> JIT -> placement -> node mailbox flow.
 - [x] Controller restart recovery for lost JIT-bearing mailbox commands.
 - [x] Surviving node runner adoption across node-agent generation restart.
@@ -96,8 +98,8 @@
 - [x] Real GitHub scale-set execution across Dookie, Squirts, Steamy, Steamy WSL, and Tootie's container backend.
 - [x] Live GitHub cancellation with Unix process-group signal observation, terminal placement reporting, resource return, and credential cleanup.
 - [ ] Controller/node restart and network-partition matrix.
-- [x] Synthetic visible-batch convoy regression plus 64-job ranking microbenchmark with bounded allocation evidence.
-- [ ] Real scale-set validation of candidate-delivery/lookahead semantics and resource fragmentation/oversubscription/fairness matrix at sustained load.
+- [x] Synthetic visible/hidden convoy regressions plus 64-job and 10,000-job/64-slot ranking benchmarks with bounded allocation evidence.
+- [ ] Real GitHub scale-set smoke proving `acquirablejobs` + partial acquisition behavior against queued jobs, followed by resource fragmentation/oversubscription/fairness matrix at sustained load.
 - [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.
 - [ ] Automated CA/server certificate rotation and revocation-provider integration policy.
 - [x] Security review of credentials, certificates, durable JIT cache,

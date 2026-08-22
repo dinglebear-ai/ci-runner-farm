@@ -117,6 +117,52 @@ func TestJobMetadataPreservesAdaptiveQueueSignals(t *testing.T) {
 	}
 }
 
+func TestDecodeAcquirableJobsValidatesAndPreservesMetadata(t *testing.T) {
+	queued := time.Date(2026, 8, 21, 6, 30, 0, 0, time.UTC)
+	jobs := []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{
+		RunnerRequestID: 101, OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+		JobDisplayName: "unit", QueueTime: queued,
+	}}}
+	got, err := decodeAcquirableJobs(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RequestID != 101 || got[0].Metadata.OwnerName != "dinglebear-ai" ||
+		got[0].Metadata.RepositoryName != "soma" || got[0].Metadata.JobDisplayName != "unit" ||
+		got[0].Metadata.QueueTime != queued {
+		t.Fatalf("acquirable job metadata changed: %#v", got)
+	}
+}
+
+func TestDecodeAcquirableJobsRejectsInvalidAndDuplicateEntries(t *testing.T) {
+	valid := func(id int64) *scaleset.JobAvailable {
+		return &scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: id}}
+	}
+	for name, jobs := range map[string][]*scaleset.JobAvailable{
+		"nil":       {nil},
+		"zero":      {valid(0)},
+		"negative":  {valid(-1)},
+		"duplicate": {valid(7), valid(7)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeAcquirableJobs(jobs); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("invalid acquirable list was accepted: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeAcquirableJobsEnforcesResponseFuse(t *testing.T) {
+	jobs := make([]*scaleset.JobAvailable, maxAcquirableJobs+1)
+	for i := range jobs {
+		jobs[i] = &scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: int64(i + 1)}}
+	}
+	if _, err := decodeAcquirableJobs(jobs); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("oversized acquirable list was accepted: err=%v", err)
+	}
+}
+
 func TestAssignedJobHandleUsesStableJobIdentityWhenRunnerRequestIDIsZero(t *testing.T) {
 	job := &scaleset.JobAssigned{JobMessageBase: scaleset.JobMessageBase{
 		JobID: "4dbf00ec-bdda-5ddd-a451-0bc7f6f980e3", RunnerRequestID: 0,

@@ -20,7 +20,10 @@ var (
 	ErrInvalidResponse = errors.New("invalid_scale_set_response")
 )
 
-const maxJSONSafeInteger int64 = 1<<53 - 1
+const (
+	maxJSONSafeInteger int64 = 1<<53 - 1
+	maxAcquirableJobs        = 10_000
+)
 
 type ScaleSet struct {
 	ID            int64
@@ -92,6 +95,7 @@ type ScaleSetAPI interface {
 	GetRunnerGroupByName(context.Context, string) (RunnerGroup, error)
 	CreateMessageSession(context.Context, int64) (Session, error)
 	GetMessage(context.Context, Session, int64, int) (MessageBatch, error)
+	GetAcquirableJobs(context.Context, int64) ([]AvailableJob, error)
 	AcquireJobs(context.Context, Session, AcquireRequest) (AcquireResult, error)
 	AcknowledgeMessage(context.Context, Session, int64) error
 	GenerateJitRunnerConfig(context.Context, int64, JITRequest) ([]byte, error)
@@ -346,6 +350,39 @@ func jobMetadata(job *scaleset.JobMessageBase) JobMetadata {
 		JobDisplayName: job.JobDisplayName,
 		QueueTime:      job.QueueTime,
 	}
+}
+
+func decodeAcquirableJobs(jobs []*scaleset.JobAvailable) ([]AvailableJob, error) {
+	if len(jobs) > maxAcquirableJobs {
+		return nil, ErrInvalidResponse
+	}
+	out := make([]AvailableJob, 0, len(jobs))
+	seen := make(map[int64]bool, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.RunnerRequestID <= 0 || seen[job.RunnerRequestID] {
+			return nil, ErrInvalidResponse
+		}
+		seen[job.RunnerRequestID] = true
+		out = append(out, AvailableJob{
+			RequestID: job.RunnerRequestID, Metadata: jobMetadata(&job.JobMessageBase),
+		})
+	}
+	return out, nil
+}
+
+func (a *Adapter) GetAcquirableJobs(ctx context.Context, scaleSetID int64) ([]AvailableJob, error) {
+	if scaleSetID <= 0 {
+		return nil, ErrInvalidResponse
+	}
+	client, err := a.adminClient()
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := client.GetAcquirableJobs(ctx, int(scaleSetID))
+	if err != nil {
+		return nil, err
+	}
+	return decodeAcquirableJobs(jobs)
 }
 
 func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64, max int) (MessageBatch, error) {

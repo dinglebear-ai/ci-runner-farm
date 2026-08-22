@@ -12,7 +12,10 @@ import (
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
 )
 
-var benchmarkRanked []crfgithub.AvailableJob
+var (
+	benchmarkRanked   []crfgithub.AvailableJob
+	benchmarkSelected []int64
+)
 
 func testJob(id int64, repository, workflow, name string, queued time.Time) crfgithub.AvailableJob {
 	return crfgithub.AvailableJob{RequestID: id, Metadata: crfgithub.JobMetadata{
@@ -25,7 +28,7 @@ func TestRankAvailablePrefersLearnedShortWork(t *testing.T) {
 	short := testJob(3, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now.Add(-time.Minute))
 	unknown := testJob(2, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "new-check", now.Add(-2*time.Minute))
 	long := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/feature", "rust-build", now.Add(-3*time.Minute))
-	runtimes := map[string]runtimeEstimate{
+	runtimes := map[runtimeDigest]runtimeEstimate{
 		runtimeKey("build", short.Metadata): {duration: 30 * time.Second, samples: 4},
 		runtimeKey("build", long.Metadata):  {duration: 20 * time.Minute, samples: 6},
 	}
@@ -40,7 +43,7 @@ func TestRankAvailableAgingPreventsLongJobStarvation(t *testing.T) {
 	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
 	oldLong := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-queueStarvationAge-time.Second))
 	newShort := testJob(2, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now.Add(-time.Minute))
-	runtimes := map[string]runtimeEstimate{
+	runtimes := map[runtimeDigest]runtimeEstimate{
 		runtimeKey("build", oldLong.Metadata):  {duration: 20 * time.Minute, samples: 6},
 		runtimeKey("build", newShort.Metadata): {duration: 30 * time.Second, samples: 4},
 	}
@@ -51,7 +54,7 @@ func TestRankAvailableAgingPreventsLongJobStarvation(t *testing.T) {
 }
 
 func TestCompletedRuntimeLearningNormalizesWorkflowRef(t *testing.T) {
-	poller := &Poller{runtimes: map[string]runtimeEstimate{}}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
 	metadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
 		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/feature", JobDisplayName: "unit"}
 	poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata,
@@ -69,7 +72,7 @@ func TestRuntimeHistoryPersistsAcrossPollerRestart(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(root, "replay", "messages.jsonl")}
 	metadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
 		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "unit"}
-	poller := &Poller{cfg: Config{Store: store}, runtimes: map[string]runtimeEstimate{}}
+	poller := &Poller{cfg: Config{Store: store}, runtimes: map[runtimeDigest]runtimeEstimate{}}
 	poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata,
 		RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}})
 
@@ -139,7 +142,7 @@ func TestAdmissionNeverExceedsRemainingCapacity(t *testing.T) {
 	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
 	one := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now)
 	two := testJob(2, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "lint", now)
-	poller := &Poller{runtimes: map[string]runtimeEstimate{}}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
 	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 3}, AvailableJobs: []crfgithub.AvailableJob{one, two}}
 	if selected := poller.selectedAvailable(batch, "build", 4, now); len(selected) != 1 {
 		t.Fatalf("selected beyond remaining capacity: %v", selected)
@@ -163,13 +166,54 @@ func TestRuntimeKeyScopesOwnersAndBoundsUntrustedMetadata(t *testing.T) {
 	}
 	missingOwner := base
 	missingOwner.OwnerName = ""
-	if runtimeKey("build", missingOwner) != "" {
+	if validRuntimeDigest(runtimeKey("build", missingOwner)) {
 		t.Fatal("runtime key accepted missing owner identity")
 	}
 	oversized := base
 	oversized.JobDisplayName = strings.Repeat("x", 2048)
-	if runtimeKey("build", oversized) != "" {
+	if validRuntimeDigest(runtimeKey("build", oversized)) {
 		t.Fatal("oversized runtime metadata was accepted")
+	}
+}
+
+func TestTopCandidatesMatchesFullRankingPrefix(t *testing.T) {
+	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 257)
+	for i := 0; i < 257; i++ {
+		name := "unit"
+		if i%5 == 0 {
+			name = "rust-build"
+		}
+		queued := now.Add(-time.Duration((i*37)%900) * time.Second)
+		jobs = append(jobs, testJob(int64(257-i), "dinglebear-ai/soma",
+			"dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", name, queued))
+	}
+	runtimes := map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", jobs[0].Metadata): {duration: 20 * time.Minute, samples: 20},
+		runtimeKey("build", jobs[1].Metadata): {duration: 30 * time.Second, samples: 20},
+	}
+	full := rankCandidates("build", jobs, runtimes, now)
+	for _, limit := range []int{1, 2, 7, 64, 128, len(jobs)} {
+		top := topCandidates("build", jobs, runtimes, now, limit)
+		if len(top) != limit {
+			t.Fatalf("top candidate length mismatch: limit=%d got=%d", limit, len(top))
+		}
+		for i := 0; i < limit; i++ {
+			if top[i].job.RequestID != full[i].job.RequestID {
+				t.Fatalf("top-K diverged from full ranking: limit=%d index=%d got=%d want=%d",
+					limit, i, top[i].job.RequestID, full[i].job.RequestID)
+			}
+		}
+	}
+}
+
+func TestRuntimeKeyNormalizesAsciiCaseAndBranchRef(t *testing.T) {
+	upper := crfgithub.JobMetadata{OwnerName: "DINGLEBEAR-AI", RepositoryName: "SOMA",
+		JobWorkflowRef: "Dinglebear-AI/Soma/.github/workflows/CI.yml@refs/heads/FEATURE", JobDisplayName: "UNIT"}
+	lower := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "unit"}
+	if runtimeKey("BUILD", upper) != runtimeKey("build", lower) {
+		t.Fatal("runtime identity did not normalize ASCII case and branch ref")
 	}
 }
 
@@ -178,7 +222,7 @@ func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testin
 	longOne := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-3*time.Minute))
 	longTwo := testJob(2, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-2*time.Minute))
 	quick := testJob(3, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", now.Add(-time.Minute))
-	poller := &Poller{runtimes: map[string]runtimeEstimate{
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
 		runtimeKey("build", longOne.Metadata): {duration: 20 * time.Minute, samples: 20},
 		runtimeKey("build", quick.Metadata):   {duration: 30 * time.Second, samples: 20},
 	}}
@@ -186,6 +230,29 @@ func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testin
 		AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo, quick}}
 	if selected := poller.selectedAvailable(batch, "build", 2, now); !slices.Equal(selected, []int64{3, 1}) {
 		t.Fatalf("quick work remained behind visible long builds: %v", selected)
+	}
+}
+
+func BenchmarkSelectAvailable10000Jobs64Slots(b *testing.B) {
+	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 10_000)
+	for i := 0; i < 10_000; i++ {
+		name := "unit"
+		if i%4 == 0 {
+			name = "rust-build"
+		}
+		jobs = append(jobs, testJob(int64(i+1), "dinglebear-ai/soma",
+			"dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", name,
+			now.Add(-time.Duration(i%300)*time.Second)))
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", jobs[0].Metadata): {duration: 20 * time.Minute, samples: 100},
+		runtimeKey("build", jobs[1].Metadata): {duration: 30 * time.Second, samples: 100},
+	}}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, AvailableJobs: jobs}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkSelected = poller.selectedAvailable(batch, "build", 64, now)
 	}
 }
 
@@ -201,7 +268,7 @@ func BenchmarkRankAvailable64Jobs(b *testing.B) {
 			"dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", name,
 			now.Add(-time.Duration(i)*time.Second)))
 	}
-	runtimes := map[string]runtimeEstimate{
+	runtimes := map[runtimeDigest]runtimeEstimate{
 		runtimeKey("build", jobs[0].Metadata): {duration: 20 * time.Minute, samples: 100},
 		runtimeKey("build", jobs[1].Metadata): {duration: 30 * time.Second, samples: 100},
 	}

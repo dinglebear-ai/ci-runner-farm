@@ -1,6 +1,7 @@
 package session
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,6 +27,8 @@ const (
 	runtimePersistInterval   = 30 * time.Second
 	maxRuntimeIdentityBytes  = 1024
 )
+
+type runtimeDigest [sha256.Size]byte
 
 type runtimeEstimate struct {
 	duration time.Duration
@@ -53,17 +56,34 @@ func runtimeHistoryPath(store journal.Store) string {
 	return filepath.Join(filepath.Dir(store.Path), "runtime-history.json")
 }
 
-func loadRuntimeHints(store journal.Store) map[string]runtimeEstimate {
+func loadRuntimeHints(store journal.Store) map[runtimeDigest]runtimeEstimate {
 	runtimes, err := loadRuntimeHistory(runtimeHistoryPath(store))
 	if err != nil {
 		log.Printf("runtime history unavailable, starting cold: %v", err)
-		return map[string]runtimeEstimate{}
+		return map[runtimeDigest]runtimeEstimate{}
 	}
 	return runtimes
 }
 
-func loadRuntimeHistory(path string) (map[string]runtimeEstimate, error) {
-	out := map[string]runtimeEstimate{}
+func parseRuntimeDigest(value string) (runtimeDigest, bool) {
+	var digest runtimeDigest
+	if len(value) != sha256.Size*2 {
+		return digest, false
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return digest, false
+	}
+	copy(digest[:], decoded)
+	return digest, true
+}
+
+func validRuntimeDigest(digest runtimeDigest) bool {
+	return digest != (runtimeDigest{})
+}
+
+func loadRuntimeHistory(path string) (map[runtimeDigest]runtimeEstimate, error) {
+	out := map[runtimeDigest]runtimeEstimate{}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return out, nil
@@ -86,29 +106,30 @@ func loadRuntimeHistory(path string) (map[string]runtimeEstimate, error) {
 		return out, errors.New("invalid_runtime_history_schema")
 	}
 	for _, entry := range history.Entries {
-		if !validRuntimeDigest(entry.Key) || entry.Samples == 0 ||
+		digest, valid := parseRuntimeDigest(entry.Key)
+		if !valid || entry.Samples == 0 ||
 			entry.DurationMillis < int64(minRuntimeSample/time.Millisecond) ||
 			entry.DurationMillis > int64(maxRuntimeSample/time.Millisecond) {
-			return map[string]runtimeEstimate{}, errors.New("invalid_runtime_history_entry")
+			return map[runtimeDigest]runtimeEstimate{}, errors.New("invalid_runtime_history_entry")
 		}
 		duration := time.Duration(entry.DurationMillis) * time.Millisecond
-		if _, duplicate := out[entry.Key]; duplicate {
-			return map[string]runtimeEstimate{}, errors.New("duplicate_runtime_history_entry")
+		if _, duplicate := out[digest]; duplicate {
+			return map[runtimeDigest]runtimeEstimate{}, errors.New("duplicate_runtime_history_entry")
 		}
-		out[entry.Key] = runtimeEstimate{duration: duration, samples: entry.Samples}
+		out[digest] = runtimeEstimate{duration: duration, samples: entry.Samples}
 	}
 	return out, nil
 }
 
-func saveRuntimeHistory(path string, runtimes map[string]runtimeEstimate) error {
+func saveRuntimeHistory(path string, runtimes map[runtimeDigest]runtimeEstimate) error {
 	entries := make([]runtimeHistoryEntry, 0, len(runtimes))
-	for key, estimate := range runtimes {
-		if !validRuntimeDigest(key) || estimate.samples == 0 ||
+	for digest, estimate := range runtimes {
+		if !validRuntimeDigest(digest) || estimate.samples == 0 ||
 			estimate.duration < minRuntimeSample || estimate.duration > maxRuntimeSample {
 			continue
 		}
 		entries = append(entries, runtimeHistoryEntry{
-			Key: key, DurationMillis: estimate.duration.Milliseconds(), Samples: estimate.samples,
+			Key: hex.EncodeToString(digest[:]), DurationMillis: estimate.duration.Milliseconds(), Samples: estimate.samples,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -151,21 +172,7 @@ func saveRuntimeHistory(path string, runtimes map[string]runtimeEstimate) error 
 	return os.Rename(name, path)
 }
 
-func validRuntimeDigest(key string) bool {
-	if len(key) != sha256.Size*2 {
-		return false
-	}
-	for i := range len(key) {
-		if key[i] < '0' || key[i] > '9' {
-			if key[i] < 'a' || key[i] > 'f' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func runtimeKey(poolID string, metadata crfgithub.JobMetadata) string {
+func runtimeKey(poolID string, metadata crfgithub.JobMetadata) runtimeDigest {
 	poolID = strings.TrimSpace(poolID)
 	owner := strings.TrimSpace(metadata.OwnerName)
 	repository := strings.TrimSpace(metadata.RepositoryName)
@@ -176,15 +183,27 @@ func runtimeKey(poolID string, metadata crfgithub.JobMetadata) string {
 	workflow = strings.TrimSpace(workflow)
 	name := strings.TrimSpace(metadata.JobDisplayName)
 	if poolID == "" || owner == "" || repository == "" || workflow == "" || name == "" {
-		return ""
+		return runtimeDigest{}
 	}
 	if len(poolID)+len(owner)+len(repository)+len(workflow)+len(name)+4 > maxRuntimeIdentityBytes {
-		return ""
+		return runtimeDigest{}
 	}
-	identity := strings.ToLower(poolID) + "\x00" + strings.ToLower(owner) + "\x00" +
-		strings.ToLower(repository) + "\x00" + strings.ToLower(workflow) + "\x00" + strings.ToLower(name)
-	digest := sha256.Sum256([]byte(identity))
-	return hex.EncodeToString(digest[:])
+	fields := [...]string{poolID, owner, repository, workflow, name}
+	var storage [maxRuntimeIdentityBytes]byte
+	identity := storage[:0]
+	for fieldIndex, field := range fields {
+		if fieldIndex > 0 {
+			identity = append(identity, 0)
+		}
+		for i := 0; i < len(field); i++ {
+			value := field[i]
+			if value >= 'A' && value <= 'Z' {
+				value += 'a' - 'A'
+			}
+			identity = append(identity, value)
+		}
+	}
+	return sha256.Sum256(identity)
 }
 
 func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) {
@@ -196,7 +215,7 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 	for _, job := range jobs {
 		key := runtimeKey(poolID, job.Metadata)
 		duration := job.FinishTime.Sub(job.RunnerAssignTime)
-		if key == "" || duration < minRuntimeSample || duration > maxRuntimeSample {
+		if !validRuntimeDigest(key) || duration < minRuntimeSample || duration > maxRuntimeSample {
 			continue
 		}
 		previous := p.runtimes[key]
@@ -218,7 +237,7 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 	now := time.Now().UTC()
 	shouldPersist := changed && p.cfg.Store.Path != "" &&
 		(p.lastRuntimePersist.IsZero() || now.Sub(p.lastRuntimePersist) >= runtimePersistInterval)
-	snapshot := make(map[string]runtimeEstimate, len(p.runtimes))
+	snapshot := make(map[runtimeDigest]runtimeEstimate, len(p.runtimes))
 	if shouldPersist {
 		for key, estimate := range p.runtimes {
 			snapshot[key] = estimate
@@ -233,56 +252,100 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 	}
 }
 
-func (p *Poller) runtimeSnapshot() map[string]runtimeEstimate {
+func (p *Poller) runtimeSnapshot() map[runtimeDigest]runtimeEstimate {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[string]runtimeEstimate, len(p.runtimes))
+	out := make(map[runtimeDigest]runtimeEstimate, len(p.runtimes))
 	for key, estimate := range p.runtimes {
 		out[key] = estimate
 	}
 	return out
 }
 
-func rankCandidates(poolID string, jobs []crfgithub.AvailableJob, runtimes map[string]runtimeEstimate, now time.Time) []rankedCandidate {
+func makeRankedCandidate(poolID string, job crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time) rankedCandidate {
 	const defaultRuntime = 5 * time.Minute
+	estimatedRuntime := defaultRuntime
+	if estimate, known := runtimes[runtimeKey(poolID, job.Metadata)]; known {
+		estimatedRuntime = estimate.duration
+	}
+	age := now.Sub(job.Metadata.QueueTime)
+	return rankedCandidate{
+		job: job, estimatedRuntime: estimatedRuntime,
+		starved: !job.Metadata.QueueTime.IsZero() && age >= queueStarvationAge,
+	}
+}
+
+func candidateLess(left, right rankedCandidate) bool {
+	if left.starved != right.starved {
+		return left.starved
+	}
+	if left.starved && !left.job.Metadata.QueueTime.Equal(right.job.Metadata.QueueTime) {
+		return left.job.Metadata.QueueTime.Before(right.job.Metadata.QueueTime)
+	}
+	if left.estimatedRuntime != right.estimatedRuntime {
+		return left.estimatedRuntime < right.estimatedRuntime
+	}
+	if !left.job.Metadata.QueueTime.Equal(right.job.Metadata.QueueTime) {
+		if left.job.Metadata.QueueTime.IsZero() {
+			return false
+		}
+		if right.job.Metadata.QueueTime.IsZero() {
+			return true
+		}
+		return left.job.Metadata.QueueTime.Before(right.job.Metadata.QueueTime)
+	}
+	return left.job.RequestID < right.job.RequestID
+}
+
+func rankCandidates(poolID string, jobs []crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time) []rankedCandidate {
 	ranked := make([]rankedCandidate, len(jobs))
 	for i, job := range jobs {
-		estimatedRuntime := defaultRuntime
-		if estimate, known := runtimes[runtimeKey(poolID, job.Metadata)]; known {
-			estimatedRuntime = estimate.duration
-		}
-		age := now.Sub(job.Metadata.QueueTime)
-		ranked[i] = rankedCandidate{
-			job: job, estimatedRuntime: estimatedRuntime,
-			starved: !job.Metadata.QueueTime.IsZero() && age >= queueStarvationAge,
-		}
+		ranked[i] = makeRankedCandidate(poolID, job, runtimes, now)
 	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		left, right := ranked[i], ranked[j]
-		if left.starved != right.starved {
-			return left.starved
-		}
-		if left.starved && !left.job.Metadata.QueueTime.Equal(right.job.Metadata.QueueTime) {
-			return left.job.Metadata.QueueTime.Before(right.job.Metadata.QueueTime)
-		}
-		if left.estimatedRuntime != right.estimatedRuntime {
-			return left.estimatedRuntime < right.estimatedRuntime
-		}
-		if !left.job.Metadata.QueueTime.Equal(right.job.Metadata.QueueTime) {
-			if left.job.Metadata.QueueTime.IsZero() {
-				return false
-			}
-			if right.job.Metadata.QueueTime.IsZero() {
-				return true
-			}
-			return left.job.Metadata.QueueTime.Before(right.job.Metadata.QueueTime)
-		}
-		return left.job.RequestID < right.job.RequestID
-	})
+	sort.SliceStable(ranked, func(i, j int) bool { return candidateLess(ranked[i], ranked[j]) })
 	return ranked
 }
 
-func rankAvailable(poolID string, jobs []crfgithub.AvailableJob, runtimes map[string]runtimeEstimate, now time.Time) []crfgithub.AvailableJob {
+type candidateMaxHeap []rankedCandidate
+
+func (h candidateMaxHeap) Len() int      { return len(h) }
+func (h candidateMaxHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h candidateMaxHeap) Less(i, j int) bool {
+	return candidateLess(h[j], h[i])
+}
+func (h *candidateMaxHeap) Push(value any) { *h = append(*h, value.(rankedCandidate)) }
+func (h *candidateMaxHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	value := old[last]
+	*h = old[:last]
+	return value
+}
+
+func topCandidates(poolID string, jobs []crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time, limit int) []rankedCandidate {
+	if limit <= 0 || len(jobs) == 0 {
+		return nil
+	}
+	if limit >= len(jobs) {
+		return rankCandidates(poolID, jobs, runtimes, now)
+	}
+	selected := make(candidateMaxHeap, limit)
+	for i := 0; i < limit; i++ {
+		selected[i] = makeRankedCandidate(poolID, jobs[i], runtimes, now)
+	}
+	heap.Init(&selected)
+	for _, job := range jobs[limit:] {
+		candidate := makeRankedCandidate(poolID, job, runtimes, now)
+		if candidateLess(candidate, selected[0]) {
+			selected[0] = candidate
+			heap.Fix(&selected, 0)
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool { return candidateLess(selected[i], selected[j]) })
+	return selected
+}
+
+func rankAvailable(poolID string, jobs []crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time) []crfgithub.AvailableJob {
 	candidates := rankCandidates(poolID, jobs, runtimes, now)
 	ranked := make([]crfgithub.AvailableJob, len(candidates))
 	for i, candidate := range candidates {
@@ -306,8 +369,8 @@ func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, 
 		limit := min(remaining, len(batch.Available))
 		return slices.Clone(batch.Available[:limit])
 	}
-	ranked := rankCandidates(poolID, batch.AvailableJobs, p.runtimeSnapshot(), now)
-	limit := min(remaining, len(ranked))
+	limit := min(remaining, len(batch.AvailableJobs))
+	ranked := topCandidates(poolID, batch.AvailableJobs, p.runtimeSnapshot(), now, limit)
 	selected := make([]int64, 0, limit)
 	for _, candidate := range ranked[:limit] {
 		selected = append(selected, candidate.job.RequestID)

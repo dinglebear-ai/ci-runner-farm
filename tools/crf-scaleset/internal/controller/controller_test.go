@@ -82,6 +82,9 @@ func (f *fakeAPI) GetMessage(_ context.Context, _ crfgithub.Session, _ int64, ca
 	return crfgithub.MessageBatch{MessageID: 11,
 		Statistics: &crfgithub.Statistics{TotalAssignedJobs: 1}, AssignedHandles: []int64{501}}, nil
 }
+func (*fakeAPI) GetAcquirableJobs(context.Context, int64) ([]crfgithub.AvailableJob, error) {
+	return nil, nil
+}
 func (*fakeAPI) AcquireJobs(_ context.Context, _ crfgithub.Session, req crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
 	return crfgithub.AcquireResult{AcquiredIDs: slices.Clone(req.RequestIDs)}, nil
 }

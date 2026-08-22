@@ -56,6 +56,9 @@ func (f *liveFake) GetMessage(_ context.Context, _ crfgithub.Session, _ int64, c
 	return crfgithub.MessageBatch{MessageID: int64(capacity + 1),
 		Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}}, nil
 }
+func (*liveFake) GetAcquirableJobs(context.Context, int64) ([]crfgithub.AvailableJob, error) {
+	return nil, nil
+}
 func (*liveFake) AcquireJobs(context.Context, crfgithub.Session, crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
 	return crfgithub.AcquireResult{}, nil
 }
@@ -74,7 +77,7 @@ func liveConfig() LiveConfig {
 		QuarantineRunnerGroupName: "CRF Quarantine",
 		RunnerGroupPolicy:         "selected_repositories", InstallationID: "installation", HostID: "host",
 		PluginDigest: strings.Repeat("a", 64), HelperDigest: strings.Repeat("b", 64),
-		ModuleRevision: "6ce025902cd964747a078c2aabe7340ebc667eca", GoVersion: "go1.25.3",
+		ModuleRevision: "34d2a863b00883630a1b5e840300c8d44db3206c", GoVersion: "go1.25.3",
 		ImageDigest: strings.Repeat("c", 64), DockerfileDigest: strings.Repeat("d", 64),
 		EntrypointDigest: strings.Repeat("e", 64),
 		Workload: WorkloadEvidence{TotalAssignedJobs: true, ZeroToOne: true, CancelReassign: true,

@@ -17,7 +17,10 @@ import (
 
 var ErrAmbiguousAcquire = errors.New("ambiguous_acquisition_session_reset")
 
-const maxJSONSafeInteger int64 = 1<<53 - 1
+const (
+	maxJSONSafeInteger      int64 = 1<<53 - 1
+	acquirableLookupTimeout       = 2 * time.Second
+)
 
 type Config struct {
 	API               crfgithub.ScaleSetAPI
@@ -38,7 +41,7 @@ type Poller struct {
 	replay             map[journal.Key]journal.Entry
 	consumed           map[string]bool
 	poolMu             map[int64]*sync.Mutex
-	runtimes           map[string]runtimeEstimate
+	runtimes           map[runtimeDigest]runtimeEstimate
 	lastRuntimePersist time.Time
 }
 
@@ -361,6 +364,48 @@ func (p *Poller) compactJournalLocked() error {
 	return nil
 }
 
+func (p *Poller) acquisitionBatch(ctx context.Context, pool supervisor.Pool, batch crfgithub.MessageBatch) crfgithub.MessageBatch {
+	if batch.Statistics == nil {
+		return batch
+	}
+	visibleCount := max(len(batch.Available), len(batch.AvailableJobs))
+	if batch.Statistics.TotalAvailableJobs <= visibleCount {
+		return batch
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, acquirableLookupTimeout)
+	jobs, err := p.cfg.API.GetAcquirableJobs(lookupCtx, pool.ScaleSetID)
+	cancel()
+	if err != nil || len(jobs) == 0 {
+		return batch
+	}
+	merged := slices.Clone(batch.AvailableJobs)
+	seen := make(map[int64]bool, len(merged)+len(jobs))
+	for _, job := range merged {
+		if job.RequestID > 0 {
+			seen[job.RequestID] = true
+		}
+	}
+	for _, job := range jobs {
+		if job.RequestID <= 0 || seen[job.RequestID] {
+			continue
+		}
+		seen[job.RequestID] = true
+		merged = append(merged, job)
+	}
+	if len(merged) == 0 {
+		return batch
+	}
+	batch.AvailableJobs = merged
+	return batch
+}
+
+func (p *Poller) selectForAcquire(ctx context.Context, pool supervisor.Pool, batch crfgithub.MessageBatch, capacity int) []int64 {
+	if capacity <= 0 || (batch.Statistics != nil && batch.Statistics.TotalAssignedJobs >= capacity) {
+		return nil
+	}
+	return p.selectedAvailable(p.acquisitionBatch(ctx, pool, batch), pool.ID, capacity, time.Now().UTC())
+}
+
 func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (supervisor.PollResult, error) {
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
@@ -381,9 +426,9 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
 	// Keep GitHub capacity honest. actions/scaleset defines X-ScaleSetMaxCapacity
-	// as the scale set capacity the backend may rely on for assignment. Runtime
-	// ranking therefore only reorders JobAvailable candidates already visible in
-	// this response; it must never inflate capacity merely to obtain lookahead.
+	// as the scale set capacity the backend may rely on for assignment. Hidden
+	// backlog is inspected through the separate admin acquirable-jobs endpoint;
+	// never inflate this capacity header merely to manufacture lookahead.
 	batch, err := p.cfg.API.GetMessage(ctx, session, last, capacity)
 	if err != nil {
 		return supervisor.PollResult{}, err
@@ -422,7 +467,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			}
 			fallthrough
 		case "validated":
-			selected := p.selectedAvailable(batch, pool.ID, capacity, time.Now().UTC())
+			selected := p.selectForAcquire(ctx, pool, batch, capacity)
 			if len(selected) > 0 {
 				base.Phase = "acquire_started"
 				if err := p.append(base); err != nil {
@@ -488,7 +533,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if err := p.append(base); err != nil {
 		return supervisor.PollResult{}, err
 	}
-	selected := p.selectedAvailable(batch, pool.ID, capacity, time.Now().UTC())
+	selected := p.selectForAcquire(ctx, pool, batch, capacity)
 	if len(selected) > 0 {
 		base.Phase = "acquire_started"
 		if err := p.append(base); err != nil {
