@@ -27,7 +27,7 @@ func TestFastLaneStatePersistsAcrossPollerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now().UTC().Truncate(time.Millisecond)
-	policy := fastLanePolicy{longThreshold: 6 * time.Minute, holdDuration: 15 * time.Second}
+	policy := fastLanePolicy{longThreshold: 6 * time.Minute, holdDuration: 15 * time.Second, reserveSlots: 2}
 	poller.startFastLaneWithPolicy(7, 4, started, policy)
 
 	info, err := os.Stat(fastLaneStatePath(store))
@@ -43,8 +43,9 @@ func TestFastLaneStatePersistsAcrossPollerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	lane, ok := restarted.fastLanes[7]
-	if !ok || lane.capacity != 4 || lane.borrowPending || lane.longThreshold != policy.longThreshold ||
-		lane.holdDuration != policy.holdDuration || !lane.holdUntil.Equal(started.Add(policy.holdDuration)) {
+	if !ok || lane.capacity != 4 || lane.reservedSlots != policy.reserveSlots || lane.borrowPending ||
+		lane.longThreshold != policy.longThreshold || lane.holdDuration != policy.holdDuration ||
+		!lane.holdUntil.Equal(started.Add(policy.holdDuration)) {
 		t.Fatalf("fast lane did not survive restart: %#v", restarted.fastLanes)
 	}
 }

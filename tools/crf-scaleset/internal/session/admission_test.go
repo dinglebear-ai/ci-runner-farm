@@ -394,15 +394,55 @@ func TestDerivedFastLanePolicyAdaptsToQueueShapeWithinBounds(t *testing.T) {
 	}
 }
 
+func TestFastLaneReserveWidthTracksCapacityAndPressure(t *testing.T) {
+	cases := []struct {
+		capacity int
+		pressure int
+		want     int
+	}{
+		{capacity: 1, pressure: 100, want: 0},
+		{capacity: 2, pressure: 2, want: 1},
+		{capacity: 8, pressure: 8, want: 2},
+		{capacity: 16, pressure: 16, want: 4},
+		{capacity: 16, pressure: 64, want: 2},
+		{capacity: 64, pressure: 10_000, want: 1},
+	}
+	for _, tc := range cases {
+		if got := fastLaneReserveSlots(tc.capacity, tc.pressure); got != tc.want {
+			t.Fatalf("reserve width capacity=%d pressure=%d got=%d want=%d",
+				tc.capacity, tc.pressure, got, tc.want)
+		}
+	}
+}
+
+func TestElasticFastLaneReservesMultipleKnownLongSlots(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 8)
+	runtimes := map[runtimeDigest]runtimeEstimate{}
+	for i := 0; i < 8; i++ {
+		job := testJob(int64(i+1), "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now)
+		jobs = append(jobs, job)
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	poller := &Poller{runtimes: runtimes}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, AvailableJobs: jobs}
+	policy := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second, reserveSlots: 2}
+	decision := poller.admissionSelectionWithRuntimes(batch, "build", 8, now, false, policy, runtimes)
+	if !decision.reserveFastLane || decision.policy.reserveSlots != 2 ||
+		!slices.Equal(decision.requestIDs, []int64{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("elastic fast lane did not reserve two trailing long slots: %#v", decision)
+	}
+}
+
 func TestFastLanePolicyHysteresisUsesBoundedSteps(t *testing.T) {
-	current := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second}
-	target := fastLanePolicy{longThreshold: 4 * time.Minute, holdDuration: 10 * time.Second}
+	current := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second, reserveSlots: 1}
+	target := fastLanePolicy{longThreshold: 4 * time.Minute, holdDuration: 10 * time.Second, reserveSlots: 4}
 	got := stabilizeFastLanePolicy(current, target)
-	if got.longThreshold != 6*time.Minute || got.holdDuration != 15*time.Second {
+	if got.longThreshold != 6*time.Minute || got.holdDuration != 15*time.Second || got.reserveSlots != 2 {
 		t.Fatalf("policy moved too aggressively: %#v", got)
 	}
 	withinDeadband := stabilizeFastLanePolicy(current,
-		fastLanePolicy{longThreshold: 7 * time.Minute, holdDuration: 19 * time.Second})
+		fastLanePolicy{longThreshold: 7 * time.Minute, holdDuration: 19 * time.Second, reserveSlots: 1})
 	if withinDeadband != current {
 		t.Fatalf("policy ignored hysteresis deadband: %#v", withinDeadband)
 	}

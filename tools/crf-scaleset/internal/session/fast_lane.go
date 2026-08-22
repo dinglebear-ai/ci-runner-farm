@@ -25,6 +25,7 @@ type fastLaneStateEntry struct {
 	HoldUntilMilli      int64 `json:"hold_until_ms"`
 	LongThresholdMillis int64 `json:"long_threshold_ms,omitempty"`
 	HoldDurationMillis  int64 `json:"hold_duration_ms,omitempty"`
+	ReservedSlots       int   `json:"reserved_slots,omitempty"`
 	BorrowPending       bool  `json:"borrow_pending"`
 }
 
@@ -97,7 +98,14 @@ func loadFastLaneState(path string, now time.Time) (map[int64]fastLaneState, err
 			}
 			holdDuration = time.Duration(entry.HoldDurationMillis) * time.Millisecond
 		}
-		lane := fastLaneState{capacity: entry.Capacity, holdUntil: holdUntil,
+		reservedSlots := entry.ReservedSlots
+		if reservedSlots == 0 {
+			reservedSlots = 1
+		}
+		if reservedSlots < 1 || reservedSlots > fastLaneMaxReservedSlots || reservedSlots >= entry.Capacity {
+			return map[int64]fastLaneState{}, errors.New("fast_lane_state_reserved_slots_out_of_range")
+		}
+		lane := fastLaneState{capacity: entry.Capacity, reservedSlots: reservedSlots, holdUntil: holdUntil,
 			holdDuration: holdDuration, longThreshold: longThreshold, borrowPending: entry.BorrowPending}
 		if !lane.borrowPending && !now.Before(lane.holdUntil) {
 			lane.borrowPending = true
@@ -121,16 +129,23 @@ func saveFastLaneState(path string, lanes map[int64]fastLaneState) error {
 		if holdDuration == 0 {
 			holdDuration = fastLaneHoldDuration
 		}
+		reservedSlots := lane.reservedSlots
+		if reservedSlots == 0 {
+			reservedSlots = 1
+		}
 		if longThreshold < fastLaneMinLongThreshold || longThreshold > fastLaneMaxLongThreshold {
 			return errors.New("invalid_fast_lane_state_threshold")
 		}
 		if holdDuration < fastLaneMinHoldDuration || holdDuration > fastLaneMaxHoldDuration {
 			return errors.New("invalid_fast_lane_state_hold_duration")
 		}
+		if reservedSlots < 1 || reservedSlots > fastLaneMaxReservedSlots || reservedSlots >= lane.capacity {
+			return errors.New("invalid_fast_lane_state_reserved_slots")
+		}
 		entries = append(entries, fastLaneStateEntry{
 			ScaleSetID: scaleSetID, Capacity: lane.capacity, HoldUntilMilli: lane.holdUntil.UnixMilli(),
 			LongThresholdMillis: longThreshold.Milliseconds(), HoldDurationMillis: holdDuration.Milliseconds(),
-			BorrowPending: lane.borrowPending,
+			ReservedSlots: reservedSlots, BorrowPending: lane.borrowPending,
 		})
 	}
 	if len(entries) > maxFastLaneStateEntries {

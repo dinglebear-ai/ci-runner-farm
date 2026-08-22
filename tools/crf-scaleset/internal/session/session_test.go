@@ -253,7 +253,8 @@ func TestFastLaneUsesDynamicThresholdForModerateConvoy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.FastLaneState != "holding" || result.FastLaneLongThresholdMillis != 360_000 ||
-		result.FastLaneHoldDurationMillis != 20_000 || result.FastLaneHoldUntilMillis <= 0 {
+		result.FastLaneHoldDurationMillis != 20_000 || result.FastLaneReservedSlots != 1 ||
+		result.FastLaneHoldUntilMillis <= 0 {
 		t.Fatalf("poll result did not expose tuned fast lane: %#v", result)
 	}
 	if len(api.acquireIDs) != 1 {

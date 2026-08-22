@@ -31,6 +31,7 @@ type PollResult struct {
 	FastLaneState               string
 	FastLaneLongThresholdMillis int64
 	FastLaneHoldDurationMillis  int64
+	FastLaneReservedSlots       int
 	FastLaneHoldUntilMillis     int64
 }
 type Poller interface {
@@ -122,7 +123,8 @@ func cloneSnapshot(snapshot protocol.Snapshot) protocol.Snapshot {
 
 func normalizePollResult(result PollResult) PollResult {
 	if result.FastLaneState == "" && result.FastLaneLongThresholdMillis == 0 &&
-		result.FastLaneHoldDurationMillis == 0 && result.FastLaneHoldUntilMillis == 0 {
+		result.FastLaneHoldDurationMillis == 0 && result.FastLaneReservedSlots == 0 &&
+		result.FastLaneHoldUntilMillis == 0 {
 		result.FastLaneState = "inactive"
 	}
 	return result
@@ -140,13 +142,15 @@ func validFastLanePollResult(result PollResult) bool {
 		return false
 	}
 	if result.FastLaneState == "inactive" && result.FastLaneLongThresholdMillis == 0 &&
-		result.FastLaneHoldDurationMillis == 0 && result.FastLaneHoldUntilMillis == 0 {
+		result.FastLaneHoldDurationMillis == 0 && result.FastLaneReservedSlots == 0 &&
+		result.FastLaneHoldUntilMillis == 0 {
 		return true
 	}
 	if result.FastLaneLongThresholdMillis < minThresholdMS ||
 		result.FastLaneLongThresholdMillis > maxThresholdMS ||
 		result.FastLaneHoldDurationMillis < minHoldMS ||
-		result.FastLaneHoldDurationMillis > maxHoldMS {
+		result.FastLaneHoldDurationMillis > maxHoldMS ||
+		result.FastLaneReservedSlots < 1 || result.FastLaneReservedSlots > 4 {
 		return false
 	}
 	if result.FastLaneState == "inactive" {
@@ -223,7 +227,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					AssignedJobs: poll.AssignedJobs, AdvertisedCapacity: capacity, LastMessageID: poll.MessageID,
 					SessionHealthy: err == nil, AcquiredHandles: acquiredHandles(poll.AcquiredHandles),
 					FastLaneState: poll.FastLaneState, FastLaneLongThresholdMS: poll.FastLaneLongThresholdMillis,
-					FastLaneHoldDurationMS: poll.FastLaneHoldDurationMillis, FastLaneHoldUntilMS: poll.FastLaneHoldUntilMillis}
+					FastLaneHoldDurationMS: poll.FastLaneHoldDurationMillis, FastLaneReservedSlots: poll.FastLaneReservedSlots,
+					FastLaneHoldUntilMS: poll.FastLaneHoldUntilMillis}
 				if err == nil {
 					result.ObservedAt = now
 					result.ValidUntil = now.Add(s.cfg.DemandTTL)

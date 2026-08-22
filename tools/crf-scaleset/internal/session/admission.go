@@ -37,6 +37,7 @@ const (
 	fastLaneThresholdDeadband    = time.Minute
 	fastLaneHoldStep             = 5 * time.Second
 	fastLaneHoldDeadband         = 2 * time.Second
+	fastLaneMaxReservedSlots     = 4
 )
 
 type runtimeDigest [sha256.Size]byte
@@ -67,6 +68,7 @@ type rankedCandidate struct {
 type fastLanePolicy struct {
 	longThreshold time.Duration
 	holdDuration  time.Duration
+	reserveSlots  int
 }
 
 type admissionDecision struct {
@@ -327,7 +329,7 @@ func (p *Poller) runtimeSnapshot() map[runtimeDigest]runtimeEstimate {
 }
 
 func defaultFastLanePolicy() fastLanePolicy {
-	return fastLanePolicy{longThreshold: fastLaneLongRuntimeThreshold, holdDuration: fastLaneHoldDuration}
+	return fastLanePolicy{longThreshold: fastLaneLongRuntimeThreshold, holdDuration: fastLaneHoldDuration, reserveSlots: 1}
 }
 
 func clampFastLaneDuration(value, minimum, maximum time.Duration) time.Duration {
@@ -364,8 +366,14 @@ func stepFastLaneDuration(current, target, step, deadband time.Duration) time.Du
 }
 
 func stabilizeFastLanePolicy(current, target fastLanePolicy) fastLanePolicy {
-	if current.longThreshold <= 0 || current.holdDuration <= 0 {
+	if current.longThreshold <= 0 || current.holdDuration <= 0 || current.reserveSlots <= 0 {
 		return target
+	}
+	reserveSlots := current.reserveSlots
+	if target.reserveSlots > reserveSlots {
+		reserveSlots++
+	} else if target.reserveSlots < reserveSlots {
+		reserveSlots--
 	}
 	return fastLanePolicy{
 		longThreshold: clampFastLaneDuration(
@@ -376,7 +384,23 @@ func stabilizeFastLanePolicy(current, target fastLanePolicy) fastLanePolicy {
 			stepFastLaneDuration(current.holdDuration, target.holdDuration,
 				fastLaneHoldStep, fastLaneHoldDeadband),
 			fastLaneMinHoldDuration, fastLaneMaxHoldDuration),
+		reserveSlots: reserveSlots,
 	}
+}
+
+func fastLaneReserveSlots(capacity, pressure int) int {
+	if capacity < 2 {
+		return 0
+	}
+	reserve := max(1, capacity/4)
+	reserve = min(reserve, fastLaneMaxReservedSlots)
+	switch {
+	case pressure >= capacity*8:
+		reserve = 1
+	case pressure >= capacity*4:
+		reserve = max(1, (reserve+1)/2)
+	}
+	return min(reserve, capacity-1)
 }
 
 func deriveFastLanePolicy(poolID string, jobs []crfgithub.AvailableJob,
@@ -414,6 +438,7 @@ func deriveFastLanePolicy(poolID string, jobs []crfgithub.AvailableJob,
 	}
 	policy.holdDuration = clampFastLaneDuration(
 		policy.holdDuration, fastLaneMinHoldDuration, fastLaneMaxHoldDuration)
+	policy.reserveSlots = fastLaneReserveSlots(capacity, pressure)
 	return policy
 }
 
@@ -523,6 +548,9 @@ func (p *Poller) admissionSelectionWithRuntimes(batch crfgithub.MessageBatch, po
 	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
 		policy = defaultFastLanePolicy()
 	}
+	if policy.reserveSlots <= 0 {
+		policy.reserveSlots = 1
+	}
 	if capacity <= 0 {
 		return admissionDecision{policy: policy}
 	}
@@ -549,10 +577,20 @@ func (p *Poller) admissionSelectionWithRuntimes(batch crfgithub.MessageBatch, po
 	reserveFastLane := false
 	selectedLimit := limit
 	if !allowBorrow && capacity >= 2 && remaining > 0 && len(batch.AvailableJobs) >= remaining {
-		marginal := ranked[remaining-1]
-		if marginal.runtimeKnown && !marginal.starved && marginal.estimatedRuntime >= policy.longThreshold {
-			selectedLimit--
+		maxReserve := min(policy.reserveSlots, min(fastLaneMaxReservedSlots, remaining))
+		reserveCount := 0
+		for i := 0; i < maxReserve; i++ {
+			candidate := ranked[remaining-1-i]
+			if !candidate.runtimeKnown || candidate.starved || candidate.estimatedRuntime < policy.longThreshold {
+				break
+			}
+			reserveCount++
+		}
+		if reserveCount > 0 {
+			selectedLimit -= reserveCount
 			reserveFastLane = true
+			policy.reserveSlots = reserveCount
+			marginal := ranked[remaining-1]
 			if marginal.estimatedRuntime >= 2*policy.longThreshold {
 				policy.holdDuration = clampFastLaneDuration(
 					policy.holdDuration+fastLaneHoldStep, fastLaneMinHoldDuration, fastLaneMaxHoldDuration)

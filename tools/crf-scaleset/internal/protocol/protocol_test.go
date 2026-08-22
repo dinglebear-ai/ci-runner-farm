@@ -52,8 +52,8 @@ func TestSnapshotFastLaneContract(t *testing.T) {
 	base := Snapshot{SchemaVersion: 1, ControllerInstanceID: "controller-1",
 		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64),
 		ObservedAt: now, ValidUntil: now.Add(10 * time.Second)}
-	valid := PoolSnapshot{PoolID: "python", FastLaneState: "holding",
-		FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000,
+	valid := PoolSnapshot{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding",
+		FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 1,
 		FastLaneHoldUntilMS: now.Add(15 * time.Second).UnixMilli()}
 	base.Pools = []PoolSnapshot{valid}
 	if err := base.Validate(now); err != nil {
@@ -74,10 +74,13 @@ func TestSnapshotFastLaneContract(t *testing.T) {
 	invalid := []PoolSnapshot{
 		{PoolID: "python", FastLaneState: ""},
 		{PoolID: "python", FastLaneState: "teleporting"},
-		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 239_999, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: 1},
-		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 30_001, FastLaneHoldUntilMS: 1},
-		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: 0},
-		{PoolID: "python", FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneHoldUntilMS: now.Add(3 * time.Minute).UnixMilli()},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 239_999, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 30_001, FastLaneReservedSlots: 1, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 0, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", AdvertisedCapacity: 8, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 5, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 2, FastLaneHoldUntilMS: 1},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMS: 0},
+		{PoolID: "python", AdvertisedCapacity: 2, FastLaneState: "holding", FastLaneLongThresholdMS: 360_000, FastLaneHoldDurationMS: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMS: now.Add(3 * time.Minute).UnixMilli()},
 	}
 	for _, pool := range invalid {
 		base.Pools = []PoolSnapshot{pool}

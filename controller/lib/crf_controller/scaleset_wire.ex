@@ -205,6 +205,7 @@ defmodule CrfController.ScaleSetWire do
              "fast_lane_state",
              "fast_lane_long_threshold_ms",
              "fast_lane_hold_duration_ms",
+             "fast_lane_reserved_slots",
              "fast_lane_hold_until_ms",
              "observed_at",
              "valid_until"
@@ -223,6 +224,8 @@ defmodule CrfController.ScaleSetWire do
            pool["fast_lane_long_threshold_ms"],
          fast_lane_hold_duration when is_integer(fast_lane_hold_duration) <-
            pool["fast_lane_hold_duration_ms"],
+         fast_lane_reserved_slots when is_integer(fast_lane_reserved_slots) <-
+           pool["fast_lane_reserved_slots"],
          fast_lane_hold_until when is_integer(fast_lane_hold_until) <-
            pool["fast_lane_hold_until_ms"],
          :ok <-
@@ -230,7 +233,9 @@ defmodule CrfController.ScaleSetWire do
              fast_lane_state,
              fast_lane_threshold,
              fast_lane_hold_duration,
+             fast_lane_reserved_slots,
              fast_lane_hold_until,
+             capacity,
              now
            ),
          {:ok, observed_at} <- parse_time(pool["observed_at"]),
@@ -248,6 +253,7 @@ defmodule CrfController.ScaleSetWire do
          fast_lane_state: fast_lane_state,
          fast_lane_long_threshold_ms: fast_lane_threshold,
          fast_lane_hold_duration_ms: fast_lane_hold_duration,
+         fast_lane_reserved_slots: fast_lane_reserved_slots,
          fast_lane_hold_until_ms: fast_lane_hold_until,
          observed_at: observed_at,
          valid_until: valid_until
@@ -268,12 +274,14 @@ defmodule CrfController.ScaleSetWire do
 
   defp handles(_), do: {:error, :invalid_scaleset_snapshot}
 
-  defp fast_lane("inactive", 0, 0, 0, _now), do: :ok
+  defp fast_lane("inactive", 0, 0, 0, 0, _capacity, _now), do: :ok
 
-  defp fast_lane(state, threshold, hold_duration, hold_until, now)
+  defp fast_lane(state, threshold, hold_duration, reserved_slots, hold_until, capacity, now)
        when state in ["inactive", "holding", "borrow_pending"] and
               threshold >= 240_000 and threshold <= 480_000 and
-              hold_duration >= 5_000 and hold_duration <= 30_000 do
+              hold_duration >= 5_000 and hold_duration <= 30_000 and
+              reserved_slots >= 1 and reserved_slots <= 4 and
+              capacity > reserved_slots do
     max_hold_until = DateTime.to_unix(DateTime.add(now, 120, :second), :millisecond)
 
     cond do
@@ -283,7 +291,7 @@ defmodule CrfController.ScaleSetWire do
     end
   end
 
-  defp fast_lane(_, _, _, _, _), do: {:error, :invalid_scaleset_snapshot}
+  defp fast_lane(_, _, _, _, _, _, _), do: {:error, :invalid_scaleset_snapshot}
 
   defp fresh(observed_at, valid_until, now, max_ttl_ms) do
     cond do

@@ -242,7 +242,8 @@ func TestSupervisorClonesConfigurationPollResultsAndSnapshots(t *testing.T) {
 	}
 	valid := PollResult{AssignedJobs: 1, MessageID: 1, AcquiredHandles: []int64{7},
 		FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000,
-		FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: time.Now().Add(15 * time.Second).UnixMilli()}
+		FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 1,
+		FastLaneHoldUntilMillis: time.Now().Add(15 * time.Second).UnixMilli()}
 	if !validPollResult(valid) {
 		t.Fatal("valid poll result rejected")
 	}
@@ -256,10 +257,12 @@ func TestSupervisorClonesConfigurationPollResultsAndSnapshots(t *testing.T) {
 		{AcquiredHandles: []int64{7, 7}, FastLaneState: "inactive"},
 		{AcquiredHandles: make([]int64, 65), FastLaneState: "inactive"},
 		{FastLaneState: "teleporting"},
-		{FastLaneState: "holding", FastLaneLongThresholdMillis: 239_999, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: 1},
-		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 4_999, FastLaneHoldUntilMillis: 1},
-		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: 0},
-		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneHoldUntilMillis: time.Now().Add(3 * time.Minute).UnixMilli()},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 239_999, FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 4_999, FastLaneReservedSlots: 1, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 0, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 5, FastLaneHoldUntilMillis: 1},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMillis: 0},
+		{FastLaneState: "holding", FastLaneLongThresholdMillis: 360_000, FastLaneHoldDurationMillis: 15_000, FastLaneReservedSlots: 1, FastLaneHoldUntilMillis: time.Now().Add(3 * time.Minute).UnixMilli()},
 	} {
 		if validPollResult(result) {
 			t.Fatalf("accepted invalid poll result: %#v", result)

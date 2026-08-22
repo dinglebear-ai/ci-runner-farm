@@ -141,6 +141,9 @@ defmodule CrfController.ScaleSetWireTest do
           %{pool | "fast_lane_long_threshold_ms" => 480_001},
           %{pool | "fast_lane_hold_duration_ms" => 4_999},
           %{pool | "fast_lane_hold_duration_ms" => 30_001},
+          %{pool | "fast_lane_reserved_slots" => 0},
+          %{pool | "fast_lane_reserved_slots" => 5},
+          %{pool | "fast_lane_reserved_slots" => 4},
           %{pool | "fast_lane_hold_until_ms" => 0},
           %{
             pool
@@ -157,6 +160,7 @@ defmodule CrfController.ScaleSetWireTest do
       | "fast_lane_state" => "inactive",
         "fast_lane_long_threshold_ms" => 0,
         "fast_lane_hold_duration_ms" => 0,
+        "fast_lane_reserved_slots" => 0,
         "fast_lane_hold_until_ms" => 0
     }
 
@@ -228,6 +232,7 @@ defmodule CrfController.ScaleSetWireTest do
           "fast_lane_state" => "holding",
           "fast_lane_long_threshold_ms" => 360_000,
           "fast_lane_hold_duration_ms" => 15_000,
+          "fast_lane_reserved_slots" => 1,
           "fast_lane_hold_until_ms" =>
             DateTime.to_unix(DateTime.add(now, 14, :second), :millisecond),
           "observed_at" => DateTime.to_iso8601(observed),

@@ -34,6 +34,7 @@ type Config struct {
 
 type fastLaneState struct {
 	capacity      int
+	reservedSlots int
 	holdUntil     time.Time
 	holdDuration  time.Duration
 	longThreshold time.Duration
@@ -193,16 +194,20 @@ func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capac
 	return nil
 }
 
-func (p *Poller) fastLaneStatus(scaleSetID int64) (string, int64, int64, int64) {
+func (p *Poller) fastLaneStatus(scaleSetID int64, capacity int) (string, int64, int64, int, int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if capacity < 2 {
+		return "inactive", 0, 0, 0, 0
+	}
 	policy := p.fastLaneTunings[scaleSetID]
-	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
+	if policy.longThreshold <= 0 || policy.holdDuration <= 0 || policy.reserveSlots <= 0 {
 		policy = defaultFastLanePolicy()
 	}
 	lane, active := p.fastLanes[scaleSetID]
 	if !active {
-		return "inactive", policy.longThreshold.Milliseconds(), policy.holdDuration.Milliseconds(), 0
+		reservedSlots := min(policy.reserveSlots, min(fastLaneMaxReservedSlots, capacity-1))
+		return "inactive", policy.longThreshold.Milliseconds(), policy.holdDuration.Milliseconds(), reservedSlots, 0
 	}
 	longThreshold := lane.longThreshold
 	if longThreshold <= 0 {
@@ -216,7 +221,11 @@ func (p *Poller) fastLaneStatus(scaleSetID int64) (string, int64, int64, int64) 
 	if lane.borrowPending {
 		state = "borrow_pending"
 	}
-	return state, longThreshold.Milliseconds(), holdDuration.Milliseconds(), lane.holdUntil.UnixMilli()
+	reservedSlots := lane.reservedSlots
+	if reservedSlots <= 0 {
+		reservedSlots = 1
+	}
+	return state, longThreshold.Milliseconds(), holdDuration.Milliseconds(), reservedSlots, lane.holdUntil.UnixMilli()
 }
 
 func (p *Poller) result(scaleSetID int64, sessionID string, capacity int,
@@ -224,11 +233,12 @@ func (p *Poller) result(scaleSetID int64, sessionID string, capacity int,
 	if err := p.ensureCapacityHandles(scaleSetID, sessionID, capacity); err != nil {
 		return supervisor.PollResult{}, err
 	}
-	state, thresholdMS, holdDurationMS, holdUntilMS := p.fastLaneStatus(scaleSetID)
+	state, thresholdMS, holdDurationMS, reservedSlots, holdUntilMS := p.fastLaneStatus(scaleSetID, capacity)
 	return supervisor.PollResult{AssignedJobs: p.assignedCount(scaleSetID),
 		MessageID: messageID, AcquiredHandles: p.pendingSnapshot(scaleSetID),
 		FastLaneState: state, FastLaneLongThresholdMillis: thresholdMS,
-		FastLaneHoldDurationMillis: holdDurationMS, FastLaneHoldUntilMillis: holdUntilMS}, nil
+		FastLaneHoldDurationMillis: holdDurationMS, FastLaneReservedSlots: reservedSlots,
+		FastLaneHoldUntilMillis: holdUntilMS}, nil
 }
 
 func (p *Poller) assignedCount(scaleSetID int64) int {
@@ -560,6 +570,10 @@ func (p *Poller) startFastLaneWithPolicy(scaleSetID int64, capacity int, now tim
 	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
 		policy = defaultFastLanePolicy()
 	}
+	if policy.reserveSlots <= 0 {
+		policy.reserveSlots = 1
+	}
+	policy.reserveSlots = min(policy.reserveSlots, min(fastLaneMaxReservedSlots, capacity-1))
 	policy.longThreshold = clampFastLaneDuration(
 		policy.longThreshold, fastLaneMinLongThreshold, fastLaneMaxLongThreshold)
 	policy.holdDuration = clampFastLaneDuration(
@@ -568,8 +582,9 @@ func (p *Poller) startFastLaneWithPolicy(scaleSetID int64, capacity int, now tim
 	if p.fastLanes == nil {
 		p.fastLanes = map[int64]fastLaneState{}
 	}
-	p.fastLanes[scaleSetID] = fastLaneState{capacity: capacity, holdUntil: now.Add(policy.holdDuration),
-		holdDuration: policy.holdDuration, longThreshold: policy.longThreshold}
+	p.fastLanes[scaleSetID] = fastLaneState{capacity: capacity, reservedSlots: policy.reserveSlots,
+		holdUntil: now.Add(policy.holdDuration), holdDuration: policy.holdDuration,
+		longThreshold: policy.longThreshold}
 	p.mu.Unlock()
 	p.persistFastLanes()
 }
@@ -577,8 +592,9 @@ func (p *Poller) startFastLaneWithPolicy(scaleSetID int64, capacity int, now tim
 func (p *Poller) markFastLaneBorrowPending(scaleSetID int64, expected fastLaneState) bool {
 	p.mu.Lock()
 	current, exists := p.fastLanes[scaleSetID]
-	if !exists || current.capacity != expected.capacity || !current.holdUntil.Equal(expected.holdUntil) ||
-		current.holdDuration != expected.holdDuration || current.longThreshold != expected.longThreshold {
+	if !exists || current.capacity != expected.capacity || current.reservedSlots != expected.reservedSlots ||
+		!current.holdUntil.Equal(expected.holdUntil) || current.holdDuration != expected.holdDuration ||
+		current.longThreshold != expected.longThreshold {
 		p.mu.Unlock()
 		return false
 	}

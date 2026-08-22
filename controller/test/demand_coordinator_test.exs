@@ -164,6 +164,7 @@ defmodule CrfController.DemandCoordinatorTest do
             fast_lane_state: "holding",
             fast_lane_long_threshold_ms: 360_000,
             fast_lane_hold_duration_ms: 15_000,
+            fast_lane_reserved_slots: 1,
             fast_lane_hold_until_ms: 123_456
           }
         ]
@@ -240,6 +241,7 @@ defmodule CrfController.DemandCoordinatorTest do
       assert pool.fast_lane_state == "holding"
       assert pool.fast_lane_long_threshold_ms == 360_000
       assert pool.fast_lane_hold_duration_ms == 15_000
+      assert pool.fast_lane_reserved_slots == 1
       assert pool.fast_lane_hold_until_ms == 123_456
       refute Map.has_key?(pool, :acquired_handles)
     end

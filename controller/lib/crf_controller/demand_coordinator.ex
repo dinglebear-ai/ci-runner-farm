@@ -228,6 +228,7 @@ defmodule CrfController.DemandCoordinator do
         fast_lane_state: Map.get(pool, :fast_lane_state, "inactive"),
         fast_lane_long_threshold_ms: Map.get(pool, :fast_lane_long_threshold_ms, 0),
         fast_lane_hold_duration_ms: Map.get(pool, :fast_lane_hold_duration_ms, 0),
+        fast_lane_reserved_slots: Map.get(pool, :fast_lane_reserved_slots, 0),
         fast_lane_hold_until_ms: Map.get(pool, :fast_lane_hold_until_ms, 0),
         observed_at: Map.get(pool, :observed_at),
         valid_until: Map.get(pool, :valid_until)

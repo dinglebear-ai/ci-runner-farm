@@ -101,6 +101,7 @@ type PoolSnapshot struct {
 	FastLaneState           string    `json:"fast_lane_state"`
 	FastLaneLongThresholdMS int64     `json:"fast_lane_long_threshold_ms"`
 	FastLaneHoldDurationMS  int64     `json:"fast_lane_hold_duration_ms"`
+	FastLaneReservedSlots   int       `json:"fast_lane_reserved_slots"`
 	FastLaneHoldUntilMS     int64     `json:"fast_lane_hold_until_ms"`
 	ObservedAt              time.Time `json:"observed_at"`
 	ValidUntil              time.Time `json:"valid_until"`
@@ -118,11 +119,15 @@ func validFastLanePoolSnapshot(pool PoolSnapshot, now time.Time) bool {
 		return false
 	}
 	if pool.FastLaneState == "inactive" && pool.FastLaneLongThresholdMS == 0 &&
-		pool.FastLaneHoldDurationMS == 0 && pool.FastLaneHoldUntilMS == 0 {
+		pool.FastLaneHoldDurationMS == 0 && pool.FastLaneReservedSlots == 0 && pool.FastLaneHoldUntilMS == 0 {
 		return true
 	}
 	if pool.FastLaneLongThresholdMS < minThresholdMS || pool.FastLaneLongThresholdMS > maxThresholdMS ||
-		pool.FastLaneHoldDurationMS < minHoldMS || pool.FastLaneHoldDurationMS > maxHoldMS {
+		pool.FastLaneHoldDurationMS < minHoldMS || pool.FastLaneHoldDurationMS > maxHoldMS ||
+		pool.FastLaneReservedSlots < 1 || pool.FastLaneReservedSlots > 4 {
+		return false
+	}
+	if pool.AdvertisedCapacity > 0 && pool.FastLaneReservedSlots >= pool.AdvertisedCapacity {
 		return false
 	}
 	if pool.FastLaneState == "inactive" {
