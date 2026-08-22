@@ -19,30 +19,31 @@ import (
 )
 
 type fakeAPI struct {
-	mu                 sync.Mutex
-	batch              crfgithub.MessageBatch
-	acquire            crfgithub.AcquireResult
-	acquireResultSet   bool
-	acquireErr         error
-	sessionCalls       int
-	acquireCalls       int
-	acquireIDs         []int64
-	ackCalls           int
-	ackSawCommit       bool
-	ackErr             error
-	ackHook            func()
-	closeCalls         int
-	closeErr           error
-	messageCalls       int
-	lastMessage        int64
-	messageCapacity    int
-	acquirable         []crfgithub.AvailableJob
-	acquirableErr      error
-	acquirableCalls    int
-	acquirableDeadline bool
-	store              journal.Store
-	started            chan int64
-	block              chan struct{}
+	mu                  sync.Mutex
+	batch               crfgithub.MessageBatch
+	acquire             crfgithub.AcquireResult
+	acquireResultSet    bool
+	acquireErr          error
+	sessionCalls        int
+	acquireCalls        int
+	acquireIDs          []int64
+	ackCalls            int
+	ackSawCommit        bool
+	ackErr              error
+	ackHook             func()
+	closeCalls          int
+	closeErr            error
+	messageCalls        int
+	lastMessage         int64
+	messageCapacity     int
+	acquirable          []crfgithub.AvailableJob
+	acquirableErr       error
+	acquirableCalls     int
+	acquirableDeadline  bool
+	store               journal.Store
+	started             chan int64
+	block               chan struct{}
+	ignoreMessageCancel bool
 }
 
 func (*fakeAPI) CreateRunnerScaleSet(context.Context, crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -78,10 +79,14 @@ func (f *fakeAPI) GetMessage(ctx context.Context, session crfgithub.Session, las
 		f.started <- session.ScaleSetID
 	}
 	if f.block != nil {
-		select {
-		case <-f.block:
-		case <-ctx.Done():
-			return crfgithub.MessageBatch{}, ctx.Err()
+		if f.ignoreMessageCancel {
+			<-f.block
+		} else {
+			select {
+			case <-f.block:
+			case <-ctx.Done():
+				return crfgithub.MessageBatch{}, ctx.Err()
+			}
 		}
 	}
 	return batch, nil
@@ -89,7 +94,7 @@ func (f *fakeAPI) GetMessage(ctx context.Context, session crfgithub.Session, las
 
 func TestRetireHandleInterruptsLongPoll(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
-	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{})}
+	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{}), ignoreMessageCancel: true}
 	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
 		OwnershipRevision: strings.Repeat("b", 64)})
 	if err != nil {
@@ -113,8 +118,9 @@ func TestRetireHandleInterruptsLongPoll(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("retirement remained blocked behind the GitHub long poll")
 	}
-	if err := <-pollDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("poll error = %v, want context canceled", err)
+	close(api.block)
+	if err := <-pollDone; err != nil {
+		t.Fatalf("poll error = %v", err)
 	}
 }
 func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.AvailableJob, error) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type Poller struct {
 	consumed           map[string]bool
 	poolMu             map[int64]*sync.Mutex
 	pollCancels        map[int64]context.CancelFunc
+	pollActive         map[int64]int
 	runtimes           map[runtimeDigest]runtimeEstimate
 	lastRuntimePersist time.Time
 	runtimePersistMu   sync.Mutex
@@ -69,7 +71,7 @@ func New(cfg Config) (*Poller, error) {
 	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, rejectedSessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
-		poolMu: map[int64]*sync.Mutex{}, pollCancels: map[int64]context.CancelFunc{}, runtimes: runtimes,
+		poolMu: map[int64]*sync.Mutex{}, pollCancels: map[int64]context.CancelFunc{}, pollActive: map[int64]int{}, runtimes: runtimes,
 		acquirableHealth: map[int64]string{}}
 	for key, consumed := range cfg.ConsumedHandles {
 		if consumed {
@@ -344,6 +346,11 @@ func (p *Poller) append(entry journal.Entry) error {
 	// or fsync. Independent pool polls can continue updating in-memory state.
 	p.journalMu.Lock()
 	defer p.journalMu.Unlock()
+	p.mu.Lock()
+	entry.AcquiredHandles = slices.DeleteFunc(slices.Clone(entry.AcquiredHandles), func(handle int64) bool {
+		return p.consumed[handleKey(entry.ScaleSetID, handle)]
+	})
+	p.mu.Unlock()
 	size, err := p.cfg.Store.Size()
 	if err != nil {
 		return err
@@ -542,12 +549,26 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if p.pollCancels == nil {
 		p.pollCancels = map[int64]context.CancelFunc{}
 	}
+	if p.pollActive == nil {
+		p.pollActive = map[int64]int{}
+	}
 	p.pollCancels[pool.ScaleSetID] = cancel
+	p.pollActive[pool.ScaleSetID]++
 	p.mu.Unlock()
 	defer func() {
 		cancel()
 		p.mu.Lock()
 		delete(p.pollCancels, pool.ScaleSetID)
+		p.pollActive[pool.ScaleSetID]--
+		if p.pollActive[pool.ScaleSetID] == 0 {
+			delete(p.pollActive, pool.ScaleSetID)
+			prefix := fmt.Sprintf("%d:", pool.ScaleSetID)
+			for key := range p.consumed {
+				if strings.HasPrefix(key, prefix) {
+					delete(p.consumed, key)
+				}
+			}
+		}
 		p.mu.Unlock()
 	}()
 	ctx = pollCtx
@@ -756,10 +777,6 @@ func (p *Poller) RetireHandle(scaleSetID, handle int64) error {
 	if cancel != nil {
 		cancel()
 	}
-	lock := p.poolLock(scaleSetID)
-	lock.Lock()
-	defer lock.Unlock()
-
 	key := handleKey(scaleSetID, handle)
 	p.mu.Lock()
 	p.consumed[key] = true
@@ -775,7 +792,9 @@ func (p *Poller) RetireHandle(scaleSetID, handle int64) error {
 	}
 	p.journalMu.Unlock()
 	p.mu.Lock()
-	delete(p.consumed, key)
+	if p.pollActive[scaleSetID] == 0 {
+		delete(p.consumed, key)
+	}
 	p.mu.Unlock()
 	return nil
 }
