@@ -90,6 +90,12 @@ impl NativeRunnerExecutor {
     pub fn mark_terminal_reported(&self, placement_id: &str) -> Result<(), NativeExecutorError> {
         self.store
             .mark_terminal_reported(placement_id)
+            .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?;
+        self.materializer
+            .cleanup(placement_id)
+            .map_err(|_| NativeExecutorError::PlacementStateUnavailable)?;
+        self.store
+            .prune_reported(placement_id)
             .map_err(|_| NativeExecutorError::PlacementStateUnavailable)
     }
 

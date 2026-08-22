@@ -63,6 +63,7 @@ impl ContainerRunnerExecutor {
     pub fn mark_terminal_reported(&self, placement_id: &str) -> Result<(), ContainerExecutorError> {
         self.store
             .mark_terminal_reported(placement_id)
+            .and_then(|()| self.store.prune_reported(placement_id))
             .map_err(|_| ContainerExecutorError::PlacementStateUnavailable)
     }
 

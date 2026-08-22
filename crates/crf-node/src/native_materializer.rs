@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use crf_protocol::OperatingSystem;
+use crf_protocol::{OperatingSystem, valid_identifier};
 
 const MAX_TEMPLATE_ENTRIES: usize = 30_000;
 const MAX_TEMPLATE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -26,6 +26,7 @@ pub enum MaterializerError {
     MaterializationConflict,
     MaterializationFailed,
     LogOpenFailed,
+    CleanupFailed,
 }
 
 impl RunnerMaterializer {
@@ -104,6 +105,14 @@ impl RunnerMaterializer {
         &self.runtime_root
     }
 
+    pub fn cleanup(&self, placement_id: &str) -> Result<(), MaterializerError> {
+        if !valid_identifier(placement_id) {
+            return Err(MaterializerError::CleanupFailed);
+        }
+        remove_private_placement_directory(&self.runtime_root, placement_id)?;
+        remove_private_placement_directory(&self.log_root, placement_id)
+    }
+
     fn validate(&self) -> Result<(), MaterializerError> {
         if matches!(self.os, OperatingSystem::Other)
             || self.template_root.as_os_str().is_empty()
@@ -127,6 +136,24 @@ impl RunnerMaterializer {
         }
         Ok(())
     }
+}
+
+fn remove_private_placement_directory(
+    root: &Path,
+    placement_id: &str,
+) -> Result<(), MaterializerError> {
+    ensure_private_directory(root).map_err(|_| MaterializerError::CleanupFailed)?;
+    let target = root.join(placement_id);
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(MaterializerError::CleanupFailed),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(MaterializerError::CleanupFailed);
+    }
+    fs::remove_dir_all(&target).map_err(|_| MaterializerError::CleanupFailed)?;
+    sync_directory(root).map_err(|_| MaterializerError::CleanupFailed)
 }
 
 #[derive(Default)]
@@ -284,4 +311,80 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "crf-native-materializer-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn materializer(directory: &TestDirectory) -> RunnerMaterializer {
+        let template = directory.0.join("template");
+        fs::create_dir_all(&template).expect("template");
+        fs::write(template.join("run.sh"), b"#!/bin/sh\n").expect("runner");
+        RunnerMaterializer::new(
+            OperatingSystem::Linux,
+            template,
+            directory.0.join("runtime"),
+            directory.0.join("logs"),
+        )
+        .expect("materializer")
+    }
+
+    #[test]
+    fn cleanup_removes_only_the_named_runtime_and_logs() {
+        let directory = TestDirectory::new();
+        let materializer = materializer(&directory);
+        let runtime = materializer.prepare("placement-1").expect("runtime");
+        let _logs = materializer.open_logs("placement-1").expect("logs");
+        let other_runtime = materializer.prepare("placement-2").expect("other runtime");
+
+        materializer.cleanup("placement-1").expect("cleanup");
+
+        assert!(!runtime.exists());
+        assert!(!directory.0.join("logs/placement-1").exists());
+        assert!(other_runtime.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_symlinked_placement_directory() {
+        let directory = TestDirectory::new();
+        let materializer = materializer(&directory);
+        fs::create_dir_all(materializer.runtime_root()).expect("runtime root");
+        let outside = directory.0.join("outside");
+        fs::create_dir(&outside).expect("outside");
+        fs::write(outside.join("keep"), b"safe").expect("sentinel");
+        std::os::unix::fs::symlink(&outside, materializer.runtime_root().join("placement-1"))
+            .expect("symlink");
+
+        assert_eq!(
+            materializer.cleanup("placement-1"),
+            Err(MaterializerError::CleanupFailed)
+        );
+        assert!(outside.join("keep").exists());
+    }
 }
