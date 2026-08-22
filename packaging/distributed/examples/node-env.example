@@ -19,8 +19,9 @@ CRF_OPERATOR_PROJECTION_PATH=/var/lib/ci-runner-farm/node/status/controller.json
 
 # A backend is mandatory. Native processes are rejected because repository code
 # would share the node agent identity and could read its mTLS/control state.
+# Install a compatible isolated adapter before enabling the node service.
 CRF_EXECUTION_BACKEND=container
-CRF_CONTAINER_ADAPTER_PROGRAM=/usr/local/libexec/ci-runner-farm/container-adapter
+CRF_CONTAINER_ADAPTER_PROGRAM=/absolute/path/to/container-adapter
 CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
 # The adapter receives the JIT descriptor only over bounded stdin.
 

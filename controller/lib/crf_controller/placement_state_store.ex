@@ -8,7 +8,6 @@ defmodule CrfController.PlacementStateStore do
   @legacy_schema_version 1
   @max_state_bytes 16 * 1024 * 1024
   @max_records 65_536
-  @max_tombstones 8_192
   @states %{
     "commanded" => :commanded,
     "accepted" => :accepted,
@@ -52,15 +51,12 @@ defmodule CrfController.PlacementStateStore do
   def persist(_, _, _), do: {:error, :invalid_placement_state}
 
   def compact(placements, tombstones) when is_map(placements) and is_map(tombstones) do
-    retained =
-      tombstones
-      |> Map.values()
-      |> Enum.sort_by(&{&1.updated_at_ms, &1.id}, :desc)
-      |> Enum.take(@max_tombstones)
-      |> Map.new(&{&1.id, &1})
-
-    %{placements: placements, tombstones: retained}
+    %{placements: placements, tombstones: tombstones}
   end
+
+  def capacity_available?(placements, tombstones, limit \\ @max_records)
+      when is_map(placements) and is_map(tombstones) and is_integer(limit) and limit > 0,
+      do: map_size(placements) + map_size(tombstones) < min(limit, @max_records)
 
   defp read(path) do
     with {:ok, stat} <- File.stat(path),

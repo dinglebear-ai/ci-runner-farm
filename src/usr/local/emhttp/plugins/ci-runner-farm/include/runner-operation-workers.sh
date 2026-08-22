@@ -10,7 +10,8 @@ OPERATION_KILL_AFTER_SECONDS="${OPERATION_KILL_AFTER_SECONDS:-5}"
 OPERATION_COMMAND_LAUNCHER="${CRF_OPERATION_COMMAND_LAUNCHER:-$0}"
 
 operation_run_bounded() {
-  local seconds="$1" pid deadline kill_deadline now rc=0
+  local seconds="$1" pid starttime deadline kill_deadline now rc=0 member member_start
+  local -a identities=()
   shift
   case "$seconds" in ''|*[!0-9]*) return 125 ;; esac
   [ "$seconds" -ge 1 ] && [ "$seconds" -le 86400 ] || return 125
@@ -18,16 +19,28 @@ operation_run_bounded() {
   [ "$OPERATION_KILL_AFTER_SECONDS" -ge 1 ] && [ "$OPERATION_KILL_AFTER_SECONDS" -le 60 ] || return 125
   setsid "$@" &
   pid=$!
+  starttime="$(operation_pid_starttime "$pid")" || { wait "$pid" || rc=$?; return "$rc"; }
   deadline=$(($(date +%s) + seconds))
-  while kill -0 -- "-$pid" 2>/dev/null; do
+  while operation_pid_matches "$pid" "$starttime"; do
     now="$(date +%s)"
     if [ "$now" -ge "$deadline" ]; then
-      kill -TERM -- "-$pid" 2>/dev/null || true
+      while read -r member; do
+        [ -n "$member" ] || continue
+        member_start="$(operation_pid_starttime "$member" 2>/dev/null)" || continue
+        identities+=("$member:$member_start")
+      done < <(ps -eo pid=,pgid= | awk -v group="$pid" '$2 == group {print $1}')
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       kill_deadline=$((now + OPERATION_KILL_AFTER_SECONDS))
-      while kill -0 -- "-$pid" 2>/dev/null && [ "$(date +%s)" -lt "$kill_deadline" ]; do
+      while operation_pid_matches "$pid" "$starttime" && [ "$(date +%s)" -lt "$kill_deadline" ]; do
         sleep 0.1
       done
-      kill -KILL -- "-$pid" 2>/dev/null || true
+      if operation_pid_matches "$pid" "$starttime"; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        for member in "${identities[@]}"; do
+          operation_signal_identity KILL "$member"
+        done
+      fi
       wait "$pid" 2>/dev/null || true
       return 124
     fi
@@ -35,6 +48,23 @@ operation_run_bounded() {
   done
   wait "$pid" || rc=$?
   return "$rc"
+}
+
+operation_pid_starttime() {
+  local pid="$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  sed -E 's/^[0-9]+ \(.*\) [^ ]+ //' "/proc/$pid/stat" 2>/dev/null | awk '{print $19}'
+}
+
+operation_pid_matches() {
+  [ "$(operation_pid_starttime "$1" 2>/dev/null)" = "$2" ]
+}
+
+operation_signal_identity() {
+  local signal="$1" identity="$2" pid="${identity%%:*}" starttime="${identity#*:}"
+  operation_pid_matches "$pid" "$starttime" || return 0
+  kill -"$signal" "$pid" 2>/dev/null || true
 }
 
 operation_runtime_dir_ensure() {

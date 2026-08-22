@@ -5,7 +5,7 @@
 ## Execution backend selection
 
 - Set `CRF_EXECUTION_BACKEND=container` to use a controller-approved local container adapter. Container mode requires `CRF_CONTAINER_ADAPTER_PROGRAM=/absolute/path/to/adapter`; `CRF_CONTAINER_ADAPTER_TIMEOUT_MS` defaults to 15000 and is bounded to 100..120000 ms. Native runner-template/runtime/log settings are not required.
-- Omitting `CRF_EXECUTION_BACKEND` fails closed. Setting it to `native_process` returns `UnsafeNativeExecution`; there is no unsafe override.
+- Omitting `CRF_EXECUTION_BACKEND` fails closed. Setting it to `native_process` returns `UnsafeNativeExecution`; there is no unsafe override. The distributed bundle does not ship a portable adapter yet, so do not enable its node service until a compatible isolated adapter is installed.
 
 The container adapter is an execution boundary, not a scheduler. The controller remains authoritative for placement/resource admission. The adapter receives placement identity, pool, resource claim, runner name, and JIT descriptor over bounded JSON stdin; the JIT descriptor is never placed in adapter argv or environment. Start recovery inspects by placement identity before any retry, and exact immutable container IDs are persisted for cancellation and liveness checks.
 

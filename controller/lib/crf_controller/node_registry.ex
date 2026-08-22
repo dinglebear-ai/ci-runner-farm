@@ -12,7 +12,11 @@ defmodule CrfController.NodeRegistry do
   end
 
   def register(server \\ __MODULE__, attrs, opts \\ []) do
-    GenServer.call(server, {:register, attrs, Keyword.get(opts, :now_ms, now_ms())})
+    GenServer.call(
+      server,
+      {:register, attrs, Keyword.get(opts, :now_ms, now_ms()),
+       Keyword.get(opts, :before_commit, fn _node -> :ok end)}
+    )
   end
 
   def heartbeat(server \\ __MODULE__, node_id, generation, available, opts \\ []) do
@@ -52,9 +56,10 @@ defmodule CrfController.NodeRegistry do
   end
 
   @impl true
-  def handle_call({:register, attrs, now_ms}, _from, state) do
+  def handle_call({:register, attrs, now_ms, before_commit}, _from, state) do
     with {:ok, incoming} <- Node.new(attrs, now_ms),
-         {:ok, node} <- reconcile_registration(state.nodes[incoming.id], incoming) do
+         {:ok, node} <- reconcile_registration(state.nodes[incoming.id], incoming),
+         :ok <- before_commit.(node) do
       {:reply, {:ok, node}, put_in(state, [:nodes, node.id], node)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}

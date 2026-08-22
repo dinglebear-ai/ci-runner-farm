@@ -68,6 +68,22 @@ defmodule CrfController.ControllerConfigTest do
              |> ControllerConfig.parse()
   end
 
+  test "TLS connection limit reserves a separate acceptor slot", ctx do
+    configured = put_in(config(ctx), ["tls", "max_connections"], 1)
+    path = write_config(ctx, configured)
+    System.put_env("CRF_CONTROLLER_CONFIG", path)
+
+    assert {:ok, children} = Application.children_from_environment()
+
+    assert {Task.Supervisor, supervisor_opts} =
+             Enum.find(children, fn
+               {Task.Supervisor, _opts} -> true
+               _ -> false
+             end)
+
+    assert supervisor_opts[:max_children] == 2
+  end
+
   test "relative paths and malformed revisions fail closed", ctx do
     relative = put_in(config(ctx), ["scaleset", "socket_path"], "relative.sock")
     assert {:error, :invalid_scaleset_socket} = ControllerConfig.parse(relative)

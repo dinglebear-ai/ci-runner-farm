@@ -50,7 +50,8 @@ defmodule CrfController.Application do
       {CrfController.Ingress,
        [controller_instance_id: Keyword.fetch!(config.scaleset_opts, :controller_instance_id)]},
       {CrfController.PeerRegistry, [peers: peers]},
-      {Task.Supervisor, name: CrfController.ConnectionSupervisor, max_children: max_connections}
+      {Task.Supervisor,
+       name: CrfController.ConnectionSupervisor, max_children: max_connections + 1}
     ] ++
       sidecar_children ++
       [

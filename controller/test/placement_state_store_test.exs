@@ -44,10 +44,11 @@ defmodule CrfController.PlacementStateStoreTest do
     assert decoded["schema_version"] == 3
     assert decoded["placements"] == []
 
-    assert [["placement-1", "command-1", digest, "dookie", 7, "finished", :null, 20]] =
+    assert [["placement-1", "command-1", digest, "dookie", 7, "finished", :null, retained_at]] =
              decoded["tombstones"]
 
     assert digest == PlacementTombstone.digest("idempotency-1")
+    assert retained_at > 1_000_000_000_000
     encoded = File.read!(path)
     refute encoded =~ "resources"
     refute encoded =~ "work_id"
@@ -96,7 +97,7 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
-  test "tombstone compaction retains a bounded newest replay window across restart" do
+  test "tombstone replay fences are retained until a newer node generation is durable" do
     root =
       Path.join(System.tmp_dir!(), "crf-placement-compact-#{System.unique_integer([:positive])}")
 
@@ -120,8 +121,8 @@ defmodule CrfController.PlacementStateStoreTest do
       end)
 
     compacted = PlacementStateStore.compact(%{}, tombstones)
-    assert map_size(compacted.tombstones) == 8_192
-    refute Map.has_key?(compacted.tombstones, "placement-0")
+    assert map_size(compacted.tombstones) == 8_193
+    assert Map.has_key?(compacted.tombstones, "placement-0")
     assert Map.has_key?(compacted.tombstones, "placement-8192")
     assert :ok = PlacementStateStore.persist(path, %{}, compacted.tombstones)
 
@@ -139,9 +140,84 @@ defmodule CrfController.PlacementStateStoreTest do
                now_ms: 9_000
              )
 
+    assert {:ok, %PlacementTombstone{}} = PlacementLedger.get(ledger, "placement-0")
+    assert :ok = PlacementLedger.prune_before_generation(ledger, "dookie", 8)
+    assert [] = PlacementLedger.tombstone_snapshot(ledger)
     assert {:error, :unknown_placement} = PlacementLedger.get(ledger, "placement-0")
     GenServer.stop(ledger)
     File.rm_rf!(root)
+  end
+
+  test "fresh post-restart tombstone does not evict existing replay fences" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "crf-placement-restart-order-#{System.unique_integer([:positive])}"
+      )
+
+    path = Path.join(root, "placements.json")
+
+    persisted =
+      Map.new(1..8_192, fn index ->
+        id = "old-placement-#{index}"
+
+        {id,
+         %PlacementTombstone{
+           id: id,
+           command_id: "old-command-#{index}",
+           idempotency_sha256: PlacementTombstone.digest("old-key-#{index}"),
+           node_id: "dookie",
+           node_generation: 7,
+           state: :finished,
+           detail_code: nil,
+           updated_at_ms: 1_000_000_000_000 + index
+         }}
+      end)
+
+    assert :ok = PlacementStateStore.persist(path, %{}, persisted)
+    {:ok, ledger} = PlacementLedger.start_link(name: nil, state_path: path)
+
+    fresh =
+      placement_attrs()
+      |> Map.put(:id, "fresh-placement")
+      |> Map.put(:command_id, "fresh-command")
+
+    assert {:ok, _} = PlacementLedger.begin_placement(ledger, fresh, now_ms: 1)
+
+    assert {:ok, _} =
+             PlacementLedger.placement_update(
+               ledger,
+               "dookie",
+               7,
+               "fresh-placement",
+               "fresh-command",
+               :finished,
+               nil,
+               now_ms: 2
+             )
+
+    assert {:ok, %PlacementTombstone{}} = PlacementLedger.get(ledger, "fresh-placement")
+    assert length(PlacementLedger.tombstone_snapshot(ledger)) == 8_193
+
+    GenServer.stop(ledger)
+    File.rm_rf!(root)
+  end
+
+  test "capacity rejects only new placements and preserves idempotent retries" do
+    {:ok, ledger} = PlacementLedger.start_link(name: nil, record_capacity: 1)
+    attrs = placement_attrs()
+
+    assert {:ok, original} = PlacementLedger.begin_placement(ledger, attrs, now_ms: 1)
+    assert {:ok, ^original} = PlacementLedger.begin_placement(ledger, attrs, now_ms: 2)
+
+    assert {:error, :placement_state_capacity} =
+             PlacementLedger.begin_placement(
+               ledger,
+               %{attrs | id: "placement-2", command_id: "command-2"},
+               now_ms: 3
+             )
+
+    GenServer.stop(ledger)
   end
 
   test "persistence remains bounded at 10x 100x and 1000x record counts" do

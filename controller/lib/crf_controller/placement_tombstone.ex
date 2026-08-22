@@ -37,7 +37,10 @@ defmodule CrfController.PlacementTombstone do
          node_generation: placement.node_generation,
          state: placement.state,
          detail_code: placement.detail_code,
-         updated_at_ms: placement.updated_at_ms
+         # Placement timestamps are monotonic and intentionally meaningful only
+         # within one controller boot. Tombstone retention crosses restarts, so
+         # it needs a restart-stable clock.
+         updated_at_ms: retention_timestamp_ms()
        }}
     else
       {:error, :placement_not_terminal}
@@ -54,7 +57,7 @@ defmodule CrfController.PlacementTombstone do
         idempotency_key,
         status,
         detail_code,
-        now_ms
+        _now_ms
       ) do
     with :ok <- command_identity(tombstone, node_id, generation, command_id, idempotency_key),
          :ok <- validate_detail_code(detail_code) do
@@ -67,7 +70,7 @@ defmodule CrfController.PlacementTombstone do
            %{
              tombstone
              | detail_code: detail_code || tombstone.detail_code,
-               updated_at_ms: max(tombstone.updated_at_ms, now_ms)
+               updated_at_ms: max(tombstone.updated_at_ms, retention_timestamp_ms())
            }}
 
         :rejected ->
@@ -86,7 +89,7 @@ defmodule CrfController.PlacementTombstone do
         command_id,
         state,
         detail_code,
-        now_ms
+        _now_ms
       ) do
     with :ok <- placement_identity(tombstone, node_id, generation, command_id),
          true <- state in @terminal_states,
@@ -100,7 +103,7 @@ defmodule CrfController.PlacementTombstone do
        %{
          tombstone
          | node_generation: generation,
-           updated_at_ms: max(tombstone.updated_at_ms, now_ms)
+           updated_at_ms: max(tombstone.updated_at_ms, retention_timestamp_ms())
        }}
     else
       false -> {:error, :terminal_state_conflict}
@@ -120,6 +123,8 @@ defmodule CrfController.PlacementTombstone do
     :crypto.hash(:sha256, value)
     |> Base.url_encode64(padding: false)
   end
+
+  defp retention_timestamp_ms, do: System.system_time(:millisecond)
 
   defp command_identity(tombstone, node_id, generation, command_id, idempotency_key) do
     cond do

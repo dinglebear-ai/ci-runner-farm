@@ -142,6 +142,15 @@ migration_start() {
     { err "backend transition changed in another session"; return 3; }
   [ "$(config_revision)" = "$expected_config" ] ||
     { err "configuration changed before migration"; return 3; }
+  local observed_ownership
+  observed_ownership="$(scaleset_ownership_revision 2>/dev/null)" || {
+    err "scale-set ownership authority is unavailable"
+    return 1
+  }
+  [ "$observed_ownership" = "$ownership" ] || {
+    printf '%s\n' '{"ok":false,"code":"ownership_changed","message":"scale-set ownership changed before migration"}'
+    return 3
+  }
   [ "$POOL_BACKEND" = scaleset ] || { err "requested backend is not scaleset"; return 2; }
   migration_record_matches "$compatibility" ||
     { err "compatibility evidence is missing, stale, or does not match"; return 2; }

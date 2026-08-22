@@ -30,6 +30,45 @@ while IFS='|' read -r direction from to before after barrier; do
   [ -n "$before$after$barrier" ]
 done < tests/fixtures/migration.tsv
 
+# Migration start compares every caller authority before its first durable
+# write. A stale ownership revision must return the stable code and leave the
+# transition file byte-for-byte unchanged.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; mkdir -p "$RUNDIR" "$CFGDIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  MIGRATION_FILE=$CFGDIR/backend-migration.json
+  expected=$(printf config | sha256sum | cut -d" " -f1)
+  current_ownership=$(printf ownership-current | sha256sum | cut -d" " -f1)
+  stale_ownership=$(printf ownership-stale | sha256sum | cut -d" " -f1)
+  compatibility=$(printf compatibility | sha256sum | cut -d" " -f1)
+  transition=$(printf transition | sha256sum | cut -d" " -f1)
+  printf "%s\n" original-transition-bytes >"$MIGRATION_FILE"
+  before=$(sha256sum "$MIGRATION_FILE" | cut -d" " -f1)
+  . "$SCRIPT_DIR/runner-migration.sh"
+  err(){ :; }
+  migration_load(){
+    MIGRATION_REVISION=$transition
+    MIGRATION_PHASE=classic_active
+    MIGRATION_EFFECTIVE_BACKEND=classic
+  }
+  config_revision(){ printf "%s\n" "$expected"; }
+  scaleset_ownership_revision(){ printf "%s\n" "$current_ownership"; }
+  migration_record_matches(){ return 0; }
+  migration_write(){ printf mutated >"$MIGRATION_FILE"; }
+  POOL_BACKEND=scaleset
+  set +e
+  migration_start "$expected" "$stale_ownership" "$compatibility" "$transition" >"$root/output"
+  rc=$?
+  set -e
+  output=$(cat "$root/output")
+  [ "$rc" -eq 3 ] || { printf "unexpected stale-ownership rc=%s output=%s\n" "$rc" "$output" >&2; exit 1; }
+  printf "%s" "$output" | php -r '\''$j=json_decode(stream_get_contents(STDIN),true);exit(is_array($j)&&($j["code"]??"")==="ownership_changed"?0:1);'\''
+  after=$(sha256sum "$MIGRATION_FILE" | cut -d" " -f1)
+  [ "$before" = "$after" ]
+'
+
 # Interrupted forward migration may restore classic capacity only after the
 # locally-created scale sets are remotely proven ineligible.
 bash -c '

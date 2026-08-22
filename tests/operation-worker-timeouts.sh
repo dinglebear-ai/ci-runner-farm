@@ -52,4 +52,14 @@ next=80000002-0000-4000-8000-000000000002
 CRF_OPERATION_ID="$next" operation_create_unique provisioning_validation "$sha" provisioning_log >/dev/null ||
   crf_fail 'timed out operation blocked the next operation of its kind'
 
+# The shared helper itself must retain the same stable timeout contract.
+started="$(date +%s)"
+set +e
+operation_run_bounded 1 "$root/hung-command"
+delayed_rc=$?
+set -e
+elapsed=$(( $(date +%s) - started ))
+crf_assert_eq 124 "$delayed_rc" 'delayed setsid timeout exit code'
+[ "$elapsed" -le 4 ] || crf_fail 'delayed setsid bypassed the wall-clock timeout'
+
 echo 'operation-worker-timeouts: OK'
