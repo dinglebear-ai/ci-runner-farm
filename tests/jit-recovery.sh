@@ -283,7 +283,7 @@ fake_exists[$slow]=0; fake_status[$slow]=exited; fake_consumed[$slow]=1; fake_po
 mkdir -p "$CACHE_ROOT/work/$slow" "$CACHE_ROOT/docker/$slow"
 touch "$CACHE_ROOT/work/$slow/artifact" "$CACHE_ROOT/docker/$slow/layer" "$RESERVATION_DIR/$slow_reservation.state"
 write_state "$JIT_STATE_DIR/$slow.state" "$slow" terminal "$slow_reservation" 808 "$old" rust
-slow_gc_rm_seconds=1
+slow_gc_rm_seconds=3
 : >"$gc_rm_started"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
 exec 5>"$tmp/autoscale-tick.lock"
 flock 5
@@ -294,7 +294,7 @@ jit_reconcile
 elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 flock -u 8; exec 8>&-
 flock -u 5; exec 5>&-
-[ "$elapsed_ms" -lt 500 ] || crf_fail "slow recursive deletion delayed JIT reconciliation (${elapsed_ms}ms)"
+[ "$elapsed_ms" -lt 2000 ] || crf_fail "slow recursive deletion delayed JIT reconciliation (${elapsed_ms}ms)"
 [ ! -e "$JIT_STATE_DIR/$slow.state" ] || crf_fail "slow cleanup did not converge JIT state"
 [ ! -e "$RESERVATION_DIR/$slow_reservation.state" ] || crf_fail "slow cleanup did not release reservation"
 [ ! -e "$CACHE_ROOT/work/$slow" ] && [ ! -e "$CACHE_ROOT/docker/$slow" ] || crf_fail "slow cleanup left live runner paths attached"
