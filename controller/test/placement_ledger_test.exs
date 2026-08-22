@@ -70,7 +70,9 @@ defmodule CrfController.PlacementLedgerTest do
              )
   end
 
-  test "terminal placement state cannot be rewritten", %{ledger: ledger} do
+  test "late terminal replay is acknowledged without rewriting authoritative state", %{
+    ledger: ledger
+  } do
     attrs = TestFixtures.placement_attrs("dookie", 7)
     assert {:ok, _} = PlacementLedger.begin_placement(ledger, attrs, now_ms: 10)
 
@@ -88,7 +90,7 @@ defmodule CrfController.PlacementLedgerTest do
 
     assert finished.state == :finished
 
-    assert {:error, :terminal_state_conflict} =
+    assert {:ok, replayed} =
              PlacementLedger.placement_update(
                ledger,
                "dookie",
@@ -99,5 +101,8 @@ defmodule CrfController.PlacementLedgerTest do
                "late_failure",
                now_ms: 30
              )
+
+    assert replayed.state == :finished
+    assert replayed.detail_code == nil
   end
 end

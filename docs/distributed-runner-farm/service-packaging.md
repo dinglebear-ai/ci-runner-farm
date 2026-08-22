@@ -117,5 +117,6 @@ On 2026-08-21, Dookie built a clean Ubuntu 26.04 x86_64 bundle from
 `GIT_DIRTY=false`, Go 1.25.3, Elixir 1.20.3/OTP 29, and Rust 1.97.1. The
 controller is installed on Dookie, and Linux native nodes on Dookie, Squirts,
 and Steamy WSL, a Windows native node on Steamy, and a cache-resident container
-node on Tootie all register through mTLS. This proves packaging, service start,
-and five-node heartbeat; final real-job scheduling remains gated separately.
+node on Tootie all register through mTLS. Exact-branch jobs have completed on
+all five targets, including isolated Tootie container run `32555900347`; live
+cancellation also proved Dookie process-tree cleanup and resource recovery.

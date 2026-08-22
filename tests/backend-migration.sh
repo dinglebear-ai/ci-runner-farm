@@ -12,7 +12,11 @@ grep -Fq 'backend_classic_admission_allowed' "$engine"
 grep -Fq 'backend_scaleset_admission_allowed' src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-jit.sh
 grep -Fq 'classic-quarantine.json' "$migration"
 grep -Fq 'migration_quarantine_move_all' "$migration"
+grep -Fq 'migration_classic_names' "$migration"
 grep -Fq 'MIGRATION_CLASSIC_ACTIVATION=1 cmd_start' "$migration"
+grep -Fq 'classic:quiescing_classic:scaleset_ineligible' "$migration"
+grep -Fq 'classic:quiescing_classic:scaleset_ineligible' "$engine"
+grep -Fq 'inventory_backend_names "$teardown_backend"' "$engine"
 grep -Fq 'scaleset_activation_prove_effective' "$migration"
 grep -Fq 'scaleset_publish_zero_capacity' "$migration"
 grep -Fq -- '--data-binary "$request_body"' "$engine"
@@ -25,6 +29,44 @@ while IFS='|' read -r direction from to before after barrier; do
   grep -Fq "$to" "$migration" || crf_fail "missing migration phase $to"
   [ -n "$before$after$barrier" ]
 done < tests/fixtures/migration.tsv
+
+# Interrupted forward migration may restore classic capacity only after the
+# locally-created scale sets are remotely proven ineligible.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; mkdir -p "$RUNDIR" "$CFGDIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  . "$SCRIPT_DIR/runner-migration.sh"
+  migration_load(){
+    MIGRATION_EFFECTIVE_BACKEND=classic
+    MIGRATION_PHASE=quiescing_classic
+    MIGRATION_LAST_BARRIER=scaleset_ineligible
+  }
+  backend_classic_admission_allowed
+  MIGRATION_LAST_BARRIER=classic_only
+  migration_load(){ :; }
+  ! backend_classic_admission_allowed
+'
+
+# The shared managed label includes distributed and JIT containers. Backend
+# migration must select only exact fixed classic identities from that inventory.
+bash -c '
+  set -euo pipefail
+  root=$(mktemp -d); trap "rm -rf \"$root\"" EXIT
+  RUNDIR=$root/run; CFGDIR=$root/cfg; mkdir -p "$RUNDIR" "$CFGDIR"
+  SCRIPT_DIR=$PWD/src/usr/local/emhttp/plugins/ci-runner-farm/include
+  NAME_PREFIX=ci-runner
+  pool_id_valid(){ [[ "$1" =~ ^[a-z][a-z0-9-]*$ ]]; }
+  managed_names(){ printf "%s\n" \
+    ci-runner-1 ci-runner-rust-2 \
+    ci-runner-dist-acceptance-container-a71846cd1dc5d0e8f83f65c6 \
+    ci-runner-jit-rust-a71846cd1dc5d0e8f83f \
+    ci-runner-rust-notanindex unrelated; }
+  . "$SCRIPT_DIR/runner-migration.sh"
+  [ "$(migration_classic_names | sort | tr "\n" " ")" = "ci-runner-1 ci-runner-rust-2 " ]
+  [ "$(migration_classic_count)" = 2 ]
+'
 
 # Classic quiesce removes only GitHub-proven idle runners and preserves busy
 # work until a later continuation.

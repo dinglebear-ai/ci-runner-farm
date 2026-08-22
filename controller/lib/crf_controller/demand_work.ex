@@ -186,7 +186,7 @@ defmodule CrfController.DemandWork do
       node.id != placement.node_id ->
         {:error, :placement_node_identity_conflict}
 
-      placement.state == next_state ->
+      placement.state == next_state and placement.node_generation == node.generation ->
         discard_start_command(ctx.node_mailbox, placement.command_id)
 
       true ->

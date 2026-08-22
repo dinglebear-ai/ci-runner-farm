@@ -163,7 +163,11 @@ DFBLOCK;
       <label class="crfi-remote-field" for="crfi-image-ref">Image ref</label>
       <input class="crfi-remote-field crfi-mono-input" id="crfi-image-ref" type="text" value="<?=htmlspecialchars($crfi_image_ref, ENT_QUOTES)?>" placeholder="ghcr.io/org/runner:latest" onchange="crfiSaveImageRef(this.value)">
     </div>
-    <p>Built-in uses the Dockerfile from the Runner image tab.</p>
+    <p>Built-in uses the Dockerfile from this tab. A literal <code>local/...</code>
+      <code>FROM</code> image must already exist on this Unraid host; the build
+      now stops with the missing local image name instead of attempting a
+      misleading Docker Hub pull. Building creates an immutable candidate only
+      &mdash; verify and promote its exact image ID before restarting runners.</p>
   </article>
 
   <article class="crfi-config-card crf-surface">

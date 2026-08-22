@@ -51,7 +51,7 @@ TEST_ROOT="$tmp"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_local_base_images_available build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -144,6 +144,7 @@ docker(){
     *) return 31 ;;
   esac
 }
+printf 'sha256:%064d\n' 0 | tr 0 b > "$(image_path local/github-runner:ubuntu-resolute)"
 cmd_build_image "" || crf_fail 'empty dispatcher argument rejected the canonical Dockerfile'
 cmp -s "$CFGDIR/Dockerfile" "$docker_capture" || crf_fail 'build did not receive canonical Dockerfile content'
 cmp -s "$CFGDIR/kache-supervise.sh" "$supervisor_capture" || crf_fail 'Nashost build context omitted or changed kache-supervise.sh'
@@ -155,6 +156,14 @@ if grep -Fq "$kache_endpoint" "$engine_log" "$TEST_ROOT/error" 2>/dev/null; then
 fi
 build_candidate_state_load || crf_fail 'direct build did not preserve verified candidate metadata'
 [ "$BUILD_CANDIDATE_TAG" != "$BUILTIN_IMAGE" ] || crf_fail 'direct build targeted the production image tag'
+
+rm -f "$(image_path local/github-runner:ubuntu-resolute)"
+if cmd_build_image "" >/dev/null 2>&1; then
+  crf_fail 'candidate build allowed BuildKit to pull a missing local base image'
+fi
+grep -Fq "local base image 'local/github-runner:ubuntu-resolute' is unavailable" "$TEST_ROOT/error" ||
+  crf_fail 'missing local base image did not produce an actionable error'
+printf 'sha256:%064d\n' 0 | tr 0 b > "$(image_path local/github-runner:ubuntu-resolute)"
 expected_df_sha="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
 expected_supervisor_sha="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
 expected_validator_sha="$(sha256sum "$CFGDIR/endpoint-validation.sh" | awk '{print $1}')"

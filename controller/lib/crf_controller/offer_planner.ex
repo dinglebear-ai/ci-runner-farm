@@ -71,7 +71,10 @@ defmodule CrfController.OfferPlanner do
         by_work = Map.new(candidates, &{&1.requirement.work_id, &1})
 
         case reserve_scheduled(schedule.placements, by_work, ctx, now_ms) do
-          :ok when schedule.placements == [] -> {:ok, planner}
+          # An unplaceable candidate must not pin the fairness cursor forever.
+          # Advance to the next pool so a later, feasible policy can advertise
+          # capacity on the following tick.
+          :ok when schedule.placements == [] -> {:ok, next_planner}
           :ok -> {:ok, next_planner}
           {:error, reason} -> {:error, reason}
         end

@@ -21,6 +21,34 @@ on:
         options:
           - ci-pool-ops
           - ci-pool-acceptance-linux
+      windows_pool:
+        description: Windows scale-set routing label (use the isolated lane for fleet qualification)
+        required: true
+        type: choice
+        default: ci-pool-windows
+        options:
+          - ci-pool-windows
+          - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
+      container_pool:
+        description: Container scale-set routing label (use the isolated lane for fleet qualification)
+        required: true
+        type: choice
+        default: ci-pool-residential-egress
+        options:
+          - ci-pool-residential-egress
+          - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
+          - ci-pool-acceptance-container
+      cancellation_pool:
+        description: Scale-set routing label used for cancellation proof
+        required: true
+        type: choice
+        default: ci-pool-ops
+        options:
+          - ci-pool-ops
+          - ci-pool-acceptance-linux
+          - ci-pool-acceptance-windows
 
 permissions:
   contents: read
@@ -61,7 +89,9 @@ jobs:
 
   distributed-windows:
     if: inputs.target == 'distributed-windows'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-windows' || 'windows-latest' }}
+    # The isolated acceptance label is platform-neutral; the controller pool
+    # policy selects Windows or Linux nodes for each qualification phase.
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.windows_pool || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - name: Record distributed Windows placement
@@ -76,7 +106,7 @@ jobs:
 
   distributed-container:
     if: inputs.target == 'distributed-container'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-residential-egress' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.container_pool || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Record distributed container placement
@@ -91,7 +121,7 @@ jobs:
 
   cancellation:
     if: inputs.target == 'cancellation'
-    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && 'ci-pool-ops' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.cancellation_pool || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Hold placement for cancellation and reassignment proof

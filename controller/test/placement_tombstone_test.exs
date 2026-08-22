@@ -74,7 +74,12 @@ defmodule CrfController.PlacementTombstoneTest do
                now_ms: 22
              )
 
-    assert {:error, :terminal_state_conflict} =
+    assert {:ok,
+            %PlacementTombstone{
+              node_generation: 8,
+              state: :finished,
+              detail_code: nil
+            }} =
              PlacementLedger.placement_update(
                ledger,
                "dookie",

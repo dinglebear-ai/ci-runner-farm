@@ -232,7 +232,7 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     sleep_interruptible(config.heartbeat_interval, &running);
                 }
                 Err(error) => {
-                    let reconnect = matches!(error, AgentSessionError::Transport(_));
+                    let reconnect = heartbeat_error_reconnectable(&error);
                     core = session.into_core();
                     if !reconnect {
                         eprintln!(
@@ -256,6 +256,15 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         }
     }
     Ok(())
+}
+
+fn heartbeat_error_reconnectable<T>(error: &AgentSessionError<T>) -> bool {
+    matches!(error, AgentSessionError::Transport(_))
+        || matches!(
+            error,
+            AgentSessionError::Agent(crate::agent::AgentError::ControllerRejected { code })
+                if code == "unknown_node" || code == "node_not_registered"
+        )
 }
 
 fn persist_operator_projection(
@@ -363,6 +372,25 @@ mod tests {
         let started = Instant::now();
         sleep_interruptible(Duration::from_secs(5), &running);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn missing_controller_registration_reconnects_but_other_rejections_are_fatal() {
+        for code in ["unknown_node", "node_not_registered"] {
+            let error =
+                AgentSessionError::<()>::Agent(crate::agent::AgentError::ControllerRejected {
+                    code: code.into(),
+                });
+            assert!(heartbeat_error_reconnectable(&error));
+        }
+        let unauthorized =
+            AgentSessionError::<()>::Agent(crate::agent::AgentError::ControllerRejected {
+                code: "unauthorized".into(),
+            });
+        assert!(!heartbeat_error_reconnectable(&unauthorized));
+        assert!(heartbeat_error_reconnectable(
+            &AgentSessionError::<()>::Transport(())
+        ));
     }
 
     #[test]
