@@ -679,11 +679,11 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "planning preserves pool order while no eligible node can accept an offer", ctx do
+  test "planning rotates past an unplaceable pool to advertise a feasible pool", ctx do
     unless ctx.disabled do
       :ok =
         FakeScaleSet.add_pool(ctx.scale_set, %{
-          pool_id: "other",
+          pool_id: "blocked",
           scale_set_id: 75,
           assigned_jobs: 0,
           advertised_capacity: 0,
@@ -692,12 +692,18 @@ defmodule CrfController.DemandCoordinatorTest do
           acquired_handles: []
         })
 
+      blocked =
+        policy(1)
+        |> Map.put(:id, "blocked")
+        |> Map.put(:required_backend, :container)
+        |> Map.put(:required_capabilities, ["container", "github-actions"])
+
       demand =
         start_supervised!(
           Supervisor.child_spec(
             {DemandCoordinator,
              name: nil,
-             policies: [policy(1), %{policy(1) | id: "other"}],
+             policies: [blocked, policy(1)],
              scale_set_client: ctx.scale_set,
              scheduler_client: ctx.scheduler,
              node_registry: ctx.registry,
@@ -711,15 +717,13 @@ defmodule CrfController.DemandCoordinatorTest do
           )
         )
 
-      assert {:ok, _node} = NodeRegistry.set_draining(ctx.registry, "dookie", 7, true)
       assert {:ok, waiting} = reconcile(demand, 100)
       assert waiting.offers == 0
-      assert waiting.leases == %{"build" => 0, "other" => 0}
+      assert waiting.leases == %{"blocked" => 0, "build" => 0}
 
-      assert {:ok, _node} = NodeRegistry.set_draining(ctx.registry, "dookie", 7, false)
       assert {:ok, ready} = reconcile(demand, 200)
       assert ready.offers == 1
-      assert ready.leases == %{"build" => 1, "other" => 0}
+      assert ready.leases == %{"blocked" => 0, "build" => 1}
     end
   end
 
