@@ -10,7 +10,7 @@ Last updated: 2026-08-22
   local-image-base preflight, and a fairness fix that rotates past an
   unplaceable pool instead of starving later feasible pools.
 - The Dookie controller runs immutable clean release
-  `6216e1d609b615bbc5361d019f0f0af62694865c` from `/opt/ci-runner-farm`.
+  `06cb4fbc84942a53509bccd2ff5f2da064ee3e9e` from `/opt/ci-runner-farm`.
   Controller configuration, sidecar state, placement state, and GitHub
   credentials remain on Dookie, not Unraid flash.
 - Registered nodes: Dookie (Linux native), Squirts (Linux native), Steamy
@@ -18,10 +18,10 @@ Last updated: 2026-08-22
 - Tootie advertises 16000 CPU millis and 16 GiB. Its node binary,
   configuration, TLS, state, logs, and operator projection live under
   `/mnt/cache/appdata/ci-runner-farm/distributed-node`; only the PID is tmpfs.
-- Production owns seven scale sets (IDs 238-244 at this checkpoint): Rust,
-  Python, TypeScript, Go, Ops, System, and Residential Egress. A temporary,
-  isolated acceptance scale set remains during closeout; it must be deleted and
-  the original seven-pool configuration restored before release sign-off.
+- Production owns exactly seven distributed-controller scale sets (IDs 238-244
+  at this checkpoint): Rust, Python, TypeScript, Go, Ops, System, and
+  Residential Egress. Temporary acceptance sets 245, 246, and 249 were deleted
+  by exact numeric identity and the original seven-pool configuration restored.
 - Current exact-branch GitHub qualification passed on Dookie (run
   `32550077732`), Squirts (`32550417290`), Steamy WSL (`32550464379`), and
   Steamy Windows (`32552302375`). The Windows log proves runner
@@ -30,18 +30,20 @@ Last updated: 2026-08-22
   Dookie cancellation: the job observed TERM, GitHub completed it as cancelled,
   the runner process group disappeared, and Dookie returned its full 2000m/4
   GiB budget.
-- The isolated Tootie container rerun is pending available controller-backed
-  capacity; production Go/Ops placements currently consume the node budget and
-  are not being interrupted for qualification.
+- Isolated Tootie container run `32555900347` (job `96989833369`) passed on
+  runner `crf-a71846cd1dc5d0e8f83f65c6`. Its `/.dockerenv` assertion, Linux/X64
+  platform assertion, and cgroup probe prove the controller-approved container
+  execution path rather than a native-host fallback.
 - The acceptance workflow now offers a constrained
   `ci-pool-acceptance-linux` dispatch choice. Its default remains
   `ci-pool-ops` for ordinary production-ops checks; fleet qualification should
   provision and select the isolated label.
-- Classic replacement is **not complete**. Tootie still has classic Python,
-  TypeScript, Rust, and Ops containers registered; several Ops runners were busy
-  at the last live check. The supported migration must quiesce classic
-  admission, allow those jobs to finish, prove remote ineligibility, activate
-  scale sets, and only then remove the classic registrations/containers.
+- Classic replacement is draining non-disruptively. A recovery rollback exposed
+  and fixed an inventory bug that allowed `ci-runner-dist-*` containers into
+  classic quarantine. Exact classic selection now excludes distributed and JIT
+  authorities; idle registrations/containers are retired while genuinely busy
+  jobs continue. Do not call the classic fleet retired until GitHub and Docker
+  both report zero classic identities.
 - Fresh main-branch Build Plugin and Release Please workflows completed through
   distributed Ops runners after the PR #64 deployment. The Lint workflow's
   distributed Ubuntu and Windows jobs passed; its shell job exposed an
@@ -199,17 +201,14 @@ The implemented path is:
 
 ## Remaining major work
 
-1. Finish the isolated Tootie container acceptance when production capacity is
-   available, remove the temporary scale set/configuration, and verify the
-   original seven production pools are the only eligible owned sets.
-2. Execute the supported Fleet backend migration, drain current classic jobs,
+1. Execute the supported Fleet backend migration, drain current classic jobs,
    remove their exact registrations/containers, and prove zero classic capacity
    through both GitHub and Docker.
-3. Complete authenticated real-browser verification of the expanded Unraid
+2. Complete authenticated real-browser verification of the expanded Unraid
    distributed-fleet UI.
-4. Complete the controller/node restart and network-partition matrix plus
+3. Complete the controller/node restart and network-partition matrix plus
    orphan/force-abandon acceptance under production pool identities.
-5. Add automated CA/server-certificate rotation, more target-distribution Linux
+4. Add automated CA/server-certificate rotation, more target-distribution Linux
    bundles, live `acquirablejobs` queue-ordering proof, sustained fairness/load
    tests, and longer-horizon replay-fence archival if operational scale requires
    it.
@@ -218,7 +217,7 @@ The implemented path is:
 
 The controller and five nodes are deployed and registered. Tootie's node is
 cache-resident and integrated with Docker start/stop events. Four native-host
-execution paths and Dookie cancellation are proven on the closeout branch.
-Container rerun, temporary-set cleanup, authenticated WebUI acceptance, and
-non-disruptive classic retirement remain before the distributed backend becomes
-the sole active production path.
+execution paths, Dookie cancellation, and Tootie container execution are proven
+on the closeout branch. Temporary acceptance sets are removed. Authenticated
+WebUI acceptance and completion of the non-disruptive classic drain remain
+before the distributed backend becomes the sole active production path.
