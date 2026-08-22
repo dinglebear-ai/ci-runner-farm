@@ -67,7 +67,7 @@ func (f *fakeAPI) CreateMessageSession(_ context.Context, id int64) (crfgithub.S
 	f.mu.Unlock()
 	return crfgithub.Session{ScaleSetID: id, ID: "session-1"}, nil
 }
-func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastMessage int64, capacity int) (crfgithub.MessageBatch, error) {
+func (f *fakeAPI) GetMessage(ctx context.Context, session crfgithub.Session, lastMessage int64, capacity int) (crfgithub.MessageBatch, error) {
 	f.mu.Lock()
 	f.messageCalls++
 	f.lastMessage = lastMessage
@@ -78,9 +78,44 @@ func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastM
 		f.started <- session.ScaleSetID
 	}
 	if f.block != nil {
-		<-f.block
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return crfgithub.MessageBatch{}, ctx.Err()
+		}
 	}
 	return batch, nil
+}
+
+func TestRetireHandleInterruptsLongPoll(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{})}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pollDone := make(chan error, 1)
+	go func() {
+		_, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+		pollDone <- err
+	}()
+	<-api.started
+
+	retireDone := make(chan error, 1)
+	go func() { retireDone <- poller.RetireHandle(7, 101) }()
+	select {
+	case err := <-retireDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retirement remained blocked behind the GitHub long poll")
+	}
+	if err := <-pollDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("poll error = %v, want context canceled", err)
+	}
 }
 func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.AvailableJob, error) {
 	f.mu.Lock()
