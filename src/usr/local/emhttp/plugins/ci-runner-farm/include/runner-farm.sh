@@ -1221,7 +1221,10 @@ kache_supervisor_reconcile() {
 }
 
 kache_watchdog_daemon() {
-  trap 'rm -f "$KACHE_WATCHDOG_PID"' EXIT
+  # The controller owns the singleton PID file. A daemon exiting late must not
+  # unlink a PID already committed for its replacement; start/status validate
+  # both PID liveness and exact argv, so an unexpected exit leaves only harmless
+  # stale metadata that the next start/stop repairs.
   trap 'exit 0' INT TERM
   exec 8>&- 7>&- 9>&- 2>/dev/null || true
   log "kache-watchdog: daemon started"
@@ -1269,7 +1272,7 @@ kache_watchdog_pid_active() {
   [ "${argv[2]}" = kache-watchdog-daemon ]
 }
 
-kache_watchdog_stop() {
+kache_watchdog_stop_unlocked() {
   local pid alive
   local -a pids=()
   if kache_watchdog_pid_active; then
@@ -1290,12 +1293,22 @@ kache_watchdog_stop() {
   for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
 }
 
+kache_watchdog_stop() {
+  (
+    flock -w 20 9 || { err "kache-watchdog: control lock busy"; exit 1; }
+    kache_watchdog_stop_unlocked
+  ) 9>"${KACHE_WATCHDOG_PID}.control.lock"
+}
+
 kache_watchdog_start() {
-  kache_watchdog_pid_active && return 0
-  kache_watchdog_stop
-  nohup "$0" kache-watchdog-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
-  echo $! > "$KACHE_WATCHDOG_PID"
-  log "kache-watchdog: started (pid $(cat "$KACHE_WATCHDOG_PID"))"
+  (
+    flock -w 20 9 || { err "kache-watchdog: control lock busy"; exit 1; }
+    kache_watchdog_pid_active && exit 0
+    kache_watchdog_stop_unlocked
+    nohup "$0" kache-watchdog-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
+    printf "%s\n" "$!" >"$KACHE_WATCHDOG_PID"
+    log "kache-watchdog: started (pid $(cat "$KACHE_WATCHDOG_PID"))"
+  ) 9>"${KACHE_WATCHDOG_PID}.control.lock"
 }
 
 kache_watchdog_status() {
