@@ -1,12 +1,42 @@
 package github
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 )
+
+func TestAdapterRetainsMessageSessionUntilCloseSucceeds(t *testing.T) {
+	client := &scaleset.MessageSessionClient{}
+	closeFailure := errors.New("close failed")
+	attempts := 0
+	adapter := &Adapter{sessions: map[int64]*scaleset.MessageSessionClient{7: client},
+		closeSession: func(context.Context, *scaleset.MessageSessionClient) error {
+			attempts++
+			if attempts == 1 {
+				return closeFailure
+			}
+			return nil
+		}}
+	session := Session{ScaleSetID: 7, ID: "session-1"}
+	if err := adapter.CloseMessageSession(context.Background(), session); !errors.Is(err, closeFailure) {
+		t.Fatalf("close failure was not returned: %v", err)
+	}
+	if adapter.sessions[7] != client {
+		t.Fatal("adapter discarded message-session mapping after failed close")
+	}
+	if err := adapter.CloseMessageSession(context.Background(), session); err != nil {
+		t.Fatalf("close retry failed: %v", err)
+	}
+	if _, ok := adapter.sessions[7]; ok || attempts != 2 {
+		t.Fatalf("successful close did not remove mapping exactly once: attempts=%d sessions=%v", attempts, adapter.sessions)
+	}
+}
 
 func TestAdapterSelectsDedicatedScaleSetClient(t *testing.T) {
 	admin, err := scaleset.NewClientWithPersonalAccessToken(
@@ -96,6 +126,107 @@ func TestLabelsForComparisonDistinguishesImplicitAndConfiguredName(t *testing.T)
 	stable := ScaleSet{Name: "ci-pool-ops", Labels: []string{"tailscale", "ci-pool-ops"}}
 	if got := LabelsForComparison(stable, []string{"ci-pool-ops", "tailscale"}); !slices.Equal(got, []string{"tailscale", "ci-pool-ops"}) {
 		t.Fatalf("configured routing-name label was removed: %#v", got)
+	}
+}
+
+func TestJobMetadataPreservesAdaptiveQueueSignals(t *testing.T) {
+	queued := time.Date(2026, 8, 21, 6, 12, 0, 0, time.UTC)
+	metadata := jobMetadata(&scaleset.JobMessageBase{
+		OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+		JobDisplayName: "unit", QueueTime: queued, EventName: "push",
+		RequestLabels: []string{"self-hosted", "linux"},
+	})
+	if metadata.OwnerName != "dinglebear-ai" || metadata.RepositoryName != "soma" ||
+		metadata.JobDisplayName != "unit" || metadata.QueueTime != queued {
+		t.Fatalf("adaptive scheduling identity was not preserved: %#v", metadata)
+	}
+	if metadata.JobWorkflowRef != "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main" {
+		t.Fatalf("workflow identity changed: %#v", metadata)
+	}
+}
+
+func TestDecodeAcquirableJobsValidatesAndPreservesMetadata(t *testing.T) {
+	queued := time.Date(2026, 8, 21, 6, 30, 0, 0, time.UTC)
+	jobs := []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{
+		RunnerRequestID: 101, OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+		JobDisplayName: "unit", QueueTime: queued,
+	}}}
+	got, err := decodeAcquirableJobs(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RequestID != 101 || got[0].Metadata.OwnerName != "dinglebear-ai" ||
+		got[0].Metadata.RepositoryName != "soma" || got[0].Metadata.JobDisplayName != "unit" ||
+		got[0].Metadata.QueueTime != queued {
+		t.Fatalf("acquirable job metadata changed: %#v", got)
+	}
+}
+
+func TestDecodeAcquirableJobsRejectsInvalidAndDuplicateEntries(t *testing.T) {
+	valid := func(id int64) *scaleset.JobAvailable {
+		return &scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: id}}
+	}
+	for name, jobs := range map[string][]*scaleset.JobAvailable{
+		"nil":       {nil},
+		"zero":      {valid(0)},
+		"negative":  {valid(-1)},
+		"duplicate": {valid(7), valid(7)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeAcquirableJobs(jobs); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("invalid acquirable list was accepted: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeAcquirableJobsEnforcesResponseFuse(t *testing.T) {
+	jobs := make([]*scaleset.JobAvailable, maxAcquirableJobs+1)
+	for i := range jobs {
+		jobs[i] = &scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: int64(i + 1)}}
+	}
+	if _, err := decodeAcquirableJobs(jobs); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("oversized acquirable list was accepted: err=%v", err)
+	}
+}
+
+func TestStatsRejectsEveryNegativeCounter(t *testing.T) {
+	minInt := -int(^uint(0)>>1) - 1
+	fields := []struct {
+		name string
+		set  func(*scaleset.RunnerScaleSetStatistic, int)
+	}{
+		{"available", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAvailableJobs = n }},
+		{"acquired", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAcquiredJobs = n }},
+		{"assigned", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalAssignedJobs = n }},
+		{"running", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalRunningJobs = n }},
+		{"registered_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalRegisteredRunners = n }},
+		{"busy_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalBusyRunners = n }},
+		{"idle_runners", func(v *scaleset.RunnerScaleSetStatistic, n int) { v.TotalIdleRunners = n }},
+	}
+	for _, field := range fields {
+		for _, negative := range []int{-1, minInt} {
+			t.Run(fmt.Sprintf("%s_%d", field.name, negative), func(t *testing.T) {
+				statistics := &scaleset.RunnerScaleSetStatistic{
+					TotalAvailableJobs: 1, TotalAcquiredJobs: 1, TotalAssignedJobs: 1,
+					TotalRunningJobs: 1, TotalRegisteredRunners: 1, TotalBusyRunners: 1,
+					TotalIdleRunners: 1,
+				}
+				field.set(statistics, negative)
+				if _, err := stats(statistics); !errors.Is(err, ErrInvalidResponse) {
+					t.Fatalf("negative %s counter was accepted: %v", field.name, err)
+				}
+			})
+		}
+	}
+}
+
+func TestStatsRejectsContradictoryNegativeAvailableCount(t *testing.T) {
+	value := &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: -1, TotalAssignedJobs: 4}
+	if _, err := stats(value); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("contradictory statistics were accepted: %v", err)
 	}
 }
 

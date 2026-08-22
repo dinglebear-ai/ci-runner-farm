@@ -57,10 +57,12 @@ grep -Fq 'JIT_LOG_MAX_DAYS="${JIT_LOG_MAX_DAYS:-7}"' \
   crf_fail "seven-day diagnostic cap drifted"
 grep -Fq '30*24*time.Hour' tools/crf-scaleset/cmd/crf-scaleset/main.go ||
   crf_fail "30-day compatibility age drifted"
-grep -Fq '6ce025902cd964747a078c2aabe7340ebc667eca' \
+grep -Fq '035cda46ea086d5faaa13f4b17953112c1c7f295' \
   tools/crf-scaleset/cmd/crf-scaleset/main.go || crf_fail "scale-set module revision drifted"
 grep -Fq 'github.com/actions/scaleset v0.4.0' tools/crf-scaleset/go.mod ||
   crf_fail "scale-set module version drifted"
+grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260822023756-035cda46ea08' \
+  tools/crf-scaleset/go.mod || crf_fail "scale-set fork backport drifted"
 grep -Fq 'go 1.25.3' tools/crf-scaleset/go.mod || crf_fail "Go version drifted"
 
 # Activation uses real remote ownership/session operations. No test-only
@@ -173,7 +175,7 @@ grep -Fq 'statically linked' <<<"$helper_type" || crf_fail "packaged helper is n
 php -r '
   $j=json_decode(file_get_contents($argv[1]),true);
   exit(is_array($j)&&($j["go_version"]??"")==="go1.25.3"&&
-    ($j["module_revision"]??"")==="6ce025902cd964747a078c2aabe7340ebc667eca"?0:1);
+    ($j["module_revision"]??"")==="035cda46ea086d5faaa13f4b17953112c1c7f295"?0:1);
 ' "$tmp/version.json" || crf_fail "packaged helper identity mismatch"
 
 record="${CRF_LIVE_COMPAT_RECORD:-}"

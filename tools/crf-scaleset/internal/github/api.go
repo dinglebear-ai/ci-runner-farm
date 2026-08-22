@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 )
@@ -19,7 +20,10 @@ var (
 	ErrInvalidResponse = errors.New("invalid_scale_set_response")
 )
 
-const maxJSONSafeInteger int64 = 1<<53 - 1
+const (
+	maxJSONSafeInteger int64 = 1<<53 - 1
+	maxAcquirableJobs        = 10_000
+)
 
 type ScaleSet struct {
 	ID            int64
@@ -47,10 +51,31 @@ type Statistics struct {
 	TotalBusyRunners       int
 	TotalIdleRunners       int
 }
+type JobMetadata struct {
+	OwnerName      string
+	RepositoryName string
+	JobWorkflowRef string
+	JobDisplayName string
+	QueueTime      time.Time
+}
+
+type AvailableJob struct {
+	RequestID int64
+	Metadata  JobMetadata
+}
+
+type CompletedJob struct {
+	Metadata         JobMetadata
+	RunnerAssignTime time.Time
+	FinishTime       time.Time
+}
+
 type MessageBatch struct {
 	MessageID       int64
 	Statistics      *Statistics
 	Available       []int64
+	AvailableJobs   []AvailableJob
+	CompletedJobs   []CompletedJob
 	AssignedHandles []int64
 	ReleasedHandles []int64
 }
@@ -70,6 +95,7 @@ type ScaleSetAPI interface {
 	GetRunnerGroupByName(context.Context, string) (RunnerGroup, error)
 	CreateMessageSession(context.Context, int64) (Session, error)
 	GetMessage(context.Context, Session, int64, int) (MessageBatch, error)
+	GetAcquirableJobs(context.Context, int64) ([]AvailableJob, error)
 	AcquireJobs(context.Context, Session, AcquireRequest) (AcquireResult, error)
 	AcknowledgeMessage(context.Context, Session, int64) error
 	GenerateJitRunnerConfig(context.Context, int64, JITRequest) ([]byte, error)
@@ -81,6 +107,7 @@ type Adapter struct {
 	client        *scaleset.Client
 	owner         string
 	clientFactory ScaleSetClientFactory
+	closeSession  func(context.Context, *scaleset.MessageSessionClient) error
 	mu            sync.Mutex
 	sessions      map[int64]*scaleset.MessageSessionClient
 }
@@ -255,12 +282,25 @@ func (a *Adapter) CreateMessageSession(ctx context.Context, id int64) (Session, 
 func (a *Adapter) CloseMessageSession(ctx context.Context, session Session) error {
 	a.mu.Lock()
 	client := a.sessions[session.ScaleSetID]
-	delete(a.sessions, session.ScaleSetID)
 	a.mu.Unlock()
 	if client == nil {
 		return nil
 	}
-	return client.Close(ctx)
+	closeSession := a.closeSession
+	if closeSession == nil {
+		closeSession = func(ctx context.Context, client *scaleset.MessageSessionClient) error {
+			return client.Close(ctx)
+		}
+	}
+	if err := closeSession(ctx, client); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.sessions[session.ScaleSetID] == client {
+		delete(a.sessions, session.ScaleSetID)
+	}
+	a.mu.Unlock()
+	return nil
 }
 func (a *Adapter) session(s Session) (*scaleset.MessageSessionClient, error) {
 	a.mu.Lock()
@@ -271,11 +311,27 @@ func (a *Adapter) session(s Session) (*scaleset.MessageSessionClient, error) {
 	}
 	return v, nil
 }
-func stats(v *scaleset.RunnerScaleSetStatistic) *Statistics {
+func stats(v *scaleset.RunnerScaleSetStatistic) (*Statistics, error) {
+	if v == nil {
+		return nil, nil
+	}
+	decoded := &Statistics{v.TotalAvailableJobs, v.TotalAcquiredJobs, v.TotalAssignedJobs, v.TotalRunningJobs, v.TotalRegisteredRunners, v.TotalBusyRunners, v.TotalIdleRunners}
+	if err := ValidateStatistics(decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func ValidateStatistics(v *Statistics) error {
 	if v == nil {
 		return nil
 	}
-	return &Statistics{v.TotalAvailableJobs, v.TotalAcquiredJobs, v.TotalAssignedJobs, v.TotalRunningJobs, v.TotalRegisteredRunners, v.TotalBusyRunners, v.TotalIdleRunners}
+	if v.TotalAvailableJobs < 0 || v.TotalAcquiredJobs < 0 || v.TotalAssignedJobs < 0 ||
+		v.TotalRunningJobs < 0 || v.TotalRegisteredRunners < 0 || v.TotalBusyRunners < 0 ||
+		v.TotalIdleRunners < 0 {
+		return ErrInvalidResponse
+	}
+	return nil
 }
 
 func jobHandle(scaleSetID int64, job *scaleset.JobMessageBase) (int64, error) {
@@ -313,6 +369,52 @@ func assignedJobHandle(scaleSetID int64, job *scaleset.JobAssigned) (int64, erro
 	return jobHandle(scaleSetID, &job.JobMessageBase)
 }
 
+func jobMetadata(job *scaleset.JobMessageBase) JobMetadata {
+	if job == nil {
+		return JobMetadata{}
+	}
+	return JobMetadata{
+		OwnerName:      job.OwnerName,
+		RepositoryName: job.RepositoryName,
+		JobWorkflowRef: job.JobWorkflowRef,
+		JobDisplayName: job.JobDisplayName,
+		QueueTime:      job.QueueTime,
+	}
+}
+
+func decodeAcquirableJobs(jobs []*scaleset.JobAvailable) ([]AvailableJob, error) {
+	if len(jobs) > maxAcquirableJobs {
+		return nil, ErrInvalidResponse
+	}
+	out := make([]AvailableJob, 0, len(jobs))
+	seen := make(map[int64]bool, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.RunnerRequestID <= 0 || seen[job.RunnerRequestID] {
+			return nil, ErrInvalidResponse
+		}
+		seen[job.RunnerRequestID] = true
+		out = append(out, AvailableJob{
+			RequestID: job.RunnerRequestID, Metadata: jobMetadata(&job.JobMessageBase),
+		})
+	}
+	return out, nil
+}
+
+func (a *Adapter) GetAcquirableJobs(ctx context.Context, scaleSetID int64) ([]AvailableJob, error) {
+	if scaleSetID <= 0 {
+		return nil, ErrInvalidResponse
+	}
+	client, err := a.adminClient()
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := client.GetAcquirableJobs(ctx, int(scaleSetID))
+	if err != nil {
+		return nil, err
+	}
+	return decodeAcquirableJobs(jobs)
+}
+
 func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64, max int) (MessageBatch, error) {
 	c, err := a.session(s)
 	if err != nil {
@@ -322,12 +424,19 @@ func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64
 	if err != nil || v == nil {
 		return MessageBatch{}, err
 	}
-	out := MessageBatch{MessageID: int64(v.MessageID), Statistics: stats(v.Statistics)}
+	statistics, err := stats(v.Statistics)
+	if err != nil {
+		return MessageBatch{}, err
+	}
+	out := MessageBatch{MessageID: int64(v.MessageID), Statistics: statistics}
 	for _, job := range v.JobAvailableMessages {
 		if job == nil || job.RunnerRequestID <= 0 {
 			return MessageBatch{}, errors.New("invalid_available_job_identity")
 		}
 		out.Available = append(out.Available, job.RunnerRequestID)
+		out.AvailableJobs = append(out.AvailableJobs, AvailableJob{
+			RequestID: job.RunnerRequestID, Metadata: jobMetadata(&job.JobMessageBase),
+		})
 	}
 	for _, job := range v.JobAssignedMessages {
 		handle, err := assignedJobHandle(s.ScaleSetID, job)
@@ -344,6 +453,9 @@ func (a *Adapter) GetMessage(ctx context.Context, s Session, lastMessageID int64
 		if err != nil {
 			return MessageBatch{}, err
 		}
+		out.CompletedJobs = append(out.CompletedJobs, CompletedJob{
+			Metadata: jobMetadata(&job.JobMessageBase), RunnerAssignTime: job.RunnerAssignTime, FinishTime: job.FinishTime,
+		})
 		out.ReleasedHandles = append(out.ReleasedHandles, handle)
 	}
 	return out, nil

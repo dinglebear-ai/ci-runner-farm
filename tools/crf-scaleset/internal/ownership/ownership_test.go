@@ -89,6 +89,9 @@ func (*fakeAPI) CreateMessageSession(context.Context, int64) (crfgithub.Session,
 func (*fakeAPI) GetMessage(context.Context, crfgithub.Session, int64, int) (crfgithub.MessageBatch, error) {
 	return crfgithub.MessageBatch{}, nil
 }
+func (*fakeAPI) GetAcquirableJobs(context.Context, int64) ([]crfgithub.AvailableJob, error) {
+	return nil, nil
+}
 func (*fakeAPI) AcquireJobs(context.Context, crfgithub.Session, crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
 	return crfgithub.AcquireResult{}, nil
 }

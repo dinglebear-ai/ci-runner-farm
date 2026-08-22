@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
+	"time"
 
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
@@ -16,7 +18,10 @@ import (
 
 var ErrAmbiguousAcquire = errors.New("ambiguous_acquisition_session_reset")
 
-const maxJSONSafeInteger int64 = 1<<53 - 1
+const (
+	maxJSONSafeInteger      int64 = 1<<53 - 1
+	acquirableLookupTimeout       = 2 * time.Second
+)
 
 type Config struct {
 	API               crfgithub.ScaleSetAPI
@@ -27,16 +32,23 @@ type Config struct {
 }
 
 type Poller struct {
-	cfg        Config
-	mu         sync.Mutex
-	journalMu  sync.Mutex
-	sessions   map[int64]crfgithub.Session
-	assigned   map[int64]int
-	advertised map[int64]int
-	pending    map[int64][]int64
-	replay     map[journal.Key]journal.Entry
-	consumed   map[string]bool
-	poolMu     map[int64]*sync.Mutex
+	cfg                Config
+	mu                 sync.Mutex
+	journalMu          sync.Mutex
+	sessions           map[int64]crfgithub.Session
+	rejectedSessions   map[int64]crfgithub.Session
+	assigned           map[int64]int
+	advertised         map[int64]int
+	pending            map[int64][]int64
+	replay             map[journal.Key]journal.Entry
+	consumed           map[string]bool
+	poolMu             map[int64]*sync.Mutex
+	runtimes           map[runtimeDigest]runtimeEstimate
+	lastRuntimePersist time.Time
+	runtimePersistMu   sync.Mutex
+	runtimeDirty       bool
+	runtimeGeneration  uint64
+	acquirableHealth   map[int64]string
 }
 
 type sessionCloser interface {
@@ -52,10 +64,12 @@ func New(cfg Config) (*Poller, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
+	runtimes := loadRuntimeHints(cfg.Store)
+	p := &Poller{cfg: cfg, sessions: map[int64]crfgithub.Session{}, rejectedSessions: map[int64]crfgithub.Session{}, assigned: map[int64]int{},
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
-		poolMu: map[int64]*sync.Mutex{}}
+		poolMu: map[int64]*sync.Mutex{}, runtimes: runtimes,
+		acquirableHealth: map[int64]string{}}
 	for key, consumed := range cfg.ConsumedHandles {
 		if consumed {
 			p.consumed[key] = true
@@ -191,12 +205,11 @@ func (p *Poller) setAdvertised(scaleSetID int64, capacity int) {
 	p.advertised[scaleSetID] = capacity
 }
 
-func (p *Poller) advertisedChanged(scaleSetID int64, capacity int) bool {
+func (p *Poller) advertisedState(scaleSetID int64, capacity int) (bool, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	previous, known := p.advertised[scaleSetID]
-	p.advertised[scaleSetID] = capacity
-	return known && previous != capacity
+	return known, known && previous != capacity
 }
 
 func appendUnique(existing []int64, ids ...int64) []int64 {
@@ -208,24 +221,77 @@ func appendUnique(existing []int64, ids ...int64) []int64 {
 	return existing
 }
 
-func (p *Poller) session(ctx context.Context, scaleSetID int64) (crfgithub.Session, error) {
+func (p *Poller) session(ctx context.Context, scaleSetID int64) (crfgithub.Session, bool, error) {
 	p.mu.Lock()
 	if existing, ok := p.sessions[scaleSetID]; ok {
 		p.mu.Unlock()
-		return existing, nil
+		return existing, false, nil
 	}
 	p.mu.Unlock()
 	created, err := p.cfg.API.CreateMessageSession(ctx, scaleSetID)
 	if err != nil {
-		return crfgithub.Session{}, err
+		return crfgithub.Session{}, false, err
 	}
 	if created.ScaleSetID != scaleSetID || created.ID == "" {
-		return crfgithub.Session{}, errors.New("invalid_message_session")
+		return crfgithub.Session{}, false, errors.New("invalid_message_session")
+	}
+	return created, true, nil
+}
+
+func (p *Poller) commitSession(created crfgithub.Session, isNew bool) {
+	if !isNew {
+		return
 	}
 	p.mu.Lock()
-	p.sessions[scaleSetID] = created
+	p.sessions[created.ScaleSetID] = created
 	p.mu.Unlock()
-	return created, nil
+}
+
+func (p *Poller) rejectSession(ctx context.Context, created crfgithub.Session, isNew bool, cause error) error {
+	if !isNew {
+		return cause
+	}
+	closer, ok := p.cfg.API.(sessionCloser)
+	if !ok {
+		p.retainRejectedSession(created)
+		return errors.Join(cause, errors.New("close_rejected_message_session_unsupported"))
+	}
+	if err := closer.CloseMessageSession(ctx, created); err != nil {
+		p.retainRejectedSession(created)
+		return errors.Join(cause, fmt.Errorf("close_rejected_message_session: %w", err))
+	}
+	return cause
+}
+
+func (p *Poller) retainRejectedSession(session crfgithub.Session) {
+	p.mu.Lock()
+	if p.rejectedSessions == nil {
+		p.rejectedSessions = map[int64]crfgithub.Session{}
+	}
+	p.rejectedSessions[session.ScaleSetID] = session
+	p.mu.Unlock()
+}
+
+func (p *Poller) retryRejectedSession(ctx context.Context, scaleSetID int64) error {
+	p.mu.Lock()
+	rejected, exists := p.rejectedSessions[scaleSetID]
+	p.mu.Unlock()
+	if !exists {
+		return nil
+	}
+	closer, ok := p.cfg.API.(sessionCloser)
+	if !ok {
+		return errors.New("close_rejected_message_session_unsupported")
+	}
+	if err := closer.CloseMessageSession(ctx, rejected); err != nil {
+		return fmt.Errorf("close_rejected_message_session: %w", err)
+	}
+	p.mu.Lock()
+	if p.rejectedSessions[scaleSetID] == rejected {
+		delete(p.rejectedSessions, scaleSetID)
+	}
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *Poller) resetAmbiguousAcquire(ctx context.Context, scaleSetID int64,
@@ -357,11 +423,123 @@ func (p *Poller) compactJournalLocked() error {
 	return nil
 }
 
+func (p *Poller) acquisitionBatch(ctx context.Context, pool supervisor.Pool, batch crfgithub.MessageBatch) crfgithub.MessageBatch {
+	if batch.Statistics == nil {
+		return batch
+	}
+	visibleCount := max(len(batch.Available), len(batch.AvailableJobs))
+	if batch.Statistics.TotalAvailableJobs <= visibleCount {
+		return batch
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, acquirableLookupTimeout)
+	jobs, err := p.cfg.API.GetAcquirableJobs(lookupCtx, pool.ScaleSetID)
+	cancel()
+	if err != nil {
+		state := "error"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(lookupCtx.Err(), context.DeadlineExceeded) {
+			state = "timeout"
+		}
+		p.recordAcquirableHealth(pool.ScaleSetID, state, err)
+		return batch
+	}
+	if len(jobs) == 0 {
+		p.recordAcquirableHealth(pool.ScaleSetID, "empty", nil)
+		return batch
+	}
+	p.recordAcquirableHealth(pool.ScaleSetID, "healthy", nil)
+	merged := slices.Clone(batch.AvailableJobs)
+	seen := make(map[int64]bool, len(merged)+len(jobs))
+	for _, job := range merged {
+		if job.RequestID > 0 {
+			seen[job.RequestID] = true
+		}
+	}
+	for _, job := range jobs {
+		if job.RequestID <= 0 || seen[job.RequestID] {
+			continue
+		}
+		seen[job.RequestID] = true
+		merged = append(merged, job)
+	}
+	if len(merged) == 0 {
+		return batch
+	}
+	batch.AvailableJobs = merged
+	return batch
+}
+
+func (p *Poller) recordAcquirableHealth(scaleSetID int64, state string, err error) {
+	p.mu.Lock()
+	if p.acquirableHealth == nil {
+		p.acquirableHealth = map[int64]string{}
+	}
+	previous := p.acquirableHealth[scaleSetID]
+	if previous == state {
+		p.mu.Unlock()
+		return
+	}
+	p.acquirableHealth[scaleSetID] = state
+	p.mu.Unlock()
+	if state == "healthy" {
+		if previous != "" && previous != "healthy" {
+			log.Printf("acquirable lookup recovered scale_set_id=%d previous=%s", scaleSetID, previous)
+		}
+		return
+	}
+	log.Printf("acquirable lookup degraded scale_set_id=%d state=%s err=%v", scaleSetID, state, err)
+}
+
+func exactAcquiredIDs(requested, acquired []int64) bool {
+	if len(requested) == 0 || len(requested) != len(acquired) {
+		return false
+	}
+	remaining := make(map[int64]struct{}, len(requested))
+	for _, id := range requested {
+		if id <= 0 {
+			return false
+		}
+		remaining[id] = struct{}{}
+	}
+	if len(remaining) != len(requested) {
+		return false
+	}
+	for _, id := range acquired {
+		if _, ok := remaining[id]; !ok {
+			return false
+		}
+		delete(remaining, id)
+	}
+	return len(remaining) == 0
+}
+
+func (p *Poller) acquire(ctx context.Context, scaleSetID int64, session crfgithub.Session,
+	key journal.Key, selected []int64) error {
+	result, err := p.cfg.API.AcquireJobs(ctx, session,
+		crfgithub.AcquireRequest{RequestIDs: selected})
+	if err != nil {
+		return err
+	}
+	if !exactAcquiredIDs(selected, result.AcquiredIDs) {
+		return p.resetAmbiguousAcquire(ctx, scaleSetID, key)
+	}
+	return nil
+}
+
+func (p *Poller) selectForAcquire(ctx context.Context, pool supervisor.Pool, batch crfgithub.MessageBatch, capacity int) []int64 {
+	if capacity <= 0 || (batch.Statistics != nil && batch.Statistics.TotalAssignedJobs >= capacity) {
+		return nil
+	}
+	return p.selectedAvailable(p.acquisitionBatch(ctx, pool, batch), pool.ID, capacity, time.Now().UTC())
+}
+
 func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (supervisor.PollResult, error) {
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := p.session(ctx, pool.ScaleSetID)
+	if err := p.retryRejectedSession(ctx, pool.ScaleSetID); err != nil {
+		return supervisor.PollResult{}, err
+	}
+	session, sessionIsNew, err := p.session(ctx, pool.ScaleSetID)
 	if err != nil {
 		return supervisor.PollResult{}, err
 	}
@@ -373,18 +551,41 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		}
 	}
 	p.mu.Unlock()
-	if p.advertisedChanged(pool.ScaleSetID, capacity) {
+	advertisedKnown, advertisedChanged := p.advertisedState(pool.ScaleSetID, capacity)
+	if advertisedChanged {
+		p.commitSession(session, sessionIsNew)
+		p.setAdvertised(pool.ScaleSetID, capacity)
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
+	// Keep GitHub capacity honest. actions/scaleset defines X-ScaleSetMaxCapacity
+	// as the scale set capacity the backend may rely on for assignment. Hidden
+	// backlog is inspected through the separate admin acquirable-jobs endpoint;
+	// never inflate this capacity header merely to manufacture lookahead.
 	batch, err := p.cfg.API.GetMessage(ctx, session, last, capacity)
 	if err != nil {
+		p.commitSession(session, sessionIsNew)
+		if !advertisedKnown {
+			p.setAdvertised(pool.ScaleSetID, capacity)
+		}
 		return supervisor.PollResult{}, err
 	}
 	if batch.MessageID == 0 {
+		p.commitSession(session, sessionIsNew)
+		if !advertisedKnown {
+			p.setAdvertised(pool.ScaleSetID, capacity)
+		}
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
 	if batch.Statistics == nil {
-		return supervisor.PollResult{}, errors.New("message_statistics_required")
+		return supervisor.PollResult{}, p.rejectSession(ctx, session, sessionIsNew,
+			errors.New("message_statistics_required"))
+	}
+	if err := crfgithub.ValidateStatistics(batch.Statistics); err != nil {
+		return supervisor.PollResult{}, p.rejectSession(ctx, session, sessionIsNew, err)
+	}
+	p.commitSession(session, sessionIsNew)
+	if !advertisedKnown {
+		p.setAdvertised(pool.ScaleSetID, capacity)
 	}
 	p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)
@@ -414,13 +615,13 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			}
 			fallthrough
 		case "validated":
-			if len(batch.Available) > 0 {
+			selected := p.selectForAcquire(ctx, pool, batch, capacity)
+			if len(selected) > 0 {
 				base.Phase = "acquire_started"
 				if err := p.append(base); err != nil {
 					return supervisor.PollResult{}, err
 				}
-				if _, err := p.cfg.API.AcquireJobs(ctx, session,
-					crfgithub.AcquireRequest{RequestIDs: batch.Available}); err != nil {
+				if err := p.acquire(ctx, pool.ScaleSetID, session, base.Key(), selected); err != nil {
 					return supervisor.PollResult{}, err
 				}
 				base.Phase = "acquire_observed"
@@ -460,10 +661,14 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 			if err := p.cfg.API.AcknowledgeMessage(ctx, session, batch.MessageID); err != nil {
 				return supervisor.PollResult{}, err
 			}
+			// Runtime hints are optional optimization state. Learn only after GitHub
+			// accepted the message acknowledgement so retries, ambiguous acquisition
+			// resets, and redelivery cannot count one completion more than once.
 			base.Phase = "acked"
 			if err := p.append(base); err != nil {
 				return supervisor.PollResult{}, err
 			}
+			p.observeCompleted(pool.ID, batch.CompletedJobs)
 		case "acked":
 		default:
 			return supervisor.PollResult{}, ErrAmbiguousAcquire
@@ -475,13 +680,13 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if err := p.append(base); err != nil {
 		return supervisor.PollResult{}, err
 	}
-	if len(batch.Available) > 0 {
+	selected := p.selectForAcquire(ctx, pool, batch, capacity)
+	if len(selected) > 0 {
 		base.Phase = "acquire_started"
 		if err := p.append(base); err != nil {
 			return supervisor.PollResult{}, err
 		}
-		if _, err := p.cfg.API.AcquireJobs(ctx, session,
-			crfgithub.AcquireRequest{RequestIDs: batch.Available}); err != nil {
+		if err := p.acquire(ctx, pool.ScaleSetID, session, base.Key(), selected); err != nil {
 			return supervisor.PollResult{}, err
 		}
 		base.Phase = "acquire_observed"
@@ -501,6 +706,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	if err := p.append(base); err != nil {
 		return supervisor.PollResult{}, err
 	}
+	p.observeCompleted(pool.ID, batch.CompletedJobs)
 	return p.result(pool.ScaleSetID, session.ID, capacity, batch.MessageID)
 }
 
@@ -551,23 +757,41 @@ func (p *Poller) RetireHandle(scaleSetID, handle int64) error {
 }
 
 func (p *Poller) Close(ctx context.Context) error {
+	var first error
+	if err := p.persistRuntimeHints(true); err != nil {
+		first = err
+	}
 	p.mu.Lock()
 	closer, ok := p.cfg.API.(sessionCloser)
 	if !ok {
 		p.mu.Unlock()
-		return nil
+		return first
 	}
-	sessions := make([]crfgithub.Session, 0, len(p.sessions))
+	sessions := make(map[int64]crfgithub.Session, len(p.sessions)+len(p.rejectedSessions))
 	for scaleSetID, active := range p.sessions {
-		sessions = append(sessions, active)
-		delete(p.sessions, scaleSetID)
+		sessions[scaleSetID] = active
+	}
+	for scaleSetID, rejected := range p.rejectedSessions {
+		if _, active := sessions[scaleSetID]; !active {
+			sessions[scaleSetID] = rejected
+		}
 	}
 	p.mu.Unlock()
-	var first error
-	for _, active := range sessions {
-		if err := closer.CloseMessageSession(ctx, active); err != nil && first == nil {
-			first = err
+	for scaleSetID, active := range sessions {
+		if err := closer.CloseMessageSession(ctx, active); err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
 		}
+		p.mu.Lock()
+		if p.sessions[scaleSetID] == active {
+			delete(p.sessions, scaleSetID)
+		}
+		if p.rejectedSessions[scaleSetID] == active {
+			delete(p.rejectedSessions, scaleSetID)
+		}
+		p.mu.Unlock()
 	}
 	return first
 }
