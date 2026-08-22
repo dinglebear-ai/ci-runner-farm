@@ -316,16 +316,22 @@ pipe_item="$CACHE_ROOT/.jit-gc/pipe-latency"
 mkdir -p "$pipe_item"; touch "$pipe_item/artifact"
 slow_gc_rm_seconds=1
 export CACHE_ROOT RUNDIR JIT_GC_SWEEP_MAX JIT_GC_SWEEPER_PID slow_gc_rm_seconds
-export gc_rm_started gc_rm_finished gc_rm_active gc_rm_max_active gc_inherited_fd5 gc_inherited_fd8
+export gc_rm_started gc_rm_finished gc_rm_gate gc_rm_active gc_rm_max_active gc_inherited_fd5 gc_inherited_fd8
 export safe_cache_root_mode detach_failure_runner gc_remove_failure
 export -f crf_safe_cache_root jit_gc_log jit_gc_root_prepare jit_gc_sweep_config_valid
 export -f jit_gc_sweep jit_gc_sweep_start rm mv
-started_ns="$(date +%s%N)"
-pipe_result="$(bash -c 'jit_gc_sweep_start; printf detached' | cat)"
-elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
+: >"$gc_rm_gate"
+pipe_result="$(timeout 2 bash -c 'jit_gc_sweep_start; printf detached' | cat)" ||
+  crf_fail "piped caller retained background GC descriptors"
 [ "$pipe_result" = detached ] || crf_fail "piped GC start returned unexpected output"
-[ "$elapsed_ms" -lt 500 ] || crf_fail "piped caller waited for background GC (${elapsed_ms}ms)"
-for _ in {1..200}; do [ ! -e "$pipe_item" ] && break; sleep 0.01; done
+[ -e "$pipe_item" ] || crf_fail "blocked piped GC reclaimed its fixture before gate release"
+rm -f "$gc_rm_gate"
+for _ in {1..200}; do
+  grep -Fq "jit-gc: reclaimed item=pipe-latency" "$RUNDIR/autoscale.log" 2>/dev/null && break
+  sleep 0.01
+done
+grep -Fq "jit-gc: reclaimed item=pipe-latency" "$RUNDIR/autoscale.log" 2>/dev/null ||
+  crf_fail "detached piped GC did not report completion"
 [ ! -e "$pipe_item" ] || crf_fail "detached piped GC did not reclaim its fixture"
 
 # Configuration errors are rejected before a child is launched, allowing the
