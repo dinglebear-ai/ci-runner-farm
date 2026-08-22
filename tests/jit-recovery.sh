@@ -26,6 +26,7 @@ gc_rm_started="$tmp/gc-rm-started"
 gc_rm_finished="$tmp/gc-rm-finished"
 gc_rm_active="$tmp/gc-rm-active"
 gc_rm_max_active="$tmp/gc-rm-max-active"
+gc_inherited_fd5="$tmp/gc-inherited-fd5"
 gc_inherited_fd8="$tmp/gc-inherited-fd8"
 crf_safe_cache_root(){
   [ "$safe_cache_root_mode" = success ] || return 1
@@ -44,6 +45,7 @@ rm(){
   local arg active max
   for arg in "$@"; do
     if [[ "$arg" == *"/.jit-gc/"* ]]; then
+      [ ! -e "/proc/$BASHPID/fd/5" ] || printf '%s\n' "$BASHPID" >>"$gc_inherited_fd5"
       [ ! -e "/proc/$BASHPID/fd/8" ] || printf '%s\n' "$BASHPID" >>"$gc_inherited_fd8"
       printf '%s\n' "$arg" >>"$gc_rm_started"
       (
@@ -54,7 +56,7 @@ rm(){
         [ "$active" -le "$max" ] || printf '%s\n' "$active" >"$gc_rm_max_active"
       ) 9>"$tmp/gc-rm-count.lock"
       [ "$slow_gc_rm_seconds" = 0 ] || sleep "$slow_gc_rm_seconds"
-      if [ -n "$gc_remove_failure" ] && [[ "$arg" == *"/$gc_remove_failure" ]]; then
+      if [ -n "$gc_remove_failure" ] && [[ "${arg##*/}" == "$gc_remove_failure"* ]]; then
         (
           flock -x 9
           active=$(( $(cat "$gc_rm_active" 2>/dev/null || printf 1) - 1 ))
@@ -177,6 +179,21 @@ jit_reconcile
 [ "${fake_exists[$orphan]}" = 0 ] || crf_fail "orphan exited JIT container was not removed"
 grep -Fq '"work_handle":303' "$retired" || crf_fail "orphan work handle was not retired"
 
+# A create attempt may fail before Docker exposes a container. Its already
+# allocated work/docker trees must still detach before retirement and release.
+create_failed=ci-runner-jit-rust-12121212121212121212
+create_failed_reservation=lease-rust-create-failed
+fake_exists[$create_failed]=0; fake_status[$create_failed]=exited; fake_consumed[$create_failed]=0; fake_pool[$create_failed]=rust; fake_handle[$create_failed]=313
+mkdir -p "$CACHE_ROOT/work/$create_failed" "$CACHE_ROOT/docker/$create_failed"
+touch "$CACHE_ROOT/work/$create_failed/artifact" "$CACHE_ROOT/docker/$create_failed/layer" \
+  "$RESERVATION_DIR/$create_failed_reservation.state"
+write_state "$JIT_STATE_DIR/$create_failed.state" "$create_failed" failed "$create_failed_reservation" 313 "$old" rust
+jit_reconcile
+[ ! -e "$CACHE_ROOT/work/$create_failed" ] && [ ! -e "$CACHE_ROOT/docker/$create_failed" ] || crf_fail "failed create left live runner data attached"
+[ "$(jit_state_field "$JIT_STATE_DIR/$create_failed.state" phase)" = deleted ] || crf_fail "failed create state did not converge"
+[ ! -e "$RESERVATION_DIR/$create_failed_reservation.state" ] || crf_fail "failed create reservation was not released"
+grep -Fq '"work_handle":313' "$retired" || crf_fail "failed create handle was not retired"
+
 # A delivered request without explicit retirement confirmation must remain in
 # deleting state so reconciliation retries instead of releasing the reservation.
 unconfirmed=ci-runner-jit-ops-eeeeeeeeeeeeeeeeeeee
@@ -267,19 +284,23 @@ mkdir -p "$CACHE_ROOT/work/$slow" "$CACHE_ROOT/docker/$slow"
 touch "$CACHE_ROOT/work/$slow/artifact" "$CACHE_ROOT/docker/$slow/layer" "$RESERVATION_DIR/$slow_reservation.state"
 write_state "$JIT_STATE_DIR/$slow.state" "$slow" terminal "$slow_reservation" 808 "$old" rust
 slow_gc_rm_seconds=1
-: >"$gc_rm_started"; : >"$gc_inherited_fd8"
+: >"$gc_rm_started"; : >"$gc_inherited_fd5"; : >"$gc_inherited_fd8"
+exec 5>"$tmp/autoscale-tick.lock"
+flock 5
 exec 8>"$tmp/autoscale-fleet.lock"
 flock 8
 started_ns="$(date +%s%N)"
 jit_reconcile
 elapsed_ms=$(( ($(date +%s%N) - started_ns) / 1000000 ))
 flock -u 8; exec 8>&-
+flock -u 5; exec 5>&-
 [ "$elapsed_ms" -lt 500 ] || crf_fail "slow recursive deletion delayed JIT reconciliation (${elapsed_ms}ms)"
 [ ! -e "$JIT_STATE_DIR/$slow.state" ] || crf_fail "slow cleanup did not converge JIT state"
 [ ! -e "$RESERVATION_DIR/$slow_reservation.state" ] || crf_fail "slow cleanup did not release reservation"
 [ ! -e "$CACHE_ROOT/work/$slow" ] && [ ! -e "$CACHE_ROOT/docker/$slow" ] || crf_fail "slow cleanup left live runner paths attached"
 for _ in {1..100}; do [ -s "$gc_rm_started" ] && break; sleep 0.01; done
 [ -s "$gc_rm_started" ] || crf_fail "background GC sweep did not start"
+[ ! -s "$gc_inherited_fd5" ] || crf_fail "GC sweeper inherited the autoscale tick lock fd"
 [ ! -s "$gc_inherited_fd8" ] || crf_fail "GC sweeper inherited the autoscale lock fd"
 
 # A failed sweep remains quarantined and is retried by a later reconcile, which
@@ -292,7 +313,8 @@ gc_remove_failure=retry.manual
 jit_gc_sweep_start
 wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
 gc_remove_failure=
-[ -e "$retry_item/artifact" ] || crf_fail "failed sweep did not preserve quarantined data"
+find "$CACHE_ROOT/.jit-gc" -maxdepth 2 -type f -path '*retry.manual*/artifact' | grep -q . ||
+  crf_fail "failed sweep did not preserve quarantined data"
 slow_gc_rm_seconds=1
 jit_reconcile
 first_sweeper="$JIT_GC_SWEEPER_PID"
@@ -300,8 +322,20 @@ jit_gc_sweep_start
 second_sweeper="$JIT_GC_SWEEPER_PID"
 [ "$first_sweeper" = "$second_sweeper" ] || crf_fail "concurrent GC sweepers were started"
 wait "$first_sweeper" 2>/dev/null || true
-[ ! -e "$retry_item" ] || crf_fail "quarantined data was not retried on the next sweep"
+find "$CACHE_ROOT/.jit-gc" -maxdepth 1 -name '*retry.manual*' | grep -q . &&
+  crf_fail "quarantined data was not retried on the next sweep"
 [ "$(cat "$gc_rm_max_active" 2>/dev/null || printf 0)" -le 1 ] || crf_fail "GC reclamation concurrency was not bounded"
+
+# Failed entries rotate behind untouched work so a full failed batch cannot
+# starve a later reclaimable item forever.
+slow_gc_rm_seconds=0
+for n in {1..9}; do mkdir -p "$CACHE_ROOT/.jit-gc/a-fail-$n"; done
+mkdir -p "$CACHE_ROOT/.jit-gc/b-reclaim"; touch "$CACHE_ROOT/.jit-gc/b-reclaim/artifact"
+gc_remove_failure=a-fail
+jit_gc_sweep_start; wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
+jit_gc_sweep_start; wait "${JIT_GC_SWEEPER_PID:-}" 2>/dev/null || true
+gc_remove_failure=
+[ ! -e "$CACHE_ROOT/.jit-gc/b-reclaim" ] || crf_fail "failed GC batch starved later reclaimable data"
 
 # Symlinked parent roots are rejected before moving anything outside CACHE_ROOT.
 outside="$tmp/outside"; mkdir -p "$outside/$absent"; touch "$outside/$absent/sentinel"

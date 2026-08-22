@@ -32,6 +32,7 @@ type fakeAPI struct {
 	ackErr             error
 	ackHook            func()
 	closeCalls         int
+	messageCalls       int
 	lastMessage        int64
 	messageCapacity    int
 	acquirable         []crfgithub.AvailableJob
@@ -67,6 +68,7 @@ func (f *fakeAPI) CreateMessageSession(_ context.Context, id int64) (crfgithub.S
 }
 func (f *fakeAPI) GetMessage(_ context.Context, session crfgithub.Session, lastMessage int64, capacity int) (crfgithub.MessageBatch, error) {
 	f.mu.Lock()
+	f.messageCalls++
 	f.lastMessage = lastMessage
 	f.messageCapacity = capacity
 	batch := f.batch
@@ -445,6 +447,51 @@ func TestPollRejectsNegativeStatisticsBeforeStateMutation(t *testing.T) {
 					api.acquireCalls, api.ackCalls, api.acquirableCalls)
 			}
 		})
+	}
+}
+
+func TestFreshPollRejectsNegativeStatisticsWithoutChangingNextPollControlFlow(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 42, Statistics: &crfgithub.Statistics{TotalAvailableJobs: -1},
+		Available: []int64{101},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 2); !errors.Is(err, crfgithub.ErrInvalidResponse) {
+		t.Fatalf("negative statistics did not fail closed: %v", err)
+	}
+	if _, ok := poller.sessions[7]; ok {
+		t.Fatal("rejected first message persisted its session")
+	}
+	if _, ok := poller.advertised[7]; ok {
+		t.Fatal("rejected first message persisted advertised capacity")
+	}
+	if len(poller.assigned) != 0 || len(poller.pending) != 0 || len(poller.replay) != 0 {
+		t.Fatalf("rejected first message mutated admission state: assigned=%v pending=%v replay=%v",
+			poller.assigned, poller.pending, poller.replay)
+	}
+	if api.messageCalls != 1 || api.sessionCalls != 1 || api.closeCalls != 1 ||
+		api.acquireCalls != 0 || api.ackCalls != 0 {
+		t.Fatalf("unexpected rejected-poll calls: messages=%d sessions=%d closes=%d acquire=%d ack=%d",
+			api.messageCalls, api.sessionCalls, api.closeCalls, api.acquireCalls, api.ackCalls)
+	}
+
+	api.mu.Lock()
+	api.batch = crfgithub.MessageBatch{MessageID: 43, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1},
+		Available: []int64{102}}
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 3); err != nil {
+		t.Fatalf("valid follow-up poll failed: %v", err)
+	}
+	if api.messageCalls != 2 || api.sessionCalls != 2 || api.messageCapacity != 3 ||
+		api.acquireCalls != 1 || api.ackCalls != 1 {
+		t.Fatalf("rejected first message changed follow-up control flow: messages=%d sessions=%d capacity=%d acquire=%d ack=%d",
+			api.messageCalls, api.sessionCalls, api.messageCapacity, api.acquireCalls, api.ackCalls)
 	}
 }
 

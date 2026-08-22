@@ -204,12 +204,11 @@ func (p *Poller) setAdvertised(scaleSetID int64, capacity int) {
 	p.advertised[scaleSetID] = capacity
 }
 
-func (p *Poller) advertisedChanged(scaleSetID int64, capacity int) bool {
+func (p *Poller) advertisedState(scaleSetID int64, capacity int) (bool, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	previous, known := p.advertised[scaleSetID]
-	p.advertised[scaleSetID] = capacity
-	return known && previous != capacity
+	return known, known && previous != capacity
 }
 
 func appendUnique(existing []int64, ids ...int64) []int64 {
@@ -221,24 +220,44 @@ func appendUnique(existing []int64, ids ...int64) []int64 {
 	return existing
 }
 
-func (p *Poller) session(ctx context.Context, scaleSetID int64) (crfgithub.Session, error) {
+func (p *Poller) session(ctx context.Context, scaleSetID int64) (crfgithub.Session, bool, error) {
 	p.mu.Lock()
 	if existing, ok := p.sessions[scaleSetID]; ok {
 		p.mu.Unlock()
-		return existing, nil
+		return existing, false, nil
 	}
 	p.mu.Unlock()
 	created, err := p.cfg.API.CreateMessageSession(ctx, scaleSetID)
 	if err != nil {
-		return crfgithub.Session{}, err
+		return crfgithub.Session{}, false, err
 	}
 	if created.ScaleSetID != scaleSetID || created.ID == "" {
-		return crfgithub.Session{}, errors.New("invalid_message_session")
+		return crfgithub.Session{}, false, errors.New("invalid_message_session")
+	}
+	return created, true, nil
+}
+
+func (p *Poller) commitSession(created crfgithub.Session, isNew bool) {
+	if !isNew {
+		return
 	}
 	p.mu.Lock()
-	p.sessions[scaleSetID] = created
+	p.sessions[created.ScaleSetID] = created
 	p.mu.Unlock()
-	return created, nil
+}
+
+func (p *Poller) rejectSession(ctx context.Context, created crfgithub.Session, isNew bool, cause error) error {
+	if !isNew {
+		return cause
+	}
+	closer, ok := p.cfg.API.(sessionCloser)
+	if !ok {
+		return cause
+	}
+	if err := closer.CloseMessageSession(ctx, created); err != nil {
+		return errors.Join(cause, fmt.Errorf("close_rejected_message_session: %w", err))
+	}
+	return cause
 }
 
 func (p *Poller) resetAmbiguousAcquire(ctx context.Context, scaleSetID int64,
@@ -483,7 +502,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := p.session(ctx, pool.ScaleSetID)
+	session, sessionIsNew, err := p.session(ctx, pool.ScaleSetID)
 	if err != nil {
 		return supervisor.PollResult{}, err
 	}
@@ -495,7 +514,10 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		}
 	}
 	p.mu.Unlock()
-	if p.advertisedChanged(pool.ScaleSetID, capacity) {
+	advertisedKnown, advertisedChanged := p.advertisedState(pool.ScaleSetID, capacity)
+	if advertisedChanged {
+		p.commitSession(session, sessionIsNew)
+		p.setAdvertised(pool.ScaleSetID, capacity)
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
 	// Keep GitHub capacity honest. actions/scaleset defines X-ScaleSetMaxCapacity
@@ -504,16 +526,29 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	// never inflate this capacity header merely to manufacture lookahead.
 	batch, err := p.cfg.API.GetMessage(ctx, session, last, capacity)
 	if err != nil {
+		p.commitSession(session, sessionIsNew)
+		if !advertisedKnown {
+			p.setAdvertised(pool.ScaleSetID, capacity)
+		}
 		return supervisor.PollResult{}, err
 	}
 	if batch.MessageID == 0 {
+		p.commitSession(session, sessionIsNew)
+		if !advertisedKnown {
+			p.setAdvertised(pool.ScaleSetID, capacity)
+		}
 		return p.result(pool.ScaleSetID, session.ID, capacity, last)
 	}
 	if batch.Statistics == nil {
-		return supervisor.PollResult{}, errors.New("message_statistics_required")
+		return supervisor.PollResult{}, p.rejectSession(ctx, session, sessionIsNew,
+			errors.New("message_statistics_required"))
 	}
 	if err := crfgithub.ValidateStatistics(batch.Statistics); err != nil {
-		return supervisor.PollResult{}, err
+		return supervisor.PollResult{}, p.rejectSession(ctx, session, sessionIsNew, err)
+	}
+	p.commitSession(session, sessionIsNew)
+	if !advertisedKnown {
+		p.setAdvertised(pool.ScaleSetID, capacity)
 	}
 	p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)

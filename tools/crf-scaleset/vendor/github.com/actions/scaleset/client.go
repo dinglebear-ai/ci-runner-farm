@@ -44,8 +44,8 @@ const HeaderScaleSetMaxCapacity = "X-ScaleSetMaxCapacity"
 
 // Client implements a GitHub Actions Scale Set client.
 type Client struct {
-	mu               sync.Mutex // guards every public call
-	actionsRequestMu sync.Mutex // guards Actions request preparation and token refresh
+	mu               sync.Mutex   // guards every public call
+	actionsRequestMu contextMutex // guards Actions request preparation and token refresh
 
 	// admin session info
 	actionsServiceAdminToken          string
@@ -56,6 +56,28 @@ type Client struct {
 	config gitHubConfig
 
 	commonClient
+}
+
+type contextMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (m *contextMutex) lock(ctx context.Context) error {
+	m.once.Do(func() {
+		m.token = make(chan struct{}, 1)
+		m.token <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.token:
+		return nil
+	}
+}
+
+func (m *contextMutex) unlock() {
+	m.token <- struct{}{}
 }
 
 type clientBuildInfo struct {
@@ -212,8 +234,8 @@ func newClient(systemInfo SystemInfo, githubConfigURL string, creds actionsAuth,
 func (c *Client) SetSystemInfo(info SystemInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.actionsRequestMu.Lock()
-	defer c.actionsRequestMu.Unlock()
+	_ = c.actionsRequestMu.lock(context.Background())
+	defer c.actionsRequestMu.unlock()
 	c.setSystemInfo(info)
 }
 
@@ -245,8 +267,10 @@ func (c *Client) newGitHubAPIRequest(ctx context.Context, method, path string, b
 }
 
 func (c *Client) newActionsServiceRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	c.actionsRequestMu.Lock()
-	defer c.actionsRequestMu.Unlock()
+	if err := c.actionsRequestMu.lock(ctx); err != nil {
+		return nil, fmt.Errorf("failed to wait for actions request preparation: %w", err)
+	}
+	defer c.actionsRequestMu.unlock()
 
 	err := c.updateTokenIfNeeded(ctx)
 	if err != nil {

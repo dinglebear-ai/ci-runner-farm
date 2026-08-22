@@ -257,7 +257,7 @@ jit_gc_root_prepare() {
 }
 
 jit_gc_sweep() {
-  local root gc_root item count=0 rc=0
+  local root gc_root item retry count=0 rc=0
   root="$(crf_safe_cache_root)" || return 1
   gc_root="$(jit_gc_root_prepare "$root")" || return 1
   [[ "$JIT_GC_SWEEP_MAX" =~ ^[1-9][0-9]*$ ]] && [ "$JIT_GC_SWEEP_MAX" -le 64 ] || return 1
@@ -270,6 +270,8 @@ jit_gc_sweep() {
       jit_gc_log "reclaimed item=${item##*/}"
     else
       jit_gc_log "reclaim_failed item=${item##*/}"
+      retry="$gc_root/zz-retry.$(date +%s).$$.$RANDOM.${item##*/}"
+      mv -- "$item" "$retry" || jit_gc_log "retry_rotate_failed item=${item##*/}"
       rc=1
     fi
   done
@@ -286,8 +288,9 @@ jit_gc_sweep_start() {
   gc_root="$(jit_gc_root_prepare "$root")" || return 1
   lock="$gc_root/.sweep.lock"
   (
-    # Reconciliation normally owns the autoscale fleet lock on fd 8. The
-    # asynchronous inode walk must never extend that lock's lifetime.
+    # Reconciliation may run under the autoscale tick lock on fd 5 or the
+    # explicit fleet lock on fd 8. Async inode walks must extend neither.
+    exec 5>&-
     exec 8>&-
     exec 9>"$lock" || exit 1
     flock -n 9 || exit 0
@@ -475,7 +478,8 @@ jit_reconcile() {
               jit_cleanup_observed "$runner_id" "$reservation" "$handle" "$container" "$pool" || true
           fi
         elif jit_state_stale "$state"; then
-          jit_retire_handle "$pool" "$handle" &&
+          jit_runner_data_remove "$runner_id" &&
+            jit_retire_handle "$pool" "$handle" &&
             reservation_release "$reservation" &&
             jit_state_write "$runner_id" deleted "$reservation" "$handle" "$container" "$pool" || true
         fi
