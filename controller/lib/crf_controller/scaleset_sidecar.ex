@@ -5,7 +5,11 @@ defmodule CrfController.ScaleSetSidecar do
 
   @default_startup_timeout_ms 15_000
   @max_startup_timeout_ms 120_000
-  @shutdown_timeout_ms 2_000
+  # The Go sidecar reserves 15 seconds to join long polls and close every
+  # GitHub message session. Keep the OTP owner outside that cleanup boundary so
+  # a controller restart cannot strand remote scale-set sessions.
+  @session_close_timeout_ms 15_000
+  @shutdown_timeout_ms @session_close_timeout_ms + 5_000
   @diagnostic_tail_bytes 4_096
   @diagnostic_buffer_bytes @diagnostic_tail_bytes * 2
 
@@ -25,6 +29,7 @@ defmodule CrfController.ScaleSetSidecar do
     runtime_config = Keyword.get(opts, :runtime_config)
     compatibility = Keyword.get(opts, :compatibility)
     startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, @default_startup_timeout_ms)
+    shutdown_timeout_ms = Keyword.get(opts, :shutdown_timeout_ms, @shutdown_timeout_ms)
 
     with :ok <- supported_platform(),
          :ok <- regular_absolute(executable, :invalid_scaleset_sidecar_executable),
@@ -33,6 +38,7 @@ defmodule CrfController.ScaleSetSidecar do
          :ok <- regular_absolute(compatibility, :invalid_scaleset_compatibility),
          true <-
            is_integer(startup_timeout_ms) and startup_timeout_ms in 100..@max_startup_timeout_ms,
+         true <- is_integer(shutdown_timeout_ms) and shutdown_timeout_ms in 100..30_000,
          {:ok, port} <- open_sidecar(executable, socket_path, compatibility, runtime_config),
          {:ok, output_bytes, diagnostic_buffer} <-
            wait_ready(port, socket_path, startup_timeout_ms) do
@@ -42,6 +48,7 @@ defmodule CrfController.ScaleSetSidecar do
          socket_path: socket_path,
          output_bytes: output_bytes,
          diagnostic_buffer: diagnostic_buffer,
+         shutdown_timeout_ms: shutdown_timeout_ms,
          started_at_ms: System.monotonic_time(:millisecond)
        }}
     else
@@ -93,7 +100,7 @@ defmodule CrfController.ScaleSetSidecar do
 
   @impl true
   def terminate(_reason, state) do
-    report_cleanup(stop_port(state.port))
+    report_cleanup(stop_port(state.port, state.shutdown_timeout_ms))
     :ok
   end
 
@@ -142,7 +149,7 @@ defmodule CrfController.ScaleSetSidecar do
         {:ok, output_bytes, diagnostic_buffer}
 
       System.monotonic_time(:millisecond) >= deadline ->
-        report_cleanup(stop_port(port))
+        report_cleanup(stop_port(port, @shutdown_timeout_ms))
         {:error, :scaleset_sidecar_start_timeout}
 
       true ->
@@ -167,13 +174,13 @@ defmodule CrfController.ScaleSetSidecar do
     end
   end
 
-  defp stop_port(port) do
+  defp stop_port(port, shutdown_timeout_ms) do
     failures =
       case Port.info(port, :os_pid) do
         {:os_pid, pid} ->
           failures = record_failure([], :term, signal_process(pid, "-TERM"))
 
-          case wait_port_exit(port, System.monotonic_time(:millisecond) + @shutdown_timeout_ms) do
+          case wait_port_exit(port, System.monotonic_time(:millisecond) + shutdown_timeout_ms) do
             :ok ->
               failures
 
