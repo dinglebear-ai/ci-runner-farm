@@ -221,6 +221,9 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 		previous := p.runtimes[key]
 		if previous.samples == 0 {
 			p.runtimes[key] = runtimeEstimate{duration: duration, samples: 1}
+			if len(p.runtimes) > maxRuntimeHistoryEntries {
+				p.evictRuntimeLocked()
+			}
 			changed = true
 			continue
 		}
@@ -235,21 +238,63 @@ func (p *Poller) observeCompleted(poolID string, jobs []crfgithub.CompletedJob) 
 		changed = true
 	}
 	now := time.Now().UTC()
+	if changed {
+		p.runtimeDirty = true
+		p.runtimeGeneration++
+	}
 	shouldPersist := changed && p.cfg.Store.Path != "" &&
 		(p.lastRuntimePersist.IsZero() || now.Sub(p.lastRuntimePersist) >= runtimePersistInterval)
-	snapshot := make(map[runtimeDigest]runtimeEstimate, len(p.runtimes))
-	if shouldPersist {
-		for key, estimate := range p.runtimes {
-			snapshot[key] = estimate
-		}
-		p.lastRuntimePersist = now
-	}
 	p.mu.Unlock()
 	if shouldPersist {
-		if err := saveRuntimeHistory(runtimeHistoryPath(p.cfg.Store), snapshot); err != nil {
+		if err := p.persistRuntimeHints(false); err != nil {
 			log.Printf("runtime history persistence failed: %v", err)
 		}
 	}
+}
+
+func (p *Poller) evictRuntimeLocked() {
+	var victim runtimeDigest
+	var estimate runtimeEstimate
+	found := false
+	for key, candidate := range p.runtimes {
+		if !found || candidate.samples < estimate.samples ||
+			(candidate.samples == estimate.samples && slices.Compare(key[:], victim[:]) > 0) {
+			victim, estimate, found = key, candidate, true
+		}
+	}
+	if found {
+		delete(p.runtimes, victim)
+	}
+}
+
+func (p *Poller) persistRuntimeHints(force bool) error {
+	if p.cfg.Store.Path == "" {
+		return nil
+	}
+	p.runtimePersistMu.Lock()
+	defer p.runtimePersistMu.Unlock()
+	p.mu.Lock()
+	if !p.runtimeDirty || (!force && !p.lastRuntimePersist.IsZero() &&
+		time.Since(p.lastRuntimePersist) < runtimePersistInterval) {
+		p.mu.Unlock()
+		return nil
+	}
+	generation := p.runtimeGeneration
+	snapshot := make(map[runtimeDigest]runtimeEstimate, len(p.runtimes))
+	for key, estimate := range p.runtimes {
+		snapshot[key] = estimate
+	}
+	p.mu.Unlock()
+	if err := saveRuntimeHistory(runtimeHistoryPath(p.cfg.Store), snapshot); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.lastRuntimePersist = time.Now().UTC()
+	if p.runtimeGeneration == generation {
+		p.runtimeDirty = false
+	}
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *Poller) runtimeSnapshot() map[runtimeDigest]runtimeEstimate {

@@ -56,7 +56,7 @@
 - [x] Runtime-aware ranking for visible GitHub `JobAvailable` candidates using pool-scoped learned history, with branch-normalized workflow identity.
 - [x] Bounded private SHA-256-keyed runtime-history persistence that avoids plaintext job metadata, cold-starts safely on missing/corrupt hints, and throttles completion writes.
 - [x] Starvation-safe visible-batch admission with a ten-minute aging override and strict remaining-capacity enforcement.
-- [x] Add authenticated `acquirablejobs` queue introspection through the scale-set admin client, with a two-second best-effort deadline, 10,000-job fuse, merge-safe visible fallback, and truthful `X-ScaleSetMaxCapacity`.
+- [x] Add authenticated `acquirablejobs` queue introspection through the scale-set admin client, with a two-second best-effort deadline, a 16 MiB pre-decode transport-body limit, a separate 10,000-job post-decode semantic fuse, merge-safe visible fallback, and truthful `X-ScaleSetMaxCapacity`.
 - [x] Add O(N log K) top-K admission so deep queue ranking scales with remaining runner slots rather than sorting the full backlog.
 - [ ] Add durable proactive reserved-slot/fast-lane hold + borrow scheduling on top of `acquirablejobs`, without relying on GitHub long-poll timing.
 - [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity`; obtain hidden backlog visibility only through the authenticated admin `acquirablejobs` endpoint.

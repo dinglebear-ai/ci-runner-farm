@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -103,6 +105,86 @@ func TestRuntimeHistoryPersistsAcrossPollerRestart(t *testing.T) {
 	estimate, ok := restarted.runtimes[runtimeKey("build", metadata)]
 	if !ok || estimate.duration != 40*time.Second || estimate.samples != 1 {
 		t.Fatalf("runtime history did not survive restart: %#v", restarted.runtimes)
+	}
+}
+
+func TestRuntimeHistoryIsDeterministicallyBoundedInMemory(t *testing.T) {
+	const total = maxRuntimeHistoryEntries + 37
+	metadata := make([]crfgithub.JobMetadata, total)
+	for i := range metadata {
+		metadata[i] = crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+			JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main",
+			JobDisplayName: fmt.Sprintf("job-%04d", i)}
+	}
+	learn := func(reverse bool) *Poller {
+		poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
+		for n := range metadata {
+			i := n
+			if reverse {
+				i = len(metadata) - 1 - n
+			}
+			poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata[i],
+				RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}})
+		}
+		return poller
+	}
+	forward, reverse := learn(false), learn(true)
+	if len(forward.runtimes) != maxRuntimeHistoryEntries || len(reverse.runtimes) != maxRuntimeHistoryEntries {
+		t.Fatalf("runtime maps grew beyond bound: forward=%d reverse=%d", len(forward.runtimes), len(reverse.runtimes))
+	}
+	for key := range forward.runtimes {
+		if _, ok := reverse.runtimes[key]; !ok {
+			t.Fatal("deterministic eviction depended on observation order")
+		}
+	}
+}
+
+func TestCloseFlushesDirtyRuntimeHints(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay", "messages.jsonl")}
+	poller := &Poller{cfg: Config{API: &fakeAPI{}, Store: store},
+		runtimes: map[runtimeDigest]runtimeEstimate{}, acquirableHealth: map[int64]string{}}
+	metadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "unit"}
+	poller.lastRuntimePersist = time.Now()
+	poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata,
+		RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}})
+	if _, err := os.Stat(runtimeHistoryPath(store)); !os.IsNotExist(err) {
+		t.Fatalf("throttled observation persisted early: %v", err)
+	}
+	if err := poller.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadRuntimeHistory(runtimeHistoryPath(store))
+	if err != nil || loaded[runtimeKey("build", metadata)].samples != 1 {
+		t.Fatalf("close did not flush dirty hints: %#v err=%v", loaded, err)
+	}
+}
+
+func TestRuntimePersistenceFailureRemainsDirtyUntilSuccessfulRetry(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := journal.Store{Path: filepath.Join(blocked, "messages.jsonl")}
+	poller := &Poller{cfg: Config{Store: store}, runtimes: map[runtimeDigest]runtimeEstimate{}}
+	metadata := crfgithub.JobMetadata{OwnerName: "dinglebear-ai", RepositoryName: "soma",
+		JobWorkflowRef: "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", JobDisplayName: "unit"}
+	poller.observeCompleted("build", []crfgithub.CompletedJob{{Metadata: metadata,
+		RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}})
+	if !poller.runtimeDirty || !poller.lastRuntimePersist.IsZero() {
+		t.Fatalf("failed persistence was marked successful: dirty=%v persisted=%v",
+			poller.runtimeDirty, poller.lastRuntimePersist)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.persistRuntimeHints(true); err != nil {
+		t.Fatal(err)
+	}
+	if poller.runtimeDirty || poller.lastRuntimePersist.IsZero() {
+		t.Fatalf("successful retry did not clear dirty state: dirty=%v persisted=%v",
+			poller.runtimeDirty, poller.lastRuntimePersist)
 	}
 }
 

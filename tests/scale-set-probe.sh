@@ -8,6 +8,7 @@ grep -Fq 'github.com/dinglebear-ai/scaleset v0.4.1-0.20260821120532-34d2a863b008
 grep -Fq '34d2a863b00883630a1b5e840300c8d44db3206c' "$mod/cmd/crf-scaleset/main.go"
 ! grep -R -Eq 'listener\.New|listener\.Run' "$mod"
 go test -C "$mod" ./...
+go test -C "$mod" ./vendor/github.com/actions/scaleset
 go vet -C "$mod" ./...
 
 tmpdir="$(mktemp -d)"

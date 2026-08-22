@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ type fakeAPI struct {
 	mu                 sync.Mutex
 	batch              crfgithub.MessageBatch
 	acquire            crfgithub.AcquireResult
+	acquireResultSet   bool
 	acquireErr         error
 	sessionCalls       int
 	acquireCalls       int
@@ -26,6 +28,7 @@ type fakeAPI struct {
 	ackCalls           int
 	ackSawCommit       bool
 	ackErr             error
+	ackHook            func()
 	closeCalls         int
 	lastMessage        int64
 	messageCapacity    int
@@ -86,6 +89,9 @@ func (f *fakeAPI) AcquireJobs(_ context.Context, _ crfgithub.Session, req crfgit
 	defer f.mu.Unlock()
 	f.acquireCalls++
 	f.acquireIDs = slices.Clone(req.RequestIDs)
+	if !f.acquireResultSet && f.acquire.AcquiredIDs == nil && f.acquireErr == nil {
+		return crfgithub.AcquireResult{AcquiredIDs: slices.Clone(req.RequestIDs)}, nil
+	}
 	return f.acquire, f.acquireErr
 }
 func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id int64) error {
@@ -97,6 +103,9 @@ func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id 
 		if key.MessageID == id && (entry.Phase == "committed" || entry.Phase == "ack_pending") {
 			f.ackSawCommit = true
 		}
+	}
+	if f.ackHook != nil {
+		f.ackHook()
 	}
 	return f.ackErr
 }
@@ -252,6 +261,39 @@ func TestPollEmptyAcquirableRaceKeepsVisibleCandidate(t *testing.T) {
 	}
 }
 
+func TestAcquirableLookupTelemetryTracksDegradationAndRecovery(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	visible := testJob(501, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now())
+	api := &fakeAPI{store: store, acquirableErr: context.DeadlineExceeded}
+	poller, err := New(Config{API: api, Store: store,
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAvailableJobs: 2},
+		AvailableJobs: []crfgithub.AvailableJob{visible}}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	poller.acquisitionBatch(context.Background(), pool, batch)
+	if got := poller.acquirableHealth[7]; got != "timeout" {
+		t.Fatalf("timeout degradation state=%q", got)
+	}
+	api.mu.Lock()
+	api.acquirableErr = nil
+	api.acquirable = nil
+	api.mu.Unlock()
+	poller.acquisitionBatch(context.Background(), pool, batch)
+	if got := poller.acquirableHealth[7]; got != "empty" {
+		t.Fatalf("empty degradation state=%q", got)
+	}
+	api.mu.Lock()
+	api.acquirable = []crfgithub.AvailableJob{visible}
+	api.mu.Unlock()
+	poller.acquisitionBatch(context.Background(), pool, batch)
+	if got := poller.acquirableHealth[7]; got != "healthy" {
+		t.Fatalf("recovery state=%q", got)
+	}
+}
+
 func TestPollAcquiresOnlyAvailableJobsAndOffersAssignedJobs(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store,
@@ -336,6 +378,97 @@ func TestAcquireFailureIsNotAcknowledged(t *testing.T) {
 	replayed, _ := store.Replay()
 	if replayed[journal.Key{ScaleSetID: 8, MessageID: 10}].Phase != "acquire_started" {
 		t.Fatalf("unexpected phase: %#v", replayed[journal.Key{ScaleSetID: 8, MessageID: 10}])
+	}
+}
+
+func TestAcquireResultMustExactlyMatchRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		got  []int64
+	}{
+		{name: "empty", got: []int64{}},
+		{name: "partial", got: []int64{101}},
+		{name: "unexpected", got: []int64{101, 999}},
+		{name: "duplicate", got: []int64{101, 101}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+			api := &fakeAPI{store: store, acquireResultSet: true,
+				acquire: crfgithub.AcquireResult{AcquiredIDs: tt.got},
+				batch: crfgithub.MessageBatch{MessageID: 41,
+					Statistics: &crfgithub.Statistics{}, Available: []int64{101, 102}}}
+			poller, err := New(Config{API: api, Store: store,
+				ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2)
+			if !errors.Is(err, ErrAmbiguousAcquire) {
+				t.Fatalf("mismatched acquire result was accepted: %v", err)
+			}
+			if api.ackCalls != 0 || api.closeCalls != 1 {
+				t.Fatalf("mismatch made unsafe progress: %#v", api)
+			}
+			replayed, replayErr := store.Replay()
+			if replayErr != nil || len(replayed) != 0 {
+				t.Fatalf("ambiguous intent survived reset: %#v err=%v", replayed, replayErr)
+			}
+		})
+	}
+}
+
+func TestAcquireResultAllowsDifferentOrder(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, acquireResultSet: true,
+		acquire: crfgithub.AcquireResult{AcquiredIDs: []int64{102, 101}},
+		batch: crfgithub.MessageBatch{MessageID: 42,
+			Statistics: &crfgithub.Statistics{}, Available: []int64{101, 102}}}
+	poller, err := New(Config{API: api, Store: store,
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if api.ackCalls != 1 || api.closeCalls != 0 {
+		t.Fatalf("order-insensitive exact result was rejected: %#v", api)
+	}
+}
+
+func TestAckedJournalFailureDoesNotDoubleLearnRuntime(t *testing.T) {
+	root := t.TempDir()
+	store := journal.Store{Path: filepath.Join(root, "replay.jsonl")}
+	metadata := testJob(1, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now()).Metadata
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{MessageID: 43,
+		Statistics: &crfgithub.Statistics{}, CompletedJobs: []crfgithub.CompletedJob{{Metadata: metadata,
+			RunnerAssignTime: time.Unix(100, 0), FinishTime: time.Unix(140, 0)}}}}
+	api.ackHook = func() {
+		_ = os.Remove(store.Path)
+		_ = os.Mkdir(store.Path, 0o700)
+	}
+	poller, err := New(Config{API: api, Store: store,
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 1); err == nil {
+		t.Fatal("acked append failure was accepted")
+	}
+	if len(poller.runtimes) != 0 {
+		t.Fatal("runtime learned before durable acked journal state")
+	}
+	api.ackHook = nil
+	if err := os.Remove(store.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poller.Poll(context.Background(), pool, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := poller.runtimes[runtimeKey("build", metadata)].samples; got != 1 {
+		t.Fatalf("completion learned %d times, want 1", got)
 	}
 }
 

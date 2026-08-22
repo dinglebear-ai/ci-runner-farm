@@ -23,6 +23,9 @@ import (
 const (
 	runnerEndpoint   = "_apis/distributedtask/pools/0/agents"
 	scaleSetEndpoint = "_apis/runtime/runnerscalesets"
+	// Keep transport buffering bounded independently from the consumer's
+	// post-decode 10,000-job semantic fuse.
+	maxAcquirableJobsResponseBytes = 16 << 20
 )
 
 var buildInfo clientBuildInfo
@@ -326,11 +329,28 @@ func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([
 		return nil, fmt.Errorf("failed to create new actions service request: %w", err)
 	}
 
-	resp, err := c.do(req)
+	// The common client eagerly buffers response bodies without a size limit.
+	// This endpoint can expose the entire available backlog, so perform the
+	// request directly and impose its transport-byte fuse before JSON decoding.
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to issue the request: %w", err)
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to send request: %w", err))
 	}
 	defer resp.Body.Close()
+	boundedBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAcquirableJobsResponseBytes+1))
+	if err != nil {
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to read acquirable jobs response: %w", err))
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(boundedBody))
+	resp.ContentLength = int64(len(boundedBody))
+	if len(boundedBody) > maxAcquirableJobsResponseBytes {
+		resp.Body = http.NoBody
+		resp.ContentLength = 0
+		return nil, newRequestResponseError(req, resp, fmt.Errorf("acquirable jobs response exceeds %d bytes", maxAcquirableJobsResponseBytes))
+	}
+	boundedBody = trimByteOrderMark(boundedBody)
+	resp.Body = io.NopCloser(bytes.NewReader(boundedBody))
+	resp.ContentLength = int64(len(boundedBody))
 
 	if resp.StatusCode == http.StatusNoContent {
 		return []*JobAvailable{}, nil
@@ -340,7 +360,9 @@ func (c *Client) GetAcquirableJobs(ctx context.Context, runnerScaleSetID int) ([
 	}
 
 	var list acquirableJobsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	if err := json.Unmarshal(boundedBody, &list); err != nil {
+		resp.Body = http.NoBody
+		resp.ContentLength = 0
 		return nil, newRequestResponseError(req, resp, fmt.Errorf("failed to decode acquirable jobs: %w", err))
 	}
 

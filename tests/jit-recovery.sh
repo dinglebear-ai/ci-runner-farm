@@ -18,7 +18,21 @@ JIT_HANDOFF_GRACE_SECONDS=300
 mkdir -p "$RUNDIR" "$CFGDIR" "$CACHE_ROOT" "$RESERVATION_DIR" "$JIT_LEGACY_STATE_DIR"
 
 pool_id_valid(){ [[ "${1:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; }
-crf_safe_cache_root(){ printf '%s' "$CACHE_ROOT"; }
+safe_cache_root_mode=success
+remove_failure_runner=
+crf_safe_cache_root(){
+  [ "$safe_cache_root_mode" = success ] || return 1
+  printf '%s' "$CACHE_ROOT"
+}
+rm(){
+  local arg
+  if [ -n "$remove_failure_runner" ]; then
+    for arg in "$@"; do
+      [[ "$arg" == *"/$remove_failure_runner" ]] && return 1
+    done
+  fi
+  command rm "$@"
+}
 . "$SCRIPT_DIR/runner-resources.sh"
 . "$SCRIPT_DIR/runner-jit.sh"
 CACHE_ROOT="$tmp/configured"
@@ -143,5 +157,57 @@ retire_mode=already
 jit_reconcile
 [ ! -e "$JIT_STATE_DIR/$lost.state" ] || crf_fail "already-retired deleting state did not converge"
 grep -Fq '"work_handle":404' "$retired" || crf_fail "already-retired handle was not retried"
+
+# Filesystem cleanup must finish before remote retirement or reservation
+# release. An unsafe cache root leaves retry state and all local proof/data.
+blocked=ci-runner-jit-ops-ffffffffffffffffffff
+blocked_reservation=lease-ops-blocked
+fake_exists[$blocked]=0; fake_status[$blocked]=exited; fake_consumed[$blocked]=1; fake_pool[$blocked]=ops; fake_handle[$blocked]=606
+mkdir -p "$CACHE_ROOT/work/$blocked" "$CACHE_ROOT/docker/$blocked"
+touch "$CACHE_ROOT/work/$blocked/artifact" "$CACHE_ROOT/docker/$blocked/layer" \
+  "$RESERVATION_DIR/$blocked_reservation.state"
+write_state "$JIT_STATE_DIR/$blocked.state" "$blocked" terminal "$blocked_reservation" 606 "$old" ops
+before_retired="$(wc -l <"$retired")"
+safe_cache_root_mode=invalid
+if jit_cleanup_observed "$blocked" "$blocked_reservation" 606 "$blocked" ops; then
+  crf_fail "cleanup accepted an invalid safe cache root"
+fi
+safe_cache_root_mode=success
+[ "$(jit_state_field "$JIT_STATE_DIR/$blocked.state" phase)" = deleting ] || crf_fail "failed cleanup did not retain deleting state"
+[ -e "$RESERVATION_DIR/$blocked_reservation.state" ] || crf_fail "failed cleanup released reservation"
+[ -e "$CACHE_ROOT/work/$blocked/artifact" ] && [ -e "$CACHE_ROOT/docker/$blocked/layer" ] || crf_fail "failed cleanup removed runner data"
+[ "$(wc -l <"$retired")" = "$before_retired" ] || crf_fail "failed local cleanup attempted remote retirement"
+
+# The same ordering holds when the root is valid but removal itself fails.
+remove_failed=ci-runner-jit-python-99999999999999999999
+remove_failed_reservation=lease-python-remove-failed
+fake_exists[$remove_failed]=0; fake_status[$remove_failed]=exited; fake_consumed[$remove_failed]=1; fake_pool[$remove_failed]=python; fake_handle[$remove_failed]=707
+mkdir -p "$CACHE_ROOT/work/$remove_failed" "$CACHE_ROOT/docker/$remove_failed"
+touch "$CACHE_ROOT/work/$remove_failed/artifact" "$CACHE_ROOT/docker/$remove_failed/layer" \
+  "$RESERVATION_DIR/$remove_failed_reservation.state"
+write_state "$JIT_STATE_DIR/$remove_failed.state" "$remove_failed" terminal "$remove_failed_reservation" 707 "$old" python
+before_retired="$(wc -l <"$retired")"
+remove_failure_runner="$remove_failed"
+if jit_cleanup_observed "$remove_failed" "$remove_failed_reservation" 707 "$remove_failed" python; then
+  crf_fail "cleanup ignored runner-data removal failure"
+fi
+remove_failure_runner=
+[ "$(jit_state_field "$JIT_STATE_DIR/$remove_failed.state" phase)" = deleting ] || crf_fail "removal failure did not retain deleting state"
+[ -e "$RESERVATION_DIR/$remove_failed_reservation.state" ] || crf_fail "removal failure released reservation"
+[ -e "$CACHE_ROOT/work/$remove_failed/artifact" ] && [ -e "$CACHE_ROOT/docker/$remove_failed/layer" ] || crf_fail "removal failure did not preserve runner data"
+[ "$(wc -l <"$retired")" = "$before_retired" ] || crf_fail "removal failure attempted remote retirement"
+
+# Invalid identities are rejected before any path removal, while already
+# absent valid paths are an idempotent success.
+sentinel="$CACHE_ROOT/work/do-not-remove"
+mkdir -p "$sentinel"
+touch "$sentinel/artifact"
+if jit_runner_data_remove '../do-not-remove'; then
+  crf_fail "invalid runner ID was accepted for data removal"
+fi
+[ -e "$sentinel/artifact" ] || crf_fail "invalid runner ID removed unrelated data"
+absent=ci-runner-jit-rust-11111111111111111111
+jit_runner_data_remove "$absent" || crf_fail "absent runner paths were not idempotent"
+[ ! -e "$CACHE_ROOT/work/$absent" ] && [ ! -e "$CACHE_ROOT/docker/$absent" ] || crf_fail "absent cleanup created runner paths"
 
 echo "jit-recovery: OK"
