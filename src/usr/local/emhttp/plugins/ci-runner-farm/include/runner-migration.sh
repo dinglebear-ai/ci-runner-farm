@@ -104,7 +104,8 @@ backend_effective() {
 backend_classic_admission_allowed() {
   migration_load || return 1
   case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" in
-    classic:classic_active:classic_only|scaleset:activating_classic:jit_drained) return 0 ;;
+    classic:classic_active:classic_only|scaleset:activating_classic:jit_drained|\
+      classic:quiescing_classic:scaleset_ineligible) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -409,6 +410,7 @@ migration_quarantine_group_inventory() {
 # quarantined or retired as classic containers.
 migration_classic_names() {
   local runner suffix pool index
+  declare -F managed_names >/dev/null || return 1
   while IFS= read -r runner; do
     [ -n "$runner" ] || continue
     case "$runner" in

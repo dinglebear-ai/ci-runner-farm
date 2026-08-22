@@ -3407,12 +3407,12 @@ cmd_start() {
   [ -n "$orgp" ] && err "SECURITY: $orgp"
   provision_preflight || return 1               # cache-root guard + dirs/network/mirror/firewall/registry
   local classic_rollback_activation=0
-  if [ "${MIGRATION_CLASSIC_ACTIVATION:-0}" = 1 ] &&
-     migration_load &&
-     [ "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" = \
-       "scaleset:activating_classic:jit_drained" ] &&
-     backend_classic_admission_allowed; then
-    classic_rollback_activation=1
+  if [ "${MIGRATION_CLASSIC_ACTIVATION:-0}" = 1 ] && migration_load; then
+    case "$MIGRATION_EFFECTIVE_BACKEND:$MIGRATION_PHASE:$MIGRATION_LAST_BARRIER" in
+      scaleset:activating_classic:jit_drained|classic:quiescing_classic:scaleset_ineligible)
+        backend_classic_admission_allowed && classic_rollback_activation=1
+        ;;
+    esac
   fi
   if declare -F backend_effective >/dev/null &&
      [ "$(backend_effective 2>/dev/null)" = scaleset ] &&
