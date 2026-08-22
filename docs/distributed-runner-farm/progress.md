@@ -51,11 +51,25 @@ Last updated: 2026-08-22
 - Current verification on the controller-projection/WebUI branch: **130 Rust
   tests**, **122 Elixir tests**, distributed-status, Fleet UI behavior, shell
   syntax, and UI JavaScript tests pass.
-- Queue optimization is merged. The Go scale-set boundary learns bounded,
-  pool-scoped runtime hints, applies starvation-safe admission, and ranks deep
-  GitHub backlog candidates obtained through authenticated `acquirablejobs`
-  without inflating published scale-set capacity. Live deep-backlog ordering and
-  sustained-load validation remain release follow-ups.
+- Queue optimization baseline is merged. The Go scale-set boundary learns
+  bounded, pool-scoped runtime hints, applies starvation-safe admission, and
+  ranks deep GitHub backlog candidates obtained through authenticated
+  `acquirablejobs` without inflating published scale-set capacity. This branch
+  adds a durable borrowable fast lane: a learned >=8-minute marginal job may
+  leave exactly one slot open for 20 seconds; <=10-second supervisor heartbeats
+  probe `acquirablejobs` without a second message long-poll; unknown, quick, or
+  starved work releases the lane; expiry or lookup degradation grants one long
+  borrow pass. Reservations persist privately across restart and never call
+  `AcquireJobs` outside the existing replay-fenced message transaction. Exact-tree
+  verification is green: every Go package, `go vet`, session/GitHub race tests,
+  Rust formatting + workspace Clippy `-D warnings` + **131 Rust tests**, Elixir
+  formatting + warnings-as-errors compilation + **122 controller tests** against
+  the real Rust scheduler, `actionlint`, tracked shell/PHP syntax, scale-set
+  autoscale/control/probe/runtime/supervisor regressions, scheduler integration,
+  and package reproducibility. The latest Dookie benchmark selects the best 64
+  from 10,000 candidates at ~3.39 ms median with 9,376 B/op and 8 allocs/op;
+  64-job full ranking is ~75.8 us median with 14,904 B/op and 5 allocs/op. Live
+  fast-lane ordering and sustained-load validation remain release follow-ups.
 - Tootie's saved runner Dockerfile referenced the missing host-local base
   `local/github-runner:ubuntu-resolute`, which BuildKit misleadingly tried to
   pull from Docker Hub. The base was restored from the verified glibc-2.43

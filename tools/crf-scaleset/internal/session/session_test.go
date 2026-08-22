@@ -189,8 +189,11 @@ func TestPollAcquiresOnlyRankedVisibleSubset(t *testing.T) {
 	if api.messageCapacity != 2 {
 		t.Fatalf("poll inflated GitHub max capacity for lookahead: %d", api.messageCapacity)
 	}
-	if !slices.Equal(api.acquireIDs, []int64{103, 101}) {
-		t.Fatalf("poll did not acquire only the ranked visible subset: %v", api.acquireIDs)
+	if !slices.Equal(api.acquireIDs, []int64{103}) {
+		t.Fatalf("poll did not reserve the marginal long slot after ranking: %v", api.acquireIDs)
+	}
+	if _, ok := poller.fastLanes[7]; !ok {
+		t.Fatal("ranked visible convoy did not activate the fast lane")
 	}
 }
 
@@ -223,6 +226,104 @@ func TestPollRanksHiddenAcquirableBacklog(t *testing.T) {
 	}
 	if !slices.Equal(api.acquireIDs, []int64{102}) {
 		t.Fatalf("hidden quick job was not acquired ahead of visible long work: %v", api.acquireIDs)
+	}
+}
+
+func TestFastLaneHoldsLongConvoyThenAdmitsQuickArrival(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	now := time.Now().UTC()
+	longOne := testJob(101, "soma", "workflow@refs/heads/main", "rust-build", now.Add(-3*time.Minute))
+	longTwo := testJob(102, "soma", "workflow@refs/heads/main", "rust-build", now.Add(-2*time.Minute))
+	longThree := testJob(103, "soma", "workflow@refs/heads/main", "rust-build", now.Add(-time.Minute))
+	quick := testJob(104, "soma", "workflow@refs/heads/main", "unit", now)
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 40, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 3, TotalAssignedJobs: 0},
+		Available: []int64{101, 102, 103}, AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo, longThree},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []crfgithub.AvailableJob{longOne, longTwo, longThree} {
+		poller.runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	poller.runtimes[runtimeKey("build", quick.Metadata)] = runtimeEstimate{duration: 30 * time.Second, samples: 20}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(api.acquireIDs, []int64{101}) {
+		t.Fatalf("initial long convoy did not leave one lane open: %v", api.acquireIDs)
+	}
+	if state, ok := poller.fastLanes[7]; !ok || state.borrowPending || !state.holdUntil.After(time.Now()) {
+		t.Fatalf("fast lane was not activated: %#v", poller.fastLanes)
+	}
+
+	api.mu.Lock()
+	api.acquirable = []crfgithub.AvailableJob{longTwo, longThree}
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	if api.messageCalls != 1 || api.acquireCalls != 1 {
+		t.Fatalf("active fast lane performed a message poll/acquire: messages=%d acquires=%d", api.messageCalls, api.acquireCalls)
+	}
+
+	api.mu.Lock()
+	api.acquirable = []crfgithub.AvailableJob{longTwo, longThree, quick}
+	api.batch = crfgithub.MessageBatch{MessageID: 41, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 3, TotalAssignedJobs: 1},
+		Available: []int64{102}, AvailableJobs: []crfgithub.AvailableJob{longTwo}}
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(api.acquireIDs, []int64{104}) {
+		t.Fatalf("quick arrival did not consume reserved lane: %v", api.acquireIDs)
+	}
+	if _, ok := poller.fastLanes[7]; ok {
+		t.Fatalf("consumed fast lane remained active: %#v", poller.fastLanes[7])
+	}
+}
+
+func TestFastLaneExpiryAllowsOneLongBorrow(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	now := time.Now().UTC()
+	longOne := testJob(201, "soma", "workflow@refs/heads/main", "rust-build", now.Add(-2*time.Minute))
+	longTwo := testJob(202, "soma", "workflow@refs/heads/main", "rust-build", now.Add(-time.Minute))
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{MessageID: 50,
+		Statistics: &crfgithub.Statistics{TotalAvailableJobs: 2, TotalAssignedJobs: 0},
+		Available:  []int64{201, 202}, AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo}}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []crfgithub.AvailableJob{longOne, longTwo} {
+		poller.runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	pool := supervisor.Pool{ID: "build", ScaleSetID: 7}
+	if _, err := poller.Poll(context.Background(), pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	poller.mu.Lock()
+	state := poller.fastLanes[7]
+	state.holdUntil = time.Now().Add(-time.Second)
+	poller.fastLanes[7] = state
+	poller.mu.Unlock()
+	api.mu.Lock()
+	api.acquirable = []crfgithub.AvailableJob{longTwo}
+	api.batch = crfgithub.MessageBatch{MessageID: 51, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1, TotalAssignedJobs: 1},
+		Available: []int64{202}, AvailableJobs: []crfgithub.AvailableJob{longTwo}}
+	api.mu.Unlock()
+	if _, err := poller.Poll(context.Background(), pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(api.acquireIDs, []int64{202}) {
+		t.Fatalf("expired lane did not permit long borrow: %v", api.acquireIDs)
+	}
+	if _, ok := poller.fastLanes[7]; ok {
+		t.Fatalf("borrowed lane immediately re-armed: %#v", poller.fastLanes[7])
 	}
 }
 

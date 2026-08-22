@@ -19,13 +19,15 @@ import (
 )
 
 const (
-	queueStarvationAge       = 10 * time.Minute
-	minRuntimeSample         = time.Second
-	maxRuntimeSample         = 24 * time.Hour
-	maxRuntimeHistoryEntries = 2048
-	maxRuntimeHistoryBytes   = 1 << 20
-	runtimePersistInterval   = 30 * time.Second
-	maxRuntimeIdentityBytes  = 1024
+	queueStarvationAge           = 10 * time.Minute
+	minRuntimeSample             = time.Second
+	maxRuntimeSample             = 24 * time.Hour
+	maxRuntimeHistoryEntries     = 2048
+	maxRuntimeHistoryBytes       = 1 << 20
+	runtimePersistInterval       = 30 * time.Second
+	maxRuntimeIdentityBytes      = 1024
+	fastLaneHoldDuration         = 20 * time.Second
+	fastLaneLongRuntimeThreshold = 8 * time.Minute
 )
 
 type runtimeDigest [sha256.Size]byte
@@ -49,7 +51,14 @@ type runtimeHistoryFile struct {
 type rankedCandidate struct {
 	job              crfgithub.AvailableJob
 	estimatedRuntime time.Duration
+	runtimeKnown     bool
 	starved          bool
+}
+
+type admissionDecision struct {
+	requestIDs      []int64
+	reserveFastLane bool
+	borrowFastLane  bool
 }
 
 func runtimeHistoryPath(store journal.Store) string {
@@ -305,12 +314,13 @@ func (p *Poller) runtimeSnapshot() map[runtimeDigest]runtimeEstimate {
 func makeRankedCandidate(poolID string, job crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time) rankedCandidate {
 	const defaultRuntime = 5 * time.Minute
 	estimatedRuntime := defaultRuntime
-	if estimate, known := runtimes[runtimeKey(poolID, job.Metadata)]; known {
+	estimate, runtimeKnown := runtimes[runtimeKey(poolID, job.Metadata)]
+	if runtimeKnown {
 		estimatedRuntime = estimate.duration
 	}
 	age := now.Sub(job.Metadata.QueueTime)
 	return rankedCandidate{
-		job: job, estimatedRuntime: estimatedRuntime,
+		job: job, estimatedRuntime: estimatedRuntime, runtimeKnown: runtimeKnown,
 		starved: !job.Metadata.QueueTime.IsZero() && age >= queueStarvationAge,
 	}
 }
@@ -394,9 +404,15 @@ func rankAvailable(poolID string, jobs []crfgithub.AvailableJob, runtimes map[ru
 	return ranked
 }
 
-func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, capacity int, now time.Time) []int64 {
+func fastLaneEligible(candidate rankedCandidate) bool {
+	return candidate.starved || !candidate.runtimeKnown ||
+		candidate.estimatedRuntime < fastLaneLongRuntimeThreshold
+}
+
+func (p *Poller) admissionSelection(batch crfgithub.MessageBatch, poolID string, capacity int,
+	now time.Time, allowBorrow bool) admissionDecision {
 	if capacity <= 0 {
-		return nil
+		return admissionDecision{}
 	}
 	remaining := capacity
 	if batch.Statistics != nil {
@@ -410,17 +426,31 @@ func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, 
 		}
 	}
 	if remaining == 0 {
-		return nil
+		return admissionDecision{}
 	}
 	if len(batch.AvailableJobs) == 0 {
 		limit := min(remaining, len(batch.Available))
-		return slices.Clone(batch.Available[:limit])
+		return admissionDecision{requestIDs: slices.Clone(batch.Available[:limit]), borrowFastLane: allowBorrow}
 	}
 	limit := min(remaining, len(batch.AvailableJobs))
 	ranked := topCandidates(poolID, batch.AvailableJobs, p.runtimeSnapshot(), now, limit)
-	selected := make([]int64, 0, limit)
-	for _, candidate := range ranked {
+	reserveFastLane := false
+	selectedLimit := limit
+	if !allowBorrow && capacity >= 2 && remaining > 0 && len(batch.AvailableJobs) >= remaining {
+		marginal := ranked[remaining-1]
+		if marginal.runtimeKnown && !marginal.starved &&
+			marginal.estimatedRuntime >= fastLaneLongRuntimeThreshold {
+			selectedLimit--
+			reserveFastLane = true
+		}
+	}
+	selected := make([]int64, 0, selectedLimit)
+	for _, candidate := range ranked[:selectedLimit] {
 		selected = append(selected, candidate.job.RequestID)
 	}
-	return selected
+	return admissionDecision{requestIDs: selected, reserveFastLane: reserveFastLane, borrowFastLane: allowBorrow}
+}
+
+func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, capacity int, now time.Time) []int64 {
+	return p.admissionSelection(batch, poolID, capacity, now, true).requestIDs
 }

@@ -362,6 +362,47 @@ func TestRuntimeKeyNormalizesAsciiCaseAndBranchRef(t *testing.T) {
 	}
 }
 
+func TestFastLaneReservesOnlyMarginalKnownLongWork(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	jobs := []crfgithub.AvailableJob{
+		testJob(1, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-4*time.Minute)),
+		testJob(2, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-3*time.Minute)),
+		testJob(3, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-2*time.Minute)),
+		testJob(4, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-time.Minute)),
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
+	for _, job := range jobs {
+		poller.runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, AvailableJobs: jobs}
+	decision := poller.admissionSelection(batch, "build", 4, now, false)
+	if !decision.reserveFastLane || decision.borrowFastLane || !slices.Equal(decision.requestIDs, []int64{1, 2, 3}) {
+		t.Fatalf("known-long convoy did not reserve exactly one lane: %#v", decision)
+	}
+	borrow := poller.admissionSelection(batch, "build", 4, now, true)
+	if borrow.reserveFastLane || !borrow.borrowFastLane || !slices.Equal(borrow.requestIDs, []int64{1, 2, 3, 4}) {
+		t.Fatalf("borrow pass did not recover full utilization: %#v", borrow)
+	}
+}
+
+func TestFastLaneDoesNotReserveForQuickOrUnsaturatedWork(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	quick := testJob(1, "dinglebear-ai/soma", "workflow@refs/heads/main", "unit", now)
+	long := testJob(2, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now)
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", quick.Metadata): {duration: 30 * time.Second, samples: 10},
+		runtimeKey("build", long.Metadata):  {duration: 20 * time.Minute, samples: 10},
+	}}
+	quickBatch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{}, AvailableJobs: []crfgithub.AvailableJob{quick}}
+	if decision := poller.admissionSelection(quickBatch, "build", 2, now, false); decision.reserveFastLane {
+		t.Fatalf("quick work incorrectly triggered a reservation: %#v", decision)
+	}
+	unsaturated := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{}, AvailableJobs: []crfgithub.AvailableJob{long}}
+	if decision := poller.admissionSelection(unsaturated, "build", 2, now, false); decision.reserveFastLane {
+		t.Fatalf("unsaturated long work incorrectly triggered a reservation: %#v", decision)
+	}
+}
+
 func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testing.T) {
 	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
 	longOne := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-3*time.Minute))
