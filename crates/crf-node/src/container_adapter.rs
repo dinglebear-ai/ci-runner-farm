@@ -239,12 +239,12 @@ impl ProcessContainerAdapter {
                 Ok(Some(status)) => break status,
                 Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
                 Ok(None) => {
-                    let _ = process.terminate_tree();
+                    let _ = process.terminate_tree_now();
                     let _ = reader.join();
                     return Err(ContainerAdapterError::TimedOut);
                 }
                 Err(_) => {
-                    let _ = process.terminate_tree();
+                    let _ = process.terminate_tree_now();
                     let _ = reader.join();
                     return Err(ContainerAdapterError::PollFailed);
                 }
@@ -267,6 +267,10 @@ impl ProcessContainerAdapter {
         }
         envelope.payload.validate()?;
         Ok(envelope.payload)
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 

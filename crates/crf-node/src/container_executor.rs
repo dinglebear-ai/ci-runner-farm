@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, thread};
 
 use crf_protocol::wire::{ControllerCommand, ControllerEnvelope};
 use crf_protocol::{ExecutionBackend, Resources, valid_identifier};
@@ -27,6 +27,7 @@ pub struct ContainerRunnerExecutor {
     adapter: ProcessContainerAdapter,
     store: PlacementStore,
     draining: bool,
+    poll_cursor: usize,
 }
 
 impl ContainerRunnerExecutor {
@@ -35,6 +36,7 @@ impl ContainerRunnerExecutor {
             adapter,
             store,
             draining: false,
+            poll_cursor: 0,
         }
     }
 
@@ -302,43 +304,90 @@ impl ContainerRunnerExecutor {
     }
 
     pub fn poll_runtime_state(&mut self) -> Result<(), ContainerExecutorError> {
-        for placement_id in self
+        const MAX_CONCURRENT_POLLS: usize = 8;
+        let placements: Vec<_> = self
             .store
             .active_placements()
             .map_err(|_| ContainerExecutorError::PlacementStateUnavailable)?
-        {
-            match self
+            .into_iter()
+            .collect();
+        if placements.is_empty() {
+            self.poll_cursor = 0;
+            return Ok(());
+        }
+        let start = self.poll_cursor % placements.len();
+        let selected: Vec<_> = (0..placements.len().min(MAX_CONCURRENT_POLLS))
+            .map(|offset| placements[(start + offset) % placements.len()].clone())
+            .collect();
+        self.poll_cursor = (start + selected.len()) % placements.len();
+
+        let mut requests = Vec::with_capacity(selected.len());
+        for placement_id in selected {
+            let expected_id = match self
                 .store
                 .inspect(&placement_id)
                 .map_err(|_| ContainerExecutorError::PlacementStateUnavailable)?
             {
-                LocalPlacementState::IntentOnly => {
-                    self.poll_intent(&placement_id)?;
-                }
+                LocalPlacementState::IntentOnly => None,
                 LocalPlacementState::Spawned {
                     runtime: RuntimeIdentity::Container { id },
-                } => {
-                    self.poll_container(&placement_id, id)?;
-                }
+                } => Some(id),
                 LocalPlacementState::Spawned {
                     runtime: RuntimeIdentity::NativeProcess { .. },
                 } => return Err(ContainerExecutorError::RuntimeIdentityMismatch),
-                LocalPlacementState::Terminal { .. } => {}
+                LocalPlacementState::Terminal { .. } => continue,
+            };
+            requests.push((placement_id, expected_id));
+        }
+
+        let handles: Vec<_> = requests
+            .into_iter()
+            .map(|(placement_id, expected_id)| {
+                let adapter = self.adapter.clone();
+                thread::spawn(move || {
+                    let request = ContainerAdapterRequest::Inspect {
+                        placement_id: placement_id.clone(),
+                        expected_id: expected_id.clone(),
+                    };
+                    (placement_id, expected_id, adapter.call(&request))
+                })
+            })
+            .collect();
+        let mut adapter_failed = false;
+        for handle in handles {
+            let (placement_id, expected_id, response) = handle
+                .join()
+                .map_err(|_| ContainerExecutorError::AdapterUnavailable)?;
+            match response {
+                Ok(response) => self.apply_poll_response(&placement_id, expected_id, response)?,
+                Err(_) => adapter_failed = true,
             }
         }
-        Ok(())
+        if adapter_failed {
+            Err(ContainerExecutorError::AdapterUnavailable)
+        } else {
+            Ok(())
+        }
     }
 
-    fn poll_intent(&self, placement_id: &str) -> Result<(), ContainerExecutorError> {
-        let request = ContainerAdapterRequest::Inspect {
-            placement_id: placement_id.to_owned(),
-            expected_id: None,
-        };
-        match self
-            .adapter
-            .call(&request)
-            .map_err(|_| ContainerExecutorError::AdapterUnavailable)?
-        {
+    fn apply_poll_response(
+        &self,
+        placement_id: &str,
+        expected_id: Option<String>,
+        response: ContainerAdapterResponse,
+    ) -> Result<(), ContainerExecutorError> {
+        match expected_id {
+            Some(id) => self.apply_container_response(placement_id, id, response),
+            None => self.apply_intent_response(placement_id, response),
+        }
+    }
+
+    fn apply_intent_response(
+        &self,
+        placement_id: &str,
+        response: ContainerAdapterResponse,
+    ) -> Result<(), ContainerExecutorError> {
+        match response {
             ContainerAdapterResponse::Running { id } | ContainerAdapterResponse::Started { id } => {
                 self.store
                     .record_runtime_started(placement_id, RuntimeIdentity::Container { id })
@@ -360,20 +409,13 @@ impl ContainerRunnerExecutor {
         }
     }
 
-    fn poll_container(
+    fn apply_container_response(
         &self,
         placement_id: &str,
         expected_id: String,
+        response: ContainerAdapterResponse,
     ) -> Result<(), ContainerExecutorError> {
-        let request = ContainerAdapterRequest::Inspect {
-            placement_id: placement_id.to_owned(),
-            expected_id: Some(expected_id.clone()),
-        };
-        match self
-            .adapter
-            .call(&request)
-            .map_err(|_| ContainerExecutorError::AdapterUnavailable)?
-        {
+        match response {
             ContainerAdapterResponse::Running { id } | ContainerAdapterResponse::Started { id } => {
                 if id == expected_id {
                     Ok(())
