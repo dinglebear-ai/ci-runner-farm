@@ -480,6 +480,26 @@ defmodule CrfController.DemandCoordinatorTest do
       assert adopted.state == :observed
       assert NodeMailbox.size(ctx.mailbox) == 0
       assert FakeScaleSet.state(ctx.scale_set).issue_calls == 0
+
+      # A second node restart must still adopt the durable runner even though
+      # its controller state is already observed. Otherwise later cancellation
+      # remains fenced to generation 8 and can never reach generation 9.
+      assert {:ok, _} = register_node_generation(ctx.registry, 9)
+
+      assert {:ok, _} =
+               NodeRegistry.heartbeat(
+                 ctx.registry,
+                 "dookie",
+                 9,
+                 %{cpu_millis: 6_000, memory_bytes: 12 * @gib},
+                 active_placements: MapSet.new([identity.placement_id]),
+                 now_ms: 110
+               )
+
+      assert {:ok, _} = reconcile(ctx.demand, 120)
+      assert {:ok, readopted} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert readopted.node_generation == 9
+      assert readopted.state == :observed
     end
   end
 
