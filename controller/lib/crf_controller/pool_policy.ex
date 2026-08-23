@@ -15,7 +15,7 @@ defmodule CrfController.PoolPolicy do
     :required_capabilities,
     :work_folder
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [preferred_cpu_millis: nil]
 
   def new(attrs) when is_map(attrs) do
     with id when is_binary(id) <- Map.get(attrs, :id),
@@ -23,6 +23,9 @@ defmodule CrfController.PoolPolicy do
          max when is_integer(max) and max in 1..64 <- Map.get(attrs, :max_concurrency),
          {:ok, resources} <- Resources.new(Map.get(attrs, :resources)),
          true <- resources.cpu_millis > 0 and resources.memory_bytes > 0,
+         preferred_cpu when is_integer(preferred_cpu) <-
+           Map.get(attrs, :preferred_cpu_millis, resources.cpu_millis),
+         true <- preferred_cpu >= resources.cpu_millis,
          {:ok, os} <- optional_enum(Map.get(attrs, :required_os), @oses, :invalid_pool_os),
          {:ok, arch} <- optional_enum(Map.get(attrs, :required_arch), @arches, :invalid_pool_arch),
          backend when backend in @backends <- Map.get(attrs, :required_backend),
@@ -34,6 +37,7 @@ defmodule CrfController.PoolPolicy do
          id: id,
          max_concurrency: max,
          resources: resources,
+         preferred_cpu_millis: preferred_cpu,
          required_os: os,
          required_arch: arch,
          required_backend: backend,
@@ -57,6 +61,7 @@ defmodule CrfController.PoolPolicy do
          work_id: work_id,
          pool_id: policy.id,
          resources: policy.resources,
+         preferred_cpu_millis: policy.preferred_cpu_millis,
          required_os: policy.required_os,
          required_arch: policy.required_arch,
          required_backend: policy.required_backend,

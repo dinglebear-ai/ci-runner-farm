@@ -291,10 +291,20 @@ defmodule CrfController.ControllerConfig do
   defp pools(_), do: {:error, :invalid_pool_policies}
 
   defp pool_attrs(map) when is_map(map) do
+    map =
+      case map["resources"] do
+        %{"cpu_millis" => cpu} when is_integer(cpu) ->
+          Map.put_new(map, "preferred_cpu_millis", cpu)
+
+        _ ->
+          map
+      end
+
     keys = [
       "id",
       "max_concurrency",
       "resources",
+      "preferred_cpu_millis",
       "required_os",
       "required_arch",
       "required_backend",
@@ -331,6 +341,7 @@ defmodule CrfController.ControllerConfig do
          id: map["id"],
          max_concurrency: map["max_concurrency"],
          resources: resources,
+         preferred_cpu_millis: map["preferred_cpu_millis"],
          required_os: os,
          required_arch: arch,
          required_backend: backend,

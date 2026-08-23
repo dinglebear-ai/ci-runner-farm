@@ -132,6 +132,8 @@ pub struct WorkRequirement {
     pub work_id: String,
     pub pool_id: String,
     pub resources: Resources,
+    #[serde(default)]
+    pub preferred_cpu_millis: Option<u64>,
     pub required_os: Option<OperatingSystem>,
     pub required_arch: Option<Architecture>,
     pub required_backend: Option<ExecutionBackend>,
@@ -147,6 +149,12 @@ impl WorkRequirement {
             return Err(ValidationError::InvalidPoolId);
         }
         if self.resources.cpu_millis == 0 || self.resources.memory_bytes == 0 {
+            return Err(ValidationError::InvalidResources);
+        }
+        if self
+            .preferred_cpu_millis
+            .is_some_and(|preferred| preferred < self.resources.cpu_millis)
+        {
             return Err(ValidationError::InvalidResources);
         }
         if self
@@ -226,5 +234,21 @@ mod tests {
             node.validate(),
             Err(ValidationError::InvalidExecutionBackends)
         );
+    }
+
+    #[test]
+    fn preferred_cpu_cannot_be_lower_than_the_admission_minimum() {
+        let work = WorkRequirement {
+            work_id: "job-1".into(),
+            pool_id: "rust".into(),
+            resources: Resources::new(2_000, 4 * 1024 * 1024 * 1024),
+            preferred_cpu_millis: Some(1_000),
+            required_os: Some(OperatingSystem::Linux),
+            required_arch: Some(Architecture::X86_64),
+            required_backend: Some(ExecutionBackend::Container),
+            required_capabilities: BTreeSet::new(),
+        };
+
+        assert_eq!(work.validate(), Err(ValidationError::InvalidResources));
     }
 }

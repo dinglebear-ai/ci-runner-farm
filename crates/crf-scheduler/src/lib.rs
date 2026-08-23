@@ -73,9 +73,14 @@ pub fn schedule(requests: &[WorkRequirement], nodes: &[NodeSnapshot]) -> Schedul
             .filter(|index| state[*index].available.fits(request.resources))
             .min_by_key(|index| {
                 let node = &state[*index];
+                let preferred = request
+                    .preferred_cpu_millis
+                    .unwrap_or(request.resources.cpu_millis);
+                let granted = node.available.cpu_millis.min(preferred);
                 (
+                    preferred - granted,
                     node.available.memory_bytes - request.resources.memory_bytes,
-                    node.available.cpu_millis - request.resources.cpu_millis,
+                    node.available.cpu_millis - granted,
                     node.node_id.clone(),
                 )
             });
@@ -89,7 +94,14 @@ pub fn schedule(requests: &[WorkRequirement], nodes: &[NodeSnapshot]) -> Schedul
         };
 
         let node = &mut state[index];
-        let reserved = request.resources;
+        let reserved = Resources::new(
+            node.available.cpu_millis.min(
+                request
+                    .preferred_cpu_millis
+                    .unwrap_or(request.resources.cpu_millis),
+            ),
+            request.resources.memory_bytes,
+        );
         let did_reserve = node.available.subtract(reserved);
         debug_assert!(did_reserve, "selected node must have enough resources");
         result.placements.push(Placement {
@@ -145,11 +157,41 @@ mod tests {
             work_id: id.into(),
             pool_id: "build".into(),
             resources: Resources::new(cpu_millis, memory_bytes),
+            preferred_cpu_millis: None,
             required_os: Some(os),
             required_arch: Some(Architecture::X86_64),
             required_backend: Some(backend),
             required_capabilities: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn preferred_cpu_is_acceleration_not_an_admission_minimum() {
+        let nodes = vec![node(
+            "small-node",
+            OperatingSystem::Linux,
+            ExecutionBackend::Container,
+            2_000,
+            8 * GIB,
+        )];
+        let mut request = work(
+            "job-1",
+            OperatingSystem::Linux,
+            ExecutionBackend::Container,
+            1_000,
+            6 * GIB,
+        );
+        request.preferred_cpu_millis = Some(8_000);
+
+        let result = schedule(&[request], &nodes);
+
+        assert!(result.unplaced.is_empty());
+        assert_eq!(result.placements.len(), 1);
+        assert_eq!(result.placements[0].node_id, "small-node");
+        assert_eq!(
+            result.placements[0].reserved,
+            Resources::new(2_000, 6 * GIB)
+        );
     }
 
     #[test]

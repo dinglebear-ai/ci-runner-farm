@@ -78,6 +78,9 @@ defmodule CrfController.SchedulerWire do
          true <- Identifier.valid?(pool_id),
          {:ok, resources} <- Resources.new(Map.get(request, :resources)),
          true <- resources.cpu_millis > 0 and resources.memory_bytes > 0,
+         preferred_cpu when is_integer(preferred_cpu) <-
+           Map.get(request, :preferred_cpu_millis, resources.cpu_millis),
+         true <- preferred_cpu >= resources.cpu_millis,
          {:ok, os} <- optional_enum(Map.get(request, :required_os), @oses, :invalid_required_os),
          {:ok, arch} <-
            optional_enum(Map.get(request, :required_arch), @arches, :invalid_required_arch),
@@ -93,6 +96,7 @@ defmodule CrfController.SchedulerWire do
          "work_id" => work_id,
          "pool_id" => pool_id,
          "resources" => resources_map(resources),
+         "preferred_cpu_millis" => preferred_cpu,
          "required_os" => nullable_atom(os),
          "required_arch" => nullable_atom(arch),
          "required_backend" => nullable_atom(backend),

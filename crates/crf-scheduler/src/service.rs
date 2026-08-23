@@ -236,6 +236,7 @@ mod tests {
                 work_id: "work-1".into(),
                 pool_id: "build".into(),
                 resources: Resources::new(2_000, 4 * 1024 * 1024 * 1024),
+                preferred_cpu_millis: None,
                 required_os: Some(OperatingSystem::Windows),
                 required_arch: Some(Architecture::X86_64),
                 required_backend: Some(ExecutionBackend::NativeProcess),

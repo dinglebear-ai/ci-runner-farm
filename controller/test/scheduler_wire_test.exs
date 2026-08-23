@@ -12,6 +12,7 @@ defmodule CrfController.SchedulerWireTest do
     assert decoded["protocol_version"] == 1
     assert decoded["request_id"] == "schedule-1"
     assert hd(decoded["requests"])["required_os"] == "windows"
+    assert hd(decoded["requests"])["preferred_cpu_millis"] == 8_000
     assert hd(decoded["nodes"])["execution_backends"] == ["native_process"]
   end
 
@@ -84,6 +85,7 @@ defmodule CrfController.SchedulerWireTest do
       work_id: "work-1",
       pool_id: "build",
       resources: %{cpu_millis: 2_000, memory_bytes: 4 * @gib},
+      preferred_cpu_millis: 8_000,
       required_os: :windows,
       required_arch: :x86_64,
       required_backend: :native_process,

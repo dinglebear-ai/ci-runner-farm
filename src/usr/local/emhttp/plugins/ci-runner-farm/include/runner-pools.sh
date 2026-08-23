@@ -453,8 +453,8 @@ pool_distributed_policies_json() {
     memory="$(pool_memory_bytes "$id")" || return 1
     [ "$first" = 1 ] || printf ','
     first=0
-    printf '{"id":"%s","max_concurrency":%s,"resources":{"cpu_millis":%s,"memory_bytes":%s},"required_os":"linux","required_arch":"%s","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"}' \
-      "$id" "$ceiling" "$cpu" "$memory" "$arch"
+    printf '{"id":"%s","max_concurrency":%s,"resources":{"cpu_millis":1000,"memory_bytes":%s},"preferred_cpu_millis":%s,"required_os":"linux","required_arch":"%s","required_backend":"container","required_capabilities":["container","github-actions"],"work_folder":"_work"}' \
+      "$id" "$ceiling" "$memory" "$cpu" "$arch"
   done < <(pool_records)
   printf ']\n'
 }
