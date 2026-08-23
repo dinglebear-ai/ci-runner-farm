@@ -67,7 +67,7 @@ jobs:
           set -e
           for test in tests/*.sh; do
             case "$test" in
-              tests/native-plugin-payload.sh|tests/final-release-gate.sh) continue ;;
+              tests/native-plugin-payload.sh|tests/portable-container-adapter.sh|tests/real-docker-container-adapter.sh|tests/final-release-gate.sh) continue ;;
             esac
             echo "bash $test"
             bash "$test"
@@ -109,14 +109,38 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
 
+      - name: Install static Linux adapter target
+        if: runner.os == 'Linux'
+        run: rustup target add x86_64-unknown-linux-musl
+
       - name: Rust formatting
         run: cargo fmt --all -- --check
 
       - name: Rust lint
+        if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Rust lint (Windows-supported packages)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --exclude crf-container-adapter --all-targets -- -D warnings
+
       - name: Rust tests
+        if: runner.os == 'Linux'
         run: cargo test --workspace
+
+      - name: Rust tests (Windows-supported packages)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude crf-container-adapter
+
+      - name: Portable container adapter
+        if: runner.os == 'Linux'
+        run: bash tests/portable-container-adapter.sh
+
+      - name: Real Docker container adapter acceptance
+        if: runner.os == 'Linux'
+        env:
+          CRF_RUN_REAL_DOCKER_ACCEPTANCE: '1'
+        run: bash tests/real-docker-container-adapter.sh
 
       - name: Native plugin payload
         if: runner.os == 'Linux'
