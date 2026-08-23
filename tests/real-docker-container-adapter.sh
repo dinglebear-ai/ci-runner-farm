@@ -27,7 +27,8 @@ cleanup() {
 trap cleanup EXIT
 
 docker pull "$image" >/dev/null
-[[ "$(docker image inspect "$image" --format '{{.Id}}')" == "sha256:${image##*@sha256:}" ]]
+docker image inspect "$image" --format '{{json .RepoDigests}}' |
+  jq -e --arg image "$image" 'index($image) != null' >/dev/null
 cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-container-adapter --target x86_64-unknown-linux-musl >/dev/null
 adapter="$root/target/x86_64-unknown-linux-musl/release/crf-container-adapter"
 if readelf -l "$adapter" | grep -q INTERP; then exit 1; fi

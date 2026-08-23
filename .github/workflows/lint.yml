@@ -72,8 +72,6 @@ jobs:
             echo "bash $test"
             bash "$test"
           done
-          echo "bash tests/final-release-gate.sh"
-          bash tests/final-release-gate.sh
 
   distributed-core:
     name: Distributed core (${{ matrix.os }})
@@ -145,6 +143,10 @@ jobs:
       - name: Native plugin payload
         if: runner.os == 'Linux'
         run: bash tests/native-plugin-payload.sh
+
+      - name: Final offline release gate
+        if: runner.os == 'Linux'
+        run: bash tests/final-release-gate.sh
 
       - name: Build distributed Windows node package
         if: runner.os == 'Windows'
