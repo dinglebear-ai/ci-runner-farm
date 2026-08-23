@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -30,7 +31,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage", "expected version, validate-frame, request, probe, check-compatibility, or supervise")
+		fail("usage", "expected version, validate-frame, validate-runtime, request, probe, check-compatibility, or supervise")
 	}
 	switch os.Args[1] {
 	case "version":
@@ -41,6 +42,12 @@ func main() {
 			fail("invalid_frame", err.Error())
 		}
 		write(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: true})
+	case "validate-runtime":
+		result, err := validateRuntimeContract(os.Args[2:])
+		if err != nil {
+			fail("invalid_runtime_config", err.Error())
+		}
+		write(result)
 	case "request":
 		request(os.Args[2:])
 	case "probe":
@@ -62,6 +69,30 @@ func main() {
 	default:
 		fail("unknown_command", os.Args[1])
 	}
+}
+
+type runtimeValidationResult struct {
+	OK                bool   `json:"ok"`
+	SchemaVersion     int    `json:"schema_version"`
+	ConfigRevision    string `json:"config_revision"`
+	OwnershipRevision string `json:"ownership_revision"`
+	PoolCount         int    `json:"pool_count"`
+}
+
+func validateRuntimeContract(args []string) (runtimeValidationResult, error) {
+	flags := flag.NewFlagSet("validate-runtime", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("runtime-config", "", "mode-0600 runtime configuration")
+	if err := flags.Parse(args); err != nil || !filepath.IsAbs(*path) || flags.NArg() != 0 {
+		return runtimeValidationResult{}, errors.New("validate-runtime requires --runtime-config")
+	}
+	cfg, err := controller.LoadRuntimeConfig(*path)
+	if err != nil {
+		return runtimeValidationResult{}, err
+	}
+	return runtimeValidationResult{OK: true, SchemaVersion: cfg.SchemaVersion,
+		ConfigRevision: cfg.ConfigRevision, OwnershipRevision: cfg.OwnershipRevision,
+		PoolCount: len(cfg.Pools)}, nil
 }
 
 type probeConfig struct {
@@ -146,20 +177,15 @@ func runProbe(args []string) {
 }
 
 func supervise(args []string) {
-	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	socket := flags.String("socket", "", "same-UID Unix socket")
-	compatibility := flags.String("compatibility", "", "sealed compatibility record")
-	runtimeConfig := flags.String("runtime-config", "", "mode-0600 runtime configuration")
-	if err := flags.Parse(args); err != nil || *socket == "" || *compatibility == "" ||
-		*runtimeConfig == "" || flags.NArg() != 0 {
-		fail("invalid_arguments", "supervise requires --socket, --compatibility, and --runtime-config")
+	paths, err := parseSuperviseContract(args)
+	if err != nil {
+		fail("invalid_arguments", err.Error())
 	}
-	record, err := verifiedCompatibility(*compatibility)
+	record, err := verifiedCompatibility(paths.compatibility)
 	if err != nil {
 		fail("invalid_compatibility_record", err.Error())
 	}
-	cfg, err := controller.LoadRuntimeConfig(*runtimeConfig)
+	cfg, err := controller.LoadRuntimeConfig(paths.runtimeConfig)
 	if err != nil {
 		fail("invalid_runtime_config", err.Error())
 	}
@@ -182,9 +208,29 @@ func supervise(args []string) {
 	defer control.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := supervisorServer(*socket, control.Handle).Serve(ctx); err != nil {
+	if err := supervisorServer(paths.socket, control.Handle).Serve(ctx); err != nil {
 		fail("supervisor_failed", err.Error())
 	}
+}
+
+type superviseContract struct {
+	socket        string
+	compatibility string
+	runtimeConfig string
+}
+
+func parseSuperviseContract(args []string) (superviseContract, error) {
+	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	socket := flags.String("socket", "", "same-UID Unix socket")
+	compatibility := flags.String("compatibility", "", "sealed compatibility record")
+	runtimeConfig := flags.String("runtime-config", "", "mode-0600 runtime configuration")
+	if err := flags.Parse(args); err != nil || !filepath.IsAbs(*socket) ||
+		!filepath.IsAbs(*compatibility) || !filepath.IsAbs(*runtimeConfig) || flags.NArg() != 0 {
+		return superviseContract{}, errors.New("supervise requires absolute --socket, --compatibility, and --runtime-config paths")
+	}
+	return superviseContract{socket: *socket, compatibility: *compatibility,
+		runtimeConfig: *runtimeConfig}, nil
 }
 
 func supervisorServer(path string, handler ipc.Handler) *ipc.Server {

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "controller_instance_id": "controller-1",
+  "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ownership_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "installation_id": "installation-1",
+  "host_id": "host-1",
+  "plugin_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "image_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "dockerfile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "entrypoint_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+  "owner": "example-org",
+  "github_config_url": "https://github.com/example-org",
+  "runner_group_id": 7,
+  "quarantine_runner_group_id": 8,
+  "state_dir": "/var/lib/ci-runner-farm/scaleset",
+  "ownership_path": "/var/lib/ci-runner-farm/scaleset/ownership.json",
+  "heartbeat_seconds": 5,
+  "auth": {
+    "mode": "pat",
+    "token_file": "/etc/ci-runner-farm/github-token"
+  },
+  "pools": [
+    {
+      "id": "rust",
+      "routing_label": "ci-pool-rust",
+      "labels": ["self-hosted", "linux", "x64", "ci-pool-rust"]
+    }
+  ]
+}

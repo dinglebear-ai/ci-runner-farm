@@ -167,3 +167,61 @@ func TestNewScaleSetAPIRejectsSymlinkedCredential(t *testing.T) {
 		t.Fatal("symlinked token was accepted")
 	}
 }
+
+func TestValidateRuntimeContractAcceptsGoldenConfig(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "runtime-config-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "runtime-config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := validateRuntimeContract([]string{"--runtime-config", path})
+	if err != nil {
+		t.Fatalf("golden runtime config rejected: %v", err)
+	}
+	if result.SchemaVersion != 1 || result.PoolCount != 1 ||
+		result.ConfigRevision != strings.Repeat("a", 64) ||
+		result.OwnershipRevision != strings.Repeat("b", 64) {
+		t.Fatalf("unexpected validation result: %#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"ok":true,"schema_version":1,"config_revision":"` + strings.Repeat("a", 64) +
+		`","ownership_revision":"` + strings.Repeat("b", 64) + `","pool_count":1}`
+	if string(encoded) != want {
+		t.Fatalf("validation JSON = %s, want %s", encoded, want)
+	}
+}
+
+func TestValidateRuntimeContractRejectsUnknownArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{},
+		{"--runtime-config", "testdata/runtime-config-v1.json", "extra"},
+		{"--runtime-config", "testdata/runtime-config-v1.json", "--unknown"},
+		{"--runtime-config", "testdata/runtime-config-v1.json"},
+	} {
+		if _, err := validateRuntimeContract(args); err == nil {
+			t.Fatalf("accepted invalid arguments: %#v", args)
+		}
+	}
+}
+
+func TestSuperviseContractRequiresAbsolutePaths(t *testing.T) {
+	valid := []string{"--socket", "/run/ci-runner-farm/control.sock", "--compatibility",
+		"/var/lib/ci-runner-farm/compatibility.json", "--runtime-config",
+		"/var/lib/ci-runner-farm/runtime.json"}
+	if _, err := parseSuperviseContract(valid); err != nil {
+		t.Fatalf("absolute supervision paths rejected: %v", err)
+	}
+	for _, pathIndex := range []int{1, 3, 5} {
+		args := append([]string(nil), valid...)
+		args[pathIndex] = "relative/path"
+		if _, err := parseSuperviseContract(args); err == nil {
+			t.Fatalf("accepted relative path in arguments: %#v", args)
+		}
+	}
+}
