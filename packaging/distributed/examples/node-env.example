@@ -21,9 +21,15 @@ CRF_OPERATOR_PROJECTION_PATH=/var/lib/ci-runner-farm/node/status/controller.json
 # would share the node agent identity and could read its mTLS/control state.
 # Install a compatible isolated adapter before enabling the node service.
 CRF_EXECUTION_BACKEND=container
-CRF_CONTAINER_ADAPTER_PROGRAM=/absolute/path/to/container-adapter
+CRF_CONTAINER_ADAPTER_PROGRAM=/opt/ci-runner-farm/current/bin/crf-container-adapter
 CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
 # The adapter receives the JIT descriptor only over bounded stdin.
+
+# Portable Linux Docker adapter. The image must be immutable and contain the
+# GitHub Actions runner plus jq, base64, gosu, and a non-root runner account.
+CRF_RUNNER_IMAGE=myoung34/github-runner@sha256:4eb08a3fcb3138eaf2d20476e1d7ed6427da7953c72d57fbb0845169e4d0bba8
+CRF_CONTAINER_STATE_DIR=/var/lib/ci-runner-farm/container-adapter
+CRF_CONTAINER_WORK_ROOT=/var/lib/ci-runner-farm/work
 
 # Optional bounded tuning.
 CRF_HEARTBEAT_MS=5000

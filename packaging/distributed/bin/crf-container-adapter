@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+label_ns=io.dinglebear.ci-runner-farm
+state_root="${CRF_CONTAINER_STATE_DIR:-/var/lib/ci-runner-farm/container-adapter}"
+work_root="${CRF_CONTAINER_WORK_ROOT:-/var/lib/ci-runner-farm/work}"
+entrypoint="${CRF_RUNNER_ENTRYPOINT:-/opt/ci-runner-farm/current/libexec/runner-entrypoint.sh}"
+image="${CRF_RUNNER_IMAGE:-}"
+max_frame_bytes=131072
+
+reply_simple() { printf '{"schema_version":1,"payload":{"result":"%s"}}\n' "$1"; }
+reply_id() { printf '{"schema_version":1,"payload":{"result":"%s","id":"%s"}}\n' "$1" "$2"; }
+reply_code() { printf '{"schema_version":1,"payload":{"result":"%s","detail_code":"%s"}}\n' "$1" "$2"; }
+reply_failed() { printf '{"schema_version":1,"payload":{"result":"terminal","outcome":{"failed":{"detail_code":"%s"}}}}\n' "$1"; }
+
+fail_closed() { reply_code rejected "$1"; exit 0; }
+identifier_valid() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; }
+uint_valid() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && (( 10#$1 <= $2 )); }
+container_id_valid() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+safe_root() { [[ "$1" == /* && "$1" != *$'\n'* && ! -L "$1" ]]; }
+
+for command in jq docker sha256sum flock stat; do
+  command -v "$command" >/dev/null 2>&1 || fail_closed missing_runtime_dependency
+done
+[[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail_closed immutable_image_required
+[[ -f "$entrypoint" && ! -L "$entrypoint" && -x "$entrypoint" ]] || fail_closed invalid_runner_entrypoint
+if ! safe_root "$state_root" || ! safe_root "$work_root"; then
+  fail_closed invalid_storage_root
+fi
+install -d -m 0700 "$state_root" "$state_root/locks" "$work_root" || fail_closed state_unavailable
+
+request="$(head -c $((max_frame_bytes + 1)))"
+(( ${#request} <= max_frame_bytes )) || fail_closed request_too_large
+printf '%s' "$request" | jq -e '
+  type == "object" and keys == ["payload", "schema_version"] and
+  .schema_version == 1 and
+  (.payload | type == "object" and
+    (.action == "start" or .action == "inspect" or .action == "cancel"))
+' >/dev/null 2>&1 || fail_closed invalid_request
+
+action="$(printf '%s' "$request" | jq -r '.payload.action')"
+placement="$(printf '%s' "$request" | jq -r '.payload.placement_id // ""')"
+identifier_valid "$placement" || fail_closed invalid_request
+key="$(printf '%s' "$placement" | sha256sum | cut -d' ' -f1)"
+state_path="$state_root/$key.json"
+lock_path="$state_root/locks/$key.lock"
+exec 9>"$lock_path"
+flock -w 10 9 || { reply_code deferred placement_busy; exit 0; }
+
+container_name="crf-dist-${key:0:20}"
+
+state_field() { jq -er --arg key "$1" '.[$key]' "$state_path" 2>/dev/null; }
+state_valid() {
+  [[ -f "$state_path" && ! -L "$state_path" ]] || return 1
+  [[ "$(stat -c %a "$state_path" 2>/dev/null)" == 600 ]] || return 2
+  jq -e --arg placement "$placement" --arg name "$container_name" '
+    type == "object" and
+    keys == ["command_id","container_id","container_name","cpu_millis","memory_bytes","placement_id","pool_id","runner_name","schema_version","terminal"] and
+    .schema_version == 1 and .placement_id == $placement and .container_name == $name and
+    (.command_id | type == "string") and (.pool_id | type == "string") and
+    (.runner_name | type == "string") and (.cpu_millis | type == "number") and
+    (.memory_bytes | type == "number") and (.container_id | type == "string") and
+    (.terminal == null or .terminal == "finished" or .terminal == "cancelled" or .terminal == "failed")
+  ' "$state_path" >/dev/null 2>&1 || return 2
+}
+
+state_write() {
+  local command_id="$1" pool_id="$2" runner_name="$3" cpu="$4" memory="$5" container_id="$6" terminal="$7"
+  local tmp="$state_path.tmp.$$"
+  umask 077
+  jq -cn \
+    --arg placement_id "$placement" --arg command_id "$command_id" --arg pool_id "$pool_id" \
+    --arg runner_name "$runner_name" --arg container_name "$container_name" --arg container_id "$container_id" \
+    --argjson cpu_millis "$cpu" --argjson memory_bytes "$memory" \
+    --arg terminal "$terminal" \
+    '{schema_version:1,placement_id:$placement_id,command_id:$command_id,pool_id:$pool_id,runner_name:$runner_name,container_name:$container_name,container_id:$container_id,cpu_millis:$cpu_millis,memory_bytes:$memory_bytes,terminal:(if $terminal == "" then null else $terminal end)}' >"$tmp" || return 1
+  chmod 0600 "$tmp" && mv -f "$tmp" "$state_path" && sync -f "$state_path" 2>/dev/null
+}
+
+find_container() {
+  local ids id
+  ids="$(docker ps -aq --filter "label=$label_ns.placement-id=$placement" 2>/dev/null)" || return 3
+  [[ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l)" -le 1 ]] || return 2
+  id="$(printf '%s\n' "$ids" | sed '/^$/d')"
+  [[ -n "$id" ]] || return 1
+  observed_id="$(docker inspect --format '{{.Id}}' "$id" 2>/dev/null)" || return 3
+  container_id_valid "$observed_id" || return 3
+  [[ "$(docker inspect --format "{{ index .Config.Labels \"$label_ns.managed\" }}" "$observed_id" 2>/dev/null)" == true ]] || return 2
+  [[ "$(docker inspect --format "{{ index .Config.Labels \"$label_ns.placement-id\" }}" "$observed_id" 2>/dev/null)" == "$placement" ]] || return 2
+  [[ "${container_name}" == "$(docker inspect --format '{{.Name}}' "$observed_id" 2>/dev/null | sed 's#^/##')" ]] || return 2
+  observed_status="$(docker inspect --format '{{.State.Status}}' "$observed_id" 2>/dev/null)" || return 3
+  observed_exit="$(docker inspect --format '{{.State.ExitCode}}' "$observed_id" 2>/dev/null)" || return 3
+}
+
+terminal_response() {
+  case "$1" in
+    finished) printf '{"schema_version":1,"payload":{"result":"terminal","outcome":"finished"}}\n' ;;
+    cancelled) printf '{"schema_version":1,"payload":{"result":"terminal","outcome":"cancelled"}}\n' ;;
+    failed) reply_failed container_exit_nonzero ;;
+    *) reply_code deferred state_ambiguous ;;
+  esac
+}
+
+inspect_placement() {
+  local expected="$1" state_rc terminal stored_id command_id pool_id runner_name cpu memory
+  if state_valid; then state_rc=0; else state_rc=$?; fi
+  (( state_rc != 2 )) || { reply_code deferred state_corrupt; return; }
+  if (( state_rc == 0 )); then
+    terminal="$(state_field terminal 2>/dev/null || true)"
+    [[ -z "$terminal" || "$terminal" == null ]] || { terminal_response "$terminal"; return; }
+    stored_id="$(state_field container_id)"
+  else
+    stored_id=""
+  fi
+  if find_container; then
+    [[ -z "$stored_id" || "$stored_id" == "$observed_id" ]] || { reply_code deferred runtime_identity_mismatch; return; }
+    [[ -z "$expected" || "$expected" == "$observed_id" ]] || { reply_id running "$observed_id"; return; }
+    case "$observed_status" in
+      running|paused) reply_id running "$observed_id" ;;
+      exited)
+        if (( state_rc == 0 )); then
+          command_id="$(state_field command_id)"; pool_id="$(state_field pool_id)"; runner_name="$(state_field runner_name)"
+          cpu="$(state_field cpu_millis)"; memory="$(state_field memory_bytes)"
+          if [[ "$observed_exit" == 0 ]]; then terminal=finished; else terminal=failed; fi
+          state_write "$command_id" "$pool_id" "$runner_name" "$cpu" "$memory" "$observed_id" "$terminal" || { reply_code deferred state_write_failed; return; }
+          terminal_response "$terminal"
+        else
+          reply_code deferred state_missing
+        fi ;;
+      dead) reply_code deferred container_runtime_dead ;;
+      *) reply_code deferred container_state_transitional ;;
+    esac
+  else
+    case $? in
+      1) if (( state_rc == 0 )); then reply_failed container_lost; else reply_simple absent; fi ;;
+      *) reply_code deferred container_identity_ambiguous ;;
+    esac
+  fi
+}
+
+case "$action" in
+  inspect)
+    expected="$(printf '%s' "$request" | jq -r '.payload.expected_id // ""')"
+    [[ -z "$expected" ]] || container_id_valid "$expected" || fail_closed invalid_request
+    inspect_placement "$expected"
+    ;;
+  cancel)
+    expected="$(printf '%s' "$request" | jq -r '.payload.expected_id // ""')"
+    [[ -z "$expected" ]] || container_id_valid "$expected" || fail_closed invalid_request
+    if state_valid; then
+      terminal="$(state_field terminal 2>/dev/null || true)"
+      [[ -z "$terminal" || "$terminal" == null ]] || { terminal_response "$terminal"; exit 0; }
+      command_id="$(state_field command_id)"; pool_id="$(state_field pool_id)"; runner_name="$(state_field runner_name)"
+      cpu="$(state_field cpu_millis)"; memory="$(state_field memory_bytes)"
+    else
+      command_id=unknown; pool_id=unknown; runner_name=unknown; cpu=1; memory=1
+    fi
+    if find_container; then
+      [[ -z "$expected" || "$expected" == "$observed_id" ]] || { reply_code deferred runtime_identity_mismatch; exit 0; }
+      docker stop --time 15 "$observed_id" >/dev/null 2>&1 || true
+      docker rm -f "$observed_id" >/dev/null 2>&1 || { reply_code deferred container_remove_failed; exit 0; }
+      state_write "$command_id" "$pool_id" "$runner_name" "$cpu" "$memory" "$observed_id" cancelled || { reply_code deferred state_write_failed; exit 0; }
+    fi
+    reply_simple cancelled
+    ;;
+  start)
+    printf '%s' "$request" | jq -e '.payload | (keys == ["action","command_id","jit_config","placement_id","pool_id","resources","runner_name"]) and (.resources | keys == ["cpu_millis","memory_bytes"])' >/dev/null 2>&1 || fail_closed invalid_request
+    command_id="$(printf '%s' "$request" | jq -r '.payload.command_id')"
+    pool_id="$(printf '%s' "$request" | jq -r '.payload.pool_id')"
+    runner_name="$(printf '%s' "$request" | jq -r '.payload.runner_name')"
+    cpu="$(printf '%s' "$request" | jq -r '.payload.resources.cpu_millis')"
+    memory="$(printf '%s' "$request" | jq -r '.payload.resources.memory_bytes')"
+    jit="$(printf '%s' "$request" | jq -r '.payload.jit_config')"
+    if ! identifier_valid "$command_id" || ! identifier_valid "$pool_id" || ! identifier_valid "$runner_name"; then
+      fail_closed invalid_request
+    fi
+    if ! uint_valid "$cpu" 256000 || ! uint_valid "$memory" 1099511627776; then
+      fail_closed invalid_request
+    fi
+    [[ -n "$jit" && ${#jit} -le 65536 ]] || fail_closed invalid_request
+    if state_valid; then
+      [[ "$(state_field command_id)" == "$command_id" && "$(state_field pool_id)" == "$pool_id" && "$(state_field runner_name)" == "$runner_name" && "$(state_field cpu_millis)" == "$cpu" && "$(state_field memory_bytes)" == "$memory" ]] || fail_closed placement_conflict
+      inspect_placement "$(state_field container_id)"
+      exit 0
+    fi
+    if find_container; then reply_code deferred state_missing; exit 0; fi
+    work_dir="$work_root/$key"
+    [[ ! -L "$work_dir" ]] || fail_closed invalid_work_root
+    install -d -m 0700 "$work_dir" || { reply_code deferred work_root_unavailable; exit 0; }
+    cpu_value="$(awk -v value="$cpu" 'BEGIN { printf "%.3f", value / 1000 }')"
+    state_write "$command_id" "$pool_id" "$runner_name" "$cpu" "$memory" "" "" || { reply_code deferred state_write_failed; exit 0; }
+    docker run -d --restart=no --name "$container_name" --hostname "$runner_name" \
+      --cpus "$cpu_value" --memory "$memory" --memory-swap "$memory" --pids-limit 4096 \
+      --tmpfs /run/crf:rw,noexec,nosuid,nodev,size=1m \
+      --mount "type=bind,src=$entrypoint,dst=/usr/local/bin/crf-runner-entrypoint,readonly" \
+      --mount "type=bind,src=$work_dir,dst=/_work" \
+      --entrypoint /usr/local/bin/crf-runner-entrypoint \
+      --label "$label_ns.managed=true" --label "$label_ns.backend=distributed" \
+      --label "$label_ns.placement-id=$placement" --label "$label_ns.command-id=$command_id" \
+      --label "$label_ns.pool=$pool_id" --label "$label_ns.runner-name=$runner_name" \
+      --label "$label_ns.cpu-millis=$cpu" --label "$label_ns.memory-bytes=$memory" \
+      -e CRF_CREDENTIAL_KIND=jit -e EPHEMERAL=true -e RUN_AS_ROOT=false -e RUNNER_WORKDIR=/_work \
+      -e DISABLE_AUTO_UPDATE=true -e DISABLE_AUTOMATIC_DEREGISTRATION=true \
+      "$image" >/dev/null 2>&1 || { reply_code deferred container_start_uncertain; exit 0; }
+    find_container || { reply_code deferred container_start_uncertain; exit 0; }
+    state_write "$command_id" "$pool_id" "$runner_name" "$cpu" "$memory" "$observed_id" "" || { docker rm -f "$observed_id" >/dev/null 2>&1 || true; reply_code deferred state_write_failed; exit 0; }
+    docker exec "$observed_id" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
+    (set +x; printf '%s\n' "$jit") | docker exec -i "$observed_id" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || true
+    jit=""; unset jit
+    docker exec "$observed_id" sh -c 'for i in $(seq 1 120); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
+    reply_id started "$observed_id"
+    ;;
+esac

@@ -33,6 +33,15 @@ if [[ -z "$destdir" ]]; then
   if ! id "$service_user" >/dev/null 2>&1; then
     useradd --system --gid "$service_group" --home-dir /var/lib/ci-runner-farm --shell /usr/sbin/nologin "$service_user"
   fi
+  # The portable adapter talks to the local Docker daemon as the unprivileged
+  # node service account. Never create or guess a daemon group.
+  if command -v docker >/dev/null 2>&1; then
+    if getent group docker >/dev/null 2>&1; then
+      usermod -aG docker "$service_user"
+    else
+      echo "warning: Docker is installed without a docker group; the portable container adapter will remain unavailable" >&2
+    fi
+  fi
 fi
 
 install -d -m 0755 "$(rooted "$prefix/releases")"
@@ -41,6 +50,7 @@ if [[ ! -d "$release_root" ]]; then
   rm -rf "$tmp_release"
   install -d -m 0755 "$tmp_release"
   cp -a "$bundle_root/bin" "$tmp_release/bin"
+  cp -a "$bundle_root/libexec" "$tmp_release/libexec"
   cp -a "$bundle_root/controller" "$tmp_release/controller"
   install -m 0644 "$bundle_root/BUILD-INFO" "$tmp_release/BUILD-INFO"
   mv "$tmp_release" "$release_root"

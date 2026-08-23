@@ -82,6 +82,7 @@ bash tests/graphql-mutation-dispatch.sh
 bash tests/operation-worker-timeouts.sh
 bash tests/security-review-contracts.sh
 bash tests/windows-service-recovery.sh
+bash tests/portable-container-adapter.sh
 grep -Fq 'cmd_stop || return 10' \
   src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh ||
   crf_fail "restart stop-phase mapping is missing"
