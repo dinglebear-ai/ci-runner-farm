@@ -2,10 +2,12 @@ $ErrorActionPreference = 'Stop'
 
 $adapter = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/WindowsContainerAdapter.ps1'
 $launcher = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/crf-container-adapter.cmd'
+$entrypoint = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/WindowsRunnerEntrypoint.ps1'
 if (-not (Test-Path -LiteralPath $adapter -PathType Leaf)) {
     throw 'Windows container adapter is missing'
 }
 if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Windows container adapter launcher is missing' }
+if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) { throw 'Windows runner entrypoint is missing' }
 
 $tokens = $null
 $errors = $null
@@ -48,6 +50,16 @@ exit /b 1
     if ($cancel.payload.result -ne 'cancelled') { throw 'Owned container was not cancelled' }
     $args = Get-Content -LiteralPath $log -Raw
     if ($args -notmatch "rm -f $id") { throw 'Cancellation did not target the exact owned container ID' }
+
+    $runnerRoot = Join-Path $root 'runner'
+    New-Item -ItemType Directory -Path $runnerRoot | Out-Null
+    $jitFile = Join-Path $root 'jit.json'
+    $captured = Join-Path $root 'captured.txt'
+    Set-Content -LiteralPath $jitFile -Value 'entrypoint-secret' -NoNewline
+    "@echo off`necho %ACTIONS_RUNNER_INPUT_JITCONFIG%>`"$captured`"" | Set-Content -LiteralPath (Join-Path $runnerRoot 'run.cmd') -Encoding Ascii
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entrypoint -RunnerRoot $runnerRoot -JitFile $jitFile
+    if ((Get-Content -LiteralPath $captured -Raw).Trim() -ne 'entrypoint-secret') { throw 'Entrypoint did not pass JIT through the runner environment' }
+    if (Test-Path -LiteralPath $jitFile) { throw 'Entrypoint left the JIT bootstrap file behind' }
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
