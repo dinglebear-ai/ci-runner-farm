@@ -14,5 +14,6 @@ CRF_EXECUTION_BACKEND=container
 CRF_CONTAINER_ADAPTER_PROGRAM=sibling
 CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
 CRF_CONTAINER_STATE_DIR=C:\ProgramData\CiRunnerFarm\container-adapter
+CRF_NERDCTL_PATH=C:\Program Files\nerdctl\nerdctl.exe
 # Pin a prepared Windows runner image by digest; tags are rejected.
 CRF_RUNNER_IMAGE=example.invalid/windows-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
