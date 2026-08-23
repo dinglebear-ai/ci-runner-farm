@@ -32,6 +32,16 @@ export CRF_TEST_DESCENDANT_PID="$root/descendant.pid"
 # shellcheck disable=SC1090
 . "$SCRIPT_DIR/runner-operation-workers.sh"
 
+# The signal helper must split a captured PID identity after assigning it.
+# A single local declaration expands the dependent values too early in Bash.
+matched_identity=""
+operation_pid_matches(){ matched_identity="$1:$2"; return 1; }
+operation_signal_identity TERM "123:456"
+crf_assert_eq "123:456" "$matched_identity" 'signal helper PID identity'
+unset -f operation_pid_matches
+# Restore the real helper after the isolated assertion above.
+. "$SCRIPT_DIR/runner-operation-workers.sh"
+
 sha="$(printf config | sha256sum | cut -d' ' -f1)"
 config_revision(){ printf '%s\n' "$sha"; }
 public_field(){ operation_read_public "$1" | php -r '$j=json_decode(stream_get_contents(STDIN),true);echo $j[$argv[1]]??"";' "$2"; }

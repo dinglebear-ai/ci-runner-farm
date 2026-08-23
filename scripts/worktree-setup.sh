@@ -66,14 +66,20 @@ mise install --yes --cd "$destination"
 # shellcheck disable=SC2016
 mise exec --cd "$destination" -- bash -Eeuo pipefail -c '
   go_version="$(go version)"
+  rustc_version="$(rustc --version)"
+  cargo_version="$(cargo --version)"
   elixir_version="$(elixir --version)"
   mix_version="$(mix --version)"
 
   printf "%s\n" "$go_version"
+  printf "%s\n" "$rustc_version"
+  printf "%s\n" "$cargo_version"
   printf "%s\n" "$elixir_version"
   printf "%s\n" "$mix_version"
 
   [[ "$go_version" == *"go1.25.3"* ]]
+  [[ "$rustc_version" == "rustc 1.97.1 "* ]]
+  [[ "$cargo_version" == "cargo 1.97.1 "* ]]
   [[ "$elixir_version" == *"Erlang/OTP 29"* ]]
   [[ "$elixir_version" == *"Elixir 1.20.3"* ]]
 '

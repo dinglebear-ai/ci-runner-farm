@@ -62,7 +62,8 @@ operation_pid_matches() {
 }
 
 operation_signal_identity() {
-  local signal="$1" identity="$2" pid="${identity%%:*}" starttime="${identity#*:}"
+  local signal="$1" identity="$2"
+  local pid="${identity%%:*}" starttime="${identity#*:}"
   operation_pid_matches "$pid" "$starttime" || return 0
   kill -"$signal" "$pid" 2>/dev/null || true
 }

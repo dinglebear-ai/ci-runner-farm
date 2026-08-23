@@ -4,6 +4,7 @@
 # an installed Erlang/Elixir pair and bundle builds fail when invoking `mix`.
 erlang = "29.0.5"
 elixir = "1.20.3-otp-29"
+rust = "1.97.1"
 # build-plg.sh intentionally rejects other Go releases so the shipped
 # crf-scaleset binary stays aligned with its CI and compatibility evidence.
 go = "1.25.3"

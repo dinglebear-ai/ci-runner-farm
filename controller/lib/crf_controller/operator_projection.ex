@@ -3,20 +3,12 @@ defmodule CrfController.OperatorProjection do
 
   alias CrfController.OperatorSnapshot
 
-  def build(controller_instance_id, now_unix_ms)
+  def build(controller_instance_id, now_unix_ms, snapshot_fun \\ &OperatorSnapshot.snapshot/0)
       when is_binary(controller_instance_id) and is_integer(now_unix_ms) and now_unix_ms > 0 do
-    task = Task.async(&OperatorSnapshot.snapshot/0)
-
-    case Task.yield(task, 250) || Task.shutdown(task, :brutal_kill) do
-      {:ok, snapshot} ->
-        snapshot
-        |> Map.put(:controller_instance_id, controller_instance_id)
-        |> Map.put(:observed_at_unix_ms, now_unix_ms)
-        |> json_value()
-
-      _ ->
-        nil
-    end
+    snapshot_fun.()
+    |> Map.put(:controller_instance_id, controller_instance_id)
+    |> Map.put(:observed_at_unix_ms, now_unix_ms)
+    |> json_value()
   end
 
   defp json_value(nil), do: :null

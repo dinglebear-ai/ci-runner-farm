@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, Read, Write},
+    io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,6 +13,7 @@ use crf_protocol::wire::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls_pki_types::pem::PemObject;
 
 use crate::controller_endpoint::ControllerEndpoint;
 
@@ -217,12 +218,16 @@ fn load_certificates(
     path: &Path,
     kind: CertificateKind,
 ) -> Result<Vec<CertificateDer<'static>>, NodeTransportError> {
-    let file = File::open(path).map_err(|_| match kind {
+    File::open(path).map_err(|_| match kind {
         CertificateKind::Authority => NodeTransportError::ReadAuthorityCertificate,
         CertificateKind::Client => NodeTransportError::ReadClientCertificate,
     })?;
-    let mut reader = BufReader::new(file);
-    let certificates: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
+    let certificates: Result<Vec<_>, _> = CertificateDer::pem_file_iter(path)
+        .map_err(|_| match kind {
+            CertificateKind::Authority => NodeTransportError::InvalidAuthorityCertificate,
+            CertificateKind::Client => NodeTransportError::InvalidClientCertificate,
+        })?
+        .collect();
     let certificates = certificates.map_err(|_| match kind {
         CertificateKind::Authority => NodeTransportError::InvalidAuthorityCertificate,
         CertificateKind::Client => NodeTransportError::InvalidClientCertificate,
@@ -237,9 +242,11 @@ fn load_certificates(
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, NodeTransportError> {
-    let file = File::open(path).map_err(|_| NodeTransportError::ReadPrivateKey)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
+    File::open(path).map_err(|_| NodeTransportError::ReadPrivateKey)?;
+    PrivateKeyDer::pem_file_iter(path)
+        .map_err(|_| NodeTransportError::ReadPrivateKey)?
+        .next()
+        .transpose()
         .map_err(|_| NodeTransportError::ReadPrivateKey)?
         .ok_or(NodeTransportError::MissingPrivateKey)
 }
