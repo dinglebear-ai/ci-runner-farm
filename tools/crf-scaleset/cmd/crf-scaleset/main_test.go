@@ -6,11 +6,64 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/controller"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/probe"
 )
+
+func TestCompatibilityEvidenceContractProjectsVerifiedRecord(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "compatibility.json")
+	record := probe.Record{
+		PluginDigest: strings.Repeat("1", 64), HelperDigest: strings.Repeat("2", 64),
+		ModuleRevision: "revision", GoVersion: "go1.test", ImageDigest: strings.Repeat("3", 64),
+		DockerfileDigest: strings.Repeat("4", 64), EntrypointDigest: strings.Repeat("5", 64),
+		Owner: "example", APIURL: "https://api.github.com", InstallationID: "install",
+		HostID: "host", RunnerGroupID: 7, QuarantineRunnerGroupID: 8,
+		RunnerGroupPolicy: "restricted", Capabilities: map[string]bool{},
+		Cleanup: probe.Cleanup{Complete: true, IDs: []int64{}},
+	}
+	for _, capability := range probe.RequiredCapabilities() {
+		record.Capabilities[capability] = true
+	}
+	if err := record.Seal(now); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := compatibilityEvidenceContract([]string{"--path", path}, now,
+		func(path string, now time.Time) (probe.Record, error) {
+			return probe.LoadFresh(path, now, 30*24*time.Hour)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.SchemaVersion != 1 || got.RecordID != record.CompatibilityRecordID ||
+		got.TestedAt != now || got.RunnerGroupID != 7 || got.QuarantineRunnerGroupID != 8 ||
+		len(got.Capabilities) != len(probe.RequiredCapabilities()) {
+		t.Fatalf("unexpected compatibility projection: %#v", got)
+	}
+}
+
+func TestCompatibilityEvidenceContractRequiresOneAbsolutePath(t *testing.T) {
+	loader := func(string, time.Time) (probe.Record, error) { return probe.Record{}, nil }
+	for _, args := range [][]string{
+		{}, {"--path", "relative.json"}, {"--path", "/absolute.json", "extra"},
+		{"--path", "/absolute.json", "--unknown"},
+	} {
+		if _, err := compatibilityEvidenceContract(args, time.Now(), loader); err == nil {
+			t.Fatalf("accepted invalid arguments: %#v", args)
+		}
+	}
+}
 
 func TestSupervisorServerAuthorizesEffectiveUID(t *testing.T) {
 	server := supervisorServer(filepath.Join(t.TempDir(), "control.sock"), nil)

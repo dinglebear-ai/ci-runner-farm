@@ -31,7 +31,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage", "expected version, validate-frame, validate-runtime, request, probe, check-compatibility, or supervise")
+		fail("usage", "expected version, validate-frame, validate-runtime, request, probe, check-compatibility, compatibility-evidence, or supervise")
 	}
 	switch os.Args[1] {
 	case "version":
@@ -64,11 +64,70 @@ func main() {
 			fail("invalid_compatibility_record", err.Error())
 		}
 		write(map[string]any{"ok": true, "compatibility_record_id": record.CompatibilityRecordID})
+	case "compatibility-evidence":
+		result, err := compatibilityEvidenceContract(os.Args[2:], time.Now().UTC(), verifiedCompatibilityAt)
+		if err != nil {
+			fail("invalid_compatibility_record", err.Error())
+		}
+		write(result)
 	case "supervise":
 		supervise(os.Args[2:])
 	default:
 		fail("unknown_command", os.Args[1])
 	}
+}
+
+type compatibilityEvidenceResult struct {
+	OK                      bool            `json:"ok"`
+	SchemaVersion           int             `json:"schema_version"`
+	RecordID                string          `json:"compatibility_record_id"`
+	PluginDigest            string          `json:"plugin_digest"`
+	HelperDigest            string          `json:"helper_digest"`
+	ModuleRevision          string          `json:"module_revision"`
+	GoVersion               string          `json:"go_version"`
+	ImageDigest             string          `json:"image_digest"`
+	DockerfileDigest        string          `json:"dockerfile_digest"`
+	EntrypointDigest        string          `json:"entrypoint_digest"`
+	Owner                   string          `json:"owner"`
+	APIURL                  string          `json:"api_url"`
+	InstallationID          string          `json:"installation_id"`
+	HostID                  string          `json:"host_id"`
+	RunnerGroupID           int64           `json:"runner_group_id"`
+	QuarantineRunnerGroupID int64           `json:"quarantine_runner_group_id"`
+	RunnerGroupPolicy       string          `json:"runner_group_policy"`
+	Capabilities            map[string]bool `json:"capabilities"`
+	TestedAt                time.Time       `json:"tested_at"`
+	CleanupComplete         bool            `json:"cleanup_complete"`
+}
+
+type compatibilityLoader func(string, time.Time) (probe.Record, error)
+
+func compatibilityEvidenceContract(args []string, now time.Time, load compatibilityLoader) (compatibilityEvidenceResult, error) {
+	flags := flag.NewFlagSet("compatibility-evidence", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "absolute mode-0600 sealed compatibility record")
+	if err := flags.Parse(args); err != nil || !filepath.IsAbs(*path) || flags.NArg() != 0 {
+		return compatibilityEvidenceResult{}, errors.New("compatibility-evidence requires one absolute --path")
+	}
+	record, err := load(*path, now)
+	if err != nil {
+		return compatibilityEvidenceResult{}, err
+	}
+	required := probe.RequiredCapabilities()
+	capabilities := make(map[string]bool, len(required))
+	for _, name := range required {
+		capabilities[name] = record.Capabilities[name]
+	}
+	return compatibilityEvidenceResult{OK: true, SchemaVersion: record.SchemaVersion,
+		RecordID: record.CompatibilityRecordID, PluginDigest: record.PluginDigest,
+		HelperDigest: record.HelperDigest, ModuleRevision: record.ModuleRevision,
+		GoVersion: record.GoVersion, ImageDigest: record.ImageDigest,
+		DockerfileDigest: record.DockerfileDigest, EntrypointDigest: record.EntrypointDigest,
+		Owner: record.Owner, APIURL: record.APIURL, InstallationID: record.InstallationID,
+		HostID: record.HostID, RunnerGroupID: record.RunnerGroupID,
+		QuarantineRunnerGroupID: record.QuarantineRunnerGroupID,
+		RunnerGroupPolicy:       record.RunnerGroupPolicy, Capabilities: capabilities,
+		TestedAt: record.TestedAt, CleanupComplete: record.Cleanup.Complete}, nil
 }
 
 type runtimeValidationResult struct {
@@ -343,7 +402,11 @@ func newScaleSetAPI(cfg controller.RuntimeConfig) (crfgithub.ScaleSetAPI, error)
 }
 
 func verifiedCompatibility(path string) (probe.Record, error) {
-	record, err := probe.LoadFresh(path, time.Now().UTC(), 30*24*time.Hour)
+	return verifiedCompatibilityAt(path, time.Now().UTC())
+}
+
+func verifiedCompatibilityAt(path string, now time.Time) (probe.Record, error) {
+	record, err := probe.LoadFresh(path, now, 30*24*time.Hour)
 	if err != nil {
 		return probe.Record{}, err
 	}

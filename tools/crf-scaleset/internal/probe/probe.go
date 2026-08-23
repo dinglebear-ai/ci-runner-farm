@@ -49,6 +49,12 @@ var required = []string{
 	"exact_cleanup",
 }
 
+// RequiredCapabilities returns a copy of the compatibility gates sealed into a
+// schema-v1 record. Callers cannot mutate the verifier's allowlist.
+func RequiredCapabilities() []string {
+	return append([]string(nil), required...)
+}
+
 var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (r *Record) Seal(now time.Time) error {

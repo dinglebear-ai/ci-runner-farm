@@ -30,6 +30,26 @@ The runtime file contains no credential value. Its `auth.token_file` or
 `auth.private_key_file` names a separate mode-`0600` regular file that the
 supervised process reads after preflight.
 
+After selecting compatibility evidence, obtain the native plugin's safe,
+machine-readable projection with exactly:
+
+```text
+crf-scaleset compatibility-evidence --path /absolute/compatibility.json
+```
+
+This command is local and non-mutating. It requires one absolute path, reads a
+regular mode-`0600` file no larger than 64 KiB, rejects unknown or trailing JSON,
+and verifies schema, cleanup, required capabilities, digests, identity,
+30-day freshness, SHA-256 seal, current helper module/Go identity, and the exact
+running helper digest. It never reads the configured GitHub credential, opens a
+socket, or contacts GitHub. Success is one JSON line containing `ok`, the schema
+and record IDs, the five bound digests, helper module and Go versions, owner/API/
+installation/host identities, both runner-group IDs and policy, the fixed
+required-capability map, `tested_at`, and `cleanup_complete`. No credential value
+or credential path is projected. The native plugin must decode this as a strict,
+bounded response and treat any nonzero exit, unknown field, or identity change as
+invalid evidence.
+
 ## Supervision
 
 After preflight and compatibility-record selection, start exactly one process
