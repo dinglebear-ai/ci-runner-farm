@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## [1.11.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.10.1...v1.11.0) (2026-08-23)
+
+
+### Features
+
+* add durable adaptive queue fast lane ([#75](https://github.com/dinglebear-ai/ci-runner-farm/issues/75)) ([e0ce8be](https://github.com/dinglebear-ai/ci-runner-farm/commit/e0ce8bed170d568f2d749692f63a11b370521437))
+
+
+### Bug Fixes
+
+* quiesce surplus fixed runners before drain ([#76](https://github.com/dinglebear-ai/ci-runner-farm/issues/76)) ([bc6f514](https://github.com/dinglebear-ai/ci-runner-farm/commit/bc6f51491a09f441998b518efdd5b100d3d88197))
+
 ## [1.10.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.10.0...v1.10.1) (2026-08-23)
 
 
