@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [1.11.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.11.0...v1.11.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* preserve published plugin manifest between releases ([73a1b8b](https://github.com/dinglebear-ai/ci-runner-farm/commit/73a1b8b6339f66d98569d3b3540e8987c9b618ec))
+* remediate full repository review findings ([0fc88d4](https://github.com/dinglebear-ai/ci-runner-farm/commit/0fc88d472b1e9a4f51e39eca086442e7abc44b1c))
+* resolve native runner review findings ([8a9d2a4](https://github.com/dinglebear-ai/ci-runner-farm/commit/8a9d2a41d657a70619b92e85865f1053ee79b27e))
+
 ## [1.11.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.10.1...v1.11.0) (2026-08-23)
 
 
