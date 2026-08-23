@@ -25,9 +25,15 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $log = Join-Path $root 'nerdctl.log'
     $fake = Join-Path $root 'nerdctl.cmd'
-    @"
+@"
 @echo off
 echo %*>>"$log"
+echo %*|findstr /c:" info " >nul && (echo windows& exit /b 0)
+echo %*|findstr /c:" create " >nul && (echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef& exit /b 0)
+echo %*|findstr /c:" cp " >nul && exit /b 0
+echo %*|findstr /c:" start " >nul && exit /b 0
+echo %*|findstr /c:" inspect " >nul && (echo true^|placement-1& exit /b 0)
+echo %*|findstr /c:" rm " >nul && exit /b 0
 if "%1"=="info" (echo windows& exit /b 0)
 if "%1"=="create" (echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef& exit /b 0)
 if "%1"=="cp" exit /b 0
@@ -46,6 +52,7 @@ exit /b 1
     if ($response.schema_version -ne 1 -or $response.payload.result -ne 'started') { throw "Unexpected adapter response: $($response | ConvertTo-Json -Compress)" }
     $args = Get-Content -LiteralPath $log -Raw
     if ($args -notmatch 'create .*--isolation=hyperv') { throw "Container was not Hyper-V isolated: $args" }
+    if ($args -notmatch '--namespace=buildkit') { throw "Containerd namespace was not explicit: $args" }
     if ($args -notmatch '--cpus=2.5' -or $args -notmatch '--memory=4294967296') { throw "Resource limits were not enforced: $args" }
     if ($args -match 'secret-jit') { throw 'JIT secret leaked into container runtime argv' }
     if ((Get-Content -LiteralPath $adapter -Raw) -match 'Docker') { throw 'Adapter still depends on Docker Desktop' }

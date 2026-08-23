@@ -14,7 +14,8 @@ function Valid-Identifier([string] $Value) {
 }
 
 function Invoke-Runtime([string[]] $Arguments, [switch] $Capture) {
-    if ($Capture) { $output = & $script:Runtime @Arguments 2>$null | Out-String } else { & $script:Runtime @Arguments 2>$null | Out-Null }
+    $namespaceArgument = "--namespace=$script:Namespace"
+    if ($Capture) { $output = & $script:Runtime $namespaceArgument @Arguments 2>$null | Out-String } else { & $script:Runtime $namespaceArgument @Arguments 2>$null | Out-Null }
     if ($LASTEXITCODE -ne 0) { throw 'container_runtime_failed' }
     if ($Capture) { return $output.Trim() }
 }
@@ -28,6 +29,8 @@ try {
     if (-not (Valid-Identifier $request.placement_id)) { Reject 'invalid_request' }
 
     $script:Runtime = if ($env:CRF_NERDCTL_PATH) { $env:CRF_NERDCTL_PATH } else { 'C:\Program Files\nerdctl\nerdctl.exe' }
+    $script:Namespace = if ($env:CRF_CONTAINERD_NAMESPACE) { $env:CRF_CONTAINERD_NAMESPACE } else { 'buildkit' }
+    if (-not (Valid-Identifier $script:Namespace)) { Reject 'invalid_runtime_namespace' }
     if (-not (Test-Path -LiteralPath $script:Runtime -PathType Leaf)) { Reject 'missing_runtime_dependency' }
     $stateRoot = if ($env:CRF_CONTAINER_STATE_DIR) { $env:CRF_CONTAINER_STATE_DIR } else { 'C:\ProgramData\CiRunnerFarm\container-adapter' }
     New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
