@@ -64,7 +64,8 @@ mkdir -p "$parent"
 stage="$(mktemp -d "$parent/.crf-native-payload.XXXXXX")"
 cleanup() { rm -rf -- "$stage"; }
 trap cleanup EXIT
-target_dir="$stage/.cargo-target"
+target_dir="${CRF_NATIVE_PAYLOAD_TARGET_DIR:-$stage/.cargo-target}"
+mkdir -p "$target_dir"
 
 for platform in "${platforms[@]}"; do
   case "$platform" in
@@ -128,7 +129,9 @@ provenance = {
 (stage / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
 PY
 
-rm -rf -- "$stage/.cargo-target"
+if [[ -z "${CRF_NATIVE_PAYLOAD_TARGET_DIR:-}" ]]; then
+  rm -rf -- "$target_dir"
+fi
 if [[ -d "$output_dir" ]]; then
   rmdir "$output_dir"
 fi

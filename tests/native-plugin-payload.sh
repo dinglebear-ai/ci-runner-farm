@@ -28,6 +28,7 @@ ln -s "$tmp/symlink-target" "$tmp/symlink-output"
 fail "$builder" --output-dir "$tmp/symlink-output" --platform linux-x86_64
 grep -q "symbolic link" "$tmp/stderr"
 
+export CRF_NATIVE_PAYLOAD_TARGET_DIR="$tmp/cargo-target"
 SOURCE_DATE_EPOCH=1700000000 "$builder" --output-dir "$tmp/payload" --platform linux-x86_64
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-node"
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-scaleset"

@@ -27,7 +27,7 @@ CRF_OPERATOR_PROJECTION_PATH=/var/lib/ci-runner-farm/node/status/controller.json
 # Install a compatible isolated adapter before enabling the node service.
 CRF_EXECUTION_BACKEND=container
 CRF_CONTAINER_ADAPTER_PROGRAM=/opt/ci-runner-farm/current/bin/crf-container-adapter
-CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
+CRF_CONTAINER_ADAPTER_TIMEOUT_MS=60000
 # The adapter receives the JIT descriptor only over bounded stdin.
 
 # Portable Linux Docker adapter. The image must be immutable and contain the

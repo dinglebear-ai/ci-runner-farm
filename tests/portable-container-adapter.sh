@@ -65,6 +65,9 @@ DOCKER
 chmod 0755 "$tmp/bin/docker"
 
 adapter="$root/packaging/distributed/bin/crf-container-adapter"
+grep -Fq 'seq 1 60' "$adapter"
+grep -Fq 'seq 1 30' "$adapter"
+grep -Fq 'CRF_CONTAINER_ADAPTER_TIMEOUT_MS=60000' "$root/packaging/distributed/examples/node-env.example"
 export PATH="$tmp/bin:$PATH"
 export CRF_TEST_DOCKER_ROOT="$tmp/mock"
 export CRF_CONTAINER_STATE_DIR="$tmp/state"

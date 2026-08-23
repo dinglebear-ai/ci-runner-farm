@@ -213,10 +213,10 @@ case "$action" in
       "$image" >/dev/null 2>&1 || { reply_code deferred container_start_uncertain; exit 0; }
     find_container || { reply_code deferred container_start_uncertain; exit 0; }
     state_write "$command_id" "$pool_id" "$runner_name" "$cpu" "$memory" "$observed_id" "" || { docker rm -f "$observed_id" >/dev/null 2>&1 || true; reply_code deferred state_write_failed; exit 0; }
-    docker exec "$observed_id" sh -c 'for i in $(seq 1 240); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
+    docker exec "$observed_id" sh -c 'for i in $(seq 1 60); do [ -f /run/crf/ready ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
     (set +x; printf '%s\n' "$jit") | docker exec -i "$observed_id" sh -c 'cat > /run/crf/secret.in' >/dev/null 2>&1 || true
     jit=""; unset jit
-    docker exec "$observed_id" sh -c 'for i in $(seq 1 120); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
+    docker exec "$observed_id" sh -c 'for i in $(seq 1 30); do [ -f /run/crf/consumed ] && exit 0; sleep 0.5; done; exit 1' >/dev/null 2>&1 || { reply_code deferred container_secret_pending; exit 0; }
     reply_id started "$observed_id"
     ;;
 esac
