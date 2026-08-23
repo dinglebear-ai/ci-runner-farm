@@ -5,40 +5,56 @@ defmodule CrfController.SchedulerClientTest do
 
   @gib 1024 * 1024 * 1024
 
-  @tag :tmp_dir
-  test "queued callers are monitored and expired before they can become ghost work", %{
-    tmp_dir: tmp_dir
-  } do
-    executable = Path.join(tmp_dir, "blocking-scheduler")
-    File.write!(executable, "#!/bin/sh\nsleep 10\n")
-    File.chmod!(executable, 0o700)
+  test "queued callers are monitored and expired before they can become ghost work" do
+    if match?({:win32, _}, :os.type()) do
+      # The blocking fixture is a POSIX executable. Windows still exercises the
+      # persistent-port queue through the real scheduler test below.
+      assert true
+    else
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "crf-scheduler-client-#{System.unique_integer([:positive])}"
+        )
 
-    client =
-      start_supervised!(
-        {SchedulerClient, name: nil, executable: executable, request_timeout_ms: 150}
-      )
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      executable = Path.join(tmp_dir, "blocking-scheduler")
+      File.write!(executable, "#!/bin/sh\nsleep 10\n")
+      File.chmod!(executable, 0o700)
 
-    nodes = [node("steamy", :windows, :native_process)]
-    first = Task.async(fn -> SchedulerClient.schedule(client, [work("active")], nodes, 2_000) end)
-    Process.sleep(25)
+      client =
+        start_supervised!(
+          {SchedulerClient, name: nil, executable: executable, request_timeout_ms: 150},
+          id: :ghost_scheduler_client
+        )
 
-    ghost =
-      spawn(fn ->
-        _ = SchedulerClient.schedule(client, [work("ghost")], nodes, 2_000)
-      end)
+      nodes = [node("steamy", :windows, :native_process)]
 
-    Process.sleep(25)
-    Process.exit(ghost, :kill)
+      first =
+        Task.async(fn -> SchedulerClient.schedule(client, [work("active")], nodes, 2_000) end)
 
-    assert eventually(fn -> map_size(:sys.get_state(client).queued) == 0 end)
-    assert {:error, :scheduler_timeout} = Task.await(first, 2_000)
+      Process.sleep(25)
 
-    started_at = System.monotonic_time(:millisecond)
+      ghost =
+        spawn(fn ->
+          _ = SchedulerClient.schedule(client, [work("ghost")], nodes, 2_000)
+        end)
 
-    assert {:error, :scheduler_timeout} =
-             SchedulerClient.schedule(client, [work("after-ghost")], nodes, 2_000)
+      Process.sleep(25)
+      Process.exit(ghost, :kill)
 
-    assert System.monotonic_time(:millisecond) - started_at < 500
+      assert eventually(fn -> map_size(:sys.get_state(client).queued) == 0 end)
+      assert {:error, :scheduler_timeout} = Task.await(first, 2_000)
+
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :scheduler_timeout} =
+               SchedulerClient.schedule(client, [work("after-ghost")], nodes, 2_000)
+
+      assert System.monotonic_time(:millisecond) - started_at < 500
+      stop_supervised!(:ghost_scheduler_client)
+    end
   end
 
   test "persistent Elixir Port uses the real Rust scheduler for sequential and queued calls" do
