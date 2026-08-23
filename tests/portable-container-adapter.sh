@@ -85,9 +85,14 @@ inspect='{"schema_version":1,"payload":{"action":"inspect","placement_id":"place
 reply="$(printf '%s\n' "$inspect" | "$adapter")"
 jq -e '.payload.result == "running"' <<<"$reply" >/dev/null
 
+printf exited >"$tmp/mock/status"
+printf 1 >"$tmp/mock/exit"
+reply="$(printf '%s\n' "$inspect" | "$adapter")"
+jq -e '.payload.result == "terminal" and .payload.outcome.failed.detail_code == "container_exit_nonzero"' <<<"$reply" >/dev/null
+
 cancel='{"schema_version":1,"payload":{"action":"cancel","placement_id":"placement-1","expected_id":null}}'
 reply="$(printf '%s\n' "$cancel" | "$adapter")"
-jq -e '.payload.result == "cancelled"' <<<"$reply" >/dev/null
+jq -e '.payload.result == "terminal" and .payload.outcome.failed.detail_code == "container_exit_nonzero"' <<<"$reply" >/dev/null
 [[ ! -f "$tmp/mock/exists" ]]
 if grep -R -Fq "$jit" "$tmp/state" "$tmp/work"; then exit 1; fi
 

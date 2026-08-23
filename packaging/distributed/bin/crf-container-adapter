@@ -149,9 +149,18 @@ case "$action" in
     [[ -z "$expected" ]] || container_id_valid "$expected" || fail_closed invalid_request
     if state_valid; then
       terminal="$(state_field terminal 2>/dev/null || true)"
-      [[ -z "$terminal" || "$terminal" == null ]] || { terminal_response "$terminal"; exit 0; }
       command_id="$(state_field command_id)"; pool_id="$(state_field pool_id)"; runner_name="$(state_field runner_name)"
       cpu="$(state_field cpu_millis)"; memory="$(state_field memory_bytes)"
+      if [[ -n "$terminal" && "$terminal" != null ]]; then
+        if find_container; then
+          [[ -z "$expected" || "$expected" == "$observed_id" ]] || { reply_code deferred runtime_identity_mismatch; exit 0; }
+          docker rm -f "$observed_id" >/dev/null 2>&1 || { reply_code deferred container_remove_failed; exit 0; }
+        else
+          case $? in 1) : ;; *) reply_code deferred container_identity_ambiguous; exit 0 ;; esac
+        fi
+        terminal_response "$terminal"
+        exit 0
+      fi
     else
       command_id=unknown; pool_id=unknown; runner_name=unknown; cpu=1; memory=1
     fi
