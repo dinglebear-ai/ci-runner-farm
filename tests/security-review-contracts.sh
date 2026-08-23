@@ -44,7 +44,8 @@ if rg -n 'github\.com/unraid/ci-runner-farm|raw\.githubusercontent\.com/unraid/c
 fi
 
 migration="$(mktemp)"
-sed -n '/# BEGIN_RUNNER_BASE_MIGRATION/,/# END_RUNNER_BASE_MIGRATION/p' ci-runner-farm.plg >"$migration"
+sed -n '/# BEGIN_RUNNER_BASE_MIGRATION/,/# END_RUNNER_BASE_MIGRATION/p' build-plg.sh \
+  | sed 's/\\\$/\$/g' >"$migration"
 fixture="$(mktemp -d)"
 CFGDIR="$fixture"; DF="$CFGDIR/Dockerfile"
 printf '%s\n' 'FROM myoung34/github-runner:latest' 'RUN echo customized' >"$DF"
