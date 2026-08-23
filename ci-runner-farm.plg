@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name          "ci-runner-farm">
 <!ENTITY author        "Lime Technology">
-<!ENTITY version       "2026.08.22.2152.80-1.10.0">
-<!ENTITY pluginVersion "1.10.0">
-<!ENTITY releaseTag    "v1.10.0">
+<!ENTITY version       "2026.08.23.0016.83-1.10.1">
+<!ENTITY pluginVersion "1.10.1">
+<!ENTITY releaseTag    "v1.10.1">
 <!ENTITY pluginURL     "https://github.com/dinglebear-ai/ci-runner-farm/releases/latest/download/ci-runner-farm.plg">
-<!ENTITY packageName   "ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz">
-<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.10.0/ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz">
-<!ENTITY packageMD5    "ea165fc7e3789ef10b60221e8dde5b71">
+<!ENTITY packageName   "ci-runner-farm-2026.08.23.0016.83-1.10.1.tgz">
+<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.10.1/ci-runner-farm-2026.08.23.0016.83-1.10.1.tgz">
+<!ENTITY packageMD5    "24d30a102da1479bb42efa14f5938453">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
 ]>
@@ -22,19 +22,7 @@
 
 <CHANGES>
 ### &version;
-### Changed
-* Build local runner images under immutable candidate tags and require an explicit exact-image-ID promotion before changing the production `ci-runner-farm-runner:latest` tag.
-* Add persistent mutation-owner leases that fence competing UI, CLI, reconcile, recycle, and daemon mutations across multi-command maintenance sessions.
-* Reject V2 configured baselines that exceed post-reserve CPU or memory admission budgets, using fixed capacity for fixed pools and minimum capacity for autoscaled pools, and expose configured claims plus remaining headroom in status JSON.
-* Add an idempotent Nashost fleet-audit installer and daily 06:30 audit covering exact GitHub identities and labels, runner image and Kache integrity, plugin identity, resource headroom, reconciliation state, watchdog stability, and Unraid/Gotify pass-fail notifications.
-* Make the package reproducibility assertion deterministic under `pipefail` by fully extracting the inspected file before searching it.
-* Move the canonical repository and scale-set helper module identity to `dinglebear-ai/ci-runner-farm`.
-* Route trusted dinglebear-ai CI through the `ci-pool-ops` self-hosted pool while keeping public fork pull requests on GitHub-hosted runners.
-* Include PHP CLI, ripgrep, and file inspection tools in the Nashost runner image so the repository's syntax, behavioral, and release gates run on the farm.
-* Make the watchdog process-enumeration regression test independent of host PID ordering.
-* Replace the temporary Kache prefetch backport with the checksum-pinned upstream v0.13.0 release across the Nashost runner image profile, layering the rollout on the current s3-v8 Kache/CC image.
-* Document the final feasible 16-runner Nashost pool envelope with six Rust and one Python runner, and require pristine-image Kache version and checksum verification before fleet reconciliation.
-* Continue stale-runner reconciliation after a graceful recycle is safely refused, allowing later idle stale runners to migrate without waiting behind a transiently misreported busy runner.
+- Containerized GitHub Actions runner farm for Unraid.
 </CHANGES>
 
 <!-- plugin package: Unraid downloads it to flash and verifies the MD5 -->
@@ -52,11 +40,11 @@ CFGDIR="/boot/config/plugins/ci-runner-farm"
 RUNDIR="/var/local/emhttp/ci-runner-farm"
 mkdir -p "$CFGDIR" "$PLGDIR" "$RUNDIR"
 # Sweep any older package versions off flash, keeping this build's package.
-find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz' -delete 2>/dev/null || true
+find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.08.23.0016.83-1.10.1.tgz' -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
-tar -xzf "$CFGDIR/ci-runner-farm-2026.08.22.2152.80-1.10.0.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
+tar -xzf "$CFGDIR/ci-runner-farm-2026.08.23.0016.83-1.10.1.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
@@ -110,7 +98,7 @@ fi
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
-echo "| ci-runner-farm 2026.08.22.2152.80-1.10.0 installed.                         "
+echo "| ci-runner-farm 2026.08.23.0016.83-1.10.1 installed.                         "
 echo "| Settings > Utilities > CI Runner Farm                        "
 echo "| Set a GitHub PAT, then Start (or Validate without a token).  "
 echo "+=============================================================+"
