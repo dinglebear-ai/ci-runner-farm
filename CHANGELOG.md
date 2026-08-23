@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [1.10.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.10.0...v1.10.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* close final repository review findings ([9edcae3](https://github.com/dinglebear-ai/ci-runner-farm/commit/9edcae36970b237480a6e44efd8051b9c253ed96))
+* **controller:** keep authenticated node sessions open ([c3d6e31](https://github.com/dinglebear-ai/ci-runner-farm/commit/c3d6e31d2cb1a7785310bb53d56bc3bffb4c4e59))
+* remediate comprehensive repository review ([2463f70](https://github.com/dinglebear-ai/ci-runner-farm/commit/2463f70a41aa2acc4d3e5d8708c46afbe78c1c90))
+* **windows:** require isolated node backend ([af2d9dc](https://github.com/dinglebear-ai/ci-runner-farm/commit/af2d9dc21d1a2e665b4e52aacfb86c4c08b6e417))
+
 ## [1.10.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.9.2...v1.10.0) (2026-08-22)
 
 ### Changed
