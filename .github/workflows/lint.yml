@@ -65,10 +65,21 @@ jobs:
       - name: Behavioral regression suite
         run: |
           set -e
+          # Build the native payload while the hosted runner still has its full
+          # scratch-disk budget. The release gate intentionally builds a complete
+          # plugin package and runs last so those artifacts cannot starve another
+          # test's mktemp/build directory.
+          echo "bash tests/native-plugin-payload.sh"
+          bash tests/native-plugin-payload.sh
           for test in tests/*.sh; do
+            case "$test" in
+              tests/native-plugin-payload.sh|tests/final-release-gate.sh) continue ;;
+            esac
             echo "bash $test"
             bash "$test"
           done
+          echo "bash tests/final-release-gate.sh"
+          bash tests/final-release-gate.sh
 
   distributed-core:
     name: Distributed core (${{ matrix.os }})
