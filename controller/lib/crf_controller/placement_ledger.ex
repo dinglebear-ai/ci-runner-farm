@@ -116,20 +116,24 @@ defmodule CrfController.PlacementLedger do
         tombstone.node_id == node_id and tombstone.node_generation < generation
       end)
 
-    next_state = %{state | tombstones: retained} |> rebuild_commands()
+    if map_size(retained) == map_size(state.tombstones) do
+      {:reply, :ok, state}
+    else
+      next_state = %{state | tombstones: retained} |> rebuild_commands()
 
-    case PlacementStateStore.append(
-           state.state_path,
-           {:prune_before_generation, node_id, generation}
-         ) do
-      :ok ->
-        # The prune is now authoritative in the WAL. A checkpoint failure is
-        # non-ambiguous: recovery replays this record after any stale puts.
-        _ = checkpoint_state(next_state)
-        {:reply, :ok, next_state}
+      case PlacementStateStore.append(
+             state.state_path,
+             {:prune_before_generation, node_id, generation}
+           ) do
+        :ok ->
+          # The prune is now authoritative in the WAL. A checkpoint failure is
+          # non-ambiguous: recovery replays this record after any stale puts.
+          _ = checkpoint_state(next_state)
+          {:reply, :ok, next_state}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
     end
   end
 

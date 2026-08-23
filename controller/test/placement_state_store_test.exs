@@ -203,6 +203,29 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
+  test "generation prune with no older tombstones performs no durable write" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "crf-placement-noop-prune-#{System.unique_integer([:positive])}"
+      )
+
+    path = Path.join(root, "placements.json")
+    {:ok, ledger} = PlacementLedger.start_link(name: nil, state_path: path)
+    assert {:ok, before_stat} = File.stat(path)
+    assert {:ok, before_contents} = File.read(path)
+
+    assert :ok = PlacementLedger.prune_before_generation(ledger, "dookie", 8)
+
+    assert {:ok, after_stat} = File.stat(path)
+    assert {:ok, ^before_contents} = File.read(path)
+    assert after_stat.inode == before_stat.inode
+    refute File.exists?(path <> ".wal")
+
+    GenServer.stop(ledger)
+    File.rm_rf!(root)
+  end
+
   test "capacity rejects only new placements and preserves idempotent retries" do
     {:ok, ledger} = PlacementLedger.start_link(name: nil, record_capacity: 1)
     attrs = placement_attrs()
