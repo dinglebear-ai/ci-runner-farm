@@ -7,9 +7,14 @@ CRF_CA_CERT=/etc/ci-runner-farm/tls/ca.pem
 CRF_CLIENT_CERT=/etc/ci-runner-farm/tls/node.pem
 CRF_CLIENT_KEY=/etc/ci-runner-farm/tls/node-key.pem
 
-# Explicit host budget. The daemon refuses to advertise more than the host has.
-CRF_NODE_CPU_MILLIS=8000
-CRF_NODE_MEMORY_BYTES=17179869184
+# Host-aware budget. `auto` subtracts these operator reserves from live logical
+# CPU and RAM before advertising capacity. Use explicit positive quantities on
+# shared hosts (for example Windows plus WSL) so the same hardware is not
+# double-counted until both runtimes share one capacity domain.
+CRF_NODE_CPU_MILLIS=auto
+CRF_NODE_MEMORY_BYTES=auto
+CRF_NODE_CPU_RESERVE_MILLIS=2000
+CRF_NODE_MEMORY_RESERVE_BYTES=4294967296
 
 # Durable/private node state. This is shared by both execution backends.
 CRF_STATE_DIR=/var/lib/ci-runner-farm/node/state

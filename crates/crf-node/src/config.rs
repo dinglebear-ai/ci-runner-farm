@@ -30,6 +30,37 @@ pub enum NodeExecutionConfig {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceBudgetConfig {
+    Explicit(Resources),
+    Auto {
+        cpu_reserve_millis: u64,
+        memory_reserve_bytes: u64,
+    },
+}
+
+impl ResourceBudgetConfig {
+    pub fn resolve(self, host: Resources) -> Result<Resources, ConfigError> {
+        match self {
+            Self::Explicit(resources) if host.fits(resources) => Ok(resources),
+            Self::Explicit(_) => Err(ConfigError::InvalidResources),
+            Self::Auto {
+                cpu_reserve_millis,
+                memory_reserve_bytes,
+            } => {
+                let cpu_millis = host.cpu_millis.checked_sub(cpu_reserve_millis);
+                let memory_bytes = host.memory_bytes.checked_sub(memory_reserve_bytes);
+                match (cpu_millis, memory_bytes) {
+                    (Some(cpu), Some(memory)) if cpu > 0 && memory > 0 => {
+                        Ok(Resources::new(cpu, memory))
+                    }
+                    _ => Err(ConfigError::InvalidResources),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeConfig {
     pub controller_addr: ControllerEndpoint,
@@ -39,7 +70,7 @@ pub struct NodeConfig {
     pub client_key_path: PathBuf,
     pub state_root: PathBuf,
     pub execution: NodeExecutionConfig,
-    pub resources: Resources,
+    pub resource_budget: ResourceBudgetConfig,
     pub heartbeat_interval: Duration,
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
@@ -82,10 +113,7 @@ impl NodeConfig {
         let state_root = absolute_path(required(values, "CRF_STATE_DIR")?)?;
         let execution = execution_config(values, &state_root)?;
 
-        let cpu_millis = positive_u64(required(values, "CRF_NODE_CPU_MILLIS")?)
-            .map_err(|_| ConfigError::InvalidResources)?;
-        let memory_bytes = positive_u64(required(values, "CRF_NODE_MEMORY_BYTES")?)
-            .map_err(|_| ConfigError::InvalidResources)?;
+        let resource_budget = resource_budget(values)?;
         let heartbeat_interval = duration_ms(values, "CRF_HEARTBEAT_MS", 5_000, 1_000, 60_000)?;
         let connect_timeout = duration_ms(values, "CRF_CONNECT_TIMEOUT_MS", 5_000, 100, 120_000)?;
         let io_timeout = duration_ms(values, "CRF_IO_TIMEOUT_MS", 15_000, 100, 120_000)?;
@@ -107,13 +135,41 @@ impl NodeConfig {
             client_key_path,
             state_root,
             execution,
-            resources: Resources::new(cpu_millis, memory_bytes),
+            resource_budget,
             heartbeat_interval,
             connect_timeout,
             io_timeout,
             command_ledger_capacity: command_ledger_capacity as usize,
             operator_projection_path,
         })
+    }
+}
+
+fn resource_budget(values: &BTreeMap<String, String>) -> Result<ResourceBudgetConfig, ConfigError> {
+    let cpu = required(values, "CRF_NODE_CPU_MILLIS")?;
+    let memory = required(values, "CRF_NODE_MEMORY_BYTES")?;
+    match (cpu, memory) {
+        ("auto", "auto") => Ok(ResourceBudgetConfig::Auto {
+            cpu_reserve_millis: optional_nonnegative_u64(
+                values,
+                "CRF_NODE_CPU_RESERVE_MILLIS",
+                1_000,
+            )?,
+            memory_reserve_bytes: optional_nonnegative_u64(
+                values,
+                "CRF_NODE_MEMORY_RESERVE_BYTES",
+                2 * 1024 * 1024 * 1024,
+            )?,
+        }),
+        ("auto", _) | (_, "auto") => Err(ConfigError::InvalidResources),
+        _ => {
+            let cpu_millis = positive_u64(cpu).map_err(|_| ConfigError::InvalidResources)?;
+            let memory_bytes = positive_u64(memory).map_err(|_| ConfigError::InvalidResources)?;
+            Ok(ResourceBudgetConfig::Explicit(Resources::new(
+                cpu_millis,
+                memory_bytes,
+            )))
+        }
     }
 }
 
@@ -187,6 +243,17 @@ fn optional_u64(values: &BTreeMap<String, String>, key: &str, default: u64) -> R
     }
 }
 
+fn optional_nonnegative_u64(
+    values: &BTreeMap<String, String>,
+    key: &str,
+    default: u64,
+) -> Result<u64, ConfigError> {
+    values
+        .get(key)
+        .map_or(Ok(default), |value| value.parse::<u64>())
+        .map_err(|_| ConfigError::InvalidResources)
+}
+
 fn duration_ms(
     values: &BTreeMap<String, String>,
     key: &str,
@@ -253,8 +320,8 @@ mod tests {
             }
         );
         assert_eq!(
-            config.resources,
-            Resources::new(8_000, 16 * 1024 * 1024 * 1024)
+            config.resource_budget,
+            ResourceBudgetConfig::Explicit(Resources::new(8_000, 16 * 1024 * 1024 * 1024))
         );
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(config.command_ledger_capacity, 4_096);
@@ -397,6 +464,45 @@ mod tests {
         assert_eq!(
             NodeConfig::from_values(&values),
             Err(ConfigError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn automatic_resource_budget_subtracts_explicit_host_reserves() {
+        let mut configured = values();
+        configured.insert("CRF_NODE_CPU_MILLIS".into(), "auto".into());
+        configured.insert("CRF_NODE_MEMORY_BYTES".into(), "auto".into());
+        configured.insert("CRF_NODE_CPU_RESERVE_MILLIS".into(), "2500".into());
+        configured.insert(
+            "CRF_NODE_MEMORY_RESERVE_BYTES".into(),
+            (3 * 1024 * 1024 * 1024_u64).to_string(),
+        );
+        let budget = NodeConfig::from_values(&configured)
+            .expect("automatic budget")
+            .resource_budget;
+        assert_eq!(
+            budget.resolve(Resources::new(12_000, 32 * 1024 * 1024 * 1024)),
+            Ok(Resources::new(9_500, 29 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn automatic_resource_budget_fails_closed_on_partial_auto_or_exhausted_host() {
+        let mut configured = values();
+        configured.insert("CRF_NODE_CPU_MILLIS".into(), "auto".into());
+        assert_eq!(
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::InvalidResources)
+        );
+
+        configured.insert("CRF_NODE_MEMORY_BYTES".into(), "auto".into());
+        configured.insert("CRF_NODE_CPU_RESERVE_MILLIS".into(), "2000".into());
+        let budget = NodeConfig::from_values(&configured)
+            .expect("automatic budget")
+            .resource_budget;
+        assert_eq!(
+            budget.resolve(Resources::new(2_000, 8 * 1024 * 1024 * 1024)),
+            Err(ConfigError::InvalidResources)
         );
     }
 }

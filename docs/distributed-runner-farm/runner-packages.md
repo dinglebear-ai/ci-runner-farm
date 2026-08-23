@@ -5,9 +5,22 @@
 ## Execution backend selection
 
 - Set `CRF_EXECUTION_BACKEND=container` to use a controller-approved local container adapter. Container mode requires `CRF_CONTAINER_ADAPTER_PROGRAM=/absolute/path/to/adapter`; `CRF_CONTAINER_ADAPTER_TIMEOUT_MS` defaults to 15000 and is bounded to 100..120000 ms. Native runner-template/runtime/log settings are not required.
-- Omitting `CRF_EXECUTION_BACKEND` fails closed. Setting it to `native_process` returns `UnsafeNativeExecution`; there is no unsafe override. The distributed bundle does not ship a portable adapter yet, so do not enable its node service until a compatible isolated adapter is installed.
+- Omitting `CRF_EXECUTION_BACKEND` fails closed. Setting it to `native_process` returns `UnsafeNativeExecution`; there is no unsafe override. The distributed Linux bundle ships a portable Docker adapter and protected runner entrypoint. Its runner image must be pinned by platform digest.
 
 The container adapter is an execution boundary, not a scheduler. The controller remains authoritative for placement/resource admission. The adapter receives placement identity, pool, resource claim, runner name, and JIT descriptor over bounded JSON stdin; the JIT descriptor is never placed in adapter argv or environment. Start recovery inspects by placement identity before any retry, and exact immutable container IDs are persisted for cancellation and liveness checks.
+
+## Host capacity budgets
+
+Node capacity may be explicit or derived from the live host. Set both
+`CRF_NODE_CPU_MILLIS` and `CRF_NODE_MEMORY_BYTES` to `auto` to subtract
+`CRF_NODE_CPU_RESERVE_MILLIS` and `CRF_NODE_MEMORY_RESERVE_BYTES` from logical
+CPU and physical RAM before registration. Mixing `auto` with one explicit
+dimension fails closed.
+
+Shared physical hosts, such as Windows plus WSL, must use explicit
+non-overlapping budgets until both runtimes share one controller capacity
+domain. Independently auto-discovering both would count the same hardware
+twice.
 
 ## Historical native package inputs
 

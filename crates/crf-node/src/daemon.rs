@@ -71,11 +71,13 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
     let host_memory = host
         .total_memory_bytes()
         .map_err(|_| DaemonError::HostProbe)?;
-    if config.resources.cpu_millis > platform.logical_cpu_millis
-        || config.resources.memory_bytes > host_memory
-    {
-        return Err(DaemonError::ResourceBudgetExceedsHost);
-    }
+    let resources = config
+        .resource_budget
+        .resolve(crf_protocol::Resources::new(
+            platform.logical_cpu_millis,
+            host_memory,
+        ))
+        .map_err(|_| DaemonError::ResourceBudgetExceedsHost)?;
 
     let generation =
         reserve_next_generation(&config.state_root.join("generations"), &platform.node_id)
@@ -133,7 +135,7 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         capabilities.insert("operator-projection-v1".into());
     }
 
-    let mut available = config.resources;
+    let mut available = resources;
     let reserved = executor
         .reserved_resources()
         .map_err(|_| DaemonError::PlacementState)?;
@@ -148,7 +150,7 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         arch: platform.arch,
         execution_backends: BTreeSet::from([execution_backend]),
         capabilities,
-        total: config.resources,
+        total: resources,
         available,
         draining: false,
     };
