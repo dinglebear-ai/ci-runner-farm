@@ -6,7 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.23"
 fs2 = "0.4"
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar = "0.4"

@@ -88,10 +88,13 @@ dependencies = [
 name = "crf-container-adapter"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "fs2",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
 ]
 
 [[package]]

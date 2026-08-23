@@ -30,7 +30,7 @@ done
 ((${#platforms[@]} > 0)) || platforms=(linux-x86_64 linux-aarch64)
 ((${#platforms[@]} <= 2)) || { echo "at most two platforms may be requested" >&2; exit 2; }
 
-for command in cargo go git python3 sha256sum; do
+for command in cargo go git python3 readelf sha256sum; do
   command -v "$command" >/dev/null 2>&1 || { echo "missing required command: $command" >&2; exit 1; }
 done
 [[ "$(uname -s)" == Linux ]] || { echo "native plugin payloads can only be built on Linux" >&2; exit 1; }
@@ -69,12 +69,16 @@ mkdir -p "$target_dir"
 
 for platform in "${platforms[@]}"; do
   case "$platform" in
-    linux-x86_64) rust_target=x86_64-unknown-linux-gnu; goarch=amd64 ;;
-    linux-aarch64) rust_target=aarch64-unknown-linux-gnu; goarch=arm64 ;;
+    linux-x86_64) rust_target=x86_64-unknown-linux-gnu; adapter_target=x86_64-unknown-linux-musl; goarch=amd64 ;;
+    linux-aarch64) rust_target=aarch64-unknown-linux-gnu; adapter_target=aarch64-unknown-linux-musl; goarch=arm64 ;;
   esac
 
   if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -Fxq "$rust_target"; then
     echo "missing Rust target $rust_target (install it with: rustup target add $rust_target)" >&2
+    exit 1
+  fi
+  if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -Fxq "$adapter_target"; then
+    echo "missing static adapter Rust target $adapter_target (install it with: rustup target add $adapter_target)" >&2
     exit 1
   fi
   if [[ "$rust_target" == aarch64-unknown-linux-gnu ]] && [[ "$(rustc -vV | sed -n 's/^host: //p')" != "$rust_target" ]]; then
@@ -84,6 +88,12 @@ for platform in "${platforms[@]}"; do
       exit 1
     }
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker"
+    musl_linker="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-aarch64-linux-musl-gcc}"
+    command -v "$musl_linker" >/dev/null 2>&1 || {
+      echo "missing aarch64 musl linker: $musl_linker (set CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER or install aarch64-linux-musl-gcc)" >&2
+      exit 1
+    }
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$musl_linker"
   fi
 
   destination="$stage/priv/bin/$platform"
@@ -91,7 +101,19 @@ for platform in "${platforms[@]}"; do
   SOURCE_DATE_EPOCH="$source_date_epoch" CARGO_TARGET_DIR="$target_dir" \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=none" \
     cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node --target "$rust_target"
+  SOURCE_DATE_EPOCH="$source_date_epoch" CARGO_TARGET_DIR="$target_dir" \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=none" \
+    cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-container-adapter --target "$adapter_target"
   install -m 0755 "$target_dir/$rust_target/release/crf-node" "$destination/crf-node"
+  install -m 0755 "$target_dir/$adapter_target/release/crf-container-adapter" "$destination/crf-container-adapter"
+  ! readelf -l "$destination/crf-container-adapter" | grep -q 'INTERP' || {
+    echo "adapter is dynamically linked: $destination/crf-container-adapter" >&2
+    exit 1
+  }
+  ! readelf -d "$destination/crf-container-adapter" 2>/dev/null | grep -q '(NEEDED)' || {
+    echo "adapter has dynamic dependencies: $destination/crf-container-adapter" >&2
+    exit 1
+  }
 
   SOURCE_DATE_EPOCH="$source_date_epoch" CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
     go -C "$root/tools/crf-scaleset" build -mod=vendor -trimpath -buildvcs=false \
@@ -107,7 +129,7 @@ platforms = sys.argv[5:]
 machines = {"linux-x86_64": 62, "linux-aarch64": 183}
 files = []
 for platform in platforms:
-    for name in ("crf-node", "crf-scaleset"):
+    for name in ("crf-container-adapter", "crf-node", "crf-scaleset"):
         path = stage / "priv" / "bin" / platform / name
         data = path.read_bytes()
         if len(data) < 20 or data[:4] != b"\x7fELF":

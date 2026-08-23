@@ -185,7 +185,7 @@ fn execution_config(
         "native_process" => Err(ConfigError::UnsafeNativeExecution),
         "container" => {
             let adapter_program =
-                absolute_path(required(values, "CRF_CONTAINER_ADAPTER_PROGRAM")?)?;
+                adapter_program(required(values, "CRF_CONTAINER_ADAPTER_PROGRAM")?)?;
             if adapter_program.starts_with(state_root) || state_root.starts_with(&adapter_program) {
                 return Err(ConfigError::UnsafePathLayout);
             }
@@ -203,6 +203,19 @@ fn execution_config(
         }
         _ => Err(ConfigError::InvalidExecutionBackend),
     }
+}
+
+fn adapter_program(value: &str) -> Result<PathBuf, ConfigError> {
+    if value == "sibling" {
+        let executable = std::env::current_exe().map_err(|_| ConfigError::InvalidPath)?;
+        let directory = executable.parent().ok_or(ConfigError::InvalidPath)?;
+        return Ok(directory.join(if cfg!(windows) {
+            "crf-container-adapter.exe"
+        } else {
+            "crf-container-adapter"
+        }));
+    }
+    absolute_path(value)
 }
 
 fn required<'a>(values: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, ConfigError> {
@@ -394,6 +407,35 @@ mod tests {
                 )),
                 adapter_timeout: Duration::from_secs(15),
             }
+        );
+    }
+
+    #[test]
+    fn container_backend_resolves_only_the_fixed_sibling_adapter_token() {
+        let mut values = values();
+        values.insert("CRF_EXECUTION_BACKEND".into(), "container".into());
+        values.insert("CRF_CONTAINER_ADAPTER_PROGRAM".into(), "sibling".into());
+
+        let config = NodeConfig::from_values(&values).expect("sibling adapter config");
+        let NodeExecutionConfig::Container {
+            adapter_program, ..
+        } = config.execution
+        else {
+            panic!("container backend");
+        };
+        assert_eq!(
+            adapter_program.file_name().unwrap(),
+            if cfg!(windows) {
+                "crf-container-adapter.exe"
+            } else {
+                "crf-container-adapter"
+            }
+        );
+
+        values.insert("CRF_CONTAINER_ADAPTER_PROGRAM".into(), "nearby".into());
+        assert_eq!(
+            NodeConfig::from_values(&values),
+            Err(ConfigError::InvalidPath)
         );
     }
 

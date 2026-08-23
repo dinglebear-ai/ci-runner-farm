@@ -3,6 +3,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 builder="$root/scripts/build-native-plugin-payload.sh"
+grep -Fq 'aarch64-linux-musl-gcc' "$builder"
+grep -Fq "grep -q '(NEEDED)'" "$builder"
 tmp="$(mktemp -d)"
 trap 'rc=$?; if ((rc)); then echo "native plugin payload test failed near line ${BASH_LINENO[0]:-unknown}" >&2; test ! -f "$tmp/stderr" || cat "$tmp/stderr" >&2; fi; rm -rf "$tmp"' EXIT
 
@@ -31,6 +33,7 @@ grep -q "symbolic link" "$tmp/stderr"
 export CRF_NATIVE_PAYLOAD_TARGET_DIR="$tmp/cargo-target"
 SOURCE_DATE_EPOCH=1700000000 "$builder" --output-dir "$tmp/payload" --platform linux-x86_64
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-node"
+test -x "$tmp/payload/priv/bin/linux-x86_64/crf-container-adapter"
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-scaleset"
 (cd "$tmp/payload" && sha256sum -c SHA256SUMS)
 python3 - "$tmp/payload/provenance.json" <<'PY'
@@ -40,6 +43,7 @@ assert data["schema_version"] == 1
 assert data["source"]["source_date_epoch"] == 1700000000
 assert data["platforms"] == ["linux-x86_64"]
 assert [item["path"] for item in data["files"]] == [
+    "priv/bin/linux-x86_64/crf-container-adapter",
     "priv/bin/linux-x86_64/crf-node",
     "priv/bin/linux-x86_64/crf-scaleset",
 ]
@@ -51,6 +55,8 @@ cmp "$tmp/payload/SHA256SUMS" "$tmp/payload-repeat/SHA256SUMS"
 cmp "$tmp/payload/provenance.json" "$tmp/payload-repeat/provenance.json"
 cmp "$tmp/payload/priv/bin/linux-x86_64/crf-node" \
   "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-node"
+cmp "$tmp/payload/priv/bin/linux-x86_64/crf-container-adapter" \
+  "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-container-adapter"
 cmp "$tmp/payload/priv/bin/linux-x86_64/crf-scaleset" \
   "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-scaleset"
 
