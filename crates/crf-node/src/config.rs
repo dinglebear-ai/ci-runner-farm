@@ -253,7 +253,7 @@ fn adapter_program(value: &str) -> Result<PathBuf, ConfigError> {
         let executable = std::env::current_exe().map_err(|_| ConfigError::InvalidPath)?;
         let directory = executable.parent().ok_or(ConfigError::InvalidPath)?;
         return Ok(directory.join(if cfg!(windows) {
-            "crf-container-adapter.exe"
+            "crf-container-adapter.cmd"
         } else {
             "crf-container-adapter"
         }));
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(
             adapter_program.file_name().unwrap(),
             if cfg!(windows) {
-                "crf-container-adapter.exe"
+                "crf-container-adapter.cmd"
             } else {
                 "crf-container-adapter"
             }

@@ -153,6 +153,11 @@ jobs:
         shell: pwsh
         run: scripts/build-distributed-windows-node.ps1
 
+      - name: Windows Hyper-V container adapter contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/windows-container-adapter.ps1
+
       - name: Validate Windows package and service behavior
         if: runner.os == 'Windows'
         shell: pwsh
@@ -183,7 +188,7 @@ jobs:
           $expanded = Join-Path $env:RUNNER_TEMP 'crf-windows-archive'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $expanded
           $names = Get-ChildItem -LiteralPath $expanded -Recurse -File | ForEach-Object Name
-          foreach ($required in @('crf-node.exe', 'Install-CrfNodeService.ps1', 'node-env.example', 'runner-manifest.example.json')) {
+          foreach ($required in @('crf-node.exe', 'crf-container-adapter.cmd', 'WindowsContainerAdapter.ps1', 'Install-CrfNodeService.ps1', 'node-env.example', 'runner-manifest.example.json')) {
             if ($required -notin $names) { throw "Archive is missing $required" }
           }
           $binary = (Get-ChildItem -LiteralPath $expanded -Recurse -Filter crf-node.exe -File).FullName

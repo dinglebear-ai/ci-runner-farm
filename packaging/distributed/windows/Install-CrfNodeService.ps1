@@ -18,7 +18,7 @@ $allowedKeys = [System.Collections.Generic.HashSet[string]]::new(
     [string[]] @(
         'CRF_CA_CERT', 'CRF_CLIENT_CERT', 'CRF_CLIENT_KEY', 'CRF_COMMAND_LEDGER_CAPACITY',
         'CRF_CONNECT_TIMEOUT_MS', 'CRF_CONTAINER_ADAPTER_PROGRAM',
-        'CRF_CONTAINER_ADAPTER_TIMEOUT_MS', 'CRF_CONTROLLER_ADDR',
+        'CRF_CONTAINER_ADAPTER_TIMEOUT_MS', 'CRF_CONTAINER_STATE_DIR', 'CRF_RUNNER_IMAGE', 'CRF_DOCKER_PATH', 'CRF_CONTROLLER_ADDR',
         'CRF_CONTROLLER_SERVER_NAME', 'CRF_EXECUTION_BACKEND', 'CRF_HEARTBEAT_MS',
         'CRF_IO_TIMEOUT_MS', 'CRF_LOG_DIR', 'CRF_NODE_CPU_MILLIS',
         'CRF_NODE_ID', 'CRF_NODE_MEMORY_BYTES', 'CRF_RUNNER_CACHE_DIR', 'CRF_RUNNER_MANIFEST',
@@ -29,7 +29,8 @@ $allowedKeys = [System.Collections.Generic.HashSet[string]]::new(
 $requiredKeys = @(
     'CRF_CA_CERT', 'CRF_CLIENT_CERT', 'CRF_CLIENT_KEY', 'CRF_CONTROLLER_ADDR',
     'CRF_CONTROLLER_SERVER_NAME', 'CRF_NODE_CPU_MILLIS', 'CRF_NODE_MEMORY_BYTES',
-    'CRF_STATE_DIR', 'CRF_SERVICE_ERROR_LOG'
+    'CRF_STATE_DIR', 'CRF_SERVICE_ERROR_LOG', 'CRF_CONTAINER_ADAPTER_PROGRAM',
+    'CRF_CONTAINER_STATE_DIR', 'CRF_RUNNER_IMAGE'
 )
 
 function Invoke-Native {
@@ -85,6 +86,11 @@ switch ($backend) {
 $nodeBinaryPath = (Resolve-Path -LiteralPath $NodeBinary).Path
 Invoke-Native $nodeBinaryPath '--version'
 $binaryPath = Join-Path $InstallRoot 'crf-node.exe'
+$adapterLauncherSource = Join-Path (Split-Path -Parent $NodeBinary) 'crf-container-adapter.cmd'
+$adapterScriptSource = Join-Path (Split-Path -Parent $NodeBinary) 'WindowsContainerAdapter.ps1'
+foreach ($source in @($adapterLauncherSource, $adapterScriptSource)) {
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Windows node package is missing $source" }
+}
 $privateEnvironment = Join-Path $ConfigRoot 'node.env'
 $temporaryEnvironment = Join-Path $ConfigRoot ".node.env.$([Guid]::NewGuid().ToString('N')).tmp"
 $serviceExisted = $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
@@ -112,6 +118,8 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
         Assert-NoInjectedFailure 'acl'
         $binaryMutationStarted = $true
         Copy-Item -LiteralPath $NodeBinary -Destination $binaryPath -Force
+        Copy-Item -LiteralPath $adapterLauncherSource -Destination (Join-Path $InstallRoot 'crf-container-adapter.cmd') -Force
+        Copy-Item -LiteralPath $adapterScriptSource -Destination (Join-Path $InstallRoot 'WindowsContainerAdapter.ps1') -Force
         Copy-Item -LiteralPath $EnvironmentFile -Destination $temporaryEnvironment -Force
         $environmentMutationStarted = $true
         Move-Item -LiteralPath $temporaryEnvironment -Destination $privateEnvironment -Force

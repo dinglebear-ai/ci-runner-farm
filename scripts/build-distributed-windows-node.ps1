@@ -12,6 +12,8 @@ try {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath (Join-Path $root 'target/release/crf-node.exe') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/crf-container-adapter.cmd') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/WindowsContainerAdapter.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/Install-CrfNodeService.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/node-env.example') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'docs/distributed-runner-farm/runner-manifest.example.json') -Destination $stage
