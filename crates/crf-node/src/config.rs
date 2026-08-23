@@ -77,6 +77,22 @@ pub struct NodeConfig {
     pub command_ledger_capacity: usize,
     pub operator_projection_path: Option<PathBuf>,
     pub node_status_path: Option<PathBuf>,
+    pub node_launch_token: Option<LaunchToken>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct LaunchToken(String);
+
+impl LaunchToken {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for LaunchToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LaunchToken([REDACTED])")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +108,7 @@ pub enum ConfigError {
     InvalidResources,
     InvalidDuration,
     InvalidLedgerCapacity,
+    InvalidLaunchToken,
 }
 
 impl NodeConfig {
@@ -131,6 +148,13 @@ impl NodeConfig {
             .filter(|value| !value.is_empty())
             .map(absolute_path)
             .transpose()?;
+        let node_launch_token = optional(values, "CRF_NODE_LAUNCH_TOKEN")
+            .filter(|value| !value.is_empty())
+            .map(launch_token)
+            .transpose()?;
+        if node_status_path.is_some() != node_launch_token.is_some() {
+            return Err(ConfigError::InvalidLaunchToken);
+        }
 
         Ok(Self {
             controller_addr,
@@ -147,7 +171,20 @@ impl NodeConfig {
             command_ledger_capacity: command_ledger_capacity as usize,
             operator_projection_path,
             node_status_path,
+            node_launch_token,
         })
+    }
+}
+
+fn launch_token(value: &str) -> Result<LaunchToken, ConfigError> {
+    if value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        Ok(LaunchToken(value.to_owned()))
+    } else {
+        Err(ConfigError::InvalidLaunchToken)
     }
 }
 
@@ -346,6 +383,7 @@ mod tests {
         assert_eq!(config.command_ledger_capacity, 4_096);
         assert_eq!(config.operator_projection_path, None);
         assert_eq!(config.node_status_path, None);
+        assert_eq!(config.node_launch_token, None);
     }
 
     #[test]
@@ -381,6 +419,10 @@ mod tests {
             "CRF_NODE_STATUS_PATH".into(),
             test_path("/var/lib/crf/status/node.json"),
         );
+        configured.insert(
+            "CRF_NODE_LAUNCH_TOKEN".into(),
+            "abcdefghijklmnopqrstuvwxyzABCDEFGH012345678".into(),
+        );
         assert_eq!(
             NodeConfig::from_values(&configured)
                 .expect("status config")
@@ -393,6 +435,34 @@ mod tests {
             NodeConfig::from_values(&configured),
             Err(ConfigError::InvalidPath)
         );
+    }
+
+    #[test]
+    fn node_status_token_is_required_with_status_and_redacted_from_debug() {
+        let mut configured = values();
+        configured.insert(
+            "CRF_NODE_STATUS_PATH".into(),
+            test_path("/var/lib/crf/status/node.json"),
+        );
+        assert_eq!(
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::InvalidLaunchToken)
+        );
+
+        configured.insert("CRF_NODE_LAUNCH_TOKEN".into(), "secret-token".into());
+        assert_eq!(
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::InvalidLaunchToken)
+        );
+
+        configured.insert(
+            "CRF_NODE_LAUNCH_TOKEN".into(),
+            "abcdefghijklmnopqrstuvwxyzABCDEFGH012345678".into(),
+        );
+        let config = NodeConfig::from_values(&configured).expect("status config");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("abcdefghijklmnopqrstuvwxyzABCDEFGH012345678"));
     }
 
     #[test]

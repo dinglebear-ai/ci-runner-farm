@@ -69,10 +69,6 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
     let operator_projection_path = config.operator_projection_path.clone();
     let node_status_path = config.node_status_path.clone();
     let mut status_log = NodeStatusLog::default();
-    status_log.record(persist_node_status(
-        node_status_path.as_deref(),
-        &NodeStatusProjection::connecting(NodeStatusDetail::Starting, now_unix_ms()?),
-    ));
     let platform = probe_local_platform();
     let mut host = SystemProbe::new().map_err(|_| DaemonError::HostProbe)?;
     let host_memory = host
@@ -89,6 +85,21 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
     let generation =
         reserve_next_generation(&config.state_root.join("generations"), &platform.node_id)
             .map_err(|_| DaemonError::GenerationState)?;
+    let launch_token = config
+        .node_launch_token
+        .as_ref()
+        .map(|token| token.as_str())
+        .unwrap_or("");
+    status_log.record(persist_node_status(
+        node_status_path.as_deref(),
+        &NodeStatusProjection::connecting(
+            &platform.node_id,
+            generation,
+            launch_token,
+            NodeStatusDetail::Starting,
+            now_unix_ms()?,
+        ),
+    ));
 
     let placement_store = PlacementStore::new(config.state_root.join("placements"))
         .map_err(|_| DaemonError::PlacementState)?;
@@ -191,6 +202,9 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 status_log.record(persist_node_status(
                     node_status_path.as_deref(),
                     &NodeStatusProjection::connecting(
+                        &diagnostic_node_id,
+                        generation,
+                        launch_token,
                         NodeStatusDetail::ControllerUnavailable,
                         now_unix_ms()?,
                     ),
@@ -219,7 +233,12 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 reconnect_log.recovered(&diagnostic_node_id, &diagnostic_controller);
                 status_log.record(persist_node_status(
                     node_status_path.as_deref(),
-                    &NodeStatusProjection::ready(registration_time),
+                    &NodeStatusProjection::ready(
+                        &diagnostic_node_id,
+                        generation,
+                        launch_token,
+                        registration_time,
+                    ),
                 ));
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
@@ -230,6 +249,9 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     status_log.record(persist_node_status(
                         node_status_path.as_deref(),
                         &NodeStatusProjection::failed(
+                            &diagnostic_node_id,
+                            generation,
+                            launch_token,
                             NodeStatusDetail::ControllerRejected,
                             registration_time,
                         ),
@@ -243,6 +265,9 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                 status_log.record(persist_node_status(
                     node_status_path.as_deref(),
                     &NodeStatusProjection::connecting(
+                        &diagnostic_node_id,
+                        generation,
+                        launch_token,
                         NodeStatusDetail::RegistrationPending,
                         registration_time,
                     ),
@@ -273,7 +298,12 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     ));
                     status_log.record(persist_node_status(
                         node_status_path.as_deref(),
-                        &NodeStatusProjection::ready(heartbeat_time),
+                        &NodeStatusProjection::ready(
+                            &diagnostic_node_id,
+                            generation,
+                            launch_token,
+                            heartbeat_time,
+                        ),
                     ));
                     sleep_interruptible(config.heartbeat_interval, &running);
                 }
@@ -284,6 +314,9 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                         status_log.record(persist_node_status(
                             node_status_path.as_deref(),
                             &NodeStatusProjection::failed(
+                                &diagnostic_node_id,
+                                generation,
+                                launch_token,
                                 NodeStatusDetail::ControllerRejected,
                                 heartbeat_time,
                             ),
@@ -297,6 +330,9 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     status_log.record(persist_node_status(
                         node_status_path.as_deref(),
                         &NodeStatusProjection::connecting(
+                            &diagnostic_node_id,
+                            generation,
+                            launch_token,
                             NodeStatusDetail::ControllerUnavailable,
                             heartbeat_time,
                         ),
