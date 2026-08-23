@@ -16,6 +16,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/WindowsContainerAdapter.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/WindowsRunnerEntrypoint.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/WindowsRunner.Dockerfile') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/Prepare-WindowsRunnerContext.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/Install-CrfNodeService.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'packaging/distributed/windows/node-env.example') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'docs/distributed-runner-farm/runner-manifest.example.json') -Destination $stage

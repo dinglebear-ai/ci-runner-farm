@@ -3,11 +3,17 @@ $ErrorActionPreference = 'Stop'
 $adapter = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/WindowsContainerAdapter.ps1'
 $launcher = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/crf-container-adapter.cmd'
 $entrypoint = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/WindowsRunnerEntrypoint.ps1'
+$dockerfile = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/WindowsRunner.Dockerfile'
+$prepare = Join-Path (Split-Path -Parent $PSScriptRoot) 'packaging/distributed/windows/Prepare-WindowsRunnerContext.ps1'
 if (-not (Test-Path -LiteralPath $adapter -PathType Leaf)) {
     throw 'Windows container adapter is missing'
 }
 if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Windows container adapter launcher is missing' }
 if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) { throw 'Windows runner entrypoint is missing' }
+if (-not (Test-Path -LiteralPath $prepare -PathType Leaf)) { throw 'Windows runner context preparer is missing' }
+$dockerfileText = Get-Content -LiteralPath $dockerfile -Raw
+if ($dockerfileText -match '(?m)^RUN ') { throw 'Windows image build still requires process-isolated build execution' }
+if ($dockerfileText -notmatch '(?m)^COPY actions-runner C:\\actions-runner') { throw 'Prepared runner payload is not copied into the image' }
 
 $tokens = $null
 $errors = $null
