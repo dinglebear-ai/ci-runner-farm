@@ -191,7 +191,7 @@ The implemented path is:
 - runnable portable `crf-node` daemon with explicit resource budget, durable generation, reconnect backoff, resource accounting, terminal outbox, and graceful shutdown;
 - native Linux/Windows runner lifecycle, private materialization, file-backed logs, cancellation, and PID recovery;
 - portable node runtime identity with backward-compatible native v1 migration and tagged native-process/container v2 spawned state;
-- bounded local container-adapter wire/client with JIT only on stdin, hard request/response limits, process-tree timeout containment, exact immutable container identity, and no GitHub credentials on nodes;
+- compiled Rust container-adapter wire/client with direct Docker argv, JIT only on stdin, hard request/response limits, process-tree timeout containment, exact immutable container identity, and no GitHub credentials on nodes;
 - controller-approved container executor with inspect-before-retry crash recovery, exact-ID cancellation, durable lost-container reporting, and fail-closed backend identity mismatch behavior;
 - local Unraid Start/Inspect/Cancel adapter over the shared runner runtime, with deterministic placement/container/reservation identities, private phase state, exact-label discovery, terminal-before-removal persistence, and safe replay of prepared or secret-pending starts;
 - explicit daemon backend selection: existing configuration defaults to `native_process`, while opt-in `container` mode requires only an absolute adapter program and bounded timeout and advertises only the instantiated backend/capability;
@@ -200,7 +200,7 @@ The implemented path is:
 - managed pinned GitHub runner acquisition using Rustls HTTPS, exact byte count + SHA-256 verification, TAR/ZIP traversal/link defenses, immutable content-addressed cache, cache-tamper detection, OS-backed cache locking, and current-plus-one-rollback pruning;
 - placement-loss grace tracking that surfaces nonterminal work on unavailable node incarnations as orphans without automatically retrying it;
 - explicit force-abandon remediation that re-checks live node health, requires confirmation, terminalizes the durable placement, removes stale mailbox work, and retires matching central JIT state;
-- distribution-tagged Linux service bundle containing the self-contained OTP controller release, Rust scheduler/node, Go scale-set sidecar, hardened systemd units, versioned atomic install layout, checksums/build metadata, fake-root/idempotent installer verification, and CI bundle smoke.
+- distribution-tagged Linux service bundle containing the self-contained OTP controller release, Rust scheduler/node/container adapter, Go scale-set sidecar, hardened systemd units, versioned atomic install layout, checksums/build metadata, fake-root/idempotent installer verification, and CI bundle smoke.
 - packaged `crf-operator-status` local-RPC helper exposing a deterministic secret-free snapshot of nodes, resources, offers, placements, replay fences, orphan/pool state, peer authorization counts, and sidecar health.
 - generation-fenced operator drain/undrain and explicit `force-abandon ... --force` actions, with fixed command grammar, safe identifier validation, and redacted mutation results.
 

@@ -10,11 +10,15 @@ The bundle is tagged with the build distribution/version/architecture because Mi
 
 `install.sh` never enables or starts services. It also never overwrites an active controller/node configuration. Examples are installed under `/usr/share/doc/ci-runner-farm-distributed/examples`.
 
-Linux nodes use the bundled `crf-container-adapter` with the immutable runner
+Linux nodes use the bundled Rust `crf-container-adapter` with the immutable runner
 image configured in `node.env`. When Docker is installed, the installer adds
 the unprivileged service account to its existing socket group; it never creates
 or guesses a daemon group. The adapter rejects mutable image tags and keeps the
 JIT descriptor out of Docker argv, environment, inspect metadata, logs, and
 durable state.
+
+The adapter invokes Docker with direct argv only. It does not evaluate shell
+commands; readiness probes and the bounded stdin-only JIT handoff are direct
+`docker exec` operations.
 
 The node service deliberately uses `KillMode=process`: stopping/restarting the node agent must not automatically kill a GitHub runner child that may already own a job. The new agent generation adopts a surviving durable placement. Explicit job cancellation uses the shipped managed process-tree implementation: Unix process groups with TERM-to-KILL escalation and Windows Job Objects.

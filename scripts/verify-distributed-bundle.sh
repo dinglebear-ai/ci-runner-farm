@@ -43,13 +43,13 @@ test -x "$bundle/bin/crf-container-adapter"
 test -x "$bundle/libexec/runner-entrypoint.sh"
 bash -n "$bundle/bin/crf-peer-admin"
 bash -n "$bundle/bin/crf-cert-fingerprint"
-bash -n "$bundle/bin/crf-container-adapter"
 bash -n "$bundle/libexec/runner-entrypoint.sh"
 test -x "$bundle/controller/bin/crf_controller"
 test -x "$bundle/install.sh"
 bash -n "$bundle/install.sh"
 
 "$bundle/bin/crf-node" --version
+"$bundle/bin/crf-container-adapter" --version
 "$bundle/bin/crf-scheduler" --version
 "$bundle/bin/crf-scaleset" version >/dev/null
 "$bundle/controller/bin/crf_controller" eval "Application.load(:crf_controller); IO.puts(Application.spec(:crf_controller, :vsn))" >/dev/null

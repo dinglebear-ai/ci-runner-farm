@@ -31,7 +31,6 @@ tracked_inputs=(
   controller/mix.exs
   packaging/distributed/README.md
   packaging/distributed/install.sh
-  packaging/distributed/bin/crf-container-adapter
   packaging/distributed/admin/crf-peer-admin
   packaging/distributed/admin/crf-cert-fingerprint
   packaging/distributed/admin/crf-operator-status
@@ -75,13 +74,13 @@ archive="$output_root/$name.tar.gz"
 rm -rf "$stage" "$archive"
 install -d -m 0755 "$stage/bin" "$stage/libexec" "$stage/systemd" "$stage/examples"
 
-cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node -p crf-scheduler
+cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-container-adapter -p crf-node -p crf-scheduler
 install -m 0755 "$root/target/release/crf-node" "$stage/bin/crf-node"
 install -m 0755 "$root/target/release/crf-scheduler" "$stage/bin/crf-scheduler"
 install -m 0755 "$root/packaging/distributed/admin/crf-peer-admin" "$stage/bin/crf-peer-admin"
 install -m 0755 "$root/packaging/distributed/admin/crf-cert-fingerprint" "$stage/bin/crf-cert-fingerprint"
 install -m 0755 "$root/packaging/distributed/admin/crf-operator-status" "$stage/bin/crf-operator-status"
-install -m 0755 "$root/packaging/distributed/bin/crf-container-adapter" "$stage/bin/crf-container-adapter"
+install -m 0755 "$root/target/release/crf-container-adapter" "$stage/bin/crf-container-adapter"
 install -m 0755 "$root/src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-entrypoint.sh" "$stage/libexec/runner-entrypoint.sh"
 
 go -C "$root/tools/crf-scaleset" build -trimpath -o "$stage/bin/crf-scaleset" ./cmd/crf-scaleset

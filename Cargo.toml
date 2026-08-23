@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/crf-node",
+  "crates/crf-container-adapter",
   "crates/crf-protocol",
   "crates/crf-scheduler",
 ]
@@ -13,3 +14,5 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"

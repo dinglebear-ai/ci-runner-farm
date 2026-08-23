@@ -22,6 +22,8 @@ case "$cmd" in
       case "$1" in
         --name) printf '%s' "$2" >"$mock/name"; shift 2 ;;
         --label)
+          key="${2%%=*}"; value="${2#*=}"
+          printf '%s' "$value" >"$mock/label.${key##*.}"
           case "$2" in
             io.dinglebear.ci-runner-farm.placement-id=*) printf '%s' "${2#*=}" >"$mock/placement" ;;
           esac
@@ -31,7 +33,7 @@ case "$cmd" in
     done
     printf '%s\n' "$id"
     ;;
-  ps) [[ -f "$mock/exists" ]] && printf '%s\n' "$id" ;;
+  ps) if [[ -f "$mock/exists" ]]; then printf '%s\n' "$id"; fi ;;
   inspect)
     format=""
     if [[ "${1:-}" == --format ]]; then format="$2"; fi
@@ -42,31 +44,39 @@ case "$cmd" in
       '{{.State.ExitCode}}') cat "$mock/exit" ;;
       *'.managed'*) printf 'true\n' ;;
       *'.placement-id'*) cat "$mock/placement" ;;
+      *'.backend'*) printf 'distributed\n' ;;
+      *'.command-id'*) cat "$mock/label.command-id" ;;
+      *'.pool'*) cat "$mock/label.pool" ;;
+      *'.runner-name'*) cat "$mock/label.runner-name" ;;
+      *'.cpu-millis'*) cat "$mock/label.cpu-millis" ;;
+      *'.memory-bytes'*) cat "$mock/label.memory-bytes" ;;
       *) exit 2 ;;
     esac
     ;;
   exec)
-    args="$*"
-    if [[ "$args" == *'cat > /run/crf/secret.in'* ]]; then
+    if [[ "${1:-}" == "-i" && "${3:-}" == "tee" && "${4:-}" == "/run/crf/secret.in" ]]; then
       IFS= read -r secret || true
       printf '%s' "$secret" >"$mock/secret"
+      count="$(cat "$mock/delivery-count" 2>/dev/null || printf 0)"
+      printf '%s' "$((count + 1))" >"$mock/delivery-count"
       : >"$mock/consumed"
-    elif [[ "$args" == *'/run/crf/consumed'* ]]; then
+    elif [[ "${2:-}" == "test" && "${3:-}" == "-f" && "${4:-}" == "/run/crf/consumed" ]]; then
       [[ -f "$mock/consumed" ]]
     else
       exit 0
     fi
     ;;
   stop) printf exited >"$mock/status" ;;
-  rm) rm -f "$mock/exists" ;;
+  rm)
+    rm -f "$mock/exists"
+    ;;
   *) exit 2 ;;
 esac
 DOCKER
 chmod 0755 "$tmp/bin/docker"
 
-adapter="$root/packaging/distributed/bin/crf-container-adapter"
-grep -Fq 'seq 1 60' "$adapter"
-grep -Fq 'seq 1 30' "$adapter"
+cargo build --manifest-path "$root/Cargo.toml" --locked -p crf-container-adapter >/dev/null
+adapter="$root/target/debug/crf-container-adapter"
 grep -Fq 'CRF_CONTAINER_ADAPTER_TIMEOUT_MS=60000' "$root/packaging/distributed/examples/node-env.example"
 export PATH="$tmp/bin:$PATH"
 export CRF_TEST_DOCKER_ROOT="$tmp/mock"
@@ -87,6 +97,23 @@ grep -Fq -- '--memory 1073741824' "$tmp/mock/run.args"
 inspect='{"schema_version":1,"payload":{"action":"inspect","placement_id":"placement-1","expected_id":null}}'
 reply="$(printf '%s\n' "$inspect" | "$adapter")"
 jq -e '.payload.result == "running"' <<<"$reply" >/dev/null
+
+printf 'wrong-command' >"$tmp/mock/label.command-id"
+reply="$(printf '%s\n' "$inspect" | "$adapter")"
+jq -e '.payload.result == "deferred" and .payload.detail_code == "container_identity_ambiguous"' <<<"$reply" >/dev/null
+printf 'command-1' >"$tmp/mock/label.command-id"
+
+state_file="$(find "$tmp/state" -maxdepth 1 -name '*.json' -print -quit)"
+jq '.handoff_phase = "pending_consumed"' "$state_file" >"$state_file.tmp"
+chmod 0600 "$state_file.tmp"
+mv "$state_file.tmp" "$state_file"
+rm -f "$tmp/mock/consumed"
+reply="$(printf '%s\n' "$inspect" | "$adapter")"
+jq -e '.payload.result == "deferred" and .payload.detail_code == "container_secret_pending"' <<<"$reply" >/dev/null
+( sleep 0.2; : >"$tmp/mock/consumed" ) &
+reply="$(printf '%s\n' "$start" | "$adapter")"
+jq -e '.payload.result == "started"' <<<"$reply" >/dev/null
+[[ "$(cat "$tmp/mock/delivery-count")" == 1 ]]
 
 printf exited >"$tmp/mock/status"
 printf 1 >"$tmp/mock/exit"
