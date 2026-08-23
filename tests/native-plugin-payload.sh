@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 builder="$root/scripts/build-native-plugin-payload.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'rc=$?; if ((rc)); then echo "native plugin payload test failed near line ${BASH_LINENO[0]:-unknown}" >&2; test ! -f "$tmp/stderr" || cat "$tmp/stderr" >&2; fi; rm -rf "$tmp"' EXIT
 
 fail() {
   if "$@" >"$tmp/stdout" 2>"$tmp/stderr"; then
