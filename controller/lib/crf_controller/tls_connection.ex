@@ -12,7 +12,7 @@ defmodule CrfController.TlsConnection do
            {:ok, socket} <- :ssl.handshake(socket, timeout),
            {:ok, certificate_der} <- :ssl.peercert(socket),
            {:ok, peer} <- authorize_certificate(auth_source, certificate_der) do
-        receive_loop(socket, ingress, auth_source, peer, timeout)
+        receive_loop(socket, ingress, auth_source, peer, :infinity)
       end
 
     _ = :ssl.close(socket)
