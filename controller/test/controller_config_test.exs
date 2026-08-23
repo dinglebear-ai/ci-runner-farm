@@ -46,6 +46,16 @@ defmodule CrfController.ControllerConfigTest do
     assert [%PoolPolicy{id: "build", required_os: :linux}] = parsed.demand_opts[:policies]
   end
 
+  test "loads the prior config shape with crash-safe timeout defaults", ctx do
+    legacy = config(ctx)
+    legacy = put_in(legacy, ["state"], Map.delete(legacy["state"], "checkpoint_bytes"))
+    legacy = put_in(legacy, ["tls"], Map.delete(legacy["tls"], "idle_timeout_ms"))
+
+    assert {:ok, parsed} = ControllerConfig.parse(legacy)
+    assert parsed.placement_opts[:checkpoint_bytes] == 1_048_576
+    assert parsed.tls_opts[:idle_timeout] == 60_000
+  end
+
   test "unknown fields and duplicate pools fail closed", ctx do
     base = config(ctx)
     unexpected = put_in(base, ["demand", "surprise"], true)

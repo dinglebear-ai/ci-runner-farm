@@ -33,7 +33,6 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectProc=invisible
-ProcSubset=pid
 RestrictSUIDSGID=true
 
 [Install]

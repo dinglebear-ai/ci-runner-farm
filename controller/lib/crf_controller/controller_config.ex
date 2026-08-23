@@ -87,6 +87,8 @@ defmodule CrfController.ControllerConfig do
   defp scheduler(_), do: {:error, :invalid_scheduler_config}
 
   defp state(map) when is_map(map) do
+    map = Map.put_new(map, "checkpoint_bytes", 1_048_576)
+
     with :ok <- exact_keys(map, ["placement_path", "checkpoint_bytes"]),
          {:ok, path} <-
            required_absolute_path(map, "placement_path", :invalid_placement_state_path),
@@ -181,6 +183,8 @@ defmodule CrfController.ControllerConfig do
   defp sidecar(_value, _socket_path), do: {:error, :invalid_scaleset_sidecar_config}
 
   defp tls(map) when is_map(map) do
+    map = Map.put_new(map, "idle_timeout_ms", 60_000)
+
     keys = [
       "port",
       "certfile",
