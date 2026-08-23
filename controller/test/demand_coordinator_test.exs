@@ -160,7 +160,12 @@ defmodule CrfController.DemandCoordinatorTest do
             advertised_capacity: 0,
             last_message_id: 1,
             session_healthy: true,
-            acquired_handles: handles
+            acquired_handles: handles,
+            fast_lane_state: "holding",
+            fast_lane_long_threshold_ms: 360_000,
+            fast_lane_hold_duration_ms: 15_000,
+            fast_lane_reserved_slots: 1,
+            fast_lane_hold_until_ms: 123_456
           }
         ]
       }
@@ -223,6 +228,22 @@ defmodule CrfController.DemandCoordinatorTest do
           coordinator: coordinator,
           demand: demand
         }
+    end
+  end
+
+  test "status exposes bounded fast lane policy without acquired handles", ctx do
+    unless ctx.disabled do
+      assert {:ok, _} = reconcile(ctx.demand, 50)
+      status = DemandCoordinator.status(ctx.demand)
+      assert [pool] = status.pool_status
+      assert pool.pool_id == "build"
+      assert pool.scale_set_id == 74
+      assert pool.fast_lane_state == "holding"
+      assert pool.fast_lane_long_threshold_ms == 360_000
+      assert pool.fast_lane_hold_duration_ms == 15_000
+      assert pool.fast_lane_reserved_slots == 1
+      assert pool.fast_lane_hold_until_ms == 123_456
+      refute Map.has_key?(pool, :acquired_handles)
     end
   end
 

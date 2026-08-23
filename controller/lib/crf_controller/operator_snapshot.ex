@@ -107,7 +107,8 @@ defmodule CrfController.OperatorSnapshot do
       placement_loss_grace_ms: status.placement_loss_grace_ms,
       orphaned_placements: Enum.sort(status.orphaned_placements),
       last_reconcile_unix_ms: status.last_reconcile_unix_ms,
-      pools: status.pools
+      pools: status.pools,
+      pool_status: Map.get(status, :pool_status, [])
     }
   end
 

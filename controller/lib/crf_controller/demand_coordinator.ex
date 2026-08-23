@@ -87,6 +87,7 @@ defmodule CrfController.DemandCoordinator do
         reconcile_interval_ms: interval,
         placement_loss_grace_ms: loss_grace,
         placement_health: %{missing_since: %{}, orphaned: []},
+        pool_status: [],
         last_outcome: nil,
         last_reconcile_unix_ms: nil
       }
@@ -109,7 +110,8 @@ defmodule CrfController.DemandCoordinator do
       orphaned_placements: state.placement_health.orphaned,
       last_outcome: state.last_outcome,
       last_reconcile_unix_ms: state.last_reconcile_unix_ms,
-      pools: state.ctx.policies |> Map.keys() |> Enum.sort()
+      pools: state.ctx.policies |> Map.keys() |> Enum.sort(),
+      pool_status: state.pool_status
     }
 
     {:reply, status, state}
@@ -207,10 +209,32 @@ defmodule CrfController.DemandCoordinator do
         reclaimed_idle_placements: reclaimed
       }
 
-      {:ok, result, %{state | planner: planner}}
+      {:ok, result,
+       %{state | planner: planner, pool_status: operator_pool_status(snapshot.pools)}}
     else
       {:error, reason} -> {:error, reason, state}
     end
+  end
+
+  defp operator_pool_status(pools) do
+    pools
+    |> Enum.map(fn pool ->
+      %{
+        pool_id: pool.pool_id,
+        scale_set_id: pool.scale_set_id,
+        assigned_jobs: pool.assigned_jobs,
+        advertised_capacity: pool.advertised_capacity,
+        session_healthy: pool.session_healthy,
+        fast_lane_state: Map.get(pool, :fast_lane_state, "inactive"),
+        fast_lane_long_threshold_ms: Map.get(pool, :fast_lane_long_threshold_ms, 0),
+        fast_lane_hold_duration_ms: Map.get(pool, :fast_lane_hold_duration_ms, 0),
+        fast_lane_reserved_slots: Map.get(pool, :fast_lane_reserved_slots, 0),
+        fast_lane_hold_until_ms: Map.get(pool, :fast_lane_hold_until_ms, 0),
+        observed_at: Map.get(pool, :observed_at),
+        valid_until: Map.get(pool, :valid_until)
+      }
+    end)
+    |> Enum.sort_by(& &1.pool_id)
   end
 
   defp refresh_placement_health(state, now_ms) do

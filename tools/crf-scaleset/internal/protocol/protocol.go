@@ -91,15 +91,50 @@ func Decode(rd io.Reader) (Request, error) {
 }
 
 type PoolSnapshot struct {
-	PoolID             string    `json:"pool_id"`
-	ScaleSetID         int64     `json:"scale_set_id"`
-	AssignedJobs       int       `json:"assigned_jobs"`
-	AdvertisedCapacity int       `json:"advertised_capacity"`
-	LastMessageID      int64     `json:"last_message_id"`
-	SessionHealthy     bool      `json:"session_healthy"`
-	AcquiredHandles    []int64   `json:"acquired_handles"`
-	ObservedAt         time.Time `json:"observed_at"`
-	ValidUntil         time.Time `json:"valid_until"`
+	PoolID                  string    `json:"pool_id"`
+	ScaleSetID              int64     `json:"scale_set_id"`
+	AssignedJobs            int       `json:"assigned_jobs"`
+	AdvertisedCapacity      int       `json:"advertised_capacity"`
+	LastMessageID           int64     `json:"last_message_id"`
+	SessionHealthy          bool      `json:"session_healthy"`
+	AcquiredHandles         []int64   `json:"acquired_handles"`
+	FastLaneState           string    `json:"fast_lane_state"`
+	FastLaneLongThresholdMS int64     `json:"fast_lane_long_threshold_ms"`
+	FastLaneHoldDurationMS  int64     `json:"fast_lane_hold_duration_ms"`
+	FastLaneReservedSlots   int       `json:"fast_lane_reserved_slots"`
+	FastLaneHoldUntilMS     int64     `json:"fast_lane_hold_until_ms"`
+	ObservedAt              time.Time `json:"observed_at"`
+	ValidUntil              time.Time `json:"valid_until"`
+}
+
+func validFastLanePoolSnapshot(pool PoolSnapshot, now time.Time) bool {
+	const (
+		minThresholdMS = int64((4 * time.Minute) / time.Millisecond)
+		maxThresholdMS = int64((8 * time.Minute) / time.Millisecond)
+		minHoldMS      = int64((5 * time.Second) / time.Millisecond)
+		maxHoldMS      = int64((30 * time.Second) / time.Millisecond)
+	)
+	if pool.FastLaneState != "inactive" && pool.FastLaneState != "holding" &&
+		pool.FastLaneState != "borrow_pending" {
+		return false
+	}
+	if pool.FastLaneState == "inactive" && pool.FastLaneLongThresholdMS == 0 &&
+		pool.FastLaneHoldDurationMS == 0 && pool.FastLaneReservedSlots == 0 && pool.FastLaneHoldUntilMS == 0 {
+		return true
+	}
+	if pool.FastLaneLongThresholdMS < minThresholdMS || pool.FastLaneLongThresholdMS > maxThresholdMS ||
+		pool.FastLaneHoldDurationMS < minHoldMS || pool.FastLaneHoldDurationMS > maxHoldMS ||
+		pool.FastLaneReservedSlots < 1 || pool.FastLaneReservedSlots > 4 {
+		return false
+	}
+	if pool.AdvertisedCapacity > 0 && pool.FastLaneReservedSlots >= pool.AdvertisedCapacity {
+		return false
+	}
+	if pool.FastLaneState == "inactive" {
+		return pool.FastLaneHoldUntilMS == 0
+	}
+	return pool.FastLaneHoldUntilMS > 0 &&
+		pool.FastLaneHoldUntilMS <= now.Add(2*time.Minute).UnixMilli()
 }
 
 type JITState struct {
@@ -140,7 +175,7 @@ func (s Snapshot) Validate(now time.Time) error {
 		if !identifier.MatchString(pool.PoolID) || seenPools[pool.PoolID] ||
 			pool.ScaleSetID < 0 || pool.AssignedJobs < 0 ||
 			pool.AdvertisedCapacity < 0 || pool.LastMessageID < 0 ||
-			len(pool.AcquiredHandles) > 64 {
+			len(pool.AcquiredHandles) > 64 || !validFastLanePoolSnapshot(pool, now) {
 			return errors.New("invalid_pool_snapshot")
 		}
 		if !pool.ObservedAt.IsZero() &&

@@ -19,13 +19,25 @@ import (
 )
 
 const (
-	queueStarvationAge       = 10 * time.Minute
-	minRuntimeSample         = time.Second
-	maxRuntimeSample         = 24 * time.Hour
-	maxRuntimeHistoryEntries = 2048
-	maxRuntimeHistoryBytes   = 1 << 20
-	runtimePersistInterval   = 30 * time.Second
-	maxRuntimeIdentityBytes  = 1024
+	queueStarvationAge           = 10 * time.Minute
+	minRuntimeSample             = time.Second
+	maxRuntimeSample             = 24 * time.Hour
+	maxRuntimeHistoryEntries     = 2048
+	maxRuntimeHistoryBytes       = 1 << 20
+	runtimePersistInterval       = 30 * time.Second
+	maxRuntimeIdentityBytes      = 1024
+	fastLaneHoldDuration         = 20 * time.Second
+	fastLaneLongRuntimeThreshold = 8 * time.Minute
+	fastLaneMinHoldDuration      = 5 * time.Second
+	fastLaneMaxHoldDuration      = 30 * time.Second
+	fastLaneMinLongThreshold     = 4 * time.Minute
+	fastLaneMaxLongThreshold     = fastLaneLongRuntimeThreshold
+	fastLanePolicySampleSize     = 64
+	fastLaneThresholdStep        = 2 * time.Minute
+	fastLaneThresholdDeadband    = time.Minute
+	fastLaneHoldStep             = 5 * time.Second
+	fastLaneHoldDeadband         = 2 * time.Second
+	fastLaneMaxReservedSlots     = 4
 )
 
 type runtimeDigest [sha256.Size]byte
@@ -49,7 +61,21 @@ type runtimeHistoryFile struct {
 type rankedCandidate struct {
 	job              crfgithub.AvailableJob
 	estimatedRuntime time.Duration
+	runtimeKnown     bool
 	starved          bool
+}
+
+type fastLanePolicy struct {
+	longThreshold time.Duration
+	holdDuration  time.Duration
+	reserveSlots  int
+}
+
+type admissionDecision struct {
+	requestIDs      []int64
+	reserveFastLane bool
+	borrowFastLane  bool
+	policy          fastLanePolicy
 }
 
 func runtimeHistoryPath(store journal.Store) string {
@@ -302,15 +328,130 @@ func (p *Poller) runtimeSnapshot() map[runtimeDigest]runtimeEstimate {
 	return out
 }
 
+func defaultFastLanePolicy() fastLanePolicy {
+	return fastLanePolicy{longThreshold: fastLaneLongRuntimeThreshold, holdDuration: fastLaneHoldDuration, reserveSlots: 1}
+}
+
+func clampFastLaneDuration(value, minimum, maximum time.Duration) time.Duration {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func stepFastLaneDuration(current, target, step, deadband time.Duration) time.Duration {
+	if current <= 0 {
+		return target
+	}
+	delta := target - current
+	if delta < 0 {
+		if -delta <= deadband {
+			return current
+		}
+		if current-step < target {
+			return target
+		}
+		return current - step
+	}
+	if delta <= deadband {
+		return current
+	}
+	if current+step > target {
+		return target
+	}
+	return current + step
+}
+
+func stabilizeFastLanePolicy(current, target fastLanePolicy) fastLanePolicy {
+	if current.longThreshold <= 0 || current.holdDuration <= 0 || current.reserveSlots <= 0 {
+		return target
+	}
+	reserveSlots := current.reserveSlots
+	if target.reserveSlots > reserveSlots {
+		reserveSlots++
+	} else if target.reserveSlots < reserveSlots {
+		reserveSlots--
+	}
+	return fastLanePolicy{
+		longThreshold: clampFastLaneDuration(
+			stepFastLaneDuration(current.longThreshold, target.longThreshold,
+				fastLaneThresholdStep, fastLaneThresholdDeadband),
+			fastLaneMinLongThreshold, fastLaneMaxLongThreshold),
+		holdDuration: clampFastLaneDuration(
+			stepFastLaneDuration(current.holdDuration, target.holdDuration,
+				fastLaneHoldStep, fastLaneHoldDeadband),
+			fastLaneMinHoldDuration, fastLaneMaxHoldDuration),
+		reserveSlots: reserveSlots,
+	}
+}
+
+func fastLaneReserveSlots(capacity, pressure int) int {
+	if capacity < 2 {
+		return 0
+	}
+	reserve := max(1, capacity/4)
+	reserve = min(reserve, fastLaneMaxReservedSlots)
+	switch {
+	case pressure >= capacity*8:
+		reserve = 1
+	case pressure >= capacity*4:
+		reserve = max(1, (reserve+1)/2)
+	}
+	return min(reserve, capacity-1)
+}
+
+func deriveFastLanePolicy(poolID string, jobs []crfgithub.AvailableJob,
+	runtimes map[runtimeDigest]runtimeEstimate, totalAvailable, capacity int, now time.Time) fastLanePolicy {
+	policy := defaultFastLanePolicy()
+	if capacity <= 0 || len(jobs) == 0 {
+		return policy
+	}
+
+	known := make([]time.Duration, 0, min(fastLanePolicySampleSize, len(jobs)))
+	stride := max(1, (len(jobs)+fastLanePolicySampleSize-1)/fastLanePolicySampleSize)
+	for i := 0; i < len(jobs) && len(known) < fastLanePolicySampleSize; i += stride {
+		candidate := makeRankedCandidate(poolID, jobs[i], runtimes, now)
+		if candidate.runtimeKnown && !candidate.starved {
+			known = append(known, candidate.estimatedRuntime)
+		}
+	}
+	if len(known) >= 4 {
+		sort.Slice(known, func(i, j int) bool { return known[i] < known[j] })
+		p75 := known[(3*len(known)-1)/4]
+		policy.longThreshold = clampFastLaneDuration(
+			p75, fastLaneMinLongThreshold, fastLaneMaxLongThreshold)
+	}
+
+	pressure := max(totalAvailable, len(jobs))
+	switch {
+	case pressure >= capacity*8:
+		policy.holdDuration = 10 * time.Second
+	case pressure >= capacity*4:
+		policy.holdDuration = 15 * time.Second
+	case pressure <= capacity:
+		policy.holdDuration = 25 * time.Second
+	default:
+		policy.holdDuration = fastLaneHoldDuration
+	}
+	policy.holdDuration = clampFastLaneDuration(
+		policy.holdDuration, fastLaneMinHoldDuration, fastLaneMaxHoldDuration)
+	policy.reserveSlots = fastLaneReserveSlots(capacity, pressure)
+	return policy
+}
+
 func makeRankedCandidate(poolID string, job crfgithub.AvailableJob, runtimes map[runtimeDigest]runtimeEstimate, now time.Time) rankedCandidate {
 	const defaultRuntime = 5 * time.Minute
 	estimatedRuntime := defaultRuntime
-	if estimate, known := runtimes[runtimeKey(poolID, job.Metadata)]; known {
+	estimate, runtimeKnown := runtimes[runtimeKey(poolID, job.Metadata)]
+	if runtimeKnown {
 		estimatedRuntime = estimate.duration
 	}
 	age := now.Sub(job.Metadata.QueueTime)
 	return rankedCandidate{
-		job: job, estimatedRuntime: estimatedRuntime,
+		job: job, estimatedRuntime: estimatedRuntime, runtimeKnown: runtimeKnown,
 		starved: !job.Metadata.QueueTime.IsZero() && age >= queueStarvationAge,
 	}
 }
@@ -394,9 +535,24 @@ func rankAvailable(poolID string, jobs []crfgithub.AvailableJob, runtimes map[ru
 	return ranked
 }
 
-func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, capacity int, now time.Time) []int64 {
+func fastLaneEligible(candidate rankedCandidate, longThreshold time.Duration) bool {
+	if longThreshold <= 0 {
+		longThreshold = fastLaneLongRuntimeThreshold
+	}
+	return candidate.starved || !candidate.runtimeKnown || candidate.estimatedRuntime < longThreshold
+}
+
+func (p *Poller) admissionSelectionWithRuntimes(batch crfgithub.MessageBatch, poolID string, capacity int,
+	now time.Time, allowBorrow bool, policy fastLanePolicy,
+	runtimes map[runtimeDigest]runtimeEstimate) admissionDecision {
+	if policy.longThreshold <= 0 || policy.holdDuration <= 0 {
+		policy = defaultFastLanePolicy()
+	}
+	if policy.reserveSlots <= 0 {
+		policy.reserveSlots = 1
+	}
 	if capacity <= 0 {
-		return nil
+		return admissionDecision{policy: policy}
 	}
 	remaining := capacity
 	if batch.Statistics != nil {
@@ -410,17 +566,56 @@ func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, 
 		}
 	}
 	if remaining == 0 {
-		return nil
+		return admissionDecision{policy: policy}
 	}
 	if len(batch.AvailableJobs) == 0 {
 		limit := min(remaining, len(batch.Available))
-		return slices.Clone(batch.Available[:limit])
+		return admissionDecision{requestIDs: slices.Clone(batch.Available[:limit]), borrowFastLane: allowBorrow, policy: policy}
 	}
 	limit := min(remaining, len(batch.AvailableJobs))
-	ranked := topCandidates(poolID, batch.AvailableJobs, p.runtimeSnapshot(), now, limit)
-	selected := make([]int64, 0, limit)
-	for _, candidate := range ranked {
+	ranked := topCandidates(poolID, batch.AvailableJobs, runtimes, now, limit)
+	reserveFastLane := false
+	selectedLimit := limit
+	if !allowBorrow && capacity >= 2 && remaining > 0 && len(batch.AvailableJobs) >= remaining {
+		maxReserve := min(policy.reserveSlots, min(fastLaneMaxReservedSlots, remaining))
+		reserveCount := 0
+		for i := 0; i < maxReserve; i++ {
+			candidate := ranked[remaining-1-i]
+			if !candidate.runtimeKnown || candidate.starved || candidate.estimatedRuntime < policy.longThreshold {
+				break
+			}
+			reserveCount++
+		}
+		if reserveCount > 0 {
+			selectedLimit -= reserveCount
+			reserveFastLane = true
+			policy.reserveSlots = reserveCount
+			marginal := ranked[remaining-1]
+			if marginal.estimatedRuntime >= 2*policy.longThreshold {
+				policy.holdDuration = clampFastLaneDuration(
+					policy.holdDuration+fastLaneHoldStep, fastLaneMinHoldDuration, fastLaneMaxHoldDuration)
+			}
+		}
+	}
+	selected := make([]int64, 0, selectedLimit)
+	for _, candidate := range ranked[:selectedLimit] {
 		selected = append(selected, candidate.job.RequestID)
 	}
-	return selected
+	return admissionDecision{requestIDs: selected, reserveFastLane: reserveFastLane,
+		borrowFastLane: allowBorrow, policy: policy}
+}
+
+func (p *Poller) admissionSelectionWithPolicy(batch crfgithub.MessageBatch, poolID string, capacity int,
+	now time.Time, allowBorrow bool, policy fastLanePolicy) admissionDecision {
+	return p.admissionSelectionWithRuntimes(batch, poolID, capacity, now, allowBorrow,
+		policy, p.runtimeSnapshot())
+}
+
+func (p *Poller) admissionSelection(batch crfgithub.MessageBatch, poolID string, capacity int,
+	now time.Time, allowBorrow bool) admissionDecision {
+	return p.admissionSelectionWithPolicy(batch, poolID, capacity, now, allowBorrow, defaultFastLanePolicy())
+}
+
+func (p *Poller) selectedAvailable(batch crfgithub.MessageBatch, poolID string, capacity int, now time.Time) []int64 {
+	return p.admissionSelection(batch, poolID, capacity, now, true).requestIDs
 }

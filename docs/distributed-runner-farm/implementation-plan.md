@@ -58,7 +58,9 @@
 - [x] Starvation-safe visible-batch admission with a ten-minute aging override and strict remaining-capacity enforcement.
 - [x] Add authenticated `acquirablejobs` queue introspection through the scale-set admin client, with a two-second best-effort deadline, a 16 MiB pre-decode transport-body limit, a separate 10,000-job post-decode semantic fuse, merge-safe visible fallback, and truthful `X-ScaleSetMaxCapacity`.
 - [x] Add O(N log K) top-K admission so deep queue ranking scales with remaining runner slots rather than sorting the full backlog.
-- [ ] Add durable proactive reserved-slot/fast-lane hold + borrow scheduling on top of `acquirablejobs`, without relying on GitHub long-poll timing.
+- [x] Add durable proactive elastic fast-lane hold + one-shot borrow scheduling on top of `acquirablejobs`, reserving only trailing learned-long work with a 1–4 slot width bounded by pool capacity/backlog pressure and using the existing <=10-second supervisor heartbeat rather than GitHub long-poll timing.
+- [x] Dynamically tune the long-work threshold and hold duration from a <=64-candidate queue sample and backlog pressure, with a 4–8 minute threshold, 5–30 second hold bounds, step-limited hysteresis, and the existing ten-minute starvation override.
+- [x] Expose strict secret-free fast-lane state/threshold/hold/reserved-width/deadline in the Go/Elixir pool snapshot and operator `pool_status`, without exposing acquired handles or GitHub job metadata.
 - [x] Honest GitHub capacity contract: never inflate `X-ScaleSetMaxCapacity`; obtain hidden backlog visibility only through the authenticated admin `acquirablejobs` endpoint.
 - [x] Acquired handle -> offer assignment -> JIT -> placement -> node mailbox flow.
 - [x] Controller restart recovery for lost JIT-bearing mailbox commands.
@@ -99,7 +101,8 @@
 - [x] Live GitHub cancellation with Unix process-group signal observation, terminal placement reporting, resource return, and credential cleanup.
 - [ ] Controller/node restart and network-partition matrix.
 - [x] Synthetic visible/hidden convoy regressions plus 64-job and 10,000-job/64-slot ranking benchmarks with bounded allocation evidence.
-- [ ] Real GitHub scale-set smoke proving `acquirablejobs` + partial acquisition behavior against queued jobs, followed by resource fragmentation/oversubscription/fairness matrix at sustained load.
+- [x] Deterministic sustained-load simulations using the production admission policy: Rust-build convoy vs quick-test latency/makespan and a perpetual quick stream proving the ten-minute starvation boundary.
+- [ ] Real GitHub scale-set sustained-load validation of `acquirablejobs` + partial acquisition behavior, resource fragmentation/oversubscription, fast-lane width adaptation, and fairness under live queue churn.
 - [x] Leaf certificate rotation/revocation/enrollment workflow with live-session reauthorization.
 - [ ] Automated CA/server certificate rotation and revocation-provider integration policy.
 - [x] Security review of credentials, certificates, durable JIT cache,

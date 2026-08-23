@@ -25,9 +25,14 @@ type Pool struct {
 	ScaleSetID int64
 }
 type PollResult struct {
-	AssignedJobs    int
-	MessageID       int64
-	AcquiredHandles []int64
+	AssignedJobs                int
+	MessageID                   int64
+	AcquiredHandles             []int64
+	FastLaneState               string
+	FastLaneLongThresholdMillis int64
+	FastLaneHoldDurationMillis  int64
+	FastLaneReservedSlots       int
+	FastLaneHoldUntilMillis     int64
 }
 type Poller interface {
 	Poll(context.Context, Pool, int) (PollResult, error)
@@ -116,8 +121,48 @@ func cloneSnapshot(snapshot protocol.Snapshot) protocol.Snapshot {
 	return clone
 }
 
+func normalizePollResult(result PollResult) PollResult {
+	if result.FastLaneState == "" && result.FastLaneLongThresholdMillis == 0 &&
+		result.FastLaneHoldDurationMillis == 0 && result.FastLaneReservedSlots == 0 &&
+		result.FastLaneHoldUntilMillis == 0 {
+		result.FastLaneState = "inactive"
+	}
+	return result
+}
+
+func validFastLanePollResult(result PollResult) bool {
+	const (
+		minThresholdMS = int64((4 * time.Minute) / time.Millisecond)
+		maxThresholdMS = int64((8 * time.Minute) / time.Millisecond)
+		minHoldMS      = int64((5 * time.Second) / time.Millisecond)
+		maxHoldMS      = int64((30 * time.Second) / time.Millisecond)
+	)
+	if result.FastLaneState != "inactive" && result.FastLaneState != "holding" &&
+		result.FastLaneState != "borrow_pending" {
+		return false
+	}
+	if result.FastLaneState == "inactive" && result.FastLaneLongThresholdMillis == 0 &&
+		result.FastLaneHoldDurationMillis == 0 && result.FastLaneReservedSlots == 0 &&
+		result.FastLaneHoldUntilMillis == 0 {
+		return true
+	}
+	if result.FastLaneLongThresholdMillis < minThresholdMS ||
+		result.FastLaneLongThresholdMillis > maxThresholdMS ||
+		result.FastLaneHoldDurationMillis < minHoldMS ||
+		result.FastLaneHoldDurationMillis > maxHoldMS ||
+		result.FastLaneReservedSlots < 1 || result.FastLaneReservedSlots > 4 {
+		return false
+	}
+	if result.FastLaneState == "inactive" {
+		return result.FastLaneHoldUntilMillis == 0
+	}
+	return result.FastLaneHoldUntilMillis > 0 &&
+		result.FastLaneHoldUntilMillis <= time.Now().Add(2*time.Minute).UnixMilli()
+}
+
 func validPollResult(result PollResult) bool {
-	if result.AssignedJobs < 0 || result.MessageID < 0 || len(result.AcquiredHandles) > 64 {
+	if result.AssignedJobs < 0 || result.MessageID < 0 || len(result.AcquiredHandles) > 64 ||
+		!validFastLanePollResult(result) {
 		return false
 	}
 	seen := make(map[int64]bool, len(result.AcquiredHandles))
@@ -164,6 +209,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			for {
 				capacity := s.leaseForPool(pool.ID)
 				poll, err := s.poller.Poll(ctx, pool, capacity)
+				poll = normalizePollResult(poll)
 				if err == nil && !validPollResult(poll) {
 					err = errors.New("invalid_poll_result")
 				}
@@ -179,7 +225,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				now := time.Now().UTC()
 				result := protocol.PoolSnapshot{PoolID: pool.ID, ScaleSetID: pool.ScaleSetID,
 					AssignedJobs: poll.AssignedJobs, AdvertisedCapacity: capacity, LastMessageID: poll.MessageID,
-					SessionHealthy: err == nil, AcquiredHandles: acquiredHandles(poll.AcquiredHandles)}
+					SessionHealthy: err == nil, AcquiredHandles: acquiredHandles(poll.AcquiredHandles),
+					FastLaneState: poll.FastLaneState, FastLaneLongThresholdMS: poll.FastLaneLongThresholdMillis,
+					FastLaneHoldDurationMS: poll.FastLaneHoldDurationMillis, FastLaneReservedSlots: poll.FastLaneReservedSlots,
+					FastLaneHoldUntilMS: poll.FastLaneHoldUntilMillis}
 				if err == nil {
 					result.ObservedAt = now
 					result.ValidUntil = now.Add(s.cfg.DemandTTL)
@@ -211,7 +260,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	for _, pool := range s.cfg.Pools {
 		current[pool.ID] = protocol.PoolSnapshot{
 			PoolID: pool.ID, ScaleSetID: pool.ScaleSetID, AcquiredHandles: []int64{},
-			ObservedAt: startedAt, ValidUntil: startedAt.Add(s.cfg.DemandTTL),
+			FastLaneState: "inactive", ObservedAt: startedAt, ValidUntil: startedAt.Add(s.cfg.DemandTTL),
 		}
 	}
 	publish := func() {

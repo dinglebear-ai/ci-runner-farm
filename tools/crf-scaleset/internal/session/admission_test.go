@@ -17,6 +17,7 @@ import (
 var (
 	benchmarkRanked   []crfgithub.AvailableJob
 	benchmarkSelected []int64
+	benchmarkDecision admissionDecision
 )
 
 func testJob(id int64, repository, workflow, name string, queued time.Time) crfgithub.AvailableJob {
@@ -362,6 +363,132 @@ func TestRuntimeKeyNormalizesAsciiCaseAndBranchRef(t *testing.T) {
 	}
 }
 
+func TestDerivedFastLanePolicyAdaptsToQueueShapeWithinBounds(t *testing.T) {
+	now := time.Date(2026, 8, 22, 17, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 8)
+	runtimes := map[runtimeDigest]runtimeEstimate{}
+	for i := 0; i < 8; i++ {
+		job := testJob(int64(i+1), "dinglebear-ai/soma", "workflow@refs/heads/main", "moderate", now)
+		jobs = append(jobs, job)
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 6 * time.Minute, samples: 10}
+	}
+	moderate := deriveFastLanePolicy("build", jobs, runtimes, len(jobs), 4, now)
+	if moderate.longThreshold != 6*time.Minute || moderate.holdDuration != fastLaneHoldDuration {
+		t.Fatalf("moderate queue policy = %#v", moderate)
+	}
+
+	for _, job := range jobs {
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 30 * time.Minute, samples: 10}
+	}
+	heavy := deriveFastLanePolicy("build", jobs, runtimes, 64, 4, now)
+	if heavy.longThreshold != fastLaneMaxLongThreshold || heavy.holdDuration != 10*time.Second {
+		t.Fatalf("heavy queue policy = %#v", heavy)
+	}
+
+	for _, job := range jobs {
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: time.Minute, samples: 10}
+	}
+	short := deriveFastLanePolicy("build", jobs[:4], runtimes, 4, 4, now)
+	if short.longThreshold != fastLaneMinLongThreshold || short.holdDuration != 25*time.Second {
+		t.Fatalf("short sparse queue policy = %#v", short)
+	}
+}
+
+func TestFastLaneReserveWidthTracksCapacityAndPressure(t *testing.T) {
+	cases := []struct {
+		capacity int
+		pressure int
+		want     int
+	}{
+		{capacity: 1, pressure: 100, want: 0},
+		{capacity: 2, pressure: 2, want: 1},
+		{capacity: 8, pressure: 8, want: 2},
+		{capacity: 16, pressure: 16, want: 4},
+		{capacity: 16, pressure: 64, want: 2},
+		{capacity: 64, pressure: 10_000, want: 1},
+	}
+	for _, tc := range cases {
+		if got := fastLaneReserveSlots(tc.capacity, tc.pressure); got != tc.want {
+			t.Fatalf("reserve width capacity=%d pressure=%d got=%d want=%d",
+				tc.capacity, tc.pressure, got, tc.want)
+		}
+	}
+}
+
+func TestElasticFastLaneReservesMultipleKnownLongSlots(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 8)
+	runtimes := map[runtimeDigest]runtimeEstimate{}
+	for i := 0; i < 8; i++ {
+		job := testJob(int64(i+1), "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now)
+		jobs = append(jobs, job)
+		runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	poller := &Poller{runtimes: runtimes}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, AvailableJobs: jobs}
+	policy := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second, reserveSlots: 2}
+	decision := poller.admissionSelectionWithRuntimes(batch, "build", 8, now, false, policy, runtimes)
+	if !decision.reserveFastLane || decision.policy.reserveSlots != 2 ||
+		!slices.Equal(decision.requestIDs, []int64{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("elastic fast lane did not reserve two trailing long slots: %#v", decision)
+	}
+}
+
+func TestFastLanePolicyHysteresisUsesBoundedSteps(t *testing.T) {
+	current := fastLanePolicy{longThreshold: 8 * time.Minute, holdDuration: 20 * time.Second, reserveSlots: 1}
+	target := fastLanePolicy{longThreshold: 4 * time.Minute, holdDuration: 10 * time.Second, reserveSlots: 4}
+	got := stabilizeFastLanePolicy(current, target)
+	if got.longThreshold != 6*time.Minute || got.holdDuration != 15*time.Second || got.reserveSlots != 2 {
+		t.Fatalf("policy moved too aggressively: %#v", got)
+	}
+	withinDeadband := stabilizeFastLanePolicy(current,
+		fastLanePolicy{longThreshold: 7 * time.Minute, holdDuration: 19 * time.Second, reserveSlots: 1})
+	if withinDeadband != current {
+		t.Fatalf("policy ignored hysteresis deadband: %#v", withinDeadband)
+	}
+}
+
+func TestFastLaneReservesOnlyMarginalKnownLongWork(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	jobs := []crfgithub.AvailableJob{
+		testJob(1, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-4*time.Minute)),
+		testJob(2, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-3*time.Minute)),
+		testJob(3, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-2*time.Minute)),
+		testJob(4, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now.Add(-time.Minute)),
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{}}
+	for _, job := range jobs {
+		poller.runtimes[runtimeKey("build", job.Metadata)] = runtimeEstimate{duration: 20 * time.Minute, samples: 20}
+	}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAssignedJobs: 0}, AvailableJobs: jobs}
+	decision := poller.admissionSelection(batch, "build", 4, now, false)
+	if !decision.reserveFastLane || decision.borrowFastLane || !slices.Equal(decision.requestIDs, []int64{1, 2, 3}) {
+		t.Fatalf("known-long convoy did not reserve exactly one lane: %#v", decision)
+	}
+	borrow := poller.admissionSelection(batch, "build", 4, now, true)
+	if borrow.reserveFastLane || !borrow.borrowFastLane || !slices.Equal(borrow.requestIDs, []int64{1, 2, 3, 4}) {
+		t.Fatalf("borrow pass did not recover full utilization: %#v", borrow)
+	}
+}
+
+func TestFastLaneDoesNotReserveForQuickOrUnsaturatedWork(t *testing.T) {
+	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	quick := testJob(1, "dinglebear-ai/soma", "workflow@refs/heads/main", "unit", now)
+	long := testJob(2, "dinglebear-ai/soma", "workflow@refs/heads/main", "rust-build", now)
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", quick.Metadata): {duration: 30 * time.Second, samples: 10},
+		runtimeKey("build", long.Metadata):  {duration: 20 * time.Minute, samples: 10},
+	}}
+	quickBatch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{}, AvailableJobs: []crfgithub.AvailableJob{quick}}
+	if decision := poller.admissionSelection(quickBatch, "build", 2, now, false); decision.reserveFastLane {
+		t.Fatalf("quick work incorrectly triggered a reservation: %#v", decision)
+	}
+	unsaturated := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{}, AvailableJobs: []crfgithub.AvailableJob{long}}
+	if decision := poller.admissionSelection(unsaturated, "build", 2, now, false); decision.reserveFastLane {
+		t.Fatalf("unsaturated long work incorrectly triggered a reservation: %#v", decision)
+	}
+}
+
 func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testing.T) {
 	now := time.Date(2026, 8, 21, 6, 0, 0, 0, time.UTC)
 	longOne := testJob(1, "dinglebear-ai/soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "rust-build", now.Add(-3*time.Minute))
@@ -375,6 +502,33 @@ func TestAdaptiveAdmissionPrefersQuickWorkWithinVisibleLongBuildConvoy(t *testin
 		AvailableJobs: []crfgithub.AvailableJob{longOne, longTwo, quick}}
 	if selected := poller.selectedAvailable(batch, "build", 2, now); !slices.Equal(selected, []int64{3, 1}) {
 		t.Fatalf("quick work remained behind visible long builds: %v", selected)
+	}
+}
+
+func BenchmarkTunedAdmission10000Jobs64Slots(b *testing.B) {
+	now := time.Date(2026, 8, 22, 17, 0, 0, 0, time.UTC)
+	jobs := make([]crfgithub.AvailableJob, 0, 10_000)
+	for i := 0; i < 10_000; i++ {
+		name := "unit"
+		if i%4 == 0 {
+			name = "rust-build"
+		}
+		jobs = append(jobs, testJob(int64(i+1), "dinglebear-ai/soma",
+			"dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", name,
+			now.Add(-time.Duration(i%300)*time.Second)))
+	}
+	poller := &Poller{runtimes: map[runtimeDigest]runtimeEstimate{
+		runtimeKey("build", jobs[0].Metadata): {duration: 20 * time.Minute, samples: 100},
+		runtimeKey("build", jobs[1].Metadata): {duration: 30 * time.Second, samples: 100},
+	}, fastLaneTunings: map[int64]fastLanePolicy{}}
+	batch := crfgithub.MessageBatch{Statistics: &crfgithub.Statistics{TotalAvailableJobs: len(jobs)}, AvailableJobs: jobs}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		runtimeSnapshot := poller.runtimeSnapshot()
+		target := deriveFastLanePolicy("build", jobs, runtimeSnapshot, len(jobs), 64, now)
+		policy := poller.stabilizeFastLaneTuning(7, target)
+		benchmarkDecision = poller.admissionSelectionWithRuntimes(
+			batch, "build", 64, now, false, policy, runtimeSnapshot)
 	}
 }
 

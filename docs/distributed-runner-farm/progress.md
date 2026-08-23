@@ -51,11 +51,40 @@ Last updated: 2026-08-22
 - Current verification on the controller-projection/WebUI branch: **130 Rust
   tests**, **122 Elixir tests**, distributed-status, Fleet UI behavior, shell
   syntax, and UI JavaScript tests pass.
-- Queue optimization is merged. The Go scale-set boundary learns bounded,
-  pool-scoped runtime hints, applies starvation-safe admission, and ranks deep
-  GitHub backlog candidates obtained through authenticated `acquirablejobs`
-  without inflating published scale-set capacity. Live deep-backlog ordering and
-  sustained-load validation remain release follow-ups.
+- Queue optimization baseline is merged. The Go scale-set boundary learns
+  bounded, pool-scoped runtime hints, applies starvation-safe admission, and
+  ranks deep GitHub backlog candidates obtained through authenticated
+  `acquirablejobs` without inflating published scale-set capacity. This branch
+  adds a durable, dynamically tuned borrowable fast lane. It samples at most 64
+  queue candidates, derives a known-runtime P75 threshold clamped to 4–8 minutes,
+  and adjusts the hold target to 10/15/20/25 seconds from backlog pressure with
+  a hard 5–30 second bound and step-limited hysteresis. Reservation width adapts
+  separately: normal target is roughly capacity/4, hard-capped at four slots;
+  >=4x backlog pressure halves that width and >=8x collapses it to one, with
+  one-slot hysteresis per tuning step. Only trailing learned-long, non-starved
+  candidates can be reserved. <=10-second supervisor heartbeats probe
+  `acquirablejobs` without a second message long-poll; unknown, quicker, or
+  starved work releases the lane; expiry or lookup degradation grants one long
+  borrow pass. Active threshold, duration, reserved width, deadline, and borrow
+  state persist privately across restart, while `AcquireJobs` remains inside the
+  existing replay-fenced message transaction. The strict Go/Elixir pool snapshot
+  now reports secret-free lane state, threshold, hold duration, reserved width,
+  and deadline, and `DemandCoordinator.status/1` exposes a compact `pool_status`
+  projection that intentionally omits acquired handles. Current
+  exact-tree verification is green across every Go package, `go vet`, session /
+  GitHub / protocol / supervisor race tests; Rust formatting + workspace Clippy
+  `-D warnings` + **131 Rust tests**; Elixir formatting + warnings-as-errors
+  compilation + **124 controller tests** against the real Rust scheduler;
+  `actionlint`; tracked shell/PHP syntax; scale-set autoscale/control/probe/runtime/
+  supervisor regressions; scheduler integration; and package reproducibility.
+  The latest elastic tuned 10,000-job / 64-slot admission benchmark is ~3.47 ms
+  median with 9,944 B/op and 11 allocs/op across five runs. Deterministic sustained
+  simulation using the production policy improves quick-test p95 from 20m10s FIFO
+  to 1m30s, bounds long-work max wait at 2m20s, and yields 22m20s makespan vs
+  20m30s FIFO on an eight-runner Rust-build convoy. Under a perpetual stream of
+  quick jobs, long work begins at exactly the ten-minute starvation threshold.
+  Live fast-lane ordering and sustained-load fairness validation remain release
+  follow-ups.
 - Tootie's saved runner Dockerfile referenced the missing host-local base
   `local/github-runner:ubuntu-resolute`, which BuildKit misleadingly tried to
   pull from Docker Hub. The base was restored from the verified glibc-2.43
