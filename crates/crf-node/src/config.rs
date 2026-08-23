@@ -76,6 +76,7 @@ pub struct NodeConfig {
     pub io_timeout: Duration,
     pub command_ledger_capacity: usize,
     pub operator_projection_path: Option<PathBuf>,
+    pub node_status_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +127,10 @@ impl NodeConfig {
             .filter(|value| !value.is_empty())
             .map(absolute_path)
             .transpose()?;
+        let node_status_path = optional(values, "CRF_NODE_STATUS_PATH")
+            .filter(|value| !value.is_empty())
+            .map(absolute_path)
+            .transpose()?;
 
         Ok(Self {
             controller_addr,
@@ -141,6 +146,7 @@ impl NodeConfig {
             io_timeout,
             command_ledger_capacity: command_ledger_capacity as usize,
             operator_projection_path,
+            node_status_path,
         })
     }
 }
@@ -339,6 +345,7 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(config.command_ledger_capacity, 4_096);
         assert_eq!(config.operator_projection_path, None);
+        assert_eq!(config.node_status_path, None);
     }
 
     #[test]
@@ -361,6 +368,27 @@ mod tests {
             "CRF_OPERATOR_PROJECTION_PATH".into(),
             "relative.json".into(),
         );
+        assert_eq!(
+            NodeConfig::from_values(&configured),
+            Err(ConfigError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn node_status_path_is_optional_and_absolute() {
+        let mut configured = values();
+        configured.insert(
+            "CRF_NODE_STATUS_PATH".into(),
+            test_path("/var/lib/crf/status/node.json"),
+        );
+        assert_eq!(
+            NodeConfig::from_values(&configured)
+                .expect("status config")
+                .node_status_path,
+            Some(PathBuf::from(test_path("/var/lib/crf/status/node.json")))
+        );
+
+        configured.insert("CRF_NODE_STATUS_PATH".into(), "relative.json".into());
         assert_eq!(
             NodeConfig::from_values(&configured),
             Err(ConfigError::InvalidPath)

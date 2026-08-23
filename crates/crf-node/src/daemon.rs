@@ -21,6 +21,7 @@ use crate::{
     native_executor::NativeRunnerExecutor,
     native_materializer::RunnerMaterializer,
     node_executor::NodeExecutor,
+    node_status::{self, NodeStatusDetail, NodeStatusProjection},
     placement_state::PlacementStore,
     probe_local_platform,
     runner_package::RunnerPackageManager,
@@ -66,6 +67,12 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
 
 pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result<(), DaemonError> {
     let operator_projection_path = config.operator_projection_path.clone();
+    let node_status_path = config.node_status_path.clone();
+    let mut status_log = NodeStatusLog::default();
+    status_log.record(persist_node_status(
+        node_status_path.as_deref(),
+        &NodeStatusProjection::connecting(NodeStatusDetail::Starting, now_unix_ms()?),
+    ));
     let platform = probe_local_platform();
     let mut host = SystemProbe::new().map_err(|_| DaemonError::HostProbe)?;
     let host_memory = host
@@ -181,6 +188,13 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         let transport = match tls_client.connect() {
             Ok(transport) => transport,
             Err(error) => {
+                status_log.record(persist_node_status(
+                    node_status_path.as_deref(),
+                    &NodeStatusProjection::connecting(
+                        NodeStatusDetail::ControllerUnavailable,
+                        now_unix_ms()?,
+                    ),
+                ));
                 reconnect_log.failure(
                     &diagnostic_node_id,
                     &diagnostic_controller,
@@ -195,25 +209,44 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         };
 
         let mut session = AgentSession::new(transport, core);
-        match session.register(now_unix_ms()?) {
+        let registration_time = now_unix_ms()?;
+        match session.register(registration_time) {
             Ok(outcome) => {
                 projection_log.record(persist_operator_projection(
                     operator_projection_path.as_deref(),
                     outcome.operator_projection.as_ref(),
                 ));
                 reconnect_log.recovered(&diagnostic_node_id, &diagnostic_controller);
+                status_log.record(persist_node_status(
+                    node_status_path.as_deref(),
+                    &NodeStatusProjection::ready(registration_time),
+                ));
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
             Err(error) => {
                 let reconnect = matches!(error, AgentSessionError::Transport(_));
                 core = session.into_core();
                 if !reconnect {
+                    status_log.record(persist_node_status(
+                        node_status_path.as_deref(),
+                        &NodeStatusProjection::failed(
+                            NodeStatusDetail::ControllerRejected,
+                            registration_time,
+                        ),
+                    ));
                     eprintln!(
                         "crf-node: fatal registration failure node_id={} controller={} error={error:?}",
                         diagnostic_node_id, diagnostic_controller
                     );
                     return Err(DaemonError::FatalSession);
                 }
+                status_log.record(persist_node_status(
+                    node_status_path.as_deref(),
+                    &NodeStatusProjection::connecting(
+                        NodeStatusDetail::RegistrationPending,
+                        registration_time,
+                    ),
+                ));
                 reconnect_log.failure(
                     &diagnostic_node_id,
                     &diagnostic_controller,
@@ -231,11 +264,16 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
             if !running.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            match session.runtime_heartbeat(now_unix_ms()?) {
+            let heartbeat_time = now_unix_ms()?;
+            match session.runtime_heartbeat(heartbeat_time) {
                 Ok(outcome) => {
                     projection_log.record(persist_operator_projection(
                         operator_projection_path.as_deref(),
                         outcome.heartbeat.operator_projection.as_ref(),
+                    ));
+                    status_log.record(persist_node_status(
+                        node_status_path.as_deref(),
+                        &NodeStatusProjection::ready(heartbeat_time),
                     ));
                     sleep_interruptible(config.heartbeat_interval, &running);
                 }
@@ -243,12 +281,26 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     let reconnect = heartbeat_error_reconnectable(&error);
                     core = session.into_core();
                     if !reconnect {
+                        status_log.record(persist_node_status(
+                            node_status_path.as_deref(),
+                            &NodeStatusProjection::failed(
+                                NodeStatusDetail::ControllerRejected,
+                                heartbeat_time,
+                            ),
+                        ));
                         eprintln!(
                             "crf-node: fatal heartbeat failure node_id={} controller={} error={error:?}",
                             diagnostic_node_id, diagnostic_controller
                         );
                         return Err(DaemonError::FatalSession);
                     }
+                    status_log.record(persist_node_status(
+                        node_status_path.as_deref(),
+                        &NodeStatusProjection::connecting(
+                            NodeStatusDetail::ControllerUnavailable,
+                            heartbeat_time,
+                        ),
+                    ));
                     reconnect_log.failure(
                         &diagnostic_node_id,
                         &diagnostic_controller,
@@ -283,6 +335,38 @@ fn persist_operator_projection(
         crate::operator_projection::write_atomic(path, projection)?;
     }
     Ok(())
+}
+
+fn persist_node_status(
+    path: Option<&std::path::Path>,
+    status: &NodeStatusProjection,
+) -> Result<(), std::io::Error> {
+    if let Some(path) = path {
+        node_status::write_atomic(path, status)?;
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct NodeStatusLog {
+    failures: u64,
+}
+
+impl NodeStatusLog {
+    fn record(&mut self, result: Result<(), std::io::Error>) {
+        match result {
+            Ok(()) => self.failures = 0,
+            Err(_error) => {
+                self.failures = self.failures.saturating_add(1);
+                if self.failures == 1 || self.failures.is_power_of_two() {
+                    eprintln!(
+                        "crf-node: nonsecret status write failed repeated_count={}",
+                        self.failures
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
