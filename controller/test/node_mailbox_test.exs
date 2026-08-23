@@ -97,6 +97,30 @@ defmodule CrfController.NodeMailboxTest do
     assert {:ok, ^second} = NodeMailbox.next_for(mailbox, "steamy", 3, now_unix_ms: 2_100)
   end
 
+  test "expiry reclaims capacity without polling that node" do
+    mailbox = start_supervised!({NodeMailbox, name: nil, capacity: 1}, id: :expiring_mailbox)
+    now = System.system_time(:millisecond)
+
+    {:ok, expiring} =
+      NodeCommand.set_drain("unpolled", 1, "expiring", "expiring-key", true, now, now + 25)
+
+    {:ok, replacement} =
+      NodeCommand.set_drain(
+        "dookie",
+        7,
+        "replacement",
+        "replacement-key",
+        true,
+        now,
+        now + 5_000
+      )
+
+    assert {:ok, ^expiring} = NodeMailbox.enqueue(mailbox, expiring, now_unix_ms: now)
+    assert {:error, :mailbox_full} = NodeMailbox.enqueue(mailbox, replacement, now_unix_ms: now)
+    Process.sleep(40)
+    assert {:ok, ^replacement} = NodeMailbox.enqueue(mailbox, replacement, now_unix_ms: now + 40)
+  end
+
   test "exact enqueue retry is idempotent but command ID reuse with changed payload is rejected",
        %{
          mailbox: mailbox
@@ -111,6 +135,57 @@ defmodule CrfController.NodeMailboxTest do
              NodeMailbox.enqueue(mailbox, changed, now_unix_ms: 2_100)
 
     assert NodeMailbox.size(mailbox) == 1
+  end
+
+  test "lookup and ACK work do not walk commands belonging to unrelated nodes" do
+    mailbox = start_supervised!({NodeMailbox, name: nil, capacity: 20_000}, id: :large_mailbox)
+
+    for index <- 1..10_000 do
+      command =
+        drain_command("other-#{index}", 1, "other-command-#{index}", "other-key-#{index}", 20_000)
+
+      assert {:ok, _} = NodeMailbox.enqueue(mailbox, command, now_unix_ms: 2_000)
+    end
+
+    target = drain_command("dookie", 7, "target-command", "target-key", 20_000)
+    assert {:ok, ^target} = NodeMailbox.enqueue(mailbox, target, now_unix_ms: 2_000)
+
+    {lookup_us, {:ok, ^target}} =
+      :timer.tc(fn -> NodeMailbox.next_for(mailbox, "dookie", 7, now_unix_ms: 2_100) end)
+
+    {ack_us, {:ok, ^target}} =
+      :timer.tc(fn ->
+        NodeMailbox.ack(mailbox, "dookie", 7, "target-command", "target-key", :accepted)
+      end)
+
+    assert lookup_us < 100_000
+    assert ack_us < 100_000
+    assert NodeMailbox.size(mailbox) == 10_000
+  end
+
+  test "acknowledged identifiers are compacted for a generation that remains live" do
+    mailbox = start_supervised!({NodeMailbox, name: nil, capacity: 4}, id: :compacting_mailbox)
+    sentinel = drain_command("offline", 9, "sentinel", "sentinel-key", 300_000)
+    assert {:ok, ^sentinel} = NodeMailbox.enqueue(mailbox, sentinel, now_unix_ms: 2_000)
+
+    for index <- 1..1_000 do
+      command = drain_command("offline", 9, "churn-#{index}", "key-#{index}", 300_000)
+      assert {:ok, ^command} = NodeMailbox.enqueue(mailbox, command, now_unix_ms: 2_000)
+
+      assert {:ok, ^command} =
+               NodeMailbox.ack(
+                 mailbox,
+                 "offline",
+                 9,
+                 command.command_id,
+                 command.idempotency_key,
+                 :accepted
+               )
+    end
+
+    state = :sys.get_state(mailbox)
+    assert :queue.len(Map.fetch!(state.node_queues, {"offline", 9})) <= 64
+    assert state.queue_counts[{"offline", 9}] == 1
   end
 
   defp drain_command(node_id, generation, command_id, idempotency_key, expires_at_unix_ms) do

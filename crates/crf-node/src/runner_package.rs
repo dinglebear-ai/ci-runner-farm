@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crf_protocol::{Architecture, OperatingSystem};
@@ -20,6 +20,9 @@ const MARKER_FILE: &str = "package.json";
 const TEMPLATE_DIR: &str = "template";
 const CACHE_LOCK_FILE: &str = ".runner-cache.lock";
 const MAX_CACHED_ENTRIES: usize = 2;
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerPackageError {
@@ -64,8 +67,22 @@ pub trait RunnerFetcher {
     ) -> Result<(), RunnerPackageError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HttpRunnerFetcher;
+#[derive(Clone, Copy, Debug)]
+pub struct HttpRunnerFetcher {
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    total_timeout: Duration,
+}
+
+impl Default for HttpRunnerFetcher {
+    fn default() -> Self {
+        Self {
+            connect_timeout: DOWNLOAD_CONNECT_TIMEOUT,
+            read_timeout: DOWNLOAD_READ_TIMEOUT,
+            total_timeout: DOWNLOAD_TOTAL_TIMEOUT,
+        }
+    }
+}
 
 impl RunnerFetcher for HttpRunnerFetcher {
     fn fetch(
@@ -74,12 +91,20 @@ impl RunnerFetcher for HttpRunnerFetcher {
         destination: &Path,
         expected_size: u64,
     ) -> Result<(), RunnerPackageError> {
-        let mut response = ureq::get(url).call().map_err(|error| {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(self.connect_timeout))
+            .timeout_recv_response(Some(self.read_timeout))
+            .timeout_recv_body(Some(self.read_timeout))
+            .timeout_global(Some(self.total_timeout))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut response = agent.get(url).call().map_err(|error| {
             eprintln!("runner package request failed: {error}");
             RunnerPackageError::DownloadFailed
         })?;
         let mut reader = response.body_mut().as_reader();
         let mut output = secure_new_file(destination).map_err(|_| RunnerPackageError::CacheIo)?;
+        let mut partial = PartialDownload::new(destination);
         let mut total = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
 
@@ -105,7 +130,34 @@ impl RunnerFetcher for HttpRunnerFetcher {
         if total != expected_size {
             return Err(RunnerPackageError::DownloadSizeMismatch);
         }
+        partial.commit();
         Ok(())
+    }
+}
+
+struct PartialDownload<'a> {
+    path: &'a Path,
+    committed: bool,
+}
+
+impl<'a> PartialDownload<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PartialDownload<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(self.path);
+        }
     }
 }
 
@@ -135,7 +187,7 @@ impl RunnerPackageManager {
         os: &OperatingSystem,
         arch: &Architecture,
     ) -> Result<PathBuf, RunnerPackageError> {
-        self.resolve_with_fetcher(os, arch, &HttpRunnerFetcher)
+        self.resolve_with_fetcher(os, arch, &HttpRunnerFetcher::default())
     }
 
     pub fn resolve_with_fetcher(
@@ -506,4 +558,48 @@ fn sync_directory(path: &Path) -> Result<(), io::Error> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<(), io::Error> {
     Ok(())
+}
+
+#[cfg(test)]
+mod download_tests {
+    use std::{
+        io::Write as _,
+        net::TcpListener,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+
+    #[test]
+    fn stalled_body_hits_deadline_and_removes_partial_download() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+                .expect("partial response");
+            thread::sleep(Duration::from_millis(500));
+        });
+        let destination = std::env::temp_dir().join(format!(
+            "crf-stalled-download-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let fetcher = HttpRunnerFetcher {
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
+            total_timeout: Duration::from_millis(200),
+        };
+
+        let started = Instant::now();
+        assert_eq!(
+            fetcher.fetch(&format!("http://{address}/runner"), &destination, 2),
+            Err(RunnerPackageError::DownloadFailed)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!destination.exists());
+        server.join().expect("server");
+    }
 }

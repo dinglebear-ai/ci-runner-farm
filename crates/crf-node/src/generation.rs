@@ -26,6 +26,7 @@ pub enum GenerationError {
     ReserveGeneration,
     WriteGeneration,
     SyncGeneration,
+    SyncStateDirectory,
     UnlockFailed,
 }
 
@@ -109,7 +110,18 @@ checksum={checksum}
     reservation
         .sync_all()
         .map_err(|_| GenerationError::SyncGeneration)?;
+    sync_directory(state_directory).map_err(|_| GenerationError::SyncStateDirectory)?;
     Ok(next)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 fn ensure_state_directory(path: &Path) -> Result<(), GenerationError> {

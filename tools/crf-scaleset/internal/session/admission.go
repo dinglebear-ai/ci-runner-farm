@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/durable"
 
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
@@ -167,35 +170,14 @@ func saveRuntimeHistory(path string, runtimes map[runtimeDigest]runtimeEstimate)
 	if len(entries) > maxRuntimeHistoryEntries {
 		entries = entries[:maxRuntimeHistoryEntries]
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".runtime-history.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := json.NewEncoder(tmp).Encode(runtimeHistoryFile{SchemaVersion: 1, Entries: entries}); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	info, err := os.Lstat(name)
-	if err != nil || info.Size() > maxRuntimeHistoryBytes {
+	err := durable.Replace(path, ".runtime-history.*", 0o600, maxRuntimeHistoryBytes,
+		func(w io.Writer) error {
+			return json.NewEncoder(w).Encode(runtimeHistoryFile{SchemaVersion: 1, Entries: entries})
+		})
+	if errors.Is(err, durable.ErrCapacityExceeded) {
 		return errors.New("runtime_history_capacity_exhausted")
 	}
-	return os.Rename(name, path)
+	return err
 }
 
 func runtimeKey(poolID string, metadata crfgithub.JobMetadata) runtimeDigest {

@@ -33,6 +33,7 @@ defmodule CrfController.SchedulerClient do
          timeout_ms: timeout_ms,
          pending: nil,
          queue: :queue.new(),
+         queued: %{},
          sequence: 0
        }}
     else
@@ -43,14 +44,22 @@ defmodule CrfController.SchedulerClient do
 
   @impl true
   def handle_call({:schedule, requests, nodes}, from, %{pending: nil} = state) do
-    start_request(state, from, requests, nodes)
+    entry = new_entry(from, requests, nodes, state.timeout_ms)
+    start_request(state, entry)
   end
 
   def handle_call({:schedule, requests, nodes}, from, state) do
-    if :queue.len(state.queue) >= @max_queue do
+    if map_size(state.queued) >= @max_queue do
       {:reply, {:error, :scheduler_queue_full}, state}
     else
-      {:noreply, %{state | queue: :queue.in({from, requests, nodes}, state.queue)}}
+      entry = new_entry(from, requests, nodes, state.timeout_ms)
+
+      {:noreply,
+       %{
+         state
+         | queue: :queue.in(entry.id, state.queue),
+           queued: Map.put(state.queued, entry.id, entry)
+       }}
     end
   end
 
@@ -60,6 +69,7 @@ defmodule CrfController.SchedulerClient do
     Process.cancel_timer(pending.timer)
     result = SchedulerWire.decode_response(payload, pending.request_id)
     GenServer.reply(pending.from, result)
+    drop_monitor(pending)
     start_next(%{state | pending: nil})
   end
 
@@ -68,8 +78,38 @@ defmodule CrfController.SchedulerClient do
         %{pending: %{request_id: request_id} = pending} = state
       ) do
     GenServer.reply(pending.from, {:error, :scheduler_timeout})
+    drop_monitor(pending)
     state = %{state | pending: nil}
     restart_port_and_continue(state)
+  end
+
+  def handle_info({:queue_expired, entry_id}, state) do
+    case Map.pop(state.queued, entry_id) do
+      {nil, _queued} ->
+        {:noreply, state}
+
+      {entry, queued} ->
+        GenServer.reply(entry.from, {:error, :scheduler_queue_timeout})
+        drop_monitor(entry)
+        {:noreply, %{state | queued: queued}}
+    end
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    cond do
+      state.pending && state.pending.monitor == monitor ->
+        Process.cancel_timer(state.pending.timer)
+        restart_port_and_continue(%{state | pending: nil})
+
+      true ->
+        queued =
+          Map.reject(state.queued, fn {_id, entry} ->
+            if entry.monitor == monitor, do: Process.cancel_timer(entry.expiry_timer)
+            entry.monitor == monitor
+          end)
+
+        {:noreply, %{state | queued: queued}}
+    end
   end
 
   def handle_info({port, {:exit_status, _status}}, %{port: port} = state) do
@@ -92,45 +132,55 @@ defmodule CrfController.SchedulerClient do
 
   def terminate(_reason, _state), do: :ok
 
-  defp start_request(state, from, requests, nodes) do
+  defp start_request(state, entry) do
     sequence = state.sequence + 1
     request_id = "schedule-#{sequence}"
 
-    case SchedulerWire.encode_request(request_id, requests, nodes) do
+    case SchedulerWire.encode_request(request_id, entry.requests, entry.nodes) do
       {:ok, payload} ->
         if Port.command(state.port, payload) do
+          if entry.expiry_timer, do: Process.cancel_timer(entry.expiry_timer)
           timer = Process.send_after(self(), {:scheduler_timeout, request_id}, state.timeout_ms)
 
-          pending = %{
-            from: from,
-            request_id: request_id,
-            requests: requests,
-            nodes: nodes,
-            timer: timer
-          }
+          pending = Map.merge(entry, %{request_id: request_id, timer: timer, expiry_timer: nil})
 
           {:noreply, %{state | pending: pending, sequence: sequence}}
         else
+          drop_monitor(entry)
           {:reply, {:error, :scheduler_unavailable}, state}
         end
 
       {:error, reason} ->
+        drop_monitor(entry)
         {:reply, {:error, reason}, state}
     end
   end
 
   defp start_next(state) do
     case :queue.out(state.queue) do
-      {{:value, {from, requests, nodes}}, queue} ->
-        state = %{state | queue: queue}
+      {{:value, entry_id}, queue} ->
+        case Map.pop(state.queued, entry_id) do
+          {nil, queued} ->
+            start_next(%{state | queue: queue, queued: queued})
 
-        case start_request(state, from, requests, nodes) do
-          {:noreply, state} ->
-            {:noreply, state}
+          {entry, queued} ->
+            state = %{state | queue: queue, queued: queued}
 
-          {:reply, reply, state} ->
-            GenServer.reply(from, reply)
-            start_next(state)
+            if System.monotonic_time(:millisecond) >= entry.deadline_ms or
+                 not Process.alive?(entry.caller) do
+              GenServer.reply(entry.from, {:error, :scheduler_queue_timeout})
+              drop_monitor(entry)
+              start_next(state)
+            else
+              case start_request(state, entry) do
+                {:noreply, state} ->
+                  {:noreply, state}
+
+                {:reply, reply, state} ->
+                  GenServer.reply(entry.from, reply)
+                  start_next(state)
+              end
+            end
         end
 
       {:empty, queue} ->
@@ -139,23 +189,25 @@ defmodule CrfController.SchedulerClient do
   end
 
   defp restart_port_and_continue(state) do
-    if state.pending do
-      Process.cancel_timer(state.pending.timer)
+    state =
+      if state.pending do
+        Process.cancel_timer(state.pending.timer)
+        entry = Map.drop(state.pending, [:request_id, :timer])
+        remaining = max(entry.deadline_ms - System.monotonic_time(:millisecond), 0)
+        expiry_timer = Process.send_after(self(), {:queue_expired, entry.id}, remaining)
+        entry = %{entry | expiry_timer: expiry_timer}
 
-      state = %{
+        %{
+          state
+          | pending: nil,
+            queue: :queue.in_r(entry.id, state.queue),
+            queued: Map.put(state.queued, entry.id, entry)
+        }
+      else
         state
-        | queue:
-            :queue.in_r(
-              {state.pending.from, state.pending.requests, state.pending.nodes},
-              state.queue
-            ),
-          pending: nil
-      }
+      end
 
-      reopen(state)
-    else
-      reopen(state)
-    end
+    reopen(state)
   end
 
   defp reopen(state) do
@@ -173,16 +225,44 @@ defmodule CrfController.SchedulerClient do
 
       {:error, reason} ->
         fail_all(state, reason)
-        {:stop, reason, %{state | port: nil, pending: nil, queue: :queue.new()}}
+        {:stop, reason, %{state | port: nil, pending: nil, queue: :queue.new(), queued: %{}}}
     end
   end
 
   defp fail_all(state, reason) do
-    if state.pending, do: GenServer.reply(state.pending.from, {:error, reason})
+    if state.pending do
+      GenServer.reply(state.pending.from, {:error, reason})
+      drop_monitor(state.pending)
+    end
 
     state.queue
     |> :queue.to_list()
-    |> Enum.each(fn {from, _requests, _nodes} -> GenServer.reply(from, {:error, reason}) end)
+    |> Enum.each(fn entry_id ->
+      if entry = state.queued[entry_id] do
+        GenServer.reply(entry.from, {:error, reason})
+        drop_monitor(entry)
+      end
+    end)
+  end
+
+  defp new_entry({caller, _tag} = from, requests, nodes, timeout_ms) do
+    id = make_ref()
+
+    %{
+      id: id,
+      from: from,
+      caller: caller,
+      monitor: Process.monitor(caller),
+      requests: requests,
+      nodes: nodes,
+      deadline_ms: System.monotonic_time(:millisecond) + timeout_ms,
+      expiry_timer: Process.send_after(self(), {:queue_expired, id}, timeout_ms)
+    }
+  end
+
+  defp drop_monitor(entry) do
+    if entry[:expiry_timer], do: Process.cancel_timer(entry.expiry_timer)
+    Process.demonitor(entry.monitor, [:flush])
   end
 
   defp open_port(executable) do

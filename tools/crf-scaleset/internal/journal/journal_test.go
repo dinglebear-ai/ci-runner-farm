@@ -1,12 +1,19 @@
 package journal
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func validEntry(scaleSetID, messageID int64) Entry {
+	return Entry{ScaleSetID: scaleSetID, MessageID: messageID, SessionID: "s", Phase: "acked",
+		ConfigRevision: strings.Repeat("a", 64), OwnershipRevision: strings.Repeat("b", 64)}
+}
 
 func TestDurableReplayKeepsLatestPhase(t *testing.T) {
 	s := Store{Path: filepath.Join(t.TempDir(), "journal.jsonl")}
@@ -93,5 +100,75 @@ func TestEntryRejectsDuplicateOrOversizedHandles(t *testing.T) {
 	base.SessionID = strings.Repeat("x", MaxEntryBytes)
 	if base.Validate() == nil {
 		t.Fatal("oversized journal entry was accepted")
+	}
+}
+
+func TestRewriteRejectsOversizedCompactionBeforeReplacingJournal(t *testing.T) {
+	s := Store{Path: filepath.Join(t.TempDir(), "journal.jsonl")}
+	prior := []byte("prior journal bytes\n")
+	if err := os.WriteFile(s.Path, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]Entry, 2100)
+	for index := range entries {
+		entries[index] = validEntry(1, int64(index))
+		entries[index].SessionID = strings.Repeat("x", 4096)
+	}
+	if err := s.Rewrite(entries); err == nil || err.Error() != "journal_capacity_exhausted" {
+		t.Fatalf("expected capacity rejection, got %v", err)
+	}
+	got, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(prior) {
+		t.Fatal("oversized compaction replaced prior journal")
+	}
+}
+
+func TestReplayRecoversOnlyUnterminatedFinalTail(t *testing.T) {
+	s := Store{Path: filepath.Join(t.TempDir(), "journal.jsonl")}
+	entry := validEntry(7, 9)
+	line, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := append(line, '\n')
+	if err := os.WriteFile(s.Path, append(complete, `{"scale_set_id":`...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[entry.Key()].Phase != "acked" {
+		t.Fatalf("unexpected replay: %#v", got)
+	}
+	recovered, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recovered) != string(complete) {
+		t.Fatalf("tail was not truncated: %q", recovered)
+	}
+}
+
+func TestReplayRejectsInteriorCorruptionWithoutModifyingJournal(t *testing.T) {
+	s := Store{Path: filepath.Join(t.TempDir(), "journal.jsonl")}
+	entry := validEntry(7, 9)
+	line, _ := json.Marshal(entry)
+	data := []byte(fmt.Sprintf("%s\nnot-json\n%s", line, line))
+	if err := os.WriteFile(s.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Replay(); err == nil {
+		t.Fatal("accepted interior corruption")
+	}
+	got, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Fatal("interior corruption modified journal")
 	}
 }

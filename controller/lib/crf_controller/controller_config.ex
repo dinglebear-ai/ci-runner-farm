@@ -87,10 +87,17 @@ defmodule CrfController.ControllerConfig do
   defp scheduler(_), do: {:error, :invalid_scheduler_config}
 
   defp state(map) when is_map(map) do
-    with :ok <- exact_keys(map, ["placement_path"]),
+    with :ok <- exact_keys(map, ["placement_path", "checkpoint_bytes"]),
          {:ok, path} <-
-           required_absolute_path(map, "placement_path", :invalid_placement_state_path) do
-      {:ok, [state_path: path]}
+           required_absolute_path(map, "placement_path", :invalid_placement_state_path),
+         {:ok, checkpoint_bytes} <-
+           integer(
+             map,
+             "checkpoint_bytes",
+             65_536..16_777_216,
+             :invalid_placement_checkpoint_bytes
+           ) do
+      {:ok, [state_path: path, checkpoint_bytes: checkpoint_bytes]}
     end
   end
 
@@ -180,6 +187,7 @@ defmodule CrfController.ControllerConfig do
       "keyfile",
       "cacertfile",
       "handshake_timeout_ms",
+      "idle_timeout_ms",
       "max_connections",
       "peers"
     ]
@@ -191,6 +199,8 @@ defmodule CrfController.ControllerConfig do
          {:ok, cacertfile} <- required_absolute_file(map, "cacertfile", :invalid_tls_cacertfile),
          {:ok, handshake} <-
            integer(map, "handshake_timeout_ms", 1..120_000, :invalid_tls_handshake_timeout),
+         {:ok, idle_timeout} <-
+           integer(map, "idle_timeout_ms", 1..120_000, :invalid_tls_idle_timeout),
          {:ok, max_connections} <-
            integer(map, "max_connections", 1..4096, :invalid_tls_max_connections),
          {:ok, peers} <- peers(map["peers"]),
@@ -202,6 +212,7 @@ defmodule CrfController.ControllerConfig do
          keyfile: keyfile,
          cacertfile: cacertfile,
          handshake_timeout: handshake,
+         idle_timeout: idle_timeout,
          max_connections: max_connections,
          peers: peers
        ]}

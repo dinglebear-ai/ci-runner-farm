@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/durable"
 )
 
 type Record struct {
@@ -84,32 +85,11 @@ func WriteAtomic(path string, record Record) error {
 		return err
 	}
 	data = append(data, '\n')
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".compatibility.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return durable.Replace(path, ".compatibility.*", 0o600, 64<<10,
+		func(w io.Writer) error {
+			_, err := w.Write(data)
+			return err
+		})
 }
 
 func LoadFresh(path string, now time.Time, maxAge time.Duration) (Record, error) {

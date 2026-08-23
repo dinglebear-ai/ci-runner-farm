@@ -3,12 +3,14 @@ package session
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/durable"
 
 	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/journal"
 )
@@ -152,38 +154,14 @@ func saveFastLaneState(path string, lanes map[int64]fastLaneState) error {
 		return errors.New("fast_lane_state_capacity_exhausted")
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ScaleSetID < entries[j].ScaleSetID })
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	err := durable.Replace(path, ".fast-lanes.*", 0o600, maxFastLaneStateBytes,
+		func(w io.Writer) error {
+			return json.NewEncoder(w).Encode(fastLaneStateFile{SchemaVersion: fastLaneStateSchemaVersion, Entries: entries})
+		})
+	if errors.Is(err, durable.ErrCapacityExceeded) {
+		return errors.New("fast_lane_state_capacity_exhausted")
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".fast-lanes.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := json.NewEncoder(tmp).Encode(fastLaneStateFile{SchemaVersion: fastLaneStateSchemaVersion, Entries: entries}); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	info, err := os.Lstat(name)
-	if err != nil {
-		return err
-	}
-	if info.Size() > maxFastLaneStateBytes {
-		return fmt.Errorf("fast_lane_state_capacity_exhausted: %d", info.Size())
-	}
-	return os.Rename(name, path)
+	return err
 }
 
 func (p *Poller) persistFastLaneSnapshotLocked() error {

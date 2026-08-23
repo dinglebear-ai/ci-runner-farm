@@ -27,7 +27,13 @@ NAME="ci-runner-farm"
 OUT="${NAME}.plg"
 SRCDIR="src/usr/local/emhttp/plugins/${NAME}"
 TGZ="${NAME}.tgz"
-REPO="${REPO:-unraid/ci-runner-farm}"
+REPO="${REPO:-dinglebear-ai/ci-runner-farm}"
+
+RUNNER_BASE="myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537"
+grep -Fxq "FROM ${RUNNER_BASE}" "$SRCDIR/default.Dockerfile" || {
+  echo "release gate: privileged runner base must equal reviewed immutable digest ${RUNNER_BASE}" >&2
+  exit 1
+}
 
 # Build the .tgz package REPRODUCIBLY: byte-identical output (=> identical MD5)
 # across CI runs from the same source, so the publish job can rebuild the package
@@ -192,6 +198,14 @@ chmod 0755 "\$PLGDIR/include/runner-entrypoint.sh"
 # packages marker and lack the fix; customized files without the marker get a
 # notice instead.
 DF="\$CFGDIR/Dockerfile"
+# Migrate the exact previously shipped mutable base even when the operator has
+# added packages below it. Other custom FROM lines remain untouched.
+# BEGIN_RUNNER_BASE_MIGRATION
+if [ -f "\$DF" ] && grep -Fxq 'FROM myoung34/github-runner:latest' "\$DF"; then
+  sed -i 's|^FROM myoung34/github-runner:latest$|FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537|' "\$DF"
+  echo "ci-runner-farm: pinned the saved stock runner base to the reviewed immutable digest (press Build to rebuild the runner image)."
+fi
+# END_RUNNER_BASE_MIGRATION
 if [ -f "\$DF" ] && ! grep -q 'mkdir -p /home/runner/.cargo/registry' "\$DF"; then
   if grep -q '^#  && rm -rf /var/lib/apt/lists/\\*' "\$DF"; then
     BLK=\$(mktemp)
@@ -214,7 +228,7 @@ EOF_CACHEDIRS
     echo "ci-runner-farm: NOTE - saved \$DF lacks the runner-owned cache-dir block from default.Dockerfile; merge it manually so non-root runners can write beside the cache mounts."
   fi
 fi
-( docker pull myoung34/github-runner:latest >/dev/null 2>&1 & ) || true
+( docker pull myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537 >/dev/null 2>&1 & ) || true
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
 # blocking. Transient partial starts retry, and the runtime coalesces this hook

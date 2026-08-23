@@ -134,6 +134,7 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
         # value. Keeping them as separate argv entries works across Windows
         # PowerShell and PowerShell 7; combining them exits with ERROR_INVALID_COMMAND_LINE (1639).
         Invoke-Native "$env:SystemRoot\System32\sc.exe" 'failure' $serviceName 'reset=' '86400' 'actions=' 'restart/5000/restart/15000/restart/60000'
+        Invoke-Native "$env:SystemRoot\System32\sc.exe" 'failureflag' $serviceName '1'
         Assert-NoInjectedFailure 'failure-policy'
 
         New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null

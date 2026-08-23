@@ -1,14 +1,18 @@
 package journal
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/durable"
 )
 
 var phases = []string{"received", "validated", "acquire_started", "acquire_observed", "committed", "ack_pending", "acked"}
@@ -111,7 +115,7 @@ func (s Store) Replay() (map[Key]Entry, error) {
 	if size > MaxJournalBytes {
 		return nil, errors.New("journal_capacity_exhausted")
 	}
-	f, err := os.Open(s.Path)
+	f, err := os.OpenFile(s.Path, os.O_RDWR, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return out, nil
 	}
@@ -119,27 +123,53 @@ func (s Store) Replay() (map[Key]Entry, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	scan := bufio.NewScanner(f)
-	scan.Buffer(make([]byte, 4096), 1<<20)
-	for scan.Scan() {
+	data, err := io.ReadAll(io.LimitReader(f, MaxJournalBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxJournalBytes {
+		return nil, errors.New("journal_capacity_exhausted")
+	}
+	completeEnd := len(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		completeEnd = bytes.LastIndexByte(data, '\n') + 1
+	}
+	lines := bytes.Split(data[:completeEnd], []byte{'\n'})
+	for index, line := range lines {
+		if len(line) == 0 && index == len(lines)-1 {
+			continue
+		}
 		var e Entry
-		if err := json.Unmarshal(scan.Bytes(), &e); err != nil {
-			return nil, err
+		if err := json.Unmarshal(line, &e); err != nil {
+			return nil, fmt.Errorf("journal corruption at line %d: %w", index+1, err)
 		}
 		if err := e.Validate(); err != nil {
 			return nil, err
 		}
 		out[e.Key()] = e
 	}
-	return out, scan.Err()
+	if completeEnd < len(data) {
+		var final Entry
+		if err := json.Unmarshal(data[completeEnd:], &final); err == nil {
+			if err := final.Validate(); err != nil {
+				return nil, err
+			}
+			out[final.Key()] = final
+		} else {
+			if err := f.Truncate(int64(completeEnd)); err != nil {
+				return nil, err
+			}
+			if err := f.Sync(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }
 
 // Rewrite atomically compacts the journal to one durable entry per replay key.
 // Callers decide which entries remain necessary for replay safety.
 func (s Store) Rewrite(entries []Entry) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return err
-	}
 	ordered := slices.Clone(entries)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].ScaleSetID != ordered[j].ScaleSetID {
@@ -147,44 +177,21 @@ func (s Store) Rewrite(entries []Entry) error {
 		}
 		return ordered[i].MessageID < ordered[j].MessageID
 	})
-	tmp, err := os.CreateTemp(filepath.Dir(s.Path), ".journal.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	encoder := json.NewEncoder(tmp)
-	for _, entry := range ordered {
-		if err := entry.Validate(); err != nil {
-			_ = tmp.Close()
-			return err
+	err := durable.Replace(s.Path, ".journal.*", 0o600, MaxJournalBytes, func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		for _, entry := range ordered {
+			if err := entry.Validate(); err != nil {
+				return err
+			}
+			entry.UpdatedAt = time.Now().UTC()
+			if err := encoder.Encode(entry); err != nil {
+				return err
+			}
 		}
-		entry.UpdatedAt = time.Now().UTC()
-		if err := encoder.Encode(entry); err != nil {
-			_ = tmp.Close()
-			return err
-		}
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, s.Path); err != nil {
-		return err
-	}
-	size, err := s.Size()
-	if err != nil {
-		return err
-	}
-	if size > MaxJournalBytes {
+		return nil
+	})
+	if errors.Is(err, durable.ErrCapacityExceeded) {
 		return errors.New("journal_capacity_exhausted")
 	}
-	return nil
+	return err
 }

@@ -1064,6 +1064,7 @@ echo 'reconcile-stop-stubborn-owned-group: OK'
     provision_preflight() { : >"$caller_dir/start-provision-ran"; }
     public_repo_problem() { :; }
     org_runner_group_problem() { :; }
+    privileged_trust_problem() { :; }
     managed_names() { :; }
     start_stopped_managed() { : >"$caller_dir/start-capacity-ran"; }
     pool_mode_enabled() { return 1; }
@@ -1136,6 +1137,7 @@ echo 'reconcile-fence-preserves-healthy-worker: OK'
     reconcile_calls=0
     reconcile_start() { reconcile_calls=$((reconcile_calls + 1)); return 0; }
     public_repo_problem() { :; }; org_runner_group_problem() { :; }
+    privileged_trust_problem() { :; }
     provision_preflight() { return 1; }
     if cmd_start; then echo 'FAIL: invalid Start preflight succeeded' >&2; exit 1; fi
     [ "$reconcile_calls" -eq 2 ] || {

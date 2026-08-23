@@ -8,6 +8,8 @@ defmodule CrfController.PlacementStateStore do
   @legacy_schema_version 1
   @max_state_bytes 16 * 1024 * 1024
   @max_records 65_536
+  @max_journal_record_bytes 64 * 1024
+  @max_journal_bytes 32 * 1024 * 1024
   @states %{
     "commanded" => :commanded,
     "accepted" => :accepted,
@@ -24,7 +26,10 @@ defmodule CrfController.PlacementStateStore do
 
   def load(path) when is_binary(path) do
     with true <- Path.type(path) == :absolute do
-      if File.exists?(path), do: read(path), else: {:ok, %{placements: %{}, tombstones: %{}}}
+      base =
+        if File.exists?(path), do: read(path), else: {:ok, %{placements: %{}, tombstones: %{}}}
+
+      with {:ok, state} <- base, do: replay_journal(path, state)
     else
       false -> {:error, :invalid_placement_state_path}
     end
@@ -50,6 +55,41 @@ defmodule CrfController.PlacementStateStore do
 
   def persist(_, _, _), do: {:error, :invalid_placement_state}
 
+  def append(nil, _record), do: :ok
+
+  def append(path, record) when is_binary(path) do
+    with true <- Path.type(path) == :absolute,
+         {:ok, payload} <- encode_journal_record(record),
+         true <- byte_size(payload) <= @max_journal_record_bytes,
+         :ok <- append_frame(journal_path(path), payload) do
+      :ok
+    else
+      false -> {:error, :invalid_placement_state}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def append(_, _), do: {:error, :invalid_placement_state}
+
+  def checkpoint(nil, _placements, _tombstones), do: :ok
+
+  def checkpoint(path, placements, tombstones) do
+    with :ok <- persist(path, placements, tombstones),
+         :ok <- remove_journal(path) do
+      :ok
+    end
+  end
+
+  def journal_size(nil), do: 0
+
+  def journal_size(path) do
+    case File.stat(journal_path(path)) do
+      {:ok, stat} -> stat.size
+      {:error, :enoent} -> 0
+      {:error, _reason} -> 0
+    end
+  end
+
   def compact(placements, tombstones) when is_map(placements) and is_map(tombstones) do
     %{placements: placements, tombstones: tombstones}
   end
@@ -71,6 +111,167 @@ defmodule CrfController.PlacementStateStore do
       {:error, _reason} -> {:error, :invalid_placement_state}
     end
   end
+
+  defp encode_journal_record({:put, %Placement{} = placement}) do
+    encode_journal_map(%{"op" => "put_placement", "record" => placement_map(placement)})
+  end
+
+  defp encode_journal_record({:put, %PlacementTombstone{} = tombstone}) do
+    encode_journal_map(%{"op" => "put_tombstone", "record" => tombstone_map(tombstone)})
+  end
+
+  defp encode_journal_record({:prune_before_generation, node_id, generation})
+       when is_binary(node_id) and byte_size(node_id) in 1..128 and is_integer(generation) and
+              generation > 0 do
+    encode_journal_map(%{
+      "op" => "prune_before_generation",
+      "node_id" => node_id,
+      "generation" => generation
+    })
+  end
+
+  defp encode_journal_record(_), do: {:error, :invalid_placement_state}
+
+  defp encode_journal_map(record) do
+    try do
+      {:ok, :json.encode(record) |> IO.iodata_to_binary()}
+    rescue
+      _ -> {:error, :placement_state_encode_failed}
+    end
+  end
+
+  defp replay_journal(path, state) do
+    journal = journal_path(path)
+
+    case File.stat(journal) do
+      {:ok, stat}
+      when stat.type == :regular and stat.size <= @max_journal_bytes ->
+        if secure_state_mode?(stat.mode) do
+          with {:ok, binary} <- File.read(journal), do: replay_frames(binary, state)
+        else
+          {:error, :invalid_placement_state}
+        end
+
+      {:error, :enoent} ->
+        {:ok, state}
+
+      _ ->
+        {:error, :invalid_placement_state}
+    end
+  end
+
+  defp replay_frames(<<>>, state), do: {:ok, state}
+  # A crash may leave only the final frame incomplete. No acknowledged update can
+  # have returned before its complete frame was synced, so ignoring that tail is safe.
+  defp replay_frames(binary, state) when byte_size(binary) < 36, do: {:ok, state}
+
+  defp replay_frames(<<length::unsigned-big-integer-size(32), rest::binary>>, state)
+       when length in 1..@max_journal_record_bytes do
+    frame_bytes = length + 32
+
+    if byte_size(rest) < frame_bytes do
+      {:ok, state}
+    else
+      <<digest::binary-size(32), payload::binary-size(^length), tail::binary>> = rest
+
+      with true <- :crypto.hash(:sha256, payload) == digest,
+           {:ok, next_state} <- apply_journal_record(payload, state) do
+        replay_frames(tail, next_state)
+      else
+        _ -> {:error, :invalid_placement_state}
+      end
+    end
+  end
+
+  defp replay_frames(_binary, _state), do: {:error, :invalid_placement_state}
+
+  defp apply_journal_record(payload, state) do
+    try do
+      case :json.decode(payload) do
+        %{"op" => "put_placement", "record" => record} = value when map_size(value) == 2 ->
+          with {:ok, placement} <- decode_placement(record) do
+            {:ok,
+             %{
+               placements: Map.put(state.placements, placement.id, placement),
+               tombstones: Map.delete(state.tombstones, placement.id)
+             }}
+          end
+
+        %{"op" => "put_tombstone", "record" => record} = value when map_size(value) == 2 ->
+          with {:ok, tombstone} <- decode_tombstone(record, @schema_version) do
+            {:ok,
+             %{
+               placements: Map.delete(state.placements, tombstone.id),
+               tombstones: Map.put(state.tombstones, tombstone.id, tombstone)
+             }}
+          end
+
+        %{
+          "op" => "prune_before_generation",
+          "node_id" => node_id,
+          "generation" => generation
+        } = value
+        when map_size(value) == 3 and is_binary(node_id) and byte_size(node_id) in 1..128 and
+               is_integer(generation) and generation > 0 ->
+          {:ok,
+           %{
+             state
+             | tombstones:
+                 Map.reject(state.tombstones, fn {_id, tombstone} ->
+                   tombstone.node_id == node_id and tombstone.node_generation < generation
+                 end)
+           }}
+
+        _ ->
+          {:error, :invalid_placement_state}
+      end
+    rescue
+      _ -> {:error, :invalid_placement_state}
+    end
+  end
+
+  defp append_frame(path, payload) do
+    directory = Path.dirname(path)
+    journal_exists? = File.exists?(path)
+
+    frame = [
+      <<byte_size(payload)::unsigned-big-integer-size(32)>>,
+      :crypto.hash(:sha256, payload),
+      payload
+    ]
+
+    with :ok <- File.mkdir_p(directory),
+         {:ok, file} <- :file.open(String.to_charlist(path), [:append, :binary, :raw]) do
+      try do
+        with :ok <- File.chmod(path, 0o600),
+             :ok <- :file.write(file, frame),
+             :ok <- :file.sync(file),
+             :ok <- File.chmod(path, 0o600),
+             :ok <- sync_new_journal_directory(directory, journal_exists?) do
+          :ok
+        else
+          {:error, _reason} -> {:error, :placement_state_persist_failed}
+        end
+      after
+        _ = :file.close(file)
+      end
+    else
+      {:error, _reason} -> {:error, :placement_state_persist_failed}
+    end
+  end
+
+  defp sync_new_journal_directory(_directory, true), do: :ok
+  defp sync_new_journal_directory(directory, false), do: sync_directory(directory)
+
+  defp remove_journal(path) do
+    case File.rm(journal_path(path)) do
+      :ok -> sync_directory(Path.dirname(path))
+      {:error, :enoent} -> :ok
+      {:error, _reason} -> {:error, :placement_state_persist_failed}
+    end
+  end
+
+  defp journal_path(path), do: path <> ".wal"
 
   defp encode(placements, tombstones) do
     records =

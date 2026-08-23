@@ -2,17 +2,20 @@ defmodule CrfController.TlsConnection do
   alias CrfController.{Framing, Ingress, PeerAuthorizer, PeerRegistry}
 
   @default_timeout 15_000
+  @default_idle_timeout 60_000
 
   @spec run(term(), GenServer.server(), term(), keyword()) :: :ok | {:error, term()}
   def run(socket, ingress \\ Ingress, auth_source, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
+    idle_timeout = Keyword.get(opts, :idle_timeout, @default_idle_timeout)
 
     result =
       with :ok <- valid_timeout(timeout),
+           :ok <- valid_timeout(idle_timeout),
            {:ok, socket} <- :ssl.handshake(socket, timeout),
            {:ok, certificate_der} <- :ssl.peercert(socket),
            {:ok, peer} <- authorize_certificate(auth_source, certificate_der) do
-        receive_loop(socket, ingress, auth_source, peer, :infinity)
+        receive_loop(socket, ingress, auth_source, peer, idle_timeout)
       end
 
     _ = :ssl.close(socket)

@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/durable"
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
 )
 
@@ -230,31 +230,11 @@ func (m *Manager) write(state State) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(m.cfg.Path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(m.cfg.Path), ".ownership.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, m.cfg.Path)
+	return durable.Replace(m.cfg.Path, ".ownership.*", 0o600, 1<<20,
+		func(w io.Writer) error {
+			_, err := w.Write(data)
+			return err
+		})
 }
 
 func equalSpec(remote crfgithub.ScaleSet, name string, groupID int64, labels []string) bool {

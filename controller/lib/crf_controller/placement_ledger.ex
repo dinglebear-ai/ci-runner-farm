@@ -3,6 +3,8 @@ defmodule CrfController.PlacementLedger do
 
   alias CrfController.{Placement, PlacementStateStore, PlacementTombstone}
 
+  @default_checkpoint_bytes 1_048_576
+
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     genserver_opts = if is_nil(name), do: [], else: [name: name]
@@ -67,26 +69,32 @@ defmodule CrfController.PlacementLedger do
   def init(opts) do
     state_path = Keyword.get(opts, :state_path)
     record_capacity = Keyword.get(opts, :record_capacity, 65_536)
+    checkpoint_bytes = Keyword.get(opts, :checkpoint_bytes, @default_checkpoint_bytes)
 
-    case PlacementStateStore.load(state_path) do
-      {:ok, %{placements: placements, tombstones: tombstones}} ->
-        commands =
-          Map.new(
-            Map.values(placements) ++ Map.values(tombstones),
-            &{&1.command_id, &1.id}
-          )
+    with true <- is_integer(checkpoint_bytes) and checkpoint_bytes in 65_536..16_777_216,
+         {:ok, %{placements: placements, tombstones: tombstones}} <-
+           PlacementStateStore.load(state_path) do
+      commands =
+        Map.new(
+          Map.values(placements) ++ Map.values(tombstones),
+          &{&1.command_id, &1.id}
+        )
 
-        {:ok,
-         %{
-           placements: placements,
-           tombstones: tombstones,
-           commands: commands,
-           record_capacity: record_capacity,
-           state_path: state_path
-         }}
+      state = %{
+        placements: placements,
+        tombstones: tombstones,
+        commands: commands,
+        record_capacity: record_capacity,
+        checkpoint_bytes: checkpoint_bytes,
+        state_path: state_path
+      }
 
-      {:error, reason} ->
-        {:stop, reason}
+      # Recovery and schema migration are cold-path operations. Folding any
+      # replayed journal into a fresh snapshot here bounds future replay time.
+      with :ok <- checkpoint_state(state), do: {:ok, state}
+    else
+      false -> {:stop, :invalid_placement_checkpoint_bytes}
+      {:error, reason} -> {:stop, reason}
     end
   end
 
@@ -110,9 +118,18 @@ defmodule CrfController.PlacementLedger do
 
     next_state = %{state | tombstones: retained} |> rebuild_commands()
 
-    case persist_state(next_state) do
-      :ok -> {:reply, :ok, next_state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case PlacementStateStore.append(
+           state.state_path,
+           {:prune_before_generation, node_id, generation}
+         ) do
+      :ok ->
+        # The prune is now authoritative in the WAL. A checkpoint failure is
+        # non-ambiguous: recovery replays this record after any stale puts.
+        _ = checkpoint_state(next_state)
+        {:reply, :ok, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -327,10 +344,12 @@ defmodule CrfController.PlacementLedger do
         put_placement(state, placement)
       end
 
-    compacted_state = compact_state(next_state)
+    record =
+      Map.get(next_state.placements, placement.id) ||
+        Map.fetch!(next_state.tombstones, placement.id)
 
-    case persist_state(compacted_state) do
-      :ok -> {:ok, compacted_state}
+    case append_record(next_state, record) do
+      :ok -> {:ok, maybe_checkpoint(next_state)}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -338,33 +357,28 @@ defmodule CrfController.PlacementLedger do
   defp persist_tombstone(state, %PlacementTombstone{} = tombstone) do
     next_state = put_tombstone(state, tombstone)
 
-    compacted_state = compact_state(next_state)
-
-    case persist_state(compacted_state) do
-      :ok -> {:ok, compacted_state}
+    case append_record(next_state, tombstone) do
+      :ok -> {:ok, maybe_checkpoint(next_state)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp persist_state(state) do
-    PlacementStateStore.persist(state.state_path, state.placements, state.tombstones)
+  defp append_record(state, record) do
+    PlacementStateStore.append(state.state_path, {:put, record})
   end
 
-  defp compact_state(state) do
-    compacted = PlacementStateStore.compact(state.placements, state.tombstones)
+  defp checkpoint_state(state) do
+    PlacementStateStore.checkpoint(state.state_path, state.placements, state.tombstones)
+  end
 
-    commands =
-      Map.new(
-        Map.values(compacted.placements) ++ Map.values(compacted.tombstones),
-        &{&1.command_id, &1.id}
-      )
+  defp maybe_checkpoint(state) do
+    if PlacementStateStore.journal_size(state.state_path) >= state.checkpoint_bytes do
+      # The journal record is already durable. A checkpoint failure must not turn
+      # an acknowledged mutation into an ambiguous error; recovery will replay it.
+      _ = checkpoint_state(state)
+    end
 
-    %{
-      state
-      | placements: compacted.placements,
-        tombstones: compacted.tombstones,
-        commands: commands
-    }
+    state
   end
 
   defp rebuild_commands(state) do

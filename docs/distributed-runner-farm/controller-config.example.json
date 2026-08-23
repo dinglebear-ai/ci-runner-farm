@@ -5,7 +5,8 @@
     "request_timeout_ms": 5000
   },
   "state": {
-    "placement_path": "/var/lib/ci-runner-farm/controller/placements.json"
+    "placement_path": "/var/lib/ci-runner-farm/controller/placements.json",
+    "checkpoint_bytes": 1048576
   },
   "node_registry": {
     "stale_after_ms": 15000
@@ -25,6 +26,7 @@
     "keyfile": "/etc/ci-runner-farm/tls/controller.key",
     "cacertfile": "/etc/ci-runner-farm/tls/ca.crt",
     "handshake_timeout_ms": 15000,
+    "idle_timeout_ms": 60000,
     "peers": [
       {
         "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

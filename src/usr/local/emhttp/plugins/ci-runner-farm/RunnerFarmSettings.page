@@ -42,7 +42,7 @@ $defaults = [
   'IMAGE_SOURCE'=>'builtin', 'IMAGE'=>'', 'REGISTRY_SERVER'=>'', 'REGISTRY_USERNAME'=>'',
   'CACHE_ROOT'=>'/mnt/cache/github-runner', 'WORK_TMPFS_SIZE'=>'8g',
   'CACHE_MOUNTS'=>'pnpm-store:/home/runner/.local/share/pnpm/store npm:/home/runner/.npm yarn:/home/runner/.cache/yarn ms-playwright:/home/runner/.cache/ms-playwright',
-  'DIND'=>'true', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
+  'DIND'=>'false', 'SHARE_DOCKER_SOCK'=>'false', 'SHARED_IMAGE_CACHE'=>'true', 'NETWORK_ISOLATION'=>'off',
   'RUNNER_NETWORK'=>'ci-runner-net', 'MIRROR_PORT'=>'5000',
   'IMAGE_AUTOUPDATE'=>'false', 'IMAGE_AUTOUPDATE_INTERVAL'=>'1800', 'IMAGE_DRAIN_TIMEOUT'=>'3600',
   'DASHBOARD_WIDGET_ENABLE'=>'true',
@@ -368,8 +368,8 @@ _(Cache mounts)_:
 
 _(Docker-in-docker mode)_:
 : <select name="DIND">
-  <option value="true" <?=crf_sel($cfg,'DIND','true','true')?>>true (own daemon per runner, privileged)</option>
-  <option value="false" <?=crf_sel($cfg,'DIND','false','true')?>>false (use host docker.sock)</option>
+  <option value="true" <?=crf_sel($cfg,'DIND','true','false')?>>true (own daemon per runner, privileged)</option>
+  <option value="false" <?=crf_sel($cfg,'DIND','false','false')?>>false (use host docker.sock)</option>
   </select>
 
 :crf_dind_plug:

@@ -64,7 +64,7 @@ Fork-PR code from a public repo must [b]never[/b] run on a privileged or
 socket-mounted self-hosted runner. The plugin warns you if it detects a public
 repo target on a privileged fleet.
 
-[b]Source & issues:[/b] https://github.com/unraid/ci-runner-farm
+[b]Source & issues:[/b] https://github.com/dinglebear-ai/ci-runner-farm
 ```
 
 ---

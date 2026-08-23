@@ -32,12 +32,14 @@ defmodule CrfController.ControllerConfigTest do
     assert parsed.scheduler_opts[:executable] == ctx.scheduler
     assert parsed.scheduler_opts[:request_timeout_ms] == 5_000
     assert parsed.placement_opts[:state_path] == Path.join(ctx.root, "placements.json")
+    assert parsed.placement_opts[:checkpoint_bytes] == 1_048_576
     assert parsed.node_registry_opts[:stale_after_ms] == 15_000
     assert parsed.scaleset_opts[:socket_path] == Path.join(ctx.root, "scaleset.sock")
     assert parsed.scaleset_opts[:sequence_path] == Path.join(ctx.root, "sequence.json")
     assert parsed.scaleset_opts[:controller_instance_id] == "controller-1"
     assert parsed.tls_opts[:port] == 7443
     assert parsed.tls_opts[:max_connections] == 128
+    assert parsed.tls_opts[:idle_timeout] == 60_000
     assert parsed.tls_opts[:peers] == [{String.downcase(@fingerprint), "dookie"}]
     assert parsed.demand_opts[:auto_reconcile]
     assert parsed.demand_opts[:reconcile_interval_ms] == 1_000
@@ -210,7 +212,8 @@ defmodule CrfController.ControllerConfigTest do
         "request_timeout_ms" => 5_000
       },
       "state" => %{
-        "placement_path" => Path.join(ctx.root, "placements.json")
+        "placement_path" => Path.join(ctx.root, "placements.json"),
+        "checkpoint_bytes" => 1_048_576
       },
       "node_registry" => %{
         "stale_after_ms" => 15_000
@@ -230,6 +233,7 @@ defmodule CrfController.ControllerConfigTest do
         "keyfile" => ctx.key,
         "cacertfile" => ctx.ca,
         "handshake_timeout_ms" => 15_000,
+        "idle_timeout_ms" => 60_000,
         "max_connections" => 128,
         "peers" => [
           %{"fingerprint" => @fingerprint, "node_id" => "dookie"}

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Maintainer>
-  <Icon>https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ci-runner-farm.png</Icon>
+  <Icon>https://raw.githubusercontent.com/dinglebear-ai/ci-runner-farm/main/community-applications/ci-runner-farm.png</Icon>
   <Profile>Lime Technology — makers of Unraid. Official plugins from the Unraid team.</Profile>
   <!-- TODO(before submission): point Forum at the maintainer's forums.unraid.net
        profile URL (required by Community Applications). Placeholder below. -->

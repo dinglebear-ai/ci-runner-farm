@@ -18,32 +18,46 @@ import (
 type Handler func(context.Context, protocol.Request) protocol.Response
 
 type Server struct {
-	Path        string
-	Handler     Handler
-	AllowedUID  *uint32
-	mu          sync.Mutex
-	lastSeq     map[string]uint64
-	MaxHandlers int
-	IOTimeout   time.Duration
+	Path                string
+	Handler             Handler
+	AllowedUID          *uint32
+	mu                  sync.Mutex
+	lastSeq             map[string]uint64
+	MaxReplayIdentities int
+	MaxHandlers         int
+	IOTimeout           time.Duration
 }
+
+const defaultMaxReplayIdentities = 1024
 
 func (s *Server) Serve(ctx context.Context) error {
 	if s.Handler == nil {
 		return errors.New("handler_required")
 	}
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+	if !filepath.IsAbs(s.Path) || filepath.Clean(s.Path) != s.Path || filepath.Base(s.Path) == "." {
+		return errors.New("invalid_socket_path")
+	}
+	runtimeDir := filepath.Dir(s.Path)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(filepath.Dir(s.Path), 0o700); err != nil {
+	if err := validatePrivateRuntimeDir(runtimeDir); err != nil {
 		return err
 	}
-	_ = os.Remove(s.Path)
+	if err := removeOwnedSocket(s.Path, nil); err != nil {
+		return err
+	}
 	listener, err := net.Listen("unix", s.Path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = listener.Close() }()
-	defer func() { _ = os.Remove(s.Path) }()
+	socketInfo, err := os.Lstat(s.Path)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	defer func() { _ = removeOwnedSocket(s.Path, socketInfo) }()
 	if err := os.Chmod(s.Path, 0o600); err != nil {
 		return err
 	}
@@ -103,15 +117,54 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	s.mu.Lock()
-	last := s.lastSeq[req.ControllerInstanceID]
-	if req.Sequence <= last {
+	last, known := s.lastSeq[req.ControllerInstanceID]
+	if known && req.Sequence <= last {
 		s.mu.Unlock()
 		_ = json.NewEncoder(conn).Encode(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: false, Code: "sequence_regression"})
+		return
+	}
+	maxReplayIdentities := s.MaxReplayIdentities
+	if maxReplayIdentities <= 0 {
+		maxReplayIdentities = defaultMaxReplayIdentities
+	}
+	if !known && len(s.lastSeq) >= maxReplayIdentities {
+		s.mu.Unlock()
+		_ = json.NewEncoder(conn).Encode(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: false, Code: "replay_identity_capacity_exhausted"})
 		return
 	}
 	s.lastSeq[req.ControllerInstanceID] = req.Sequence
 	s.mu.Unlock()
 	_ = json.NewEncoder(conn).Encode(s.Handler(ctx, req))
+}
+
+func validatePrivateRuntimeDir(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("socket_runtime_dir_not_private")
+	}
+	return nil
+}
+
+func removeOwnedSocket(path string, expected os.FileInfo) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSocket == 0 || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("socket_path_not_owned_socket")
+	}
+	if expected != nil && !os.SameFile(info, expected) {
+		return errors.New("socket_path_replaced")
+	}
+	return os.Remove(path)
 }
 
 func authorizedPeer(conn net.Conn, allowedUID uint32) bool {

@@ -4,6 +4,7 @@ defmodule CrfController.TlsServer do
   alias CrfController.{Ingress, PeerAuthorizer, TlsConnection, TlsOptions}
 
   @default_handshake_timeout 15_000
+  @default_idle_timeout 60_000
   @accept_timeout 1_000
 
   def start_link(opts) do
@@ -23,11 +24,13 @@ defmodule CrfController.TlsServer do
       Keyword.get(opts, :connection_supervisor, CrfController.ConnectionSupervisor)
 
     handshake_timeout = Keyword.get(opts, :handshake_timeout, @default_handshake_timeout)
+    idle_timeout = Keyword.get(opts, :idle_timeout, @default_idle_timeout)
     peers = Keyword.get(opts, :peers, [])
     peer_registry = Keyword.get(opts, :peer_registry)
 
     with true <- is_integer(port) and port in 0..65_535,
          true <- is_integer(handshake_timeout) and handshake_timeout in 1..120_000,
+         true <- is_integer(idle_timeout) and idle_timeout in 1..120_000,
          {:ok, auth_source} <- auth_source(peer_registry, peers),
          {:ok, tls_options} <- TlsOptions.server(opts),
          {:ok, listen_socket} <-
@@ -44,7 +47,8 @@ defmodule CrfController.TlsServer do
                connection_supervisor,
                ingress,
                auth_source,
-               handshake_timeout
+               handshake_timeout,
+               idle_timeout
              )
            end) do
       {:ok,
@@ -70,14 +74,43 @@ defmodule CrfController.TlsServer do
     :ok
   end
 
-  defp accept_loop(listen_socket, connection_supervisor, ingress, auth_source, handshake_timeout) do
+  defp accept_loop(
+         listen_socket,
+         connection_supervisor,
+         ingress,
+         auth_source,
+         handshake_timeout,
+         idle_timeout
+       ) do
     case :ssl.transport_accept(listen_socket, @accept_timeout) do
       {:ok, socket} ->
-        handoff(socket, connection_supervisor, ingress, auth_source, handshake_timeout)
-        accept_loop(listen_socket, connection_supervisor, ingress, auth_source, handshake_timeout)
+        handoff(
+          socket,
+          connection_supervisor,
+          ingress,
+          auth_source,
+          handshake_timeout,
+          idle_timeout
+        )
+
+        accept_loop(
+          listen_socket,
+          connection_supervisor,
+          ingress,
+          auth_source,
+          handshake_timeout,
+          idle_timeout
+        )
 
       {:error, :timeout} ->
-        accept_loop(listen_socket, connection_supervisor, ingress, auth_source, handshake_timeout)
+        accept_loop(
+          listen_socket,
+          connection_supervisor,
+          ingress,
+          auth_source,
+          handshake_timeout,
+          idle_timeout
+        )
 
       {:error, :closed} ->
         :ok
@@ -87,11 +120,21 @@ defmodule CrfController.TlsServer do
     end
   end
 
-  defp handoff(socket, connection_supervisor, ingress, auth_source, handshake_timeout) do
+  defp handoff(
+         socket,
+         connection_supervisor,
+         ingress,
+         auth_source,
+         handshake_timeout,
+         idle_timeout
+       ) do
     case Task.Supervisor.start_child(connection_supervisor, fn ->
            receive do
              {:crf_tls_socket, owned_socket} ->
-               TlsConnection.run(owned_socket, ingress, auth_source, timeout: handshake_timeout)
+               TlsConnection.run(owned_socket, ingress, auth_source,
+                 timeout: handshake_timeout,
+                 idle_timeout: idle_timeout
+               )
            after
              handshake_timeout -> {:error, :socket_handoff_timeout}
            end

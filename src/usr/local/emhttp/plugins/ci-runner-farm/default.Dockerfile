@@ -5,7 +5,7 @@
 # This is a minimal starting point: the stock self-hosted runner base plus a
 # docker-in-docker readiness wrapper. Add whatever your CI needs (language
 # runtimes, browsers, build tools) in the marked section below.
-FROM myoung34/github-runner:latest
+FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive

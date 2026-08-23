@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Containers>
 <Plugin>True</Plugin>
-<PluginURL>https://github.com/unraid/ci-runner-farm/releases/latest/download/ci-runner-farm.plg</PluginURL>
+<PluginURL>https://github.com/dinglebear-ai/ci-runner-farm/releases/latest/download/ci-runner-farm.plg</PluginURL>
 <PluginAuthor>Lime Technology</PluginAuthor>
 <Beta>False</Beta>
 <Category>Tools:System: Network:Management: Productivity:</Category>
@@ -22,8 +22,8 @@ CI Runner Farm executes GitHub Actions jobs in [b]privileged Docker-in-Docker[/b
 [br][br]
 By installing you acknowledge these risks and accept responsibility for what runs on your fleet.
 </Requires>
-<Support>https://github.com/unraid/ci-runner-farm/issues</Support>
-<Project>https://github.com/unraid/ci-runner-farm</Project>
-<Icon>https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ci-runner-farm.png</Icon>
-<Screenshot>https://raw.githubusercontent.com/unraid/ci-runner-farm/main/docs/images/fleet.png</Screenshot>
+<Support>https://github.com/dinglebear-ai/ci-runner-farm/issues</Support>
+<Project>https://github.com/dinglebear-ai/ci-runner-farm</Project>
+<Icon>https://raw.githubusercontent.com/dinglebear-ai/ci-runner-farm/main/community-applications/ci-runner-farm.png</Icon>
+<Screenshot>https://raw.githubusercontent.com/dinglebear-ai/ci-runner-farm/main/docs/images/fleet.png</Screenshot>
 </Containers>

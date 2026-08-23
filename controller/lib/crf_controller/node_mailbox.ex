@@ -69,7 +69,8 @@ defmodule CrfController.NodeMailbox do
     capacity = Keyword.get(opts, :capacity, @default_capacity)
 
     if is_integer(capacity) and capacity in 1..@max_capacity do
-      {:ok, %{capacity: capacity, order: :queue.new(), commands: %{}}}
+      {:ok,
+       %{capacity: capacity, node_queues: %{}, queue_counts: %{}, queue_stale: %{}, commands: %{}}}
     else
       {:stop, :invalid_mailbox_capacity}
     end
@@ -80,9 +81,24 @@ defmodule CrfController.NodeMailbox do
     with :ok <- NodeCommand.validate(command, now_unix_ms) do
       case Map.get(state.commands, command.command_id) do
         nil when map_size(state.commands) < state.capacity ->
+          node_key = {command.node_id, command.node_generation}
+
+          Process.send_after(
+            self(),
+            {:expire_command, command.command_id, command.expires_at_unix_ms},
+            max(command.expires_at_unix_ms - now_unix_ms + 1, 0)
+          )
+
           state = %{
             state
-            | order: :queue.in(command.command_id, state.order),
+            | node_queues:
+                Map.update(
+                  state.node_queues,
+                  node_key,
+                  :queue.from_list([command.command_id]),
+                  &:queue.in(command.command_id, &1)
+                ),
+              queue_counts: Map.update(state.queue_counts, node_key, 1, &(&1 + 1)),
               commands: Map.put(state.commands, command.command_id, command)
           }
 
@@ -156,56 +172,92 @@ defmodule CrfController.NodeMailbox do
 
   def handle_call(:size, _from, state), do: {:reply, map_size(state.commands), state}
 
-  defp next_matching(state, node_id, generation, now_unix_ms) do
-    state = purge_expired(state, now_unix_ms)
+  @impl true
+  def handle_info({:expire_command, command_id, expires_at}, state) do
+    state =
+      case Map.get(state.commands, command_id) do
+        %NodeCommand{expires_at_unix_ms: ^expires_at} -> drop_command(state, command_id)
+        _ -> state
+      end
 
-    command =
-      state.order
-      |> :queue.to_list()
-      |> Enum.find_value(fn command_id ->
-        case Map.get(state.commands, command_id) do
-          %NodeCommand{node_id: ^node_id, node_generation: ^generation} = command -> command
-          _ -> nil
-        end
-      end)
-
-    {command, state}
+    {:noreply, state}
   end
 
-  defp purge_expired(state, now_unix_ms) do
-    expired =
-      state.commands
-      |> Enum.reduce(MapSet.new(), fn
-        {command_id, %NodeCommand{expires_at_unix_ms: expires_at_unix_ms}}, acc
-        when now_unix_ms > expires_at_unix_ms ->
-          MapSet.put(acc, command_id)
+  defp next_matching(state, node_id, generation, now_unix_ms) do
+    key = {node_id, generation}
+    queue = Map.get(state.node_queues, key, :queue.new())
+    next_in_node_queue(state, key, queue, now_unix_ms)
+  end
 
-        _, acc ->
-          acc
-      end)
+  defp next_in_node_queue(state, key, queue, now_unix_ms) do
+    case :queue.out(queue) do
+      {{:value, command_id}, rest} ->
+        case Map.get(state.commands, command_id) do
+          nil ->
+            next_in_node_queue(state, key, rest, now_unix_ms)
 
-    if MapSet.size(expired) == 0 do
-      state
-    else
-      order =
-        state.order
-        |> :queue.to_list()
-        |> Enum.reject(&MapSet.member?(expired, &1))
-        |> :queue.from_list()
+          %NodeCommand{expires_at_unix_ms: expires_at} when now_unix_ms > expires_at ->
+            state
+            |> drop_command(command_id)
+            |> next_matching(elem(key, 0), elem(key, 1), now_unix_ms)
 
-      %{state | order: order, commands: Map.drop(state.commands, MapSet.to_list(expired))}
+          %NodeCommand{} = command ->
+            {command, put_node_queue(state, key, queue)}
+        end
+
+      {:empty, _queue} ->
+        {nil, %{state | node_queues: Map.delete(state.node_queues, key)}}
     end
   end
 
   defp drop_command(state, command_id) do
-    order =
-      state.order
-      |> :queue.to_list()
-      |> Enum.reject(&(&1 == command_id))
-      |> :queue.from_list()
+    case Map.get(state.commands, command_id) do
+      nil ->
+        state
 
-    %{state | order: order, commands: Map.delete(state.commands, command_id)}
+      %NodeCommand{} = command ->
+        key = {command.node_id, command.node_generation}
+        commands = Map.delete(state.commands, command_id)
+        remaining = Map.fetch!(state.queue_counts, key) - 1
+
+        if remaining == 0 do
+          %{
+            state
+            | commands: commands,
+              node_queues: Map.delete(state.node_queues, key),
+              queue_counts: Map.delete(state.queue_counts, key),
+              queue_stale: Map.delete(state.queue_stale, key)
+          }
+        else
+          stale = Map.get(state.queue_stale, key, 0) + 1
+
+          state = %{
+            state
+            | commands: commands,
+              queue_counts: Map.put(state.queue_counts, key, remaining)
+          }
+
+          if stale >= max(remaining, 64) do
+            queue =
+              :queue.filter(
+                &Map.has_key?(commands, &1),
+                Map.fetch!(state.node_queues, key)
+              )
+
+            %{
+              state
+              | node_queues: Map.put(state.node_queues, key, queue),
+                queue_stale: Map.delete(state.queue_stale, key)
+            }
+          else
+            %{state | queue_stale: Map.put(state.queue_stale, key, stale)}
+          end
+        end
+    end
   end
+
+  defp put_node_queue(state, key, queue),
+    do: %{state | node_queues: Map.put(state.node_queues, key, queue)}
 
   defp command_identity(command, node_id, generation, idempotency_key) do
     cond do

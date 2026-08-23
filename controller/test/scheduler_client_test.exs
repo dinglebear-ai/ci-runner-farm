@@ -5,6 +5,42 @@ defmodule CrfController.SchedulerClientTest do
 
   @gib 1024 * 1024 * 1024
 
+  @tag :tmp_dir
+  test "queued callers are monitored and expired before they can become ghost work", %{
+    tmp_dir: tmp_dir
+  } do
+    executable = Path.join(tmp_dir, "blocking-scheduler")
+    File.write!(executable, "#!/bin/sh\nsleep 10\n")
+    File.chmod!(executable, 0o700)
+
+    client =
+      start_supervised!(
+        {SchedulerClient, name: nil, executable: executable, request_timeout_ms: 150}
+      )
+
+    nodes = [node("steamy", :windows, :native_process)]
+    first = Task.async(fn -> SchedulerClient.schedule(client, [work("active")], nodes, 2_000) end)
+    Process.sleep(25)
+
+    ghost =
+      spawn(fn ->
+        _ = SchedulerClient.schedule(client, [work("ghost")], nodes, 2_000)
+      end)
+
+    Process.sleep(25)
+    Process.exit(ghost, :kill)
+
+    assert eventually(fn -> map_size(:sys.get_state(client).queued) == 0 end)
+    assert {:error, :scheduler_timeout} = Task.await(first, 2_000)
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :scheduler_timeout} =
+             SchedulerClient.schedule(client, [work("after-ghost")], nodes, 2_000)
+
+    assert System.monotonic_time(:millisecond) - started_at < 500
+  end
+
   test "persistent Elixir Port uses the real Rust scheduler for sequential and queued calls" do
     case System.get_env("CRF_SCHEDULER_BIN") do
       nil ->
@@ -63,5 +99,17 @@ defmodule CrfController.SchedulerClientTest do
       required_backend: :native_process,
       required_capabilities: []
     }
+  end
+
+  defp eventually(fun, attempts \\ 40)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 end

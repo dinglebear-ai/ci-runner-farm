@@ -108,7 +108,7 @@ and click **Install**.
 In the Unraid webGUI go to **Plugins → Install Plugin** and paste:
 
 ```
-https://github.com/unraid/ci-runner-farm/releases/latest/download/ci-runner-farm.plg
+https://github.com/dinglebear-ai/ci-runner-farm/releases/latest/download/ci-runner-farm.plg
 ```
 
 Unraid always resolves this to the newest published release, and its built-in
@@ -448,4 +448,4 @@ src/usr/local/emhttp/plugins/ci-runner-farm/
 
 ## Support
 
-Questions and bug reports: <https://github.com/unraid/ci-runner-farm/issues>
+Questions and bug reports: <https://github.com/dinglebear-ai/ci-runner-farm/issues>

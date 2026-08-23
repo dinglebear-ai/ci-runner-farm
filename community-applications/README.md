@@ -41,8 +41,8 @@ Use the Community Applications submission flow
 validates `ca_profile.xml`, checks for duplicates, and previews the listing.
 Point it at the raw URLs:
 
-- Template: `https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ci-runner-farm.xml`
-- Profile:  `https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ca_profile.xml`
+- Template: `https://raw.githubusercontent.com/dinglebear-ai/ci-runner-farm/main/community-applications/ci-runner-farm.xml`
+- Profile:  `https://raw.githubusercontent.com/dinglebear-ai/ci-runner-farm/main/community-applications/ca_profile.xml`
 
 The CA moderation team then vets it for security, functionality, and design
 before it goes live.

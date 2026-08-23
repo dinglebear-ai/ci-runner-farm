@@ -52,7 +52,8 @@ defmodule CrfController.TlsRevocationIntegrationTest do
            certfile: pki.server_cert,
            keyfile: pki.server_key,
            cacertfile: pki.ca_cert,
-           handshake_timeout: 1_000}
+           handshake_timeout: 1_000,
+           idle_timeout: 5_000}
         )
 
       assert {:ok, socket} = connect(TlsServer.port(tls), pki)
@@ -70,6 +71,60 @@ defmodule CrfController.TlsRevocationIntegrationTest do
       assert :ok = send_frame(socket, heartbeat)
       assert {:ok, heartbeat_response} = recv_frame(socket)
       assert TestFixtures.decode_json(heartbeat_response)["status"] == "accepted"
+    end
+
+    test "authenticated idle TLS sessions close and release their connection task" do
+      root = Path.join(System.tmp_dir!(), "crf-tls-timeout-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      pki = create_pki(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      registry = start_supervised!({NodeRegistry, name: nil, stale_after_ms: 10_000})
+      placements = start_supervised!({PlacementLedger, name: nil})
+      mailbox = start_supervised!({NodeMailbox, name: nil, capacity: 16})
+
+      ingress =
+        start_supervised!(
+          {Ingress,
+           name: nil,
+           node_registry: registry,
+           placement_ledger: placements,
+           node_mailbox: mailbox,
+           ledger_capacity: 16}
+        )
+
+      peer_registry =
+        start_supervised!({PeerRegistry, name: nil, peers: [{pki.client_fingerprint, "dookie"}]})
+
+      {:ok, connection_supervisor} = Task.Supervisor.start_link(max_children: 2)
+
+      tls =
+        start_supervised!(
+          {TlsServer,
+           name: nil,
+           port: 0,
+           ingress: ingress,
+           connection_supervisor: connection_supervisor,
+           peer_registry: peer_registry,
+           peers: [{pki.client_fingerprint, "dookie"}],
+           certfile: pki.server_cert,
+           keyfile: pki.server_key,
+           cacertfile: pki.ca_cert,
+           handshake_timeout: 1_000,
+           idle_timeout: 150}
+        )
+
+      assert {:ok, socket} = connect(TlsServer.port(tls), pki)
+
+      assert eventually(fn ->
+               Task.Supervisor.children(connection_supervisor) |> length() == 2
+             end)
+
+      assert {:error, :closed} = :ssl.recv(socket, Framing.header_bytes(), 2_000)
+
+      assert eventually(fn ->
+               Task.Supervisor.children(connection_supervisor) |> length() == 1
+             end)
     end
 
     test "revoking a fingerprint closes an already-authenticated TLS session on its next frame" do
@@ -148,6 +203,18 @@ defmodule CrfController.TlsRevocationIntegrationTest do
   else
     test "live TLS revocation integration requires OpenSSL on Unix" do
       assert true
+    end
+  end
+
+  defp eventually(fun, attempts \\ 40)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(25)
+      eventually(fun, attempts - 1)
     end
   end
 

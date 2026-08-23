@@ -68,7 +68,7 @@ ACCESS_TOKEN=""                       # GitHub PAT (repo scope; +admin:org for o
 SHARE_DOCKER_SOCK="false"             # mount host docker.sock for service containers (ignored when DIND=true).
                                       # Off by default: it gives jobs root-equivalent host access — opt in only
                                       # for trusted/private repos. DIND=true (the default) supersedes it anyway.
-DIND="true"                           # docker-in-docker: each runner gets its own daemon (--privileged).
+DIND="false"                          # docker-in-docker requires --privileged; opt in only for trusted targets.
                                       # Fixes GitHub Actions services: networking + 'port already allocated' collisions.
 SHARED_IMAGE_CACHE="true"             # run a shared pull-through registry mirror so every DinD runner
                                       # reuses pulled images (postgres, etc.) instead of each pulling cold.
@@ -1864,14 +1864,17 @@ gh_fetch_all() {
 public_repo_problem() {
   [ "$GH_SCOPE" = "repo" ] || { echo ""; return; }
   { [ "$DIND" = "true" ] || [ "$SHARE_DOCKER_SOCK" = "true" ]; } || { echo ""; return; }
-  [ -n "$ACCESS_TOKEN" ] || { echo ""; return; }   # can't query without a token
+  [ -n "$ACCESS_TOKEN" ] || { echo "Privileged runners require authenticated repository visibility proof."; return; }
   if [ -f "$SECURITY_CACHE" ]; then
     local age; age=$(( $(date +%s) - $(stat -c %Y "$SECURITY_CACHE" 2>/dev/null || echo 0) ))
     [ "$age" -ge 0 ] && [ "$age" -lt "$SECURITY_TTL" ] && { cat "$SECURITY_CACHE"; return; }
   fi
-  local pub="" repo vis tmpd n=0
+  local pub="" unknown="" repo vis tmpd n=0
   tmpd="$(mktemp -d 2>/dev/null)"
-  [ -n "$tmpd" ] || { echo ""; return; }   # transient temp failure: don't cache, retry next call
+  [ -n "$tmpd" ] || {
+    echo "Repository visibility could not be proven because a secure temporary workspace could not be created; privileged runners fail closed."
+    return
+  }
   # One concurrent visibility probe per repo (see gh_fetch_all). GitHub's repo API
   # returns "visibility":"public|private|internal"; a 404 (a repo the PAT can't see)
   # returns a JSON error body with no "visibility" field, so it reads as unknown and is
@@ -1881,21 +1884,31 @@ public_repo_problem() {
     [ -n "$repo" ] || continue
     n=$((n+1))
     vis="$(grep -o '"visibility"[[:space:]]*:[[:space:]]*"[^"]*"' "$tmpd/$n" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
-    [ "$vis" = "public" ] && pub="$pub ${repo}"
+    case "$vis" in public) pub="$pub ${repo}" ;; private|internal) ;; *) unknown="$unknown ${repo}" ;; esac
   done
   rm -rf "$tmpd"
   local msg=""
   [ -n "$pub" ] && msg="PUBLIC repo(s) targeted while runners are privileged (DinD / host docker.sock):${pub}. Fork-PR code on a public repo would run as root on this server. Use trusted/private repos only, or an org runner-group restricted to private repos. See the Security section of the plugin README."
+  [ -n "$unknown" ] && msg="${msg}${msg:+ }Repository visibility could not be proven for:${unknown}; privileged runners fail closed."
   printf '%s' "$msg" > "$SECURITY_CACHE" 2>/dev/null || true
   printf '%s' "$msg"
 }
 
 org_runner_group_problem() {
-  pool_mode_enabled || return 0
   [ "$GH_SCOPE" = org ] || return 0
   { [ "$DIND" = true ] || [ "$SHARE_DOCKER_SOCK" = true ]; } || return 0
-  [ -n "$RUNNER_GROUP" ] && return 0
-  echo "Runner pools are privileged and use the organization default runner group. Configure a repository-restricted runner group before allowing untrusted repositories to target these labels."
+  echo "Organization targeting cannot prove that runner group '${RUNNER_GROUP:-default}' excludes public or unrestricted repositories. Privileged runners require repository-scoped private/internal targets."
+}
+
+privileged_trust_problem() {
+  { [ "$DIND" = true ] || [ "$SHARE_DOCKER_SOCK" = true ]; } || return 0
+  if [ "${CRF_I_ACCEPT_UNRESTRICTED_PRIVILEGED_RUNNER_HOST_ROOT_RISK:-}" = "YES_I_ACCEPT_UNRAID_HOST_ROOT_COMPROMISE" ]; then
+    return 0
+  fi
+  local repo_problem org_problem
+  repo_problem="$(public_repo_problem)"
+  org_problem="$(org_runner_group_problem)"
+  printf '%s%s%s' "$repo_problem" "${repo_problem:+${org_problem:+ }}" "$org_problem"
 }
 
 # docker login on the HOST so it can pull a private runner IMAGE (e.g. a private
@@ -2345,6 +2358,9 @@ fleet_lock_resume() {
 }
 
 start_one() {
+  local trust_problem
+  trust_problem="$(privileged_trust_problem)"
+  [ -z "$trust_problem" ] || { err "SECURITY: $trust_problem To bypass this fail-closed gate, set CRF_I_ACCEPT_UNRESTRICTED_PRIVILEGED_RUNNER_HOST_ROOT_RISK=YES_I_ACCEPT_UNRAID_HOST_ROOT_COMPROMISE in the service environment."; return 1; }
   local idx="$1" pool="${2:-default}" scope_target="${3:-}" name
   local expected_revision cpu_milli memory_bytes spec_hash reservation_id="" rc observed=0
   [ -z "${MAINTENANCE_FILE:-}" ] || [ ! -f "$MAINTENANCE_FILE" ] || { err "maintenance mode blocks new runner admissions"; return 1; }
@@ -3503,9 +3519,8 @@ cmd_start() {
   reconcile_start || return 1
   rm -f "$RUNDIR"/scale-override.* 2>/dev/null || true
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
-  local secp orgp; secp="$(public_repo_problem)"; orgp="$(org_runner_group_problem)"
-  [ -n "$secp" ] && err "SECURITY: $secp"       # warn, do not block (operator's call)
-  [ -n "$orgp" ] && err "SECURITY: $orgp"
+  local trust_problem; trust_problem="$(privileged_trust_problem)"
+  [ -z "$trust_problem" ] || { err "SECURITY: $trust_problem To bypass this fail-closed gate, set CRF_I_ACCEPT_UNRESTRICTED_PRIVILEGED_RUNNER_HOST_ROOT_RISK=YES_I_ACCEPT_UNRAID_HOST_ROOT_COMPROMISE in the service environment."; return 1; }
   provision_preflight || return 1               # cache-root guard + dirs/network/mirror/firewall/registry
   local classic_rollback_activation=0
   if [ "${MIGRATION_CLASSIC_ACTIVATION:-0}" = 1 ] && migration_load; then

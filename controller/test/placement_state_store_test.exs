@@ -255,6 +255,96 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
+  test "hot-path mutations append bounded frames and recover through a torn journal tail" do
+    root =
+      Path.join(System.tmp_dir!(), "crf-placement-wal-#{System.unique_integer([:positive])}")
+
+    path = Path.join(root, "placements.json")
+
+    {:ok, ledger} =
+      PlacementLedger.start_link(name: nil, state_path: path, checkpoint_bytes: 16_777_216)
+
+    baseline_bytes = File.stat!(path).size
+
+    {elapsed_us, :ok} =
+      :timer.tc(fn ->
+        for index <- 1..1_000 do
+          attrs = %{
+            placement_attrs()
+            | id: "placement-#{index}",
+              command_id: "command-#{index}",
+              idempotency_key: "key-#{index}"
+          }
+
+          assert {:ok, _} = PlacementLedger.begin_placement(ledger, attrs, now_ms: index)
+        end
+
+        :ok
+      end)
+
+    assert File.stat!(path).size == baseline_bytes
+    assert PlacementStateStore.journal_size(path) in 1..1_000_000
+    # Includes one fsync per acknowledged mutation; guards against accidental
+    # quadratic/full-snapshot work without depending on tmpfs-class latency.
+    assert elapsed_us < 20_000_000
+    GenServer.stop(ledger)
+
+    File.write!(path <> ".wal", <<0, 0, 1>>, [:append])
+    {:ok, recovered} = PlacementLedger.start_link(name: nil, state_path: path)
+    assert length(PlacementLedger.snapshot(recovered)) == 1_000
+    assert {:ok, %{command_id: "command-1000"}} = PlacementLedger.get(recovered, "placement-1000")
+    assert PlacementStateStore.journal_size(path) == 0
+
+    GenServer.stop(recovered)
+    File.rm_rf!(root)
+  end
+
+  test "stale pre-checkpoint WAL cannot resurrect an acknowledged generation prune" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "crf-placement-prune-wal-#{System.unique_integer([:positive])}"
+      )
+
+    path = Path.join(root, "placements.json")
+
+    old = %PlacementTombstone{
+      id: "old",
+      command_id: "old-command",
+      idempotency_sha256: PlacementTombstone.digest("old-key"),
+      node_id: "dookie",
+      node_generation: 1,
+      state: :finished,
+      detail_code: nil,
+      updated_at_ms: 10
+    }
+
+    current = %PlacementTombstone{
+      id: "current",
+      command_id: "current-command",
+      idempotency_sha256: PlacementTombstone.digest("current-key"),
+      node_id: "dookie",
+      node_generation: 2,
+      state: :finished,
+      detail_code: nil,
+      updated_at_ms: 20
+    }
+
+    assert :ok = PlacementStateStore.persist(path, %{}, %{old.id => old, current.id => current})
+    assert :ok = PlacementStateStore.append(path, {:put, old})
+    assert :ok = PlacementStateStore.append(path, {:put, current})
+    assert :ok = PlacementStateStore.append(path, {:prune_before_generation, "dookie", 2})
+
+    # Model a crash after the compacted snapshot is durable but before the old
+    # WAL is unlinked: recovery must replay the durable prune after stale puts.
+    assert :ok = PlacementStateStore.persist(path, %{}, %{current.id => current})
+    assert {:ok, %{placements: %{}, tombstones: tombstones}} = PlacementStateStore.load(path)
+    refute Map.has_key?(tombstones, old.id)
+    assert Map.has_key?(tombstones, current.id)
+
+    File.rm_rf!(root)
+  end
+
   test "corrupt durable placement state fails closed on startup" do
     root =
       Path.join(System.tmp_dir!(), "crf-placement-corrupt-#{System.unique_integer([:positive])}")
