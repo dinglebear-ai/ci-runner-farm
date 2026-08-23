@@ -65,12 +65,6 @@ jobs:
       - name: Behavioral regression suite
         run: |
           set -e
-          # Build the native payload while the hosted runner still has its full
-          # scratch-disk budget. The release gate intentionally builds a complete
-          # plugin package and runs last so those artifacts cannot starve another
-          # test's mktemp/build directory.
-          echo "bash tests/native-plugin-payload.sh"
-          bash tests/native-plugin-payload.sh
           for test in tests/*.sh; do
             case "$test" in
               tests/native-plugin-payload.sh|tests/final-release-gate.sh) continue ;;
@@ -123,6 +117,10 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace
+
+      - name: Native plugin payload
+        if: runner.os == 'Linux'
+        run: bash tests/native-plugin-payload.sh
 
       - name: Build distributed Windows node package
         if: runner.os == 'Windows'
