@@ -1718,6 +1718,71 @@ github_runner_id() {
   github_runner_inventory "$target" | awk -F'|' -v want="$name" '$2 == want { print $1; exit }'
 }
 
+fixed_quiesce_dir_ensure() {
+  local dir="$CFGDIR/fixed-quiesced"
+  [ ! -L "$dir" ] || return 1
+  mkdir -p "$dir" || return 1
+  chmod 0700 "$dir"
+}
+
+fixed_quiesce_marker() {
+  local c="$1"
+  runner_identity_validate "$c" || return 1
+  printf '%s/fixed-quiesced/%s.state\n' "$CFGDIR" "$c"
+}
+
+github_runner_labels_replace() {
+  local c="$1" labels="$2" target base id rname body
+  [ -n "$ACCESS_TOKEN" ] && [ -n "$c" ] || return 1
+  case "$labels" in ''|*[!A-Za-z0-9,._-]*) return 1 ;; esac
+  target="$(runner_scope_target "$c")"
+  github_scope_validate "$target" || { err "runner $c lacks a valid stamped scope target"; return 1; }
+  base="$(github_scope_base "$target")" || return 1
+  rname="$(host)-${c}"
+  id="$(github_runner_id "$target" "$rname")" || return 1
+  [ -n "$id" ] || return 1
+  body="$(php -r '
+    $labels=array_values(array_filter(explode(",",$argv[1]),"strlen"));
+    echo json_encode(["labels"=>$labels],JSON_UNESCAPED_SLASHES);
+  ' "$labels")" || return 1
+  if gh_api_request PUT "${base}/actions/runners/${id}/labels" "$body" && [ "$GH_STATUS" = 200 ]; then
+    github_runner_inventory_invalidate "$target" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+fixed_quiesce_runner() {
+  local c="$1" marker tmp
+  marker="$(fixed_quiesce_marker "$c")" || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 0
+  fixed_quiesce_dir_ensure || return 1
+  github_runner_labels_replace "$c" crf-retiring || return 1
+  tmp="$marker.tmp.$$"
+  ( umask 077; printf 'schema=1\nrunner=%s\nquiesced_at=%s\n' "$c" "$(date +%s)" > "$tmp" ) || {
+    rm -f "$tmp"; return 1;
+  }
+  chmod 0600 "$tmp" && mv "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+  log "reconcile: quiesced excess runner $c from new GitHub assignments"
+}
+
+fixed_quiesce_restore() {
+  local c="$1" marker pool labels
+  marker="$(fixed_quiesce_marker "$c")" || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  pool="$(runner_pool "$c")"
+  labels="$(pool_effective_labels "$pool")" || return 1
+  github_runner_labels_replace "$c" "$labels" || return 1
+  rm -f "$marker"
+  log "reconcile: restored configured labels for $c"
+}
+
+fixed_quiesce_forget() {
+  local marker
+  marker="$(fixed_quiesce_marker "$1" 2>/dev/null)" || return 0
+  rm -f "$marker"
+}
+
 # Deregister a runner from GitHub host-side, by name, using the PAT. This replaces
 # the base image's in-container SIGTERM deregister (we disable it via
 # DISABLE_AUTOMATIC_DEREGISTRATION) — that path re-mints from ACCESS_TOKEN and so
@@ -2700,7 +2765,7 @@ cmd_mirror_up() {
 reconcile_stale_runners() {
   validate_runtime_config || { err "reconcile: $POOL_CONFIG_ERROR"; return 1; }
   cleanup_pool_runtime_state
-  local cur c gen pool scope state docker_state desired rec target recycle_result
+  local cur c gen pool scope state docker_state desired rec target recycle_result current excess selected
   fleet_inventory_refresh || { err "reconcile: could not inventory managed runners"; return 1; }
   crf_confgen_prepare || { err "reconcile: ${CRF_CONFGEN_ERROR:-runner image identity is unavailable}"; return 1; }
   if pool_mode_enabled && [ "$(count_pool_missing_capacity)" -gt 0 ]; then
@@ -2766,31 +2831,42 @@ reconcile_stale_runners() {
     fi
   done
 
-  # Pass 2: honor fixed-mode runtime targets persistently. Highest indexes drain
-  # first; a busy excess runner remains until a later worker pass sees it idle.
+  # Pass 2: designate the highest fixed-mode identities as surplus and remove
+  # their routing labels before waiting for busy work to finish.
   if pool_mode_enabled; then
     while IFS= read -r rec; do
       pool="${rec%%|*}"
       pool_autoscale_enabled "$pool" && continue
       target="$(pool_effective_target "$pool")"
-      [ "$(current_count "$pool")" -gt "$target" ] || continue
+      current="$(current_count "$pool")"
+      excess=$((current - target))
+      [ "$excess" -gt 0 ] || excess=0
+      selected=0
       for c in $(managed_names "$pool" | sort -rV); do
-        [ "$(current_count "$pool")" -gt "$target" ] || break
-        state="$(runner_state "$c")"
-        case "$state" in
-          idle)
-            log "reconcile: draining idle excess runner $c to fixed target $target"
-            remove_runner "$c" && return 0
-            ;;
-          error)
-            if runner_authoritatively_failed "$c"; then
-              log "reconcile: force-removing authoritatively failed excess runner $c to fixed target $target"
-              remove_runner_force "$c" && return 0
-            fi
-            log "reconcile: $c has a non-authoritative error signal — preserving it"
-            ;;
-          *) log "reconcile: $c exceeds fixed target but is $state — waiting" ;;
-        esac
+        if [ "$selected" -lt "$excess" ]; then
+          selected=$((selected + 1))
+          if ! fixed_quiesce_runner "$c"; then
+            log "warning: could not quiesce excess runner $c; it remains eligible and will be retried"
+            continue
+          fi
+          state="$(runner_state "$c")"
+          case "$state" in
+            idle)
+              log "reconcile: draining idle excess runner $c to fixed target $target"
+              remove_runner "$c" && return 0
+              ;;
+            error)
+              if runner_authoritatively_failed "$c"; then
+                log "reconcile: force-removing authoritatively failed excess runner $c to fixed target $target"
+                remove_runner_force "$c" && return 0
+              fi
+              log "reconcile: $c has a non-authoritative error signal — preserving it"
+              ;;
+            *) log "reconcile: quiesced excess runner $c is $state — waiting" ;;
+          esac
+        elif ! fixed_quiesce_restore "$c"; then
+          log "warning: could not restore configured labels for $c; will retry"
+        fi
       done
     done < <(pool_records)
   fi
@@ -3521,6 +3597,7 @@ remove_runner_container() {
   fi
   crf_runtime_stop_remove "$c" 30
   fleet_inventory_invalidate
+  fixed_quiesce_forget "$c" 2>/dev/null || true
   if [ -n "$root" ]; then
     rm -rf -- "${root:?}/docker/${c:?}" 2>/dev/null || true
   else
