@@ -131,9 +131,9 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
             # making a Program Files binPath invalid. Create the stopped service
             # with a no-space placeholder and set the exact ImagePath through
             # the registry before it can be started.
-            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'create' $serviceName 'binPath=' "$env:SystemRoot\System32\cmd.exe" 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
+            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'create' $serviceName 'binPath=' "$env:SystemRoot\System32\cmd.exe" 'start=' 'demand' 'obj=' 'LocalSystem'
         } else {
-            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'start=' 'demand' 'obj=' 'NT AUTHORITY\LocalService'
+            Invoke-Native "$env:SystemRoot\System32\sc.exe" 'config' $serviceName 'start=' 'demand' 'obj=' 'LocalSystem'
         }
         Set-ItemProperty -LiteralPath $serviceKey -Name ImagePath -Value $quotedBinaryPath
         Invoke-Native "$env:SystemRoot\System32\sc.exe" 'description' $serviceName 'Distributed CI Runner Farm portable node'
