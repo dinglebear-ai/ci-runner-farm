@@ -103,8 +103,12 @@ for platform in "${platforms[@]}"; do
     cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node --target "$rust_target"
   SOURCE_DATE_EPOCH="$source_date_epoch" CARGO_TARGET_DIR="$target_dir" \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=none" \
+    cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-scheduler --target "$rust_target"
+  SOURCE_DATE_EPOCH="$source_date_epoch" CARGO_TARGET_DIR="$target_dir" \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,--build-id=none" \
     cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-container-adapter --target "$adapter_target"
   install -m 0755 "$target_dir/$rust_target/release/crf-node" "$destination/crf-node"
+  install -m 0755 "$target_dir/$rust_target/release/crf-scheduler" "$destination/crf-scheduler"
   install -m 0755 "$target_dir/$adapter_target/release/crf-container-adapter" "$destination/crf-container-adapter"
   ! readelf -l "$destination/crf-container-adapter" | grep -q 'INTERP' || {
     echo "adapter is dynamically linked: $destination/crf-container-adapter" >&2
@@ -129,7 +133,7 @@ platforms = sys.argv[5:]
 machines = {"linux-x86_64": 62, "linux-aarch64": 183}
 files = []
 for platform in platforms:
-    for name in ("crf-container-adapter", "crf-node", "crf-scaleset"):
+    for name in ("crf-container-adapter", "crf-node", "crf-scaleset", "crf-scheduler"):
         path = stage / "priv" / "bin" / platform / name
         data = path.read_bytes()
         if len(data) < 20 or data[:4] != b"\x7fELF":
