@@ -289,27 +289,22 @@ defmodule CrfController.PlacementStateStoreTest do
 
     baseline_bytes = File.stat!(path).size
 
-    {elapsed_us, :ok} =
-      :timer.tc(fn ->
-        for index <- 1..1_000 do
-          attrs = %{
-            placement_attrs()
-            | id: "placement-#{index}",
-              command_id: "command-#{index}",
-              idempotency_key: "key-#{index}"
-          }
+    for index <- 1..1_000 do
+      attrs = %{
+        placement_attrs()
+        | id: "placement-#{index}",
+          command_id: "command-#{index}",
+          idempotency_key: "key-#{index}"
+      }
 
-          assert {:ok, _} = PlacementLedger.begin_placement(ledger, attrs, now_ms: index)
-        end
-
-        :ok
-      end)
+      assert {:ok, _} = PlacementLedger.begin_placement(ledger, attrs, now_ms: index)
+    end
 
     assert File.stat!(path).size == baseline_bytes
-    assert PlacementStateStore.journal_size(path) in 1..1_000_000
-    # Includes one fsync per acknowledged mutation; guards against accidental
-    # quadratic/full-snapshot work without depending on tmpfs-class latency.
-    assert elapsed_us < 20_000_000
+    # Every acknowledged mutation contributes one framed WAL record. Bounding
+    # total growth guards against accidental full-snapshot writes without tying
+    # correctness to the hosted runner's fsync latency.
+    assert PlacementStateStore.journal_size(path) in 36_000..1_000_000
     GenServer.stop(ledger)
 
     File.write!(path <> ".wal", <<0, 0, 1>>, [:append])
