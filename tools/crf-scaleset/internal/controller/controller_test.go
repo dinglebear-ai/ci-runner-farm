@@ -233,9 +233,33 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	if fmt.Sprint(first.Result) != fmt.Sprint(second.Result) {
 		t.Fatalf("replayed JIT descriptor changed: first=%#v second=%#v", first.Result, second.Result)
 	}
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
+	wrongScale := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID+1, cfg.OwnershipRevision)
 	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
-		`{"pool_id":"python","work_handle":501}`)); !response.OK {
+		wrongScale)); response.OK || response.Code != "scale_set_mismatch" {
+		t.Fatalf("JIT retirement ignored scale-set fence: %#v", response)
+	}
+	sequence++
+	wrongOwnership := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, strings.Repeat("f", 64))
+	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
+		wrongOwnership)); response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("JIT retirement ignored ownership fence: %#v", response)
+	}
+	sequence++
+	if _, err := os.Stat(descriptorPath); err != nil {
+		t.Fatalf("fenced retirement mutated descriptor: %v", err)
+	}
+	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
+		retirePayload)); !response.OK {
 		t.Fatalf("JIT retirement failed: %#v", response)
+	}
+	sequence++
+	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
+		retirePayload)); !response.OK || fmt.Sprint(response.Result) != "map[retired:true]" {
+		t.Fatalf("JIT retirement replay was not idempotent: %#v", response)
 	}
 	sequence++
 	issued, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
@@ -315,8 +339,10 @@ func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
 	if control.issued[key] != "issue_started" {
 		t.Fatalf("ambiguous JIT tombstone missing: %#v", control.issued)
 	}
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
 	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
-		"{\"pool_id\":\"python\",\"work_handle\":501}")); !response.OK {
+		retirePayload)); !response.OK {
 		t.Fatalf("ambiguous JIT retirement failed: %#v", response)
 	}
 	if len(control.issued) != 0 {

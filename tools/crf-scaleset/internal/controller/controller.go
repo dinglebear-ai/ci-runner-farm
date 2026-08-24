@@ -538,11 +538,14 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
 	case "retire_jit":
 		var payload struct {
-			PoolID     string `json:"pool_id"`
-			WorkHandle int64  `json:"work_handle"`
+			PoolID                    string `json:"pool_id"`
+			ExpectedScaleSetID        int64  `json:"expected_scale_set_id"`
+			ExpectedOwnershipRevision string `json:"expected_ownership_revision"`
+			WorkHandle                int64  `json:"work_handle"`
 		}
 		if err := decodePayload(req.Payload, &payload); err != nil ||
-			!identifier.MatchString(payload.PoolID) || payload.WorkHandle <= 0 {
+			!identifier.MatchString(payload.PoolID) || payload.ExpectedScaleSetID <= 0 ||
+			!revision.MatchString(payload.ExpectedOwnershipRevision) || payload.WorkHandle <= 0 {
 			return failure(req, "invalid_jit_retirement", err)
 		}
 		if c.poller == nil {
@@ -552,6 +555,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err != nil {
 			return failure(req, "ownership_load_failed", err)
 		}
+		if payload.ExpectedOwnershipRevision != state.IdentityRevision {
+			return failure(req, "ownership_identity_mismatch", nil)
+		}
 		scaleSetID := int64(0)
 		for _, record := range state.Records {
 			if record.PoolID == payload.PoolID {
@@ -559,10 +565,16 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 				break
 			}
 		}
+		if scaleSetID != payload.ExpectedScaleSetID {
+			return failure(req, "scale_set_mismatch", nil)
+		}
 		key := fmt.Sprintf("%d:%d", scaleSetID, payload.WorkHandle)
 		issuedState := c.issued[key]
-		if scaleSetID <= 0 || (issuedState != "issued" && issuedState != "issue_started") {
-			return failure(req, "work_handle_not_issued", nil)
+		if issuedState == "" {
+			return response(req, map[string]bool{"retired": true})
+		}
+		if issuedState != "issued" && issuedState != "issue_started" {
+			return failure(req, "invalid_issued_state", nil)
 		}
 		// REVIEW(crf-v3q.13.10): Compact the durable replay proof before
 		// removing the issued-handle tombstone. A crash at either boundary
