@@ -65,6 +65,15 @@ fi
   echo "probe used unexpected missing-PHP exit code: $missing_php_status" >&2
   exit 1
 }
+cat >"$tmp/bin/php" <<'EOF'
+#!/usr/bin/env bash
+printf '7.4'
+EOF
+chmod +x "$tmp/bin/php"
+if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1; then
+  echo 'probe accepted PHP older than 8' >&2
+  exit 1
+fi
 
 grep -Fq 'FROM ubuntu:24.04@sha256:' "$dockerfile"
 grep -Eq '^[[:space:]]*ImageOS=ubuntu24([[:space:]\\]|$)' "$dockerfile"
@@ -80,6 +89,7 @@ fi
 grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>' "$example"
 grep -Fq -- '-f deployments/distributed/runner.Dockerfile' "$workflow"
 grep -Fq -- '--entrypoint /usr/local/bin/crf-runner-image-contract' "$workflow"
+grep -Fq -- '--entrypoint php' "$workflow"
 grep -Fq -- '--platform linux/arm64 --load' "$workflow"
 grep -Fq '.arch == "arm64"' "$workflow"
 
