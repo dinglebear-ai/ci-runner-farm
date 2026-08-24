@@ -246,6 +246,7 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
             }
         }
 
+        let mut poll_degraded = false;
         loop {
             if !running.load(Ordering::SeqCst) {
                 return Ok(());
@@ -253,6 +254,20 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
             let heartbeat_time = now_unix_ms()?;
             match session.runtime_heartbeat(heartbeat_time) {
                 Ok(outcome) => {
+                    if outcome.terminal_sync.runtime_poll_degraded != poll_degraded {
+                        poll_degraded = outcome.terminal_sync.runtime_poll_degraded;
+                        if poll_degraded {
+                            eprintln!(
+                                "crf-node: runtime poll degraded node_id={} controller={} detail=execution_backend_unavailable",
+                                diagnostic_node_id, diagnostic_controller
+                            );
+                        } else {
+                            eprintln!(
+                                "crf-node: runtime poll recovered node_id={} controller={}",
+                                diagnostic_node_id, diagnostic_controller
+                            );
+                        }
+                    }
                     projection_log.record(persist_operator_projection(
                         operator_projection_path.as_deref(),
                         outcome.heartbeat.operator_projection.as_ref(),
