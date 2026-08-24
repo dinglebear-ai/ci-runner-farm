@@ -35,4 +35,3 @@ version="$(tr -d '[:space:]' < "$root/VERSION")"
   echo "VERSION $version does not match $tag" >&2
   exit 1
 }
-
