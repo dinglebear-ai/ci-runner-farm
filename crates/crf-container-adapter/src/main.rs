@@ -259,7 +259,13 @@ fn image_capabilities(config: &Config) -> Result<Value, &'static str> {
     )?;
     let architecture = docker_output(
         config,
-        &["image", "inspect", "--format", "{{.Architecture}}", &config.image],
+        &[
+            "image",
+            "inspect",
+            "--format",
+            "{{.Architecture}}",
+            &config.image,
+        ],
     )?;
     let capabilities =
         validated_image_capabilities(&config.image, &repo_digests, &architecture, &contract)?;
@@ -309,17 +315,19 @@ fn validated_image_capabilities(
                     .iter()
                     .any(|value| value.as_str() == Some(OTP_28_CAPABILITY))
         });
-    Ok(if compatible
-        && schema
-        && os_consistent
-        && arch_consistent
-        && glibc_compatible
-        && has_capability
-    {
-        vec![OTP_28_CAPABILITY]
-    } else {
-        return Err("image_contract_unavailable");
-    })
+    Ok(
+        if compatible
+            && schema
+            && os_consistent
+            && arch_consistent
+            && glibc_compatible
+            && has_capability
+        {
+            vec![OTP_28_CAPABILITY]
+        } else {
+            return Err("image_contract_unavailable");
+        },
+    )
 }
 
 impl Config {

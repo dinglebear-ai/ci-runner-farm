@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 probe="$root/deployments/distributed/runner-image-contract.sh"
 dockerfile="$root/deployments/distributed/runner.Dockerfile"
 example="$root/packaging/distributed/examples/node-env.example"
+workflow="$root/.github/workflows/lint.yml"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -53,5 +54,9 @@ if grep -Eq '^USER[[:space:]]+runner' "$dockerfile"; then
   exit 1
 fi
 grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>' "$example"
+grep -Fq -- '-f deployments/distributed/runner.Dockerfile' "$workflow"
+grep -Fq -- '--entrypoint /usr/local/bin/crf-runner-image-contract' "$workflow"
+grep -Fq -- '--platform linux/arm64 --load' "$workflow"
+grep -Fq '.arch == "arm64"' "$workflow"
 
 echo 'distributed-runner-image-contract: PASS'
