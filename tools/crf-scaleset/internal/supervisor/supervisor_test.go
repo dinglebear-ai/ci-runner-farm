@@ -154,7 +154,7 @@ func (p *internallyCancelledPoller) Poll(ctx context.Context, _ Pool, _ int) (Po
 	}
 }
 
-func TestInternalPollCancellationPreservesHealthySessionAndRetriesImmediately(t *testing.T) {
+func TestInternalPollCancellationPublishesUnhealthyAndBacksOff(t *testing.T) {
 	p := &internallyCancelledPoller{first: make(chan struct{}), releaseFirst: make(chan struct{}), second: make(chan struct{}), releaseSecond: make(chan struct{}), third: make(chan struct{}, 1)}
 	cfg := validSupervisorConfig()
 	cfg.Heartbeat = 200 * time.Millisecond
@@ -195,16 +195,28 @@ func TestInternalPollCancellationPreservesHealthySessionAndRetriesImmediately(t 
 		time.Sleep(time.Millisecond)
 	}
 	close(p.releaseSecond)
+	deadline = time.Now().Add(100 * time.Millisecond)
+	for {
+		snapshot := s.Snapshot()
+		if len(snapshot.Pools) == 1 && !snapshot.Pools[0].SessionHealthy {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("internal cancellation was not published as unhealthy: %#v", snapshot)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case <-p.third:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		cancel()
-		t.Fatal("internally cancelled poll did not retry immediately")
+		t.Fatal("internally cancelled poll did not retry after bounded backoff")
 	}
 	snapshot := s.Snapshot()
-	if len(snapshot.Pools) != 1 || !snapshot.Pools[0].SessionHealthy {
+	if len(snapshot.Pools) != 1 || snapshot.Pools[0].SessionHealthy {
 		cancel()
-		t.Fatalf("internal cancellation replaced healthy session state: %#v", snapshot)
+		t.Fatalf("internal cancellation retained stale healthy session state: %#v", snapshot)
 	}
 	cancel()
 	if err := <-done; err != nil {

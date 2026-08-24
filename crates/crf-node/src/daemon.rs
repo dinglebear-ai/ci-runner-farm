@@ -378,7 +378,9 @@ fn persist_node_status(
     status: &NodeStatusProjection,
 ) -> Result<(), std::io::Error> {
     if let Some(path) = path {
-        node_status::write_atomic(path, status)?;
+        node_status::write_atomic(path, status).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
     }
     Ok(())
 }
@@ -392,12 +394,12 @@ impl NodeStatusLog {
     fn record(&mut self, result: Result<(), std::io::Error>) {
         match result {
             Ok(()) => self.failures = 0,
-            Err(_error) => {
+            Err(error) => {
                 self.failures = self.failures.saturating_add(1);
                 if self.failures == 1 || self.failures.is_power_of_two() {
                     eprintln!(
-                        "crf-node: nonsecret status write failed repeated_count={}",
-                        self.failures
+                        "crf-node: nonsecret status write failed repeated_count={} error={error}",
+                        self.failures,
                     );
                 }
             }

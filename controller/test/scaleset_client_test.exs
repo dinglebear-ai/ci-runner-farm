@@ -4,6 +4,7 @@ defmodule CrfController.ScaleSetClientTest do
   alias CrfController.{ScaleSetClient, Secret}
 
   @revision String.duplicate("b", 64)
+  @new_revision String.duplicate("c", 64)
 
   test "client owns monotonic sequence and wraps JIT descriptor as secret" do
     if :os.type() |> elem(0) == :win32 do
@@ -17,7 +18,7 @@ defmodule CrfController.ScaleSetClientTest do
 
       server =
         Task.async(fn ->
-          for _ <- 1..4 do
+          for _ <- 1..5 do
             {:ok, socket} = :socket.accept(listener, 5_000)
             request = recv_json(socket)
             send(parent, {:request, request})
@@ -41,7 +42,7 @@ defmodule CrfController.ScaleSetClientTest do
       assert {:ok, %{"applied" => true}} = ScaleSetClient.apply_sessions(client, true)
 
       assert {:ok, %{descriptor: %Secret{} = secret, scale_set_id: 74}} =
-               ScaleSetClient.issue_jit(client, "build", 101, "runner-101", "_work")
+               ScaleSetClient.issue_jit(client, "build", 74, 101, "runner-101", "_work")
 
       assert Secret.expose(secret) == "jit-config-super-secret=="
       refute inspect(secret) =~ "jit-config-super-secret=="
@@ -49,27 +50,47 @@ defmodule CrfController.ScaleSetClientTest do
       assert {:ok, [%{pool_id: "build", work_handle: 101, descriptor_available: true}]} =
                ScaleSetClient.read_jit_state(client)
 
-      assert {:ok, %{"retired" => true}} = ScaleSetClient.retire_jit(client, "build", 101)
+      assert {:ok, %{"retired" => true}} = ScaleSetClient.retire_jit(client, "build", 74, 101)
+
+      assert :ok = ScaleSetClient.update_revisions(client, @new_revision, @new_revision)
+
+      assert {:ok, %{"confirmed" => true}} =
+               ScaleSetClient.confirm_jit_retirement(client, "build", 74, 101, @revision)
 
       requests =
-        for _ <- 1..4,
+        for _ <- 1..5,
             do: receive(do: ({:request, req} -> req), after: (5_000 -> flunk("missing request")))
 
-      assert Enum.map(requests, & &1["sequence"]) == [1, 2, 3, 4]
+      assert Enum.map(requests, & &1["sequence"]) == [1, 2, 3, 4, 5]
 
       assert Enum.map(requests, & &1["request_id"]) == [
                "scaleset-1",
                "scaleset-2",
                "scaleset-3",
-               "scaleset-4"
+               "scaleset-4",
+               "scaleset-5"
              ]
 
       assert Enum.map(requests, & &1["operation"]) == [
                "apply_sessions",
                "issue_jit",
                "read_jit_state",
-               "retire_jit"
+               "retire_jit",
+               "confirm_jit_retirement"
              ]
+
+      for request <-
+            Enum.filter(
+              requests,
+              &(&1["operation"] in ["issue_jit", "retire_jit", "confirm_jit_retirement"])
+            ) do
+        assert request["payload"]["expected_scale_set_id"] == 74
+      end
+
+      assert Enum.at(requests, 1)["payload"]["expected_ownership_revision"] == @revision
+      assert Enum.at(requests, 3)["payload"]["expected_ownership_revision"] == @revision
+      assert Enum.at(requests, 4)["ownership_revision"] == @new_revision
+      assert Enum.at(requests, 4)["payload"]["expected_ownership_revision"] == @revision
 
       Task.await(server, 5_000)
       :socket.close(listener)
@@ -203,6 +224,7 @@ defmodule CrfController.ScaleSetClientTest do
             "scale_set_id" => 74,
             "work_handle" => 101,
             "state" => "issued",
+            "ownership_revision" => @revision,
             "descriptor_available" => true
           }
         ]
@@ -216,6 +238,15 @@ defmodule CrfController.ScaleSetClientTest do
       "request_id" => request_id,
       "ok" => true,
       "result" => %{"retired" => true}
+    }
+  end
+
+  defp response_for(%{"operation" => "confirm_jit_retirement", "request_id" => request_id}) do
+    %{
+      "schema_version" => 1,
+      "request_id" => request_id,
+      "ok" => true,
+      "result" => %{"confirmed" => true}
     }
   end
 

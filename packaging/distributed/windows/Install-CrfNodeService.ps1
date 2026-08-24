@@ -18,10 +18,12 @@ $allowedKeys = [System.Collections.Generic.HashSet[string]]::new(
     [string[]] @(
         'CRF_CA_CERT', 'CRF_CLIENT_CERT', 'CRF_CLIENT_KEY', 'CRF_COMMAND_LEDGER_CAPACITY',
         'CRF_CONNECT_TIMEOUT_MS', 'CRF_CONTAINER_ADAPTER_PROGRAM',
-        'CRF_CONTAINER_ADAPTER_TIMEOUT_MS', 'CRF_CONTAINER_STATE_DIR', 'CRF_RUNNER_IMAGE', 'CRF_NERDCTL_PATH', 'CRF_CONTROLLER_ADDR',
+        'CRF_CONTAINER_ADAPTER_TIMEOUT_MS', 'CRF_CONTAINER_STATE_DIR', 'CRF_CONTAINERD_NAMESPACE',
+        'CRF_RUNNER_IMAGE', 'CRF_NERDCTL_PATH', 'CRF_CONTROLLER_ADDR',
         'CRF_CONTROLLER_SERVER_NAME', 'CRF_EXECUTION_BACKEND', 'CRF_HEARTBEAT_MS',
         'CRF_IO_TIMEOUT_MS', 'CRF_LOG_DIR', 'CRF_NODE_CPU_MILLIS',
-        'CRF_NODE_ID', 'CRF_NODE_MEMORY_BYTES', 'CRF_RUNNER_CACHE_DIR', 'CRF_RUNNER_MANIFEST',
+        'CRF_NODE_ID', 'CRF_NODE_MEMORY_BYTES', 'CRF_NODE_STATUS_PATH', 'CRF_NODE_LAUNCH_TOKEN',
+        'CRF_RUNNER_CACHE_DIR', 'CRF_RUNNER_MANIFEST',
         'CRF_RUNNER_TEMPLATE', 'CRF_RUNTIME_DIR', 'CRF_SERVICE_ERROR_LOG', 'CRF_STATE_DIR'
     ),
     [System.StringComparer]::Ordinal
@@ -69,6 +71,9 @@ foreach ($line in [System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $Env
 foreach ($key in $requiredKeys) {
     if (-not $values.ContainsKey($key)) { throw "Missing required node environment key: $key" }
 }
+if ($values.ContainsKey('CRF_NODE_STATUS_PATH') -ne $values.ContainsKey('CRF_NODE_LAUNCH_TOKEN')) {
+    throw 'CRF_NODE_STATUS_PATH and CRF_NODE_LAUNCH_TOKEN must be configured together'
+}
 $backend = if ($values.ContainsKey('CRF_EXECUTION_BACKEND')) { $values['CRF_EXECUTION_BACKEND'] } else { throw 'Missing required node environment key: CRF_EXECUTION_BACKEND' }
 switch ($backend) {
     'native_process' {
@@ -100,6 +105,10 @@ $originalConfigAcl = if ($configRootExisted) { Get-Acl -LiteralPath $ConfigRoot 
 $rollbackId = [Guid]::NewGuid().ToString('N')
 $binaryBackup = "$binaryPath.$rollbackId.rollback"
 $environmentBackup = "$privateEnvironment.$rollbackId.rollback"
+$adapterLauncherPath = Join-Path $InstallRoot 'crf-container-adapter.cmd'
+$adapterScriptPath = Join-Path $InstallRoot 'WindowsContainerAdapter.ps1'
+$adapterLauncherBackup = "$adapterLauncherPath.$rollbackId.rollback"
+$adapterScriptBackup = "$adapterScriptPath.$rollbackId.rollback"
 $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
 $serviceSnapshot = if ($serviceExisted) { Get-CimInstance Win32_Service -Filter "Name='$serviceName'" } else { $null }
 $serviceRegistrySnapshot = if ($serviceExisted) { Get-ItemProperty -LiteralPath $serviceKey } else { $null }
@@ -114,12 +123,14 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
         New-Item -ItemType Directory -Force -Path $InstallRoot, $ConfigRoot | Out-Null
         if (Test-Path -LiteralPath $binaryPath) { Copy-Item -LiteralPath $binaryPath -Destination $binaryBackup }
         if (Test-Path -LiteralPath $privateEnvironment) { Copy-Item -LiteralPath $privateEnvironment -Destination $environmentBackup }
+        if (Test-Path -LiteralPath $adapterLauncherPath) { Copy-Item -LiteralPath $adapterLauncherPath -Destination $adapterLauncherBackup }
+        if (Test-Path -LiteralPath $adapterScriptPath) { Copy-Item -LiteralPath $adapterScriptPath -Destination $adapterScriptBackup }
         Invoke-Native "$env:SystemRoot\System32\icacls.exe" $ConfigRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F'
         Assert-NoInjectedFailure 'acl'
         $binaryMutationStarted = $true
         Copy-Item -LiteralPath $NodeBinary -Destination $binaryPath -Force
-        Copy-Item -LiteralPath $adapterLauncherSource -Destination (Join-Path $InstallRoot 'crf-container-adapter.cmd') -Force
-        Copy-Item -LiteralPath $adapterScriptSource -Destination (Join-Path $InstallRoot 'WindowsContainerAdapter.ps1') -Force
+        Copy-Item -LiteralPath $adapterLauncherSource -Destination $adapterLauncherPath -Force
+        Copy-Item -LiteralPath $adapterScriptSource -Destination $adapterScriptPath -Force
         Copy-Item -LiteralPath $EnvironmentFile -Destination $temporaryEnvironment -Force
         $environmentMutationStarted = $true
         Move-Item -LiteralPath $temporaryEnvironment -Destination $privateEnvironment -Force
@@ -147,7 +158,7 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
 
         New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null
         Assert-NoInjectedFailure 'registry-environment'
-        Remove-Item -LiteralPath $binaryBackup, $environmentBackup -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $binaryBackup, $environmentBackup, $adapterLauncherBackup, $adapterScriptBackup -Force -ErrorAction SilentlyContinue
     } catch {
         $installError = $_
         Remove-Item -LiteralPath $temporaryEnvironment -Force -ErrorAction SilentlyContinue
@@ -163,6 +174,13 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
                 if (Test-Path -LiteralPath $environmentBackup) { Move-Item -LiteralPath $environmentBackup -Destination $privateEnvironment -Force }
             } else {
                 Remove-Item -LiteralPath $environmentBackup -Force -ErrorAction SilentlyContinue
+            }
+            if ($binaryMutationStarted) {
+                Remove-Item -LiteralPath $adapterLauncherPath, $adapterScriptPath -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $adapterLauncherBackup) { Move-Item -LiteralPath $adapterLauncherBackup -Destination $adapterLauncherPath -Force }
+                if (Test-Path -LiteralPath $adapterScriptBackup) { Move-Item -LiteralPath $adapterScriptBackup -Destination $adapterScriptPath -Force }
+            } else {
+                Remove-Item -LiteralPath $adapterLauncherBackup, $adapterScriptBackup -Force -ErrorAction SilentlyContinue
             }
             if ($null -ne $originalConfigAcl -and (Test-Path -LiteralPath $ConfigRoot)) { Set-Acl -LiteralPath $ConfigRoot -AclObject $originalConfigAcl }
 
@@ -189,9 +207,11 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
             if ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
                 Invoke-RollbackNative "$env:SystemRoot\System32\sc.exe" 'delete' $serviceName
             }
-            Remove-Item -LiteralPath $binaryPath, $privateEnvironment -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $binaryPath, $privateEnvironment, $adapterLauncherPath, $adapterScriptPath -Force -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $binaryBackup) { Move-Item -LiteralPath $binaryBackup -Destination $binaryPath -Force }
             if (Test-Path -LiteralPath $environmentBackup) { Move-Item -LiteralPath $environmentBackup -Destination $privateEnvironment -Force }
+            if (Test-Path -LiteralPath $adapterLauncherBackup) { Move-Item -LiteralPath $adapterLauncherBackup -Destination $adapterLauncherPath -Force }
+            if (Test-Path -LiteralPath $adapterScriptBackup) { Move-Item -LiteralPath $adapterScriptBackup -Destination $adapterScriptPath -Force }
             if ($null -ne $originalConfigAcl -and (Test-Path -LiteralPath $ConfigRoot)) { Set-Acl -LiteralPath $ConfigRoot -AclObject $originalConfigAcl }
             if (-not $installRootExisted) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue }
             if (-not $configRootExisted) { Remove-Item -LiteralPath $ConfigRoot -Recurse -Force -ErrorAction SilentlyContinue }

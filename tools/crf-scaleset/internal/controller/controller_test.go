@@ -233,6 +233,12 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	if fmt.Sprint(first.Result) != fmt.Sprint(second.Result) {
 		t.Fatalf("replayed JIT descriptor changed: first=%#v second=%#v", first.Result, second.Result)
 	}
+	wrongIssueFence := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`,
+		snapshot.Pools[0].ScaleSetID, strings.Repeat("f", 64))
+	if response := restarted.Handle(context.Background(), request(cfg, "issue_jit", 2,
+		wrongIssueFence)); response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("JIT replay ignored persisted ownership fence: %#v", response)
+	}
 	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
 		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
 	currentCfg := cfg
@@ -258,6 +264,11 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
 		retirePayload)); !response.OK {
 		t.Fatalf("JIT retirement failed: %#v", response)
+	}
+	sequence++
+	if response := control.Handle(context.Background(), request(currentCfg, "read_jit_state", sequence,
+		`{}`)); !response.OK || !strings.Contains(fmt.Sprint(response.Result), "retired") {
+		t.Fatalf("pending retirement was not discoverable for recovery: %#v", response)
 	}
 	sequence++
 	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
@@ -351,12 +362,16 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 		t.Fatalf("legacy issued binding changed: %#v", record)
 	}
 	migrated.poller = &consumeFailPoller{}
-	historicalRevision := strings.Repeat("a", 64)
+	if response := migrated.Handle(context.Background(), request(cfg, "read_jit_state", 1,
+		`{}`)); !response.OK || !strings.Contains(fmt.Sprint(response.Result), cfg.OwnershipRevision) {
+		t.Fatalf("legacy issued state did not project a recoverable ownership fence: %#v", response)
+	}
+	historicalRevision := cfg.OwnershipRevision
 	wrongOuter := cfg
 	wrongOuter.ControllerInstanceID = "wrong-controller"
 	legacyExact := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":999}`,
 		snapshot.Pools[0].ScaleSetID, historicalRevision)
-	if response := migrated.Handle(context.Background(), request(wrongOuter, "retire_jit", 1,
+	if response := migrated.Handle(context.Background(), request(wrongOuter, "retire_jit", 2,
 		legacyExact)); response.OK || response.Code != "identity_mismatch" {
 		t.Fatalf("wrong outer identity was not fenced: %#v", response)
 	}
@@ -365,20 +380,24 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	}
 	legacyWrong := fmt.Sprintf(`{"pool_id":"wrong","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":999}`,
 		snapshot.Pools[0].ScaleSetID, historicalRevision)
-	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 1,
+	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 2,
 		legacyWrong)); response.OK {
 		t.Fatalf("wrong legacy retirement tuple was not fenced: %#v", response)
 	}
 	if record := migrated.issued[legacyKey]; !record.LegacyUnbound || record.OwnershipRevision != "" {
 		t.Fatalf("wrong legacy tuple mutated binding: %#v", record)
 	}
-	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 2,
+	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 3,
 		legacyExact)); !response.OK {
 		t.Fatalf("exact legacy retirement did not bind and retire: %#v", response)
 	}
 	if proof := migrated.retired[legacyKey]; proof.LegacyUnbound ||
 		proof.OwnershipRevision != historicalRevision {
 		t.Fatalf("legacy retirement proof was not durably bound: %#v", proof)
+	}
+	if response := migrated.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 4,
+		legacyExact)); !response.OK || len(migrated.retired) != 0 {
+		t.Fatalf("legacy retirement confirmation did not compact proof: %#v", response)
 	}
 	migrated.Close()
 	if err := os.Remove(filepath.Join(cfg.StateDir, "issued-handles.json")); err != nil {

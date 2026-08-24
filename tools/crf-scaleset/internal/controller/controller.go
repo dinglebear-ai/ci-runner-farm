@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -222,7 +223,9 @@ func (c *Control) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	_ = c.stopSessions(ctx)
+	if err := c.stopSessions(ctx); err != nil {
+		log.Printf("controller %s session shutdown failed: %v", c.cfg.ControllerInstanceID, err)
+	}
 	cancel()
 }
 
@@ -420,7 +423,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		}
 		return response(req, c.super.Snapshot())
 	case "read_jit_state":
-		states := make([]protocol.JITState, 0, len(c.issued))
+		states := make([]protocol.JITState, 0, len(c.issued)+len(c.retired))
 		for key, record := range c.issued {
 			var scaleSetID, workHandle int64
 			if _, err := fmt.Sscanf(key, "%d:%d", &scaleSetID, &workHandle); err != nil ||
@@ -430,7 +433,13 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			pool := record.PoolID
 			_, descriptorErr := c.readJITDescriptor(scaleSetID, workHandle)
 			states = append(states, protocol.JITState{PoolID: pool, ScaleSetID: scaleSetID,
-				WorkHandle: workHandle, State: record.State, DescriptorAvailable: descriptorErr == nil})
+				WorkHandle: workHandle, State: record.State, OwnershipRevision: c.wireOwnershipRevision(record),
+				DescriptorAvailable: descriptorErr == nil})
+		}
+		for _, record := range c.retired {
+			states = append(states, protocol.JITState{PoolID: record.PoolID, ScaleSetID: record.ScaleSetID,
+				WorkHandle: record.WorkHandle, State: "retired", OwnershipRevision: c.wireOwnershipRevision(record),
+				DescriptorAvailable: false})
 		}
 		slices.SortFunc(states, func(a, b protocol.JITState) int {
 			if a.ScaleSetID < b.ScaleSetID {
@@ -500,6 +509,13 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			return failure(req, "scale_set_mismatch", nil)
 		}
 		if record, ok := c.issued[key]; ok {
+			if !matchesJITFence(record, payload.PoolID, payload.ExpectedScaleSetID,
+				payload.ExpectedOwnershipRevision, payload.WorkHandle) {
+				if record.OwnershipRevision != payload.ExpectedOwnershipRevision {
+					return failure(req, "ownership_identity_mismatch", nil)
+				}
+				return failure(req, "jit_issue_fence_mismatch", nil)
+			}
 			descriptor, descriptorErr := c.readJITDescriptor(scaleSetID, payload.WorkHandle)
 			switch record.State {
 			case "issued":
@@ -566,7 +582,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		key := fmt.Sprintf("%d:%d", payload.ExpectedScaleSetID, payload.WorkHandle)
 		record, issued := c.issued[key]
 		if !issued {
-			if retired, ok := c.retired[key]; ok && sameRetirement(retired, payload.PoolID,
+			if retired, ok := c.retired[key]; ok && matchesJITFence(retired, payload.PoolID,
 				payload.ExpectedScaleSetID, payload.ExpectedOwnershipRevision, payload.WorkHandle) {
 				return response(req, map[string]bool{"retired": true})
 			}
@@ -584,10 +600,17 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			}
 			return failure(req, "scale_set_mismatch", nil)
 		}
-		if !sameRetirement(record, payload.PoolID, payload.ExpectedScaleSetID,
+		if !matchesJITFence(record, payload.PoolID, payload.ExpectedScaleSetID,
 			payload.ExpectedOwnershipRevision, payload.WorkHandle) {
 			if record.LegacyUnbound && record.PoolID == payload.PoolID &&
 				record.ScaleSetID == payload.ExpectedScaleSetID && record.WorkHandle == payload.WorkHandle {
+				state, err := c.ownership.Load()
+				if err != nil {
+					return failure(req, "ownership_load_failed", err)
+				}
+				if payload.ExpectedOwnershipRevision != state.IdentityRevision {
+					return failure(req, "ownership_identity_mismatch", nil)
+				}
 				previous := record
 				record.OwnershipRevision = payload.ExpectedOwnershipRevision
 				record.LegacyUnbound = false
@@ -637,7 +660,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if !ok {
 			return response(req, map[string]bool{"confirmed": true})
 		}
-		if !sameRetirement(proof, payload.PoolID, payload.ExpectedScaleSetID,
+		if !matchesJITFence(proof, payload.PoolID, payload.ExpectedScaleSetID,
 			payload.ExpectedOwnershipRevision, payload.WorkHandle) {
 			return failure(req, "retirement_fence_mismatch", nil)
 		}
@@ -677,6 +700,13 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 	}
 }
 
+func (c *Control) wireOwnershipRevision(record issuedRecord) string {
+	if record.LegacyUnbound && record.OwnershipRevision == "" {
+		return c.cfg.OwnershipRevision
+	}
+	return record.OwnershipRevision
+}
+
 func (c *Control) issuedPath() string {
 	return filepath.Join(c.cfg.StateDir, "issued-handles.json")
 }
@@ -685,7 +715,7 @@ func (c *Control) retiredPath() string {
 	return filepath.Join(c.cfg.StateDir, "retired-handles.json")
 }
 
-func sameRetirement(record issuedRecord, pool string, scaleSetID int64, revision string, handle int64) bool {
+func matchesJITFence(record issuedRecord, pool string, scaleSetID int64, revision string, handle int64) bool {
 	return record.PoolID == pool && record.ScaleSetID == scaleSetID &&
 		record.OwnershipRevision == revision && record.WorkHandle == handle
 }
@@ -801,7 +831,7 @@ func (c *Control) loadIssued() error {
 	}
 	var document issuedDocument
 	if err := decodeExact(data, &document); err == nil && document.SchemaVersion == 2 {
-		if err := validateIssuedRecords(document.Records, false); err != nil {
+		if err := validateIssuedRecords(document.Records); err != nil {
 			return err
 		}
 		c.issued = document.Records
@@ -836,7 +866,7 @@ func (c *Control) loadIssued() error {
 		records[key] = issuedRecord{State: state, PoolID: pool, ScaleSetID: scaleSetID,
 			WorkHandle: handle, LegacyUnbound: true}
 	}
-	if err := validateIssuedRecords(records, false); err != nil {
+	if err := validateIssuedRecords(records); err != nil {
 		return err
 	}
 	c.issued = records
@@ -855,7 +885,7 @@ func (c *Control) loadRetired() error {
 	if err := decodeExact(data, &document); err != nil || document.SchemaVersion != 2 {
 		return errors.New("invalid_retired_state")
 	}
-	if err := validateIssuedRecords(document.Records, true); err != nil {
+	if err := validateIssuedRecords(document.Records); err != nil {
 		return err
 	}
 	c.retired = document.Records
@@ -886,7 +916,7 @@ func decodeExact(data []byte, target any) error {
 	return nil
 }
 
-func validateIssuedRecords(records map[string]issuedRecord, _retired bool) error {
+func validateIssuedRecords(records map[string]issuedRecord) error {
 	if len(records) > maxIssuedHandles {
 		return errors.New("issued_state_capacity_exhausted")
 	}
@@ -939,7 +969,7 @@ func (c *Control) persistRetired(key string, record issuedRecord) error {
 }
 
 func writeRecordState(path string, records map[string]issuedRecord) error {
-	if err := validateIssuedRecords(records, path != filepath.Join(filepath.Dir(path), "issued-handles.json")); err != nil {
+	if err := validateIssuedRecords(records); err != nil {
 		return err
 	}
 	dir := filepath.Dir(path)

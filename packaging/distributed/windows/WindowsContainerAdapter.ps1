@@ -15,9 +15,58 @@ function Valid-Identifier([string] $Value) {
 
 function Invoke-Runtime([string[]] $Arguments, [switch] $Capture) {
     $namespaceArgument = "--namespace=$script:Namespace"
-    if ($Capture) { $output = & $script:Runtime $namespaceArgument @Arguments 2>$null | Out-String } else { & $script:Runtime $namespaceArgument @Arguments 2>$null | Out-Null }
-    if ($LASTEXITCODE -ne 0) { throw 'container_runtime_failed' }
+    $output = & $script:Runtime $namespaceArgument @Arguments 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        $bounded = if ($output.Length -gt 2048) { $output.Substring(0, 2048) } else { $output }
+        [Console]::Error.WriteLine("container_runtime_failed: $($bounded.Trim())")
+        throw 'container_runtime_failed'
+    }
     if ($Capture) { return $output.Trim() }
+}
+
+function Write-StateAtomically([string] $Path, [hashtable] $State) {
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $json = $State | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            Move-Item -LiteralPath $temporary -Destination $Path
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-Container([string] $Identity) {
+    try {
+        Invoke-Runtime @('rm', '-f', $Identity)
+        return $true
+    } catch {
+        [Console]::Error.WriteLine("container_cleanup_failed: $Identity")
+        return $false
+    }
+}
+
+function Cleanup-FailedContainer([string] $Identity, [string] $StatePath) {
+    if (-not (Remove-Container $Identity)) { Reject 'container_cleanup_failed' }
+    Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
+}
+
+function Inspect-OwnedContainer($State) {
+    try {
+        return Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', [string]$State.container_id) -Capture
+    } catch {
+        # Distinguish a genuinely absent container from a runtime outage. A
+        # successful list with no exact deterministic name proves absence.
+        $present = Invoke-Runtime @('ps', '-a', '--filter', "name=^$([string]$State.container_name)$", '--format', '{{.Names}}') -Capture
+        if ([string]::IsNullOrWhiteSpace($present)) {
+            Remove-Item -LiteralPath $statePath -Force
+            return $null
+        }
+        throw
+    }
 }
 
 try {
@@ -54,28 +103,50 @@ try {
             try {
                 [IO.File]::WriteAllText($jit, "ACTIONS_RUNNER_INPUT_JITCONFIG=$([string]$request.jit_config)", [Text.UTF8Encoding]::new($false))
                 $id = Invoke-Runtime @(
-                    'create', "--name=$name", '--isolation=hyperv', '--entrypoint=C:\actions-runner\run.cmd',
+                    'create', "--name=$name", '--isolation=hyperv',
                     "--label=io.dinglebear.ci-runner-farm.placement-id=$($request.placement_id)",
                     "--label=io.dinglebear.ci-runner-farm.command-id=$($request.command_id)",
                     "--env-file=$jit", $imageRuntimeReference
                 ) -Capture
             } finally { Remove-Item -LiteralPath $jit -Force -ErrorAction SilentlyContinue }
-            if ($id -notmatch '^[0-9a-f]{64}$') { Reject 'invalid_container_id' }
+            if ($id -notmatch '^[0-9a-f]{64}$') {
+                if (-not (Remove-Container $name)) { Reject 'container_cleanup_failed' }
+                Reject 'invalid_container_id'
+            }
+            $containerState = @{
+                schema_version = 1
+                placement_id = $request.placement_id
+                container_id = $id
+                container_name = $name
+                started = $false
+            }
+            try {
+                Write-StateAtomically $statePath $containerState
+            } catch {
+                Cleanup-FailedContainer $id $statePath
+                throw
+            }
             try {
                 Invoke-Runtime @('start', $id)
             } catch {
-                try { Invoke-Runtime @('rm', '-f', $id) } catch { }
+                Cleanup-FailedContainer $id $statePath
                 throw
             }
-            @{ schema_version = 1; placement_id = $request.placement_id; container_id = $id; container_name = $name } |
-                ConvertTo-Json -Compress | Set-Content -LiteralPath $statePath -Encoding UTF8
+            $containerState.started = $true
+            try {
+                Write-StateAtomically $statePath $containerState
+            } catch {
+                Cleanup-FailedContainer $id $statePath
+                throw
+            }
             Write-Response @{ result = 'started'; id = $id }
         }
         'inspect' {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
+            $observed = Inspect-OwnedContainer $state
+            if ($null -eq $observed) { Write-Response @{ result = 'absent' }; exit 0 }
             $parts = $observed -split '\|', 3
             if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }
             if ($parts[0] -ceq 'true') { Write-Response @{ result = 'running'; id = $state.container_id }; exit 0 }
@@ -91,7 +162,8 @@ try {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
+            $observed = Inspect-OwnedContainer $state
+            if ($null -eq $observed) { Write-Response @{ result = 'absent' }; exit 0 }
             $parts = $observed -split '\|', 3
             if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }
             Invoke-Runtime @('rm', '-f', [string]$state.container_id)

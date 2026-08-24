@@ -16,6 +16,7 @@ if ($dockerfileText -match '(?m)^RUN ') { throw 'Windows image build still requi
 if ($dockerfileText -notmatch '(?m)^COPY actions-runner C:\\actions-runner') { throw 'Prepared runner payload is not copied into the image' }
 if ($dockerfileText -notmatch '(?m)^COPY powershell C:\\PowerShell\\7') { throw 'PowerShell 7 is not copied into the image' }
 if ($dockerfileText -notmatch '(?m)^ENV PATH=.*C:\\PowerShell\\7') { throw 'PowerShell 7 is not on the image PATH' }
+if ($dockerfileText -notmatch '(?m)^ENTRYPOINT .*WindowsRunnerEntrypoint.ps1') { throw 'Windows runner safety entrypoint is not configured' }
 
 $tokens = $null
 $errors = $null
@@ -54,7 +55,7 @@ exit /b 1
     if ($response.schema_version -ne 1 -or $response.payload.result -ne 'started') { throw "Unexpected adapter response: $($response | ConvertTo-Json -Compress)" }
     $args = Get-Content -LiteralPath $log -Raw
     if ($args -notmatch 'create .*--isolation=hyperv') { throw "Container was not Hyper-V isolated: $args" }
-    if ($args -notmatch '--entrypoint=C:\\actions-runner\\run.cmd') { throw "Runner entrypoint was not selected explicitly: $args" }
+    if ($args -match '--entrypoint=') { throw "Adapter bypassed the image safety entrypoint: $args" }
     if ($args -notmatch '--namespace=buildkit') { throw "Containerd namespace was not explicit: $args" }
     if ($args -match '--cpus=' -or $args -match '--memory=') { throw "Unsupported Windows HCS resource flags were passed: $args" }
     if ($args -notmatch 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') { throw "Validated local image digest was not used: $args" }

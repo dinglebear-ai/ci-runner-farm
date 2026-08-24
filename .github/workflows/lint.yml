@@ -214,6 +214,18 @@ jobs:
           } catch {
             if ($_.Exception.Message -eq 'Installer accepted a duplicate CRF key') { throw }
           }
+          foreach ($missingPairKey in @('CRF_NODE_STATUS_PATH', 'CRF_NODE_LAUNCH_TOKEN')) {
+            $oneSided = Join-Path $env:RUNNER_TEMP "node-one-sided-$missingPairKey.env"
+            $oneSidedContent = ($example -split "`r?`n" | Where-Object { $_ -notmatch "^$missingPairKey=" }) -join "`n"
+            Set-Content -LiteralPath $oneSided -Value $oneSidedContent
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $oneSided -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw "Installer accepted one-sided node status configuration without $missingPairKey"
+            } catch {
+              if ($_.Exception.Message -like 'Installer accepted one-sided*') { throw }
+              if ($_.Exception.Message -notmatch 'must be configured together') { throw }
+            }
+          }
 
           $environmentFile = Join-Path $env:RUNNER_TEMP 'node-valid.env'
           $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot)
@@ -256,8 +268,12 @@ jobs:
           # mutation boundary and require a byte/config/ACL/registry-exact rollback.
           $installedBinary = Join-Path $installRoot 'crf-node.exe'
           $installedEnvironment = Join-Path $configRoot 'node.env'
+          $installedAdapterLauncher = Join-Path $installRoot 'crf-container-adapter.cmd'
+          $installedAdapterScript = Join-Path $installRoot 'WindowsContainerAdapter.ps1'
           Set-Content -LiteralPath $installedBinary -Value 'pre-upgrade-binary'
           Add-Content -LiteralPath $installedEnvironment -Value '# pre-upgrade-environment'
+          Set-Content -LiteralPath $installedAdapterLauncher -Value 'pre-upgrade-launcher'
+          Set-Content -LiteralPath $installedAdapterScript -Value 'pre-upgrade-adapter'
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('config', $serviceName, 'binPath=', 'C:\Windows\System32\cmd.exe /c exit 0', 'start=', 'disabled', 'obj=', 'LocalSystem') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('description', $serviceName, 'Pre-upgrade rollback sentinel') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=', '123', 'actions=', 'restart/3210') | Out-Null
@@ -270,6 +286,8 @@ jobs:
             @(
               (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash,
               (Get-FileHash -Algorithm SHA256 -LiteralPath $installedEnvironment).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAdapterLauncher).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAdapterScript).Hash,
               (Get-Acl -LiteralPath $configRoot).Sddl,
               (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)),
               (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qdescription', $serviceName)),

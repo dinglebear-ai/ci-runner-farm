@@ -18,17 +18,50 @@ defmodule CrfController.ScaleSetClient do
   def read_jit_state(server \\ __MODULE__),
     do: call(server, "read_jit_state", %{})
 
-  def issue_jit(server \\ __MODULE__, pool_id, work_handle, runner_name, work_folder) do
+  def issue_jit(
+        server \\ __MODULE__,
+        pool_id,
+        scale_set_id,
+        work_handle,
+        runner_name,
+        work_folder
+      ) do
     call(server, "issue_jit", %{
       "pool_id" => pool_id,
+      "expected_scale_set_id" => scale_set_id,
       "work_handle" => work_handle,
       "runner_name" => runner_name,
       "work_folder" => work_folder
     })
   end
 
-  def retire_jit(server \\ __MODULE__, pool_id, work_handle) do
-    call(server, "retire_jit", %{"pool_id" => pool_id, "work_handle" => work_handle})
+  def retire_jit(server \\ __MODULE__, pool_id, scale_set_id, work_handle) do
+    call(server, "retire_jit", %{
+      "pool_id" => pool_id,
+      "expected_scale_set_id" => scale_set_id,
+      "work_handle" => work_handle
+    })
+  end
+
+  def confirm_jit_retirement(
+        server \\ __MODULE__,
+        pool_id,
+        scale_set_id,
+        work_handle,
+        proof_ownership_revision \\ nil
+      ) do
+    payload = %{
+      "pool_id" => pool_id,
+      "expected_scale_set_id" => scale_set_id,
+      "work_handle" => work_handle
+    }
+
+    payload =
+      if is_nil(proof_ownership_revision),
+        do: payload,
+        else: Map.put(payload, "expected_ownership_revision", proof_ownership_revision)
+
+    call(server, "confirm_jit_retirement", payload)
   end
 
   def publish_capacity_leases(server \\ __MODULE__, leases) when is_map(leases) do
@@ -86,6 +119,8 @@ defmodule CrfController.ScaleSetClient do
   end
 
   def handle_call({:call, operation, payload}, _from, state) do
+    payload = add_operation_fence(operation, payload, state.ownership_revision)
+
     case ScaleSetSequence.reserve(state.sequence_path, state.controller_instance_id) do
       {:ok, sequence} when sequence > state.sequence ->
         request_id = "scaleset-#{sequence}"
@@ -121,6 +156,13 @@ defmodule CrfController.ScaleSetClient do
   defp decode_operation("read_snapshot", result), do: ScaleSetWire.decode_snapshot(result)
   defp decode_operation("read_jit_state", result), do: ScaleSetWire.decode_jit_states(result)
   defp decode_operation(_operation, result), do: {:ok, result}
+
+  defp add_operation_fence(operation, payload, ownership_revision)
+       when operation in ["issue_jit", "retire_jit", "confirm_jit_retirement"] do
+    Map.put_new(payload, "expected_ownership_revision", ownership_revision)
+  end
+
+  defp add_operation_fence(_operation, payload, _ownership_revision), do: payload
 
   defp validate_state(state) do
     cond do

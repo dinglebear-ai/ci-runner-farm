@@ -217,7 +217,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					return
 				}
 				if errors.Is(err, context.Canceled) {
-					continue
+					err = errors.New("unexpected_poll_cancellation")
 				}
 				if err != nil {
 					// The supervisor log lives in the root-only state tree.

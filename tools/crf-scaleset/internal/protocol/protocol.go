@@ -143,6 +143,7 @@ type JITState struct {
 	ScaleSetID          int64  `json:"scale_set_id"`
 	WorkHandle          int64  `json:"work_handle"`
 	State               string `json:"state"`
+	OwnershipRevision   string `json:"ownership_revision"`
 	DescriptorAvailable bool   `json:"descriptor_available"`
 }
 

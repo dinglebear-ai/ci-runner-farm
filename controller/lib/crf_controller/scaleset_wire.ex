@@ -3,7 +3,7 @@ defmodule CrfController.ScaleSetWire do
 
   @schema_version 1
   @max_frame_bytes 1024 * 1024
-  @operations ~w(apply_sessions publish_capacity_leases issue_jit retire_jit read_snapshot read_jit_state reconcile_owned delete_owned)
+  @operations ~w(apply_sessions publish_capacity_leases issue_jit retire_jit confirm_jit_retirement read_snapshot read_jit_state reconcile_owned delete_owned)
 
   def encode_request(
         request_id,
@@ -85,19 +85,22 @@ defmodule CrfController.ScaleSetWire do
                "scale_set_id",
                "work_handle",
                "state",
+               "ownership_revision",
                "descriptor_available"
              ]),
            true <- Identifier.valid?(state["pool_id"]),
            scale_set_id when is_integer(scale_set_id) and scale_set_id > 0 <-
              state["scale_set_id"],
            work_handle when is_integer(work_handle) and work_handle > 0 <- state["work_handle"],
-           lifecycle when lifecycle in ["issue_started", "issued"] <- state["state"],
+           lifecycle when lifecycle in ["issue_started", "issued", "retired"] <- state["state"],
+           true <- revision?(state["ownership_revision"]),
            true <- is_boolean(state["descriptor_available"]) do
         decoded = %{
           pool_id: state["pool_id"],
           scale_set_id: scale_set_id,
           work_handle: work_handle,
           state: lifecycle,
+          ownership_revision: state["ownership_revision"],
           descriptor_available: state["descriptor_available"]
         }
 

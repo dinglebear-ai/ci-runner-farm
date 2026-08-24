@@ -24,7 +24,7 @@ defmodule CrfController.OperatorSnapshotTest do
 
     def start_link(_opts), do: GenServer.start_link(__MODULE__, nil)
     def init(state), do: {:ok, state}
-    def handle_call(:status, _from, state), do: {:noreply, state}
+    def handle_call(_request, _from, state), do: {:noreply, state}
   end
 
   test "returns a deterministic secret-free controller view" do
@@ -144,6 +144,32 @@ defmodule CrfController.OperatorSnapshotTest do
       )
 
     assert snapshot.demand == nil
+    assert System.monotonic_time(:millisecond) - started_at < 200
+  end
+
+  test "bounds every operator dependency read" do
+    {:ok, blocked} = start_supervised(BlockingStatusServer)
+    started_at = System.monotonic_time(:millisecond)
+
+    snapshot =
+      OperatorSnapshot.snapshot(
+        %{
+          nodes: blocked,
+          offers: blocked,
+          placements: blocked,
+          demand: blocked,
+          peers: blocked,
+          sidecar: blocked
+        },
+        call_timeout_ms: 10
+      )
+
+    assert snapshot.nodes == []
+    assert snapshot.offers == []
+    assert snapshot.placements == []
+    assert snapshot.demand == nil
+    assert snapshot.peer_authorization == nil
+    assert snapshot.sidecar == nil
     assert System.monotonic_time(:millisecond) - started_at < 200
   end
 

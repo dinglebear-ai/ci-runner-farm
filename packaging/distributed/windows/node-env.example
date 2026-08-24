@@ -9,6 +9,10 @@ CRF_NODE_CPU_MILLIS=8000
 CRF_NODE_MEMORY_BYTES=17179869184
 CRF_STATE_DIR=C:\ProgramData\CiRunnerFarm\state
 CRF_SERVICE_ERROR_LOG=C:\ProgramData\CiRunnerFarm\logs\service-errors.log
+# Optional readiness projection for unattended deployment verification. Configure
+# both values together and replace the launch token for each service rollout.
+CRF_NODE_STATUS_PATH=C:\ProgramData\CiRunnerFarm\state\node-status.json
+CRF_NODE_LAUNCH_TOKEN=replace-with-a-unique-launch-token
 # Windows jobs run in one fresh Hyper-V-isolated Windows container per placement.
 CRF_EXECUTION_BACKEND=container
 CRF_CONTAINER_ADAPTER_PROGRAM=sibling

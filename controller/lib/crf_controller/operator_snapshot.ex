@@ -14,28 +14,47 @@ defmodule CrfController.OperatorSnapshot do
   def snapshot(servers \\ %{}, opts \\ []) when is_map(servers) and is_list(opts) do
     now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
     call_timeout_ms = Keyword.get(opts, :call_timeout_ms, 100)
-    nodes = call(Map.get(servers, :nodes, NodeRegistry), &NodeRegistry.snapshot/1, [])
-    offers = call(Map.get(servers, :offers, OfferLedger), &OfferLedger.snapshot/1, [])
+
+    nodes =
+      call(Map.get(servers, :nodes, NodeRegistry), &NodeRegistry.snapshot/1, [], call_timeout_ms)
+
+    offers =
+      call(Map.get(servers, :offers, OfferLedger), &OfferLedger.snapshot/1, [], call_timeout_ms)
 
     placements =
-      call(Map.get(servers, :placements, PlacementLedger), &PlacementLedger.snapshot/1, [])
+      call(
+        Map.get(servers, :placements, PlacementLedger),
+        &PlacementLedger.snapshot/1,
+        [],
+        call_timeout_ms
+      )
 
     tombstones =
       call(
         Map.get(servers, :placements, PlacementLedger),
         &PlacementLedger.tombstone_snapshot/1,
-        []
+        [],
+        call_timeout_ms
       )
 
     demand =
       call(
         Map.get(servers, :demand, DemandCoordinator),
         &DemandCoordinator.status(&1, call_timeout_ms),
-        nil
+        nil,
+        call_timeout_ms
       )
 
-    peers = call(Map.get(servers, :peers, PeerRegistry), &PeerRegistry.status/1, nil)
-    sidecar = call(Map.get(servers, :sidecar, ScaleSetSidecar), &ScaleSetSidecar.status/1, nil)
+    peers =
+      call(Map.get(servers, :peers, PeerRegistry), &PeerRegistry.status/1, nil, call_timeout_ms)
+
+    sidecar =
+      call(
+        Map.get(servers, :sidecar, ScaleSetSidecar),
+        &ScaleSetSidecar.status/1,
+        nil,
+        call_timeout_ms
+      )
 
     %{
       schema_version: 1,
@@ -49,12 +68,41 @@ defmodule CrfController.OperatorSnapshot do
     }
   end
 
-  defp call(nil, _fun, fallback), do: fallback
+  defp call(nil, _fun, fallback, _timeout), do: fallback
 
-  defp call(server, fun, fallback) do
-    fun.(server)
-  catch
-    :exit, _ -> fallback
+  defp call(server, fun, fallback, timeout) do
+    caller = self()
+    result_ref = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            {:ok, fun.(server)}
+          catch
+            :exit, _ -> :failed
+          end
+
+        send(caller, {result_ref, result})
+      end)
+
+    receive do
+      {^result_ref, {:ok, result}} ->
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {^result_ref, :failed} ->
+        Process.demonitor(monitor_ref, [:flush])
+        fallback
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        fallback
+    after
+      timeout ->
+        Process.exit(pid, :kill)
+        receive do: ({:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok)
+        fallback
+    end
   end
 
   defp node_view(node, now_ms) do

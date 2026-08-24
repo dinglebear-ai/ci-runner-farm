@@ -285,10 +285,25 @@ defmodule CrfController.DemandCoordinator do
         states
         |> Enum.filter(&jit_matches_placement?(&1, placement.id))
         |> Enum.reduce([], fn jit, errors ->
-          case ScaleSetClient.retire_jit(ctx.scale_set_client, jit.pool_id, jit.work_handle) do
+          case ScaleSetClient.retire_jit(
+                 ctx.scale_set_client,
+                 jit.pool_id,
+                 jit.scale_set_id,
+                 jit.work_handle
+               ) do
             {:ok, _result} ->
               release_offer_for_handle(ctx.offer_ledger, jit.pool_id, jit.work_handle)
-              errors
+
+              case ScaleSetClient.confirm_jit_retirement(
+                     ctx.scale_set_client,
+                     jit.pool_id,
+                     jit.scale_set_id,
+                     jit.work_handle,
+                     jit.ownership_revision
+                   ) do
+                {:ok, _} -> errors
+                {:error, reason} -> [reason | errors]
+              end
 
             {:error, reason} ->
               [reason | errors]
