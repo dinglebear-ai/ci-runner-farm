@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [1.13.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.12.1...v1.13.0) (2026-08-24)
+
+
+### Features
+
+* **packaging:** include scheduler in native plugin payload ([#89](https://github.com/dinglebear-ai/ci-runner-farm/issues/89)) ([95df235](https://github.com/dinglebear-ai/ci-runner-farm/commit/95df235e6c9fa4a8bc4905460ada39fd614e0639))
+
 ## [1.12.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.12.0...v1.12.1) (2026-08-24)
 
 
