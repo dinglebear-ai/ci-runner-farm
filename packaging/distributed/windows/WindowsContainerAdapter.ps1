@@ -43,23 +43,30 @@ try {
         'start' {
             foreach ($value in @($request.command_id, $request.pool_id, $request.runner_name)) { if (-not (Valid-Identifier $value)) { Reject 'invalid_request' } }
             if ([uint64]$request.resources.cpu_millis -eq 0 -or [uint64]$request.resources.memory_bytes -eq 0) { Reject 'invalid_request' }
-            if ($env:CRF_RUNNER_IMAGE -notmatch '@sha256:[0-9a-f]{64}$') { Reject 'immutable_image_required' }
+            if ($env:CRF_RUNNER_IMAGE -notmatch '@(sha256:[0-9a-f]{64})$') { Reject 'immutable_image_required' }
+            # nerdctl treats a name@digest reference as a registry lookup even when the
+            # content is already present in containerd. Use the validated digest as the
+            # local content-store reference so an offline node never falls back to pull.
+            $imageRuntimeReference = $Matches[1]
             $probe = Invoke-Runtime @('info', '--format', '{{.OSType}}') -Capture
             if ($probe -notmatch 'windows') { Reject 'hyperv_isolation_unavailable' }
-            $cpu = ([decimal]$request.resources.cpu_millis / 1000).ToString('0.###', [Globalization.CultureInfo]::InvariantCulture)
-            $id = Invoke-Runtime @(
-                'create', "--name=$name", '--isolation=hyperv', "--cpus=$cpu", "--memory=$([uint64]$request.resources.memory_bytes)",
-                "--label=io.dinglebear.ci-runner-farm.placement-id=$($request.placement_id)",
-                "--label=io.dinglebear.ci-runner-farm.command-id=$($request.command_id)",
-                '--env=CRF_JIT_FILE=C:\crf-bootstrap\jit.json', $env:CRF_RUNNER_IMAGE
-            ) -Capture
-            if ($id -notmatch '^[0-9a-f]{64}$') { Reject 'invalid_container_id' }
-            $jit = Join-Path $stateRoot ".$key.jit.tmp"
+            $jit = Join-Path $stateRoot ".$key.jit.env.tmp"
             try {
-                [IO.File]::WriteAllText($jit, [string]$request.jit_config, [Text.UTF8Encoding]::new($false))
-                Invoke-Runtime @('cp', $jit, "$id`:/crf-bootstrap/jit.json")
+                [IO.File]::WriteAllText($jit, "ACTIONS_RUNNER_INPUT_JITCONFIG=$([string]$request.jit_config)", [Text.UTF8Encoding]::new($false))
+                $id = Invoke-Runtime @(
+                    'create', "--name=$name", '--isolation=hyperv', '--entrypoint=C:\actions-runner\run.cmd',
+                    "--label=io.dinglebear.ci-runner-farm.placement-id=$($request.placement_id)",
+                    "--label=io.dinglebear.ci-runner-farm.command-id=$($request.command_id)",
+                    "--env-file=$jit", $imageRuntimeReference
+                ) -Capture
             } finally { Remove-Item -LiteralPath $jit -Force -ErrorAction SilentlyContinue }
-            Invoke-Runtime @('start', $id)
+            if ($id -notmatch '^[0-9a-f]{64}$') { Reject 'invalid_container_id' }
+            try {
+                Invoke-Runtime @('start', $id)
+            } catch {
+                try { Invoke-Runtime @('rm', '-f', $id) } catch { }
+                throw
+            }
             @{ schema_version = 1; placement_id = $request.placement_id; container_id = $id; container_name = $name } |
                 ConvertTo-Json -Compress | Set-Content -LiteralPath $statePath -Encoding UTF8
             Write-Response @{ result = 'started'; id = $id }
@@ -68,16 +75,25 @@ try {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
-            if ($observed -cne "true|$($request.placement_id)") { Reject 'ownership_mismatch' }
-            Write-Response @{ result = 'running'; id = $state.container_id }
+            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
+            $parts = $observed -split '\|', 3
+            if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }
+            if ($parts[0] -ceq 'true') { Write-Response @{ result = 'running'; id = $state.container_id }; exit 0 }
+            Invoke-Runtime @('rm', '-f', [string]$state.container_id)
+            Remove-Item -LiteralPath $statePath -Force
+            if ($parts[1] -ceq '0') {
+                Write-Response @{ result = 'terminal'; outcome = 'succeeded' }
+            } else {
+                Write-Response @{ result = 'terminal'; outcome = @{ failed = @{ detail_code = 'container_exit_nonzero' } } }
+            }
         }
         'cancel' {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
-            if ($observed -notmatch "^[^|]+\|$([regex]::Escape([string]$request.placement_id))$") { Reject 'ownership_mismatch' }
+            $observed = Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', $state.container_id) -Capture
+            $parts = $observed -split '\|', 3
+            if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }
             Invoke-Runtime @('rm', '-f', [string]$state.container_id)
             Remove-Item -LiteralPath $statePath -Force
             Write-Response @{ result = 'cancelled' }

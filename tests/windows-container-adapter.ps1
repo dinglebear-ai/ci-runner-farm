@@ -14,6 +14,8 @@ if (-not (Test-Path -LiteralPath $prepare -PathType Leaf)) { throw 'Windows runn
 $dockerfileText = Get-Content -LiteralPath $dockerfile -Raw
 if ($dockerfileText -match '(?m)^RUN ') { throw 'Windows image build still requires process-isolated build execution' }
 if ($dockerfileText -notmatch '(?m)^COPY actions-runner C:\\actions-runner') { throw 'Prepared runner payload is not copied into the image' }
+if ($dockerfileText -notmatch '(?m)^COPY powershell C:\\PowerShell\\7') { throw 'PowerShell 7 is not copied into the image' }
+if ($dockerfileText -notmatch '(?m)^ENV PATH=.*C:\\PowerShell\\7') { throw 'PowerShell 7 is not on the image PATH' }
 
 $tokens = $null
 $errors = $null
@@ -32,13 +34,13 @@ echo %*|findstr /c:" info " >nul && (echo windows& exit /b 0)
 echo %*|findstr /c:" create " >nul && (echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef& exit /b 0)
 echo %*|findstr /c:" cp " >nul && exit /b 0
 echo %*|findstr /c:" start " >nul && exit /b 0
-echo %*|findstr /c:" inspect " >nul && (echo true^|placement-1& exit /b 0)
+echo %*|findstr /c:" inspect " >nul && (echo true^|0^|placement-1& exit /b 0)
 echo %*|findstr /c:" rm " >nul && exit /b 0
 if "%1"=="info" (echo windows& exit /b 0)
 if "%1"=="create" (echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef& exit /b 0)
 if "%1"=="cp" exit /b 0
 if "%1"=="start" exit /b 0
-if "%1"=="inspect" (echo true^|placement-1& exit /b 0)
+if "%1"=="inspect" (echo true^|0^|placement-1& exit /b 0)
 if "%1"=="rm" exit /b 0
 exit /b 1
 "@ | Set-Content -LiteralPath $fake -Encoding Ascii
@@ -52,9 +54,14 @@ exit /b 1
     if ($response.schema_version -ne 1 -or $response.payload.result -ne 'started') { throw "Unexpected adapter response: $($response | ConvertTo-Json -Compress)" }
     $args = Get-Content -LiteralPath $log -Raw
     if ($args -notmatch 'create .*--isolation=hyperv') { throw "Container was not Hyper-V isolated: $args" }
+    if ($args -notmatch '--entrypoint=C:\\actions-runner\\run.cmd') { throw "Runner entrypoint was not selected explicitly: $args" }
     if ($args -notmatch '--namespace=buildkit') { throw "Containerd namespace was not explicit: $args" }
-    if ($args -notmatch '--cpus=2.5' -or $args -notmatch '--memory=4294967296') { throw "Resource limits were not enforced: $args" }
+    if ($args -match '--cpus=' -or $args -match '--memory=') { throw "Unsupported Windows HCS resource flags were passed: $args" }
+    if ($args -notmatch 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') { throw "Validated local image digest was not used: $args" }
+    if ($args -match 'example.invalid/windows-runner@') { throw "Runtime was allowed to resolve the immutable image through a registry: $args" }
     if ($args -match 'secret-jit') { throw 'JIT secret leaked into container runtime argv' }
+    if ($args -notmatch '--env-file=') { throw 'JIT was not delivered through a runtime environment file' }
+    if ($args -match ' cp ') { throw 'Adapter used unsupported nerdctl cp on Windows' }
     if ((Get-Content -LiteralPath $adapter -Raw) -match 'Docker') { throw 'Adapter still depends on Docker Desktop' }
     $id = $response.payload.id
     $inspect = '{"schema_version":1,"payload":{"action":"inspect","placement_id":"placement-1","expected_id":"' + $id + '"}}' |
