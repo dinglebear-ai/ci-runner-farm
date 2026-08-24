@@ -8,3 +8,4 @@ self-hosted-runner:
     - ci-pool-system
     - ci-pool-residential-egress
     - ci-pool-windows
+    - ci-pool-acceptance-beam

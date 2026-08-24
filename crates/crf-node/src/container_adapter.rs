@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -271,6 +272,68 @@ impl ProcessContainerAdapter {
         Ok(envelope.payload)
     }
 
+    pub fn image_capabilities(&self) -> BTreeSet<String> {
+        self.read_image_capabilities().unwrap_or_else(|error| {
+            eprintln!("container image capability preflight failed closed: {error:?}");
+            BTreeSet::new()
+        })
+    }
+
+    fn read_image_capabilities(&self) -> Result<BTreeSet<String>, ContainerAdapterError> {
+        let mut response_file =
+            tempfile::tempfile().map_err(|_| ContainerAdapterError::ReadFailed)?;
+        let mut command = Command::new(&self.program);
+        command
+            .arg("--image-capabilities")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                response_file
+                    .try_clone()
+                    .map_err(|_| ContainerAdapterError::StdoutUnavailable)?,
+            ))
+            .stderr(Stdio::null());
+        let deadline = Instant::now() + self.timeout;
+        let mut process =
+            ManagedProcess::spawn(&mut command).map_err(|_| ContainerAdapterError::SpawnFailed)?;
+        let status = loop {
+            match process.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+                Ok(None) => {
+                    let _ = process.terminate_tree_now();
+                    return Err(ContainerAdapterError::TimedOut);
+                }
+                Err(_) => {
+                    let _ = process.terminate_tree_now();
+                    return Err(ContainerAdapterError::PollFailed);
+                }
+            }
+        };
+        if !status.success() {
+            return Err(ContainerAdapterError::ProcessFailed);
+        }
+        response_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| ContainerAdapterError::ReadFailed)?;
+        let mut bytes = Vec::new();
+        response_file
+            .take((MAX_ADAPTER_FRAME_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ContainerAdapterError::ReadFailed)?;
+        if bytes.len() > MAX_ADAPTER_FRAME_BYTES {
+            return Err(ContainerAdapterError::ResponseTooLarge);
+        }
+        let capabilities: BTreeSet<String> =
+            serde_json::from_slice(&bytes).map_err(|_| ContainerAdapterError::InvalidResponse)?;
+        if capabilities
+            .iter()
+            .any(|capability| !valid_identifier(capability))
+        {
+            return Err(ContainerAdapterError::InvalidResponse);
+        }
+        Ok(capabilities)
+    }
+
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
@@ -415,6 +478,27 @@ mod tests {
             ProcessContainerAdapter::new(absolute_program, Duration::from_millis(1)).unwrap_err(),
             ContainerAdapterError::InvalidTimeout
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_capabilities_fail_closed_for_missing_or_malformed_preflight() {
+        let _guard = ADAPTER_PROCESS_TEST.lock().expect("adapter test lock");
+        let compatible = TestAdapterScript::new(
+            r#"[ "${1:-}" = "--image-capabilities" ]
+printf '%s\n' '["otp-28-compatible"]'"#,
+        );
+        let adapter =
+            ProcessContainerAdapter::new(&compatible.path, Duration::from_secs(2)).expect("client");
+        assert_eq!(
+            adapter.image_capabilities(),
+            BTreeSet::from(["otp-28-compatible".into()])
+        );
+
+        let malformed = TestAdapterScript::new("printf '%s\\n' 'not-json'");
+        let adapter =
+            ProcessContainerAdapter::new(&malformed.path, Duration::from_secs(2)).expect("client");
+        assert!(adapter.image_capabilities().is_empty());
     }
 
     #[cfg(unix)]

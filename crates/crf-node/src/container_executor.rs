@@ -44,6 +44,10 @@ impl ContainerRunnerExecutor {
         self.draining
     }
 
+    pub fn image_capabilities(&self) -> BTreeSet<String> {
+        self.adapter.image_capabilities()
+    }
+
     pub fn active_placements(&self) -> Result<BTreeSet<String>, ContainerExecutorError> {
         self.store
             .active_placements()

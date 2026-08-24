@@ -32,7 +32,10 @@ CRF_CONTAINER_ADAPTER_TIMEOUT_MS=60000
 
 # Portable Linux Docker adapter. The image must be immutable and contain the
 # GitHub Actions runner plus jq, base64, gosu, and a non-root runner account.
-CRF_RUNNER_IMAGE=myoung34/github-runner@sha256:4eb08a3fcb3138eaf2d20476e1d7ed6427da7953c72d57fbb0845169e4d0bba8
+# Build with `docker build -f deployments/distributed/runner.Dockerfile deployments/distributed`, publish it to the first-party
+# registry, then replace the marker with the verified manifest digest. A tag or
+# a digest from the generic upstream runner image is not an accepted substitute.
+CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>
 CRF_CONTAINER_STATE_DIR=/var/lib/ci-runner-farm/container-adapter
 CRF_CONTAINER_WORK_ROOT=/var/lib/ci-runner-farm/work
 

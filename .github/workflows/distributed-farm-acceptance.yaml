@@ -12,6 +12,7 @@ on:
           - distributed-linux
           - distributed-container
           - distributed-windows
+          - beam-runtime
           - cancellation
       linux_pool:
         description: Linux scale-set routing label (use the isolated lane for fleet qualification)
@@ -49,6 +50,13 @@ on:
           - ci-pool-ops
           - ci-pool-acceptance-linux
           - ci-pool-acceptance-windows
+      beam_pool:
+        description: Isolated Linux pool with the BEAM memory and image contract
+        required: true
+        type: choice
+        default: ci-pool-acceptance-beam
+        options:
+          - ci-pool-acceptance-beam
 
 permissions:
   contents: read
@@ -118,6 +126,89 @@ jobs:
           test -r /.dockerenv
           test -r /proc/self/cgroup
           cat /proc/self/cgroup
+
+  beam-runtime:
+    if: inputs.target == 'beam-runtime'
+    runs-on: ${{ github.repository_owner == 'dinglebear-ai' && inputs.beam_pool || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      ERL_FLAGS: "+S 4:4 +SDcpu 2 +SDio 2"
+    steps:
+      - name: Check out acceptance contract
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          path: ci-runner-farm
+
+      - name: Record image, libc, and initial cgroup evidence
+        id: memory-baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          ldd --version
+          ci-runner-farm/scripts/distributed-beam-memory-check.sh snapshot "$RUNNER_TEMP/beam-memory-events"
+          echo 'created=true' >>"$GITHUB_OUTPUT"
+
+      - name: Check out Phoenix coverage canary
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: dinglebear-ai/phoenix
+          path: phoenix
+
+      - name: Record Phoenix coverage revision
+        working-directory: phoenix
+        shell: bash
+        run: git rev-parse HEAD
+
+      - name: Resolve pinned BEAM toolchain
+        id: beam
+        working-directory: phoenix
+        shell: bash
+        run: |
+          set -euo pipefail
+          erlang="$(sed -n 's/^erlang *= *"\(.*\)"/\1/p' .mise.toml)"
+          elixir="$(sed -n 's/^elixir *= *"\(.*\)"/\1/p' .mise.toml)"
+          test -n "$erlang" && test -n "$elixir"
+          printf 'erlang=%s\nelixir=%s\n' "$erlang" "$elixir" >>"$GITHUB_OUTPUT"
+
+      - name: Bind OTP artifact to the live image
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          case "${ID:-}:${VERSION_ID:-}" in
+            ubuntu:20.04) image_os=ubuntu20 ;;
+            ubuntu:22.04) image_os=ubuntu22 ;;
+            ubuntu:24.04) image_os=ubuntu24 ;;
+            ubuntu:26.04) image_os=ubuntu26 ;;
+            *) echo "unsupported runner image ${ID:-unknown} ${VERSION_ID:-unknown}" >&2; exit 1 ;;
+          esac
+          printf 'ImageOS=%s\n' "$image_os" >>"$GITHUB_ENV"
+
+      - name: Start pinned OTP and Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: ${{ steps.beam.outputs.erlang }}
+          elixir-version: ${{ steps.beam.outputs.elixir }}
+
+      - name: Prove OTP startup
+        shell: bash
+        run: erl -noshell -eval 'io:format("otp=~s~n", [erlang:system_info(otp_release)]), halt(0).'
+
+      - name: Run Phoenix coverage canary
+        working-directory: phoenix
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/run-unprivileged.sh mix local.hex --force
+          scripts/run-unprivileged.sh mix local.rebar --force
+          scripts/run-unprivileged.sh mix deps.get
+          scripts/run-unprivileged.sh mix test --cover
+
+      - name: Require no cgroup OOM events
+        if: ${{ always() && steps.memory-baseline.outputs.created == 'true' }}
+        shell: bash
+        run: ci-runner-farm/scripts/distributed-beam-memory-check.sh assert "$RUNNER_TEMP/beam-memory-events"
 
   cancellation:
     if: inputs.target == 'cancellation'

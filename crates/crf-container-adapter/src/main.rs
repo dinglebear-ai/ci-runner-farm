@@ -23,6 +23,7 @@ use std::os::unix::process::CommandExt;
 const MAX_FRAME: usize = 131_072;
 const MAX_JIT: usize = 65_536;
 const LABEL: &str = "io.dinglebear.ci-runner-farm";
+const OTP_28_CAPABILITY: &str = "otp-28-compatible";
 
 #[derive(Debug)]
 struct Config {
@@ -120,6 +121,16 @@ struct StatePath<'a> {
 }
 
 fn main() {
+    if env::args().nth(1).as_deref() == Some("--image-capabilities") {
+        match Config::from_env().and_then(|config| image_capabilities(&config)) {
+            Ok(value) => println!("{value}"),
+            Err(code) => {
+                eprintln!("crf-container-adapter image preflight failed: {code}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if env::args().nth(1).as_deref() == Some("docker-supervise") {
         docker_supervise();
         return;
@@ -212,6 +223,103 @@ fn run() -> Result<Value, &'static str> {
             expected_id.as_deref(),
         ),
     }
+}
+
+fn image_capabilities(config: &Config) -> Result<Value, &'static str> {
+    let repo_digests: Vec<String> = serde_json::from_str(&docker_output(
+        config,
+        &[
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RepoDigests}}",
+            &config.image,
+        ],
+    )?)
+    .map_err(|_| "image_contract_unavailable")?;
+    let contract = docker_output(
+        config,
+        &[
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=32",
+            "--cpus=0.25",
+            "--memory=64m",
+            "--memory-swap=64m",
+            "--user=65534:65534",
+            "--entrypoint",
+            "/usr/local/bin/crf-runner-image-contract",
+            &config.image,
+        ],
+    )?;
+    let architecture = docker_output(
+        config,
+        &["image", "inspect", "--format", "{{.Architecture}}", &config.image],
+    )?;
+    let capabilities =
+        validated_image_capabilities(&config.image, &repo_digests, &architecture, &contract)?;
+    Ok(json!(capabilities))
+}
+
+fn validated_image_capabilities(
+    configured_image: &str,
+    repo_digests: &[String],
+    inspected_architecture: &str,
+    contract_json: &str,
+) -> Result<Vec<&'static str>, &'static str> {
+    if !immutable_image(configured_image)
+        || !repo_digests.iter().any(|digest| digest == configured_image)
+    {
+        return Err("image_contract_unavailable");
+    }
+    let contract: Value =
+        serde_json::from_str(contract_json).map_err(|_| "image_contract_unavailable")?;
+    let compatible = contract.get("compatible").and_then(Value::as_bool) == Some(true);
+    let schema = contract.get("schema_version").and_then(Value::as_u64) == Some(1);
+    let os = contract.pointer("/os/id").and_then(Value::as_str);
+    let version = contract.pointer("/os/version_id").and_then(Value::as_str);
+    let image_os = contract.get("image_os").and_then(Value::as_str);
+    let os_consistent = matches!(
+        (os, version, image_os),
+        (Some("ubuntu"), Some("24.04"), Some("ubuntu24"))
+            | (Some("ubuntu"), Some("26.04"), Some("ubuntu26"))
+    );
+    let arch = contract.get("arch").and_then(Value::as_str);
+    let arch_consistent = matches!(
+        (inspected_architecture, arch),
+        ("amd64", Some("x64")) | ("arm64", Some("arm64"))
+    );
+    let glibc_compatible = contract
+        .get("glibc")
+        .and_then(Value::as_str)
+        .and_then(|value| value.split_once('.'))
+        .and_then(|(major, minor)| Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?)))
+        .is_some_and(|(major, minor)| major > 2 || (major == 2 && minor >= 34));
+    let has_capability = contract
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values.iter().all(Value::is_string)
+                && values
+                    .iter()
+                    .any(|value| value.as_str() == Some(OTP_28_CAPABILITY))
+        });
+    Ok(if compatible
+        && schema
+        && os_consistent
+        && arch_consistent
+        && glibc_compatible
+        && has_capability
+    {
+        vec![OTP_28_CAPABILITY]
+    } else {
+        return Err("image_contract_unavailable");
+    })
 }
 
 impl Config {
@@ -1911,6 +2019,38 @@ mod tests {
             "registry/image@sha256:{}",
             "A".repeat(64)
         )));
+    }
+
+    #[test]
+    fn otp_capability_requires_exact_immutable_digest_and_true_contract_label() {
+        let image = format!("registry/image@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            validated_image_capabilities(
+                &image,
+                std::slice::from_ref(&image),
+                "amd64",
+                r#"{"schema_version":1,"compatible":true,"os":{"id":"ubuntu","version_id":"24.04"},"image_os":"ubuntu24","glibc":"2.39","arch":"x64","capabilities":["github-actions","container","otp-28-compatible"]}"#,
+            ),
+            Ok(vec![OTP_28_CAPABILITY])
+        );
+        assert_eq!(
+            validated_image_capabilities(
+                &image,
+                &[],
+                "amd64",
+                r#"{"schema_version":1,"compatible":true,"os":{"id":"ubuntu","version_id":"24.04"},"image_os":"ubuntu24","glibc":"2.39","arch":"x64","capabilities":["otp-28-compatible"]}"#
+            ),
+            Err("image_contract_unavailable")
+        );
+        assert_eq!(
+            validated_image_capabilities(
+                &image,
+                std::slice::from_ref(&image),
+                "amd64",
+                r#"{"schema_version":1,"compatible":false,"os":{"id":"ubuntu","version_id":"24.04"},"image_os":"ubuntu24","glibc":"2.39","arch":"x64","capabilities":["otp-28-compatible"]}"#
+            ),
+            Err("image_contract_unavailable")
+        );
     }
     #[test]
     fn unknown_request_fields_are_rejected() {

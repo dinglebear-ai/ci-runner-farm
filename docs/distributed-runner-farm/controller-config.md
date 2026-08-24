@@ -66,6 +66,16 @@ Every pool declares:
 
 The controller translates this boundary once into `PoolPolicy` values consumed by the Rust scheduler.
 
+BEAM coverage workloads need a separate pool claim rather than a larger
+node-wide budget alone: the container adapter applies each placement's memory
+claim as its hard cgroup limit. The example `beam` pool reserves 10 GiB with no
+swap for each placement. Qualify that pool with the `beam-runtime` distributed
+acceptance target before routing production Elixir jobs to it; the target proves
+the checked-out Phoenix toolchain can start and complete `mix test --cover`
+without increasing the cgroup `oom` or `oom_kill` counters. The scheduler also
+requires the image-derived `otp-28-compatible` capability; the memory claim
+alone is not compatibility evidence.
+
 The GitHub scale set itself has one routing label: the pool ID/selector. A
 workflow uses that selector alone (`runs-on: ci-pool-rust`). Do not copy classic
 runner label arrays such as `[self-hosted, Linux, X64, ci-pool-rust]` into a
