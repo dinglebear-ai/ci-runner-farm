@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "distributed bundle builder currently supports Linux hosts only" >&2
   exit 1
@@ -77,17 +78,18 @@ output_root="${CRF_BUNDLE_OUTPUT_DIR:-$root/build/distributed}"
 stage="$output_root/$name"
 archive="$output_root/$name.tar.gz"
 
-rm -rf "$stage" "$archive"
-install -d -m 0755 "$stage/bin" "$stage/libexec" "$stage/systemd" "$stage/examples"
+build_bundle() {
+  rm -rf "$stage" "$archive"
+  install -d -m 0755 "$stage/bin" "$stage/libexec" "$stage/systemd" "$stage/examples"
 
-cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node -p crf-scheduler
-cargo build --manifest-path "$root/Cargo.toml" --locked --release --target "$adapter_target" -p crf-container-adapter
-adapter="$root/target/$adapter_target/release/crf-container-adapter"
-if readelf -l "$adapter" | grep -q 'INTERP' ||
-  readelf -d "$adapter" 2>/dev/null | grep -q '(NEEDED)'; then
-  echo "refusing to package a dynamically linked crf-container-adapter" >&2
-  exit 1
-fi
+  cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node -p crf-scheduler
+  cargo build --manifest-path "$root/Cargo.toml" --locked --release --target "$adapter_target" -p crf-container-adapter
+  adapter="$root/target/$adapter_target/release/crf-container-adapter"
+  if readelf -l "$adapter" | grep -q 'INTERP' ||
+    readelf -d "$adapter" 2>/dev/null | grep -q '(NEEDED)'; then
+    echo "refusing to package a dynamically linked crf-container-adapter" >&2
+    exit 1
+  fi
 install -m 0755 "$root/target/release/crf-node" "$stage/bin/crf-node"
 install -m 0755 "$root/target/release/crf-scheduler" "$stage/bin/crf-scheduler"
 install -m 0755 "$root/packaging/distributed/admin/crf-peer-admin" "$stage/bin/crf-peer-admin"
@@ -127,6 +129,11 @@ install -m 0644 "$root/docs/distributed-runner-farm/runner-manifest.example.json
   find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
 )
 
-tar --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner -C "$output_root" -czf "$archive" "$name"
+  tar --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner -C "$output_root" -czf "$archive" "$name"
+}
 
+# Callers capture stdout as the single machine-readable archive path. Redirect
+# the complete build body as a unit so no result descriptor is inherited by a
+# compiler or a descendant process.
+build_bundle >&2
 printf "%s\n" "$archive"

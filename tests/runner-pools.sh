@@ -206,7 +206,7 @@ else
 fi
 publication_workflow="$WORKFLOW_DIR/publish-distributed-release.yml"
 publication_hosted="$(awk '/^[[:space:]]*runs-on:[[:space:]]+ubuntu-(latest|24\.04)[[:space:]]*$/ { n++ } END { print n + 0 }' "$publication_workflow")"
-[ "$publication_hosted" -eq 4 ] && ok || bad "distributed publication must use four independent hosted jobs"
+[ "$publication_hosted" -eq 5 ] && ok || bad "distributed publication must use five independent hosted jobs"
 if grep -qE 'ci-pool-|self-hosted' "$publication_workflow"; then
   bad 'distributed publication must not depend on the fleet it repairs'
 else
