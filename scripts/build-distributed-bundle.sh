@@ -7,7 +7,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-for command in cargo go mix tar sha256sum git; do
+for command in cargo go mix tar sha256sum git readelf; do
   command -v "$command" >/dev/null 2>&1 || { echo "missing required command: $command" >&2; exit 1; }
 done
 
@@ -60,8 +60,14 @@ os_id="$(printf "%s" "$os_id" | tr -cs "A-Za-z0-9._-" "-")"
 os_version="$(printf "%s" "$os_version" | tr -cs "A-Za-z0-9._-" "-")"
 
 case "$(uname -m)" in
-  x86_64|amd64) arch=x86_64 ;;
-  aarch64|arm64) arch=arm64 ;;
+  x86_64|amd64)
+    arch=x86_64
+    adapter_target=x86_64-unknown-linux-musl
+    ;;
+  aarch64|arm64)
+    arch=arm64
+    adapter_target=aarch64-unknown-linux-musl
+    ;;
   *) echo "unsupported bundle architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -74,13 +80,20 @@ archive="$output_root/$name.tar.gz"
 rm -rf "$stage" "$archive"
 install -d -m 0755 "$stage/bin" "$stage/libexec" "$stage/systemd" "$stage/examples"
 
-cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-container-adapter -p crf-node -p crf-scheduler
+cargo build --manifest-path "$root/Cargo.toml" --locked --release -p crf-node -p crf-scheduler
+cargo build --manifest-path "$root/Cargo.toml" --locked --release --target "$adapter_target" -p crf-container-adapter
+adapter="$root/target/$adapter_target/release/crf-container-adapter"
+if readelf -l "$adapter" | grep -q 'INTERP' ||
+  readelf -d "$adapter" 2>/dev/null | grep -q '(NEEDED)'; then
+  echo "refusing to package a dynamically linked crf-container-adapter" >&2
+  exit 1
+fi
 install -m 0755 "$root/target/release/crf-node" "$stage/bin/crf-node"
 install -m 0755 "$root/target/release/crf-scheduler" "$stage/bin/crf-scheduler"
 install -m 0755 "$root/packaging/distributed/admin/crf-peer-admin" "$stage/bin/crf-peer-admin"
 install -m 0755 "$root/packaging/distributed/admin/crf-cert-fingerprint" "$stage/bin/crf-cert-fingerprint"
 install -m 0755 "$root/packaging/distributed/admin/crf-operator-status" "$stage/bin/crf-operator-status"
-install -m 0755 "$root/target/release/crf-container-adapter" "$stage/bin/crf-container-adapter"
+install -m 0755 "$adapter" "$stage/bin/crf-container-adapter"
 install -m 0755 "$root/src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-entrypoint.sh" "$stage/libexec/runner-entrypoint.sh"
 
 go -C "$root/tools/crf-scaleset" build -trimpath -o "$stage/bin/crf-scaleset" ./cmd/crf-scaleset

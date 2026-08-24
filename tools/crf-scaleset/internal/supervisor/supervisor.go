@@ -216,7 +216,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return
 				}
-				if err != nil && !errors.Is(err, context.Canceled) {
+				if errors.Is(err, context.Canceled) {
+					continue
+				}
+				if err != nil {
 					// The supervisor log lives in the root-only state tree.
 					// Keep the actual API failure available to operators while
 					// the public status snapshot exposes only healthy/unhealthy.
