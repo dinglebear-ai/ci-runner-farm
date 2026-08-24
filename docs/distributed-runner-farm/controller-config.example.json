@@ -53,6 +53,19 @@
         "required_backend": "container",
         "required_capabilities": ["github-actions"],
         "work_folder": "_work"
+      },
+      {
+        "id": "beam",
+        "max_concurrency": 2,
+        "resources": {
+          "cpu_millis": 4000,
+          "memory_bytes": 10737418240
+        },
+        "required_os": "linux",
+        "required_arch": "x86_64",
+        "required_backend": "container",
+        "required_capabilities": ["github-actions", "otp-28-compatible"],
+        "work_folder": "_work"
       }
     ]
   }

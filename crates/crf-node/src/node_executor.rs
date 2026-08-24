@@ -27,7 +27,12 @@ impl NodeExecutor {
     pub fn capabilities(&self) -> BTreeSet<String> {
         match self {
             Self::Native(_) => BTreeSet::from(["github-actions".into(), "native-process".into()]),
-            Self::Container(_) => BTreeSet::from(["github-actions".into(), "container".into()]),
+            Self::Container(executor) => {
+                let mut capabilities =
+                    BTreeSet::from(["github-actions".into(), "container".into()]);
+                capabilities.extend(executor.image_capabilities());
+                capabilities
+            }
         }
     }
 }
