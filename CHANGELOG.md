@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+## [1.12.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.11.1...v1.12.0) (2026-08-24)
+
+
+### Features
+
+* add ephemeral Windows Hyper-V container workers ([4600a91](https://github.com/dinglebear-ai/ci-runner-farm/commit/4600a91fd270c253d5407bd25a63850e45dd9799))
+* add Windows Hyper-V container adapter ([1b44709](https://github.com/dinglebear-ai/ci-runner-farm/commit/1b4470937d4913516535d9b62706c27a773ff491))
+* derive node capacity from host reserves ([54b01f2](https://github.com/dinglebear-ai/ci-runner-farm/commit/54b01f22014b75087fefaf39af4307f1c865f2f8))
+* make distributed CPU allocation elastic ([e8840b0](https://github.com/dinglebear-ai/ci-runner-farm/commit/e8840b0e98f9bb4c75ed07cae137a89a16d8a78c))
+* **node:** publish bounded readiness status ([bd97985](https://github.com/dinglebear-ai/ci-runner-farm/commit/bd979852c53935522d3dec8a2d917fd75763d877))
+* package immutable Windows runner image ([14e5ccb](https://github.com/dinglebear-ai/ci-runner-farm/commit/14e5ccbff93661a4788f0b953eebcd3f9008bb0c))
+* replace shell container adapter with Rust ([a921ed1](https://github.com/dinglebear-ai/ci-runner-farm/commit/a921ed12d9102183104ad8d6bcff41fb001b9900))
+* **scaleset:** project sealed compatibility evidence ([0f97c41](https://github.com/dinglebear-ai/ci-runner-farm/commit/0f97c41f6316f6529ec963edc6f4f59708fdbdc4))
+* **scaleset:** recover historical JIT retirement ([e748c80](https://github.com/dinglebear-ai/ci-runner-farm/commit/e748c800b6fe1ba6a23aa1c818e8978f9031f25b))
+* **scaleset:** validate native runtime contracts ([029d5bb](https://github.com/dinglebear-ai/ci-runner-farm/commit/029d5bbe89ddf18547fe148710a0209050e1f3f0))
+* ship portable distributed Docker adapter ([86789a8](https://github.com/dinglebear-ai/ci-runner-farm/commit/86789a8915aeaef3d1e2688c5a519532907d7756))
+
+
+### Bug Fixes
+
+* assemble Windows runner image without process isolation ([5398852](https://github.com/dinglebear-ai/ci-runner-farm/commit/5398852f81228051a82bf43d8b9c4212ff518985))
+* bind Windows adapter to image namespace ([9dd95dc](https://github.com/dinglebear-ai/ci-runner-farm/commit/9dd95dc07f30ef4cfc0c3a6969505fdbe8f4a813))
+* bound adapter startup and reuse payload builds ([bffc604](https://github.com/dinglebear-ai/ci-runner-farm/commit/bffc60499670f04d3d7fea15cbeb5833ecf42e28))
+* bound operator projection status reads ([d341a87](https://github.com/dinglebear-ai/ci-runner-farm/commit/d341a87b0117994bd3f655161328669b714a9335))
+* close Windows container PR review findings ([55e7207](https://github.com/dinglebear-ai/ci-runner-farm/commit/55e720727efa85fda258207dfbb75791cd53f57e))
+* close Windows runner review findings ([0fe887a](https://github.com/dinglebear-ai/ci-runner-farm/commit/0fe887ab3c722f655a2db8a19268cab5f21de9ab))
+* **distributed:** contain adapter failures and retire JIT registrations ([#84](https://github.com/dinglebear-ai/ci-runner-farm/issues/84)) ([e9130b5](https://github.com/dinglebear-ai/ci-runner-farm/commit/e9130b550454e7b391813c114ca13c78dc800d35))
+* **distributed:** qualify BEAM runner image and memory contract ([#83](https://github.com/dinglebear-ai/ci-runner-farm/issues/83)) ([97302d4](https://github.com/dinglebear-ai/ci-runner-farm/commit/97302d4d374048ecd1f749852d9d75f87ca7fcd5))
+* grant Windows node containerd access ([f4b8266](https://github.com/dinglebear-ai/ci-runner-farm/commit/f4b8266e1904f107a9a19ec03dd4d7ae580fdb12))
+* harden native container adapter lifecycle ([1d174e1](https://github.com/dinglebear-ai/ci-runner-farm/commit/1d174e1c028169a1f28b07cc9d6bc82efde21506))
+* harden Windows container runner lifecycle ([dff2f2d](https://github.com/dinglebear-ai/ci-runner-farm/commit/dff2f2d3405b81156a0944ac67a474f69c2fa4d5))
+* **node:** bind readiness to launch identity ([1e747f9](https://github.com/dinglebear-ai/ci-runner-farm/commit/1e747f9d8e29fe9998684e5485f83531d290ebcc))
+* preserve deploy compatibility for host probing ([44f0dcb](https://github.com/dinglebear-ai/ci-runner-farm/commit/44f0dcba589bdd2bcecce6cb4f4758e51ce2d4dd))
+* remove terminal adapter containers ([9805953](https://github.com/dinglebear-ai/ci-runner-farm/commit/980595329c80e8896e0c4e6382de6ed54f97cb83))
+* **scaleset:** fence JIT ownership before issuance ([1517008](https://github.com/dinglebear-ai/ci-runner-farm/commit/15170080ad23aff8402073355b1bf136b6e6f734))
+* **scaleset:** make JIT retirement fenced and idempotent ([1fbc30d](https://github.com/dinglebear-ai/ci-runner-farm/commit/1fbc30dbb6518859e32f239a6726892ae620c513))
+* **scaleset:** reassert commanded eligibility across restarts ([#82](https://github.com/dinglebear-ai/ci-runner-farm/issues/82)) ([9adb678](https://github.com/dinglebear-ai/ci-runner-farm/commit/9adb6785efd33467976fe3787ecab1d81950231e))
+* skip no-op placement generation checkpoints ([605ec10](https://github.com/dinglebear-ai/ci-runner-farm/commit/605ec10a95f1531b555a07612b31d41e07f55510))
+* stabilize distributed runner sessions ([ec2f2ab](https://github.com/dinglebear-ai/ci-runner-farm/commit/ec2f2abd35f2057168a67ce1955726343e534fdf))
+* stabilize fenced retirement compatibility ([f8345c7](https://github.com/dinglebear-ai/ci-runner-farm/commit/f8345c73a545c1388833d54e1870c7728d65873e))
+* use native Windows container runtime ([284d6fb](https://github.com/dinglebear-ai/ci-runner-farm/commit/284d6fb3f5ca27ad02258abbf843b768fbf7f8d8))
+
 ## [1.11.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.11.0...v1.11.1) (2026-08-23)
 
 
