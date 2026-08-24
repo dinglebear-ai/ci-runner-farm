@@ -1,7 +1,7 @@
 defmodule CrfController.ScaleSetClientTest do
   use ExUnit.Case, async: false
 
-  alias CrfController.{ScaleSetClient, Secret}
+  alias CrfController.{ScaleSetClient, ScaleSetEligibility, Secret}
 
   @revision String.duplicate("b", 64)
 
@@ -75,6 +75,7 @@ defmodule CrfController.ScaleSetClientTest do
       :socket.close(listener)
       File.rm(path)
       File.rm(path <> ".sequence")
+      File.rm(path <> ".eligibility")
     end
   end
 
@@ -82,6 +83,12 @@ defmodule CrfController.ScaleSetClientTest do
     if :os.type() |> elem(0) == :win32 do
       assert true
     else
+      # Uses read_jit_state (not apply_sessions) deliberately: this test's
+      # only concern is sequence-number durability across a restart. Eligible
+      # reconciliation (tested separately below) would inject an extra,
+      # automatic apply_sessions request on the second client's startup —
+      # unrelated to what this test asserts, and it would eat into the fake
+      # server's fixed accept count.
       path = socket_path()
       {:ok, listener} = :socket.open(:local, :stream, :default)
       :ok = :socket.bind(listener, %{family: :local, path: path})
@@ -110,11 +117,11 @@ defmodule CrfController.ScaleSetClientTest do
       ]
 
       {:ok, first} = ScaleSetClient.start_link(opts)
-      assert {:ok, %{"applied" => true}} = ScaleSetClient.apply_sessions(first, true)
+      assert {:ok, [%{pool_id: "build"}]} = ScaleSetClient.read_jit_state(first)
       GenServer.stop(first)
 
       {:ok, second} = ScaleSetClient.start_link(opts)
-      assert {:ok, %{"applied" => true}} = ScaleSetClient.apply_sessions(second, true)
+      assert {:ok, [%{pool_id: "build"}]} = ScaleSetClient.read_jit_state(second)
       GenServer.stop(second)
 
       requests =
@@ -132,6 +139,124 @@ defmodule CrfController.ScaleSetClientTest do
       :socket.close(listener)
       File.rm(path)
       File.rm(path <> ".sequence")
+      File.rm(path <> ".eligibility")
+    end
+  end
+
+  test "a persisted eligibility value is reasserted automatically on start, before any caller asks" do
+    if :os.type() |> elem(0) == :win32 do
+      assert true
+    else
+      path = socket_path()
+      eligibility_path = path <> ".eligibility"
+      # Pre-seeds the file a *prior* process run would have left behind after
+      # an earlier `apply_sessions(false)` — simulating exactly the incident
+      # this reconciliation exists to prevent: a restart that would otherwise
+      # come back up trusting whatever ambient eligibility GitHub's scale-set
+      # session already has, rather than the last explicitly commanded value.
+      assert :ok = ScaleSetEligibility.persist(eligibility_path, "controller-preseed", false)
+
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      :ok = :socket.listen(listener, 1)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          {:ok, socket} = :socket.accept(listener, 5_000)
+          request = recv_json(socket)
+          send(parent, {:reassert_request, request})
+          response = response_for(request)
+          :ok = :socket.send(socket, :json.encode(response) |> IO.iodata_to_binary(), 5_000)
+          :socket.close(socket)
+        end)
+
+      start_supervised!({
+        ScaleSetClient,
+        # Long enough that only the startup reassert (not a periodic tick)
+        # can be responsible for the single request this test expects.
+        name: nil,
+        socket_path: path,
+        controller_instance_id: "controller-preseed",
+        config_revision: @revision,
+        ownership_revision: @revision,
+        timeout_ms: 5_000,
+        reconcile_interval_ms: 60_000
+      })
+
+      request =
+        receive do
+          {:reassert_request, request} -> request
+        after
+          5_000 -> flunk("client never reasserted the persisted eligibility on start")
+        end
+
+      assert request["operation"] == "apply_sessions"
+      assert request["payload"] == %{"eligible" => false}
+
+      Task.await(server, 5_000)
+      :socket.close(listener)
+      File.rm(path)
+      File.rm(path <> ".sequence")
+      File.rm(eligibility_path)
+    end
+  end
+
+  test "eligibility reconciliation retries on the next tick after a failed reassert" do
+    if :os.type() |> elem(0) == :win32 do
+      assert true
+    else
+      path = socket_path()
+      eligibility_path = path <> ".eligibility"
+      assert :ok = ScaleSetEligibility.persist(eligibility_path, "controller-retry", true)
+
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      # A backlog of 1: the startup reassert's connection is accepted and
+      # dropped without a response (simulating a sidecar that isn't up yet);
+      # only the SECOND attempt, from the fast reconcile tick, gets served.
+      :ok = :socket.listen(listener, 1)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          {:ok, dropped} = :socket.accept(listener, 5_000)
+          :socket.close(dropped)
+
+          {:ok, socket} = :socket.accept(listener, 5_000)
+          request = recv_json(socket)
+          send(parent, {:retried_request, request})
+          response = response_for(request)
+          :ok = :socket.send(socket, :json.encode(response) |> IO.iodata_to_binary(), 5_000)
+          :socket.close(socket)
+        end)
+
+      start_supervised!(
+        {ScaleSetClient,
+         name: nil,
+         socket_path: path,
+         controller_instance_id: "controller-retry",
+         config_revision: @revision,
+         ownership_revision: @revision,
+         timeout_ms: 2_000,
+         reconcile_interval_ms: 50}
+      )
+
+      request =
+        receive do
+          {:retried_request, request} -> request
+        after
+          5_000 -> flunk("reconciliation never retried after the failed attempt")
+        end
+
+      assert request["operation"] == "apply_sessions"
+      assert request["payload"] == %{"eligible" => true}
+
+      Task.await(server, 5_000)
+      :socket.close(listener)
+      File.rm(path)
+      File.rm(path <> ".sequence")
+      File.rm(eligibility_path)
     end
   end
 
@@ -170,6 +295,7 @@ defmodule CrfController.ScaleSetClientTest do
       :socket.close(listener)
       File.rm(path)
       File.rm(path <> ".sequence")
+      File.rm(path <> ".eligibility")
     end
   end
 
