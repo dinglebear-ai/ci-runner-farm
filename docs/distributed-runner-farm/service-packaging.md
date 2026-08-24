@@ -56,6 +56,21 @@ Run:
 
 The builder uses the repository `VERSION`, builds Rust with `--locked --release`, builds the Go sidecar with `-trimpath`, assembles the OTP release, writes checksums/build metadata, and emits a distribution-tagged tarball under `build/distributed/`.
 
+For a stable release, run the **Publish Distributed Release** workflow with an
+existing exact `vMAJOR.MINOR.PATCH` tag. The workflow checks out and verifies
+that tag, publishes the first-party `linux/amd64` and `linux/arm64` runner image
+to GHCR, records its immutable manifest digest, builds and verifies the Ubuntu
+24.04 x86_64 service bundle, and attaches the bundle plus SHA-256 file to the
+existing GitHub Release. The image must be configured by the published digest,
+never by its convenience version or commit tag.
+
+Publication is not deployment proof. Promote the digest first to the isolated
+`ci-pool-acceptance-beam` pool, verify that the node advertises
+`otp-28-compatible`, and run the `beam-runtime` distributed-farm acceptance.
+Production routing remains contained until that workflow proves the pinned OTP
+starts, Phoenix coverage finishes inside the declared memory limit, and the
+cgroup OOM counters do not increase.
+
 ## Verification
 
 Run:

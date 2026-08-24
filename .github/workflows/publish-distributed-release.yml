@@ -1,0 +1,314 @@
+name: Publish Distributed Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable release tag to publish, for example v1.12.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distributed-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ci-runner-farm-distributed
+
+jobs:
+  validate-release:
+    name: Validate immutable release source
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - name: Validate stable tag syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release tag must be an exact stable vMAJOR.MINOR.PATCH tag"
+            exit 1
+          }
+
+      - name: Checkout exact release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: source
+        name: Bind source to tag and repository version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          tagged_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          [[ "$commit" == "$tagged_commit" ]] || {
+            echo "::error::checkout does not match $RELEASE_TAG"
+            exit 1
+          }
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "v$version" == "$RELEASE_TAG" ]] || {
+            echo "::error::VERSION $version does not match $RELEASE_TAG"
+            exit 1
+          }
+          release="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName)"
+          jq -e --arg tag "$RELEASE_TAG" '.tagName == $tag and .isDraft == false and .isPrerelease == false' <<<"$release" >/dev/null
+          printf 'commit=%s\nversion=%s\n' "$commit" "$version" >> "$GITHUB_OUTPUT"
+
+  publish-image:
+    name: Publish qualified multi-arch runner image
+    needs: validate-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - name: Checkout validated release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.validate-release.outputs.commit }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: existing
+        name: Resolve an existing immutable commit image
+        shell: bash
+        env:
+          COMMIT: ${{ needs.validate-release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_NAME:sha-$COMMIT" 2>/dev/null | sed -n 's/^Digest:[[:space:]]*//p' || true)"
+          if [[ -n "$digest" ]]; then
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+            printf 'digest=%s\nexists=true\n' "$digest" >> "$GITHUB_OUTPUT"
+          else
+            printf 'digest=\nexists=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: build
+        name: Build and publish immutable image manifest
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: deployments/distributed
+          file: deployments/distributed/runner.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: false
+          push: true
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.validate-release.outputs.commit }}
+            org.opencontainers.image.version=${{ env.RELEASE_TAG }}
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ needs.validate-release.outputs.commit }}
+
+      - id: image
+        name: Verify published platforms and bind the version tag
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::build did not return an immutable manifest digest"
+            exit 1
+          }
+          raw="$(docker buildx imagetools inspect --raw "$IMAGE_NAME@$IMAGE_DIGEST")"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' <<<"$raw" >/dev/null
+          for platform in linux/amd64 linux/arm64; do
+            expected_arch="${platform#linux/}"
+            [[ "$expected_arch" == amd64 ]] && contract_arch=x64 || contract_arch=arm64
+            docker run --rm --platform "$platform" --network none --read-only \
+              --entrypoint /usr/local/bin/crf-runner-image-contract \
+              "$IMAGE_NAME@$IMAGE_DIGEST" |
+              jq -e --arg arch "$contract_arch" \
+                '.compatible == true and .arch == $arch and (.capabilities | index("otp-28-compatible")) != null' >/dev/null
+          done
+          existing_version="$(docker buildx imagetools inspect "$IMAGE_NAME:$RELEASE_TAG" 2>/dev/null | sed -n 's/^Digest:[[:space:]]*//p' || true)"
+          if [[ -n "$existing_version" && "$existing_version" != "$IMAGE_DIGEST" ]]; then
+            echo "::error::$RELEASE_TAG already names a different image digest"
+            exit 1
+          fi
+          if [[ -z "$existing_version" ]]; then
+            docker buildx imagetools create --tag "$IMAGE_NAME:$RELEASE_TAG" "$IMAGE_NAME@$IMAGE_DIGEST"
+          fi
+          printf 'digest=%s\n' "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          cat > distributed-runner-image.txt <<EOF
+          release_tag=$RELEASE_TAG
+          commit=${{ needs.validate-release.outputs.commit }}
+          image=$IMAGE_NAME@$IMAGE_DIGEST
+          platforms=linux/amd64,linux/arm64
+          EOF
+
+      - name: Attach image identity receipt to existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset=distributed-runner-image.txt
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+            tmp="$(mktemp -d)"
+            trap 'rm -rf "$tmp"' EXIT
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$tmp"
+            cmp "$asset" "$tmp/$asset"
+          else
+            gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Upload image identity evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: distributed-runner-image
+          path: distributed-runner-image.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-bundle:
+    name: Build and attach verified Linux bundle
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.validate-release.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go 1.25.3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.25.3
+          cache-dependency-path: tools/crf-scaleset/go.sum
+
+      - name: Set up Elixir 1.20.3 / OTP 29.0.5
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: 1.20.3
+          otp-version: 29.0.5
+
+      - name: Set up Rust 1.97.1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          toolchain: 1.97.1
+
+      - name: Install static adapter toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - id: bundle
+        name: Build and verify distributed bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(scripts/build-distributed-bundle.sh)"
+          scripts/verify-distributed-bundle.sh "$archive"
+          checksum="$archive.sha256"
+          archive_dir="$(dirname "$archive")"
+          archive_name="$(basename "$archive")"
+          (cd "$archive_dir" && sha256sum "$archive_name" > "$archive_name.sha256")
+          printf 'archive=%s\nchecksum=%s\n' "$archive" "$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Attach bundle to existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.bundle.outputs.archive }}
+          CHECKSUM: ${{ steps.bundle.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          archive_name="$(basename "$ARCHIVE")"
+          checksum_name="$(basename "$CHECKSUM")"
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          archive_exists=false
+          checksum_exists=false
+          grep -Fxq "$archive_name" <<<"$assets" && archive_exists=true
+          grep -Fxq "$checksum_name" <<<"$assets" && checksum_exists=true
+          if [[ "$archive_exists" != "$checksum_exists" ]]; then
+            echo "::error::release contains only one of the distributed bundle assets"
+            exit 1
+          fi
+          if [[ "$archive_exists" == true ]]; then
+            tmp="$(mktemp -d)"
+            trap 'rm -rf "$tmp"' EXIT
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$archive_name" --pattern "$checksum_name" --dir "$tmp"
+            cmp "$ARCHIVE" "$tmp/$archive_name"
+            cmp "$CHECKSUM" "$tmp/$checksum_name"
+          else
+            gh release upload "$RELEASE_TAG" "$ARCHIVE" "$CHECKSUM" --repo "$GITHUB_REPOSITORY"
+          fi
+
+  verify-publication:
+    name: Verify distributed publication
+    needs:
+      - validate-release
+      - publish-image
+      - publish-bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify image digest and release bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST" >/dev/null
+          asset="ci-runner-farm-distributed-${VERSION}-linux-ubuntu-24.04-x86_64.tar.gz"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" --pattern "$asset.sha256" \
+            --pattern distributed-runner-image.txt --dir "$tmp"
+          (cd "$tmp" && sha256sum -c "$asset.sha256")
+          grep -Fxq "release_tag=$RELEASE_TAG" "$tmp/distributed-runner-image.txt"
+          grep -Fxq "image=$IMAGE_NAME@$IMAGE_DIGEST" "$tmp/distributed-runner-image.txt"
