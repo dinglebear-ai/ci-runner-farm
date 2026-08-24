@@ -10,7 +10,7 @@ function Reject([string] $Code) {
 }
 
 function Valid-Identifier([string] $Value) {
-    return $null -ne $Value -and $Value -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    return $null -ne $Value -and $Value -match '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 }
 
 function Invoke-Runtime([string[]] $Arguments, [switch] $Capture) {
@@ -25,6 +25,9 @@ function Invoke-Runtime([string[]] $Arguments, [switch] $Capture) {
 }
 
 function Write-StateAtomically([string] $Path, [hashtable] $State) {
+    if (Test-Path -LiteralPath $Path) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'invalid_container_state_path' }
+    }
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     $backup = "$Path.$([Guid]::NewGuid().ToString('N')).bak"
     try {
@@ -47,17 +50,25 @@ function Remove-Container([string] $Identity) {
         Invoke-Runtime @('rm', '-f', $Identity)
         return $true
     } catch {
-        [Console]::Error.WriteLine("container_cleanup_failed: $Identity")
+        [Console]::Error.WriteLine("container_cleanup_failed: identity=$Identity error=$($_.Exception.Message)")
         return $false
     }
 }
 
 function Cleanup-FailedContainer([string] $Identity, [string] $StatePath) {
     if (-not (Remove-Container $Identity)) { Reject 'container_cleanup_failed' }
-    Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $StatePath) {
+        try {
+            if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) { throw 'state_path_not_file' }
+            Remove-Item -LiteralPath $StatePath -Force -ErrorAction Stop
+        } catch {
+            [Console]::Error.WriteLine("container_state_cleanup_failed: path=$StatePath error=$($_.Exception.Message)")
+            Reject 'container_state_cleanup_failed'
+        }
+    }
 }
 
-function Inspect-OwnedContainer($State) {
+function Inspect-OwnedContainer($State, [string] $StatePath) {
     try {
         return Invoke-Runtime @('inspect', '--format', '{{.State.Running}}|{{.State.ExitCode}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}', [string]$State.container_id) -Capture
     } catch {
@@ -94,7 +105,14 @@ try {
     switch ([string]$request.action) {
         'start' {
             foreach ($value in @($request.command_id, $request.pool_id, $request.runner_name)) { if (-not (Valid-Identifier $value)) { Reject 'invalid_request' } }
-            if ([uint64]$request.resources.cpu_millis -eq 0 -or [uint64]$request.resources.memory_bytes -eq 0) { Reject 'invalid_request' }
+            [uint64]$cpuMillis = 0
+            [uint64]$memoryBytes = 0
+            if (-not [uint64]::TryParse([string]$request.resources.cpu_millis, [ref]$cpuMillis) -or $cpuMillis -eq 0 -or
+                -not [uint64]::TryParse([string]$request.resources.memory_bytes, [ref]$memoryBytes) -or $memoryBytes -eq 0) {
+                Reject 'invalid_request'
+            }
+            $cpuLimit = ([decimal]$cpuMillis / 1000).ToString('0.###', [Globalization.CultureInfo]::InvariantCulture)
+            $memoryLimit = $memoryBytes.ToString([Globalization.CultureInfo]::InvariantCulture)
             if ($env:CRF_RUNNER_IMAGE -notmatch '@(sha256:[0-9a-f]{64})$') { Reject 'immutable_image_required' }
             # nerdctl treats a name@digest reference as a registry lookup even when the
             # content is already present in containerd. Use the validated digest as the
@@ -103,14 +121,35 @@ try {
             $probe = Invoke-Runtime @('info', '--format', '{{.OSType}}') -Capture
             if ($probe -notmatch 'windows') { Reject 'hyperv_isolation_unavailable' }
             $jit = Join-Path $stateRoot ".$key.jit.env.tmp"
+            $alreadyRunning = $false
             try {
                 [IO.File]::WriteAllText($jit, "ACTIONS_RUNNER_INPUT_JITCONFIG=$([string]$request.jit_config)", [Text.UTF8Encoding]::new($false))
-                $id = Invoke-Runtime @(
-                    'create', "--name=$name", '--isolation=hyperv',
-                    "--label=io.dinglebear.ci-runner-farm.placement-id=$($request.placement_id)",
-                    "--label=io.dinglebear.ci-runner-farm.command-id=$($request.command_id)",
-                    "--env-file=$jit", $imageRuntimeReference
-                ) -Capture
+                try {
+                    $id = Invoke-Runtime @(
+                        'create', "--name=$name", '--isolation=hyperv',
+                        "--cpus=$cpuLimit", "--memory=$memoryLimit",
+                        "--label=io.dinglebear.ci-runner-farm.placement-id=$($request.placement_id)",
+                        "--label=io.dinglebear.ci-runner-farm.command-id=$($request.command_id)",
+                        "--env-file=$jit", $imageRuntimeReference
+                    ) -Capture
+                } catch {
+                    # A prior adapter may have crashed after create but before
+                    # publishing state. Recover only the deterministic-name
+                    # container whose placement and command labels match this
+                    # exact replay; never adopt an unverified name collision.
+                    $recovered = Invoke-Runtime @(
+                        'inspect', '--format', '{{.Id}}|{{.State.Running}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.placement-id"}}|{{index .Config.Labels "io.dinglebear.ci-runner-farm.command-id"}}', $name
+                    ) -Capture
+                    $recoveredParts = $recovered -split '\|', 4
+                    if ($recoveredParts.Count -ne 4 -or
+                        $recoveredParts[0] -notmatch '^[0-9a-f]{64}$' -or
+                        $recoveredParts[2] -cne [string]$request.placement_id -or
+                        $recoveredParts[3] -cne [string]$request.command_id) {
+                        Reject 'ownership_mismatch'
+                    }
+                    $id = $recoveredParts[0]
+                    $alreadyRunning = $recoveredParts[1] -ceq 'true'
+                }
             } finally { Remove-Item -LiteralPath $jit -Force -ErrorAction SilentlyContinue }
             if ($id -notmatch '^[0-9a-f]{64}$') {
                 if (-not (Remove-Container $name)) { Reject 'container_cleanup_failed' }
@@ -121,7 +160,7 @@ try {
                 placement_id = $request.placement_id
                 container_id = $id
                 container_name = $name
-                started = $false
+                started = $alreadyRunning
             }
             try {
                 Write-StateAtomically $statePath $containerState
@@ -129,18 +168,20 @@ try {
                 Cleanup-FailedContainer $id $statePath
                 throw
             }
-            try {
-                Invoke-Runtime @('start', $id)
-            } catch {
-                Cleanup-FailedContainer $id $statePath
-                throw
-            }
-            $containerState.started = $true
-            try {
-                Write-StateAtomically $statePath $containerState
-            } catch {
-                Cleanup-FailedContainer $id $statePath
-                throw
+            if (-not $alreadyRunning) {
+                try {
+                    Invoke-Runtime @('start', $id)
+                } catch {
+                    Cleanup-FailedContainer $id $statePath
+                    throw
+                }
+                $containerState.started = $true
+                try {
+                    Write-StateAtomically $statePath $containerState
+                } catch {
+                    Cleanup-FailedContainer $id $statePath
+                    throw
+                }
             }
             Write-Response @{ result = 'started'; id = $id }
         }
@@ -148,7 +189,7 @@ try {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Inspect-OwnedContainer $state
+            $observed = Inspect-OwnedContainer $state $statePath
             if ($null -eq $observed) { Write-Response @{ result = 'absent' }; exit 0 }
             $parts = $observed -split '\|', 3
             if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }
@@ -165,7 +206,7 @@ try {
             if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { Write-Response @{ result = 'absent' }; exit 0 }
             $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($request.expected_id -and $request.expected_id -cne $state.container_id) { Reject 'ownership_mismatch' }
-            $observed = Inspect-OwnedContainer $state
+            $observed = Inspect-OwnedContainer $state $statePath
             if ($null -eq $observed) { Write-Response @{ result = 'absent' }; exit 0 }
             $parts = $observed -split '\|', 3
             if ($parts.Count -ne 3 -or $parts[2] -cne [string]$request.placement_id) { Reject 'ownership_mismatch' }

@@ -227,8 +227,21 @@ jobs:
             }
           }
 
+          foreach ($invalidToken in @('too-short', ('a' * 42), ('a' * 44), ('a' * 42 + '!'))) {
+            $invalidLaunch = Join-Path $env:RUNNER_TEMP "node-invalid-launch-$($invalidToken.Length).env"
+            $invalidContent = $example.Replace('REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345', $invalidToken)
+            Set-Content -LiteralPath $invalidLaunch -Value $invalidContent
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $invalidLaunch -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw 'Installer accepted an invalid node launch token'
+            } catch {
+              if ($_.Exception.Message -eq 'Installer accepted an invalid node launch token') { throw }
+              if ($_.Exception.Message -notmatch '43-character base64url token') { throw }
+            }
+          }
+
           $environmentFile = Join-Path $env:RUNNER_TEMP 'node-valid.env'
-          $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot)
+          $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot).Replace('REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345', ('v' * 43))
           Set-Content -LiteralPath $environmentFile -Value $configured
           & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
 

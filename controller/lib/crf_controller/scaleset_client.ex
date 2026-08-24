@@ -48,12 +48,25 @@ defmodule CrfController.ScaleSetClient do
     })
   end
 
-  def retire_jit(server \\ __MODULE__, pool_id, scale_set_id, work_handle) do
-    call(server, "retire_jit", %{
+  def retire_jit(
+        server \\ __MODULE__,
+        pool_id,
+        scale_set_id,
+        work_handle,
+        proof_ownership_revision \\ nil
+      ) do
+    payload = %{
       "pool_id" => pool_id,
       "expected_scale_set_id" => scale_set_id,
       "work_handle" => work_handle
-    })
+    }
+
+    payload =
+      if is_nil(proof_ownership_revision),
+        do: payload,
+        else: Map.put(payload, "expected_ownership_revision", proof_ownership_revision)
+
+    call(server, "retire_jit", payload)
   end
 
   def confirm_jit_retirement(

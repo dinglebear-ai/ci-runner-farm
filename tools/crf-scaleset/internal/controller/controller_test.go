@@ -159,6 +159,16 @@ func (p *fencePoller) ConsumeHandle(int64, int64) bool {
 	return true
 }
 
+type retireFailPoller struct {
+	fencePoller
+	retireCalls int
+}
+
+func (p *retireFailPoller) RetireHandle(int64, int64) error {
+	p.retireCalls++
+	return errors.New("retirement unavailable")
+}
+
 func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T) {
 	root := t.TempDir()
 	cfg := RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",
@@ -470,6 +480,86 @@ func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
 	}
 	if len(control.issued) != 0 {
 		t.Fatalf("ambiguous JIT tombstone survived retirement: %#v", control.issued)
+	}
+}
+
+func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{}`)); !response.OK {
+		t.Fatalf("apply sessions failed: %#v", response)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := control.stopSessions(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
+	scaleSetID := owned.Records[0].ScaleSetID
+	failing := &retireFailPoller{}
+	control.poller = failing
+	issuePayload := issueJITPayload(t, cfg, "python", scaleSetID, 501)
+	if response := control.Handle(context.Background(), request(cfg, "issue_jit", 2, issuePayload)); !response.OK {
+		t.Fatalf("JIT issue failed: %#v", response)
+	}
+	descriptorPath := control.descriptorPath(scaleSetID, 501)
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		scaleSetID, cfg.OwnershipRevision)
+	response := control.Handle(context.Background(), request(cfg, "retire_jit", 3, retirePayload))
+	if response.OK || response.Code != "jit_retirement_failed" || failing.retireCalls != 1 {
+		t.Fatalf("retirement failure was not reported after durable proof: response=%#v calls=%d",
+			response, failing.retireCalls)
+	}
+	key := fmt.Sprintf("%d:%d", scaleSetID, 501)
+	if _, ok := control.retired[key]; !ok {
+		t.Fatalf("retirement failure lost conservative proof: %#v", control.retired)
+	}
+	if _, ok := control.issued[key]; !ok {
+		t.Fatalf("retirement failure prematurely removed issued record: %#v", control.issued)
+	}
+	if _, err := os.Stat(descriptorPath); err != nil {
+		t.Fatalf("retirement failure prematurely removed descriptor: %v", err)
+	}
+	control.Close()
+
+	restarted, err := New(cfg, api)
+	if err != nil {
+		t.Fatalf("restart with pending retirement failed: %v", err)
+	}
+	defer restarted.Close()
+	restarted.poller = &consumeFailPoller{}
+	if _, ok := restarted.retired[key]; !ok {
+		t.Fatalf("restart lost durable retirement proof: %#v", restarted.retired)
+	}
+	if _, ok := restarted.issued[key]; !ok {
+		t.Fatalf("restart lost conservative issued record: %#v", restarted.issued)
+	}
+	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 1, retirePayload)); !response.OK {
+		t.Fatalf("retirement retry after restart failed: %#v", response)
+	}
+	if _, ok := restarted.retired[key]; !ok {
+		t.Fatalf("successful retry removed proof before confirmation: %#v", restarted.retired)
+	}
+	if _, ok := restarted.issued[key]; ok {
+		t.Fatalf("successful retry retained issued record: %#v", restarted.issued)
+	}
+	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful retry retained descriptor: %v", err)
+	}
+	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 2,
+		retirePayload)); !response.OK || len(restarted.retired) != 0 {
+		t.Fatalf("confirmation did not compact recovered proof: response=%#v retired=%#v",
+			response, restarted.retired)
 	}
 }
 

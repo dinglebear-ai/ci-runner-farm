@@ -110,7 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_contains_only_fixed_nonsecret_fields() {
+    fn projection_contains_only_fixed_private_fields() {
         let status = NodeStatusProjection::connecting(
             "node-1",
             7,

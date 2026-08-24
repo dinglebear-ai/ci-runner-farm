@@ -68,7 +68,6 @@ pub fn run(config: NodeConfig) -> Result<(), DaemonError> {
 pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result<(), DaemonError> {
     let operator_projection_path = config.operator_projection_path.clone();
     let node_status_path = config.node_status_path.clone();
-    let mut status_log = NodeStatusLog::default();
     let platform = probe_local_platform();
     let mut host = SystemProbe::new().map_err(|_| DaemonError::HostProbe)?;
     let host_memory = host
@@ -90,16 +89,13 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         .as_ref()
         .map(|token| token.as_str())
         .unwrap_or("");
-    status_log.record(persist_node_status(
+    let mut status = NodeStatusReporter::new(
         node_status_path.as_deref(),
-        &NodeStatusProjection::connecting(
-            &platform.node_id,
-            generation,
-            launch_token,
-            NodeStatusDetail::Starting,
-            now_unix_ms()?,
-        ),
-    ));
+        &platform.node_id,
+        generation,
+        launch_token,
+    );
+    status.connecting(NodeStatusDetail::Starting, now_unix_ms()?);
 
     let placement_store = PlacementStore::new(config.state_root.join("placements"))
         .map_err(|_| DaemonError::PlacementState)?;
@@ -199,16 +195,7 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         let transport = match tls_client.connect() {
             Ok(transport) => transport,
             Err(error) => {
-                status_log.record(persist_node_status(
-                    node_status_path.as_deref(),
-                    &NodeStatusProjection::connecting(
-                        &diagnostic_node_id,
-                        generation,
-                        launch_token,
-                        NodeStatusDetail::ControllerUnavailable,
-                        now_unix_ms()?,
-                    ),
-                ));
+                status.connecting(NodeStatusDetail::ControllerUnavailable, now_unix_ms()?);
                 reconnect_log.failure(
                     &diagnostic_node_id,
                     &diagnostic_controller,
@@ -231,47 +218,21 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                     outcome.operator_projection.as_ref(),
                 ));
                 reconnect_log.recovered(&diagnostic_node_id, &diagnostic_controller);
-                status_log.record(persist_node_status(
-                    node_status_path.as_deref(),
-                    &NodeStatusProjection::ready(
-                        &diagnostic_node_id,
-                        generation,
-                        launch_token,
-                        registration_time,
-                    ),
-                ));
+                status.ready(registration_time);
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
             Err(error) => {
                 let reconnect = matches!(error, AgentSessionError::Transport(_));
                 core = session.into_core();
                 if !reconnect {
-                    status_log.record(persist_node_status(
-                        node_status_path.as_deref(),
-                        &NodeStatusProjection::failed(
-                            &diagnostic_node_id,
-                            generation,
-                            launch_token,
-                            NodeStatusDetail::ControllerRejected,
-                            registration_time,
-                        ),
-                    ));
+                    status.failed(NodeStatusDetail::ControllerRejected, registration_time);
                     eprintln!(
                         "crf-node: fatal registration failure node_id={} controller={} error={error:?}",
                         diagnostic_node_id, diagnostic_controller
                     );
                     return Err(DaemonError::FatalSession);
                 }
-                status_log.record(persist_node_status(
-                    node_status_path.as_deref(),
-                    &NodeStatusProjection::connecting(
-                        &diagnostic_node_id,
-                        generation,
-                        launch_token,
-                        NodeStatusDetail::RegistrationPending,
-                        registration_time,
-                    ),
-                ));
+                status.connecting(NodeStatusDetail::RegistrationPending, registration_time);
                 reconnect_log.failure(
                     &diagnostic_node_id,
                     &diagnostic_controller,
@@ -296,47 +257,21 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
                         operator_projection_path.as_deref(),
                         outcome.heartbeat.operator_projection.as_ref(),
                     ));
-                    status_log.record(persist_node_status(
-                        node_status_path.as_deref(),
-                        &NodeStatusProjection::ready(
-                            &diagnostic_node_id,
-                            generation,
-                            launch_token,
-                            heartbeat_time,
-                        ),
-                    ));
+                    status.ready(heartbeat_time);
                     sleep_interruptible(config.heartbeat_interval, &running);
                 }
                 Err(error) => {
                     let reconnect = heartbeat_error_reconnectable(&error);
                     core = session.into_core();
                     if !reconnect {
-                        status_log.record(persist_node_status(
-                            node_status_path.as_deref(),
-                            &NodeStatusProjection::failed(
-                                &diagnostic_node_id,
-                                generation,
-                                launch_token,
-                                NodeStatusDetail::ControllerRejected,
-                                heartbeat_time,
-                            ),
-                        ));
+                        status.failed(NodeStatusDetail::ControllerRejected, heartbeat_time);
                         eprintln!(
                             "crf-node: fatal heartbeat failure node_id={} controller={} error={error:?}",
                             diagnostic_node_id, diagnostic_controller
                         );
                         return Err(DaemonError::FatalSession);
                     }
-                    status_log.record(persist_node_status(
-                        node_status_path.as_deref(),
-                        &NodeStatusProjection::connecting(
-                            &diagnostic_node_id,
-                            generation,
-                            launch_token,
-                            NodeStatusDetail::ControllerUnavailable,
-                            heartbeat_time,
-                        ),
-                    ));
+                    status.connecting(NodeStatusDetail::ControllerUnavailable, heartbeat_time);
                     reconnect_log.failure(
                         &diagnostic_node_id,
                         &diagnostic_controller,
@@ -385,6 +320,65 @@ fn persist_node_status(
     Ok(())
 }
 
+struct NodeStatusReporter {
+    path: Option<std::path::PathBuf>,
+    node_id: String,
+    generation: u64,
+    launch_token: String,
+    log: NodeStatusLog,
+}
+
+impl NodeStatusReporter {
+    fn new(
+        path: Option<&std::path::Path>,
+        node_id: &str,
+        generation: u64,
+        launch_token: &str,
+    ) -> Self {
+        Self {
+            path: path.map(std::path::Path::to_path_buf),
+            node_id: node_id.to_owned(),
+            generation,
+            launch_token: launch_token.to_owned(),
+            log: NodeStatusLog::default(),
+        }
+    }
+
+    fn connecting(&mut self, detail: NodeStatusDetail, observed_at_unix_ms: u64) {
+        self.record(NodeStatusProjection::connecting(
+            &self.node_id,
+            self.generation,
+            &self.launch_token,
+            detail,
+            observed_at_unix_ms,
+        ));
+    }
+
+    fn ready(&mut self, observed_at_unix_ms: u64) {
+        self.record(NodeStatusProjection::ready(
+            &self.node_id,
+            self.generation,
+            &self.launch_token,
+            observed_at_unix_ms,
+        ));
+    }
+
+    fn failed(&mut self, detail: NodeStatusDetail, observed_at_unix_ms: u64) {
+        self.record(NodeStatusProjection::failed(
+            &self.node_id,
+            self.generation,
+            &self.launch_token,
+            detail,
+            observed_at_unix_ms,
+        ));
+    }
+
+    fn record(&mut self, projection: NodeStatusProjection) {
+        self.log
+            .record(persist_node_status(self.path.as_deref(), &projection));
+    }
+}
+
 #[derive(Default)]
 struct NodeStatusLog {
     failures: u64,
@@ -398,7 +392,7 @@ impl NodeStatusLog {
                 self.failures = self.failures.saturating_add(1);
                 if self.failures == 1 || self.failures.is_power_of_two() {
                     eprintln!(
-                        "crf-node: nonsecret status write failed repeated_count={} error={error}",
+                        "crf-node: private status write failed repeated_count={} error={error}",
                         self.failures,
                     );
                 }
@@ -576,5 +570,74 @@ mod tests {
         assert_eq!(log.failures, 5);
         log.record(Ok(()));
         assert_eq!(log.failures, 0);
+    }
+
+    #[test]
+    fn scripted_session_status_transitions_preserve_launch_identity_and_ignore_write_failures() {
+        let root = tempfile::tempdir().expect("status root");
+        let path = root.path().join("node-status.json");
+        let token = "abcdefghijklmnopqrstuvwxyzABCDEFGH012345678";
+        let mut reporter = NodeStatusReporter::new(Some(&path), "node-1", 17, token);
+
+        let script = [
+            (
+                NodeStatusDetail::ControllerUnavailable,
+                "connecting",
+                "controller_unavailable",
+                10,
+            ),
+            (
+                NodeStatusDetail::RegistrationPending,
+                "connecting",
+                "registration_pending",
+                20,
+            ),
+        ];
+        for (detail, state, detail_code, observed_at) in script {
+            reporter.connecting(detail, observed_at);
+            assert_status(&path, state, Some(detail_code), observed_at, token, 17);
+        }
+
+        // Successful registration and the subsequent heartbeat both refresh
+        // readiness without changing the launch identity.
+        reporter.ready(30);
+        assert_status(&path, "ready", None, 30, token, 17);
+        reporter.ready(40);
+        assert_status(&path, "ready", None, 40, token, 17);
+
+        reporter.failed(NodeStatusDetail::ControllerRejected, 50);
+        assert_status(&path, "failed", Some("controller_rejected"), 50, token, 17);
+
+        // A projection failure is diagnostic-only: recording returns normally,
+        // later transitions continue, and a successful write clears suppression.
+        let unwritable_path = root.path().join("directory-instead-of-file");
+        std::fs::create_dir(&unwritable_path).expect("failure fixture");
+        reporter.path = Some(unwritable_path);
+        reporter.connecting(NodeStatusDetail::ControllerUnavailable, 60);
+        assert_eq!(reporter.log.failures, 1);
+        reporter.path = Some(path.clone());
+        reporter.ready(70);
+        assert_eq!(reporter.log.failures, 0);
+        assert_status(&path, "ready", None, 70, token, 17);
+    }
+
+    fn assert_status(
+        path: &std::path::Path,
+        state: &str,
+        detail_code: Option<&str>,
+        observed_at_unix_ms: u64,
+        launch_token: &str,
+        generation: u64,
+    ) {
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path).expect("status projection remains readable"),
+        )
+        .expect("valid status projection");
+        assert_eq!(status["node_id"], "node-1");
+        assert_eq!(status["generation"], generation);
+        assert_eq!(status["launch_token"], launch_token);
+        assert_eq!(status["state"], state);
+        assert_eq!(status["detail_code"].as_str(), detail_code);
+        assert_eq!(status["observed_at_unix_ms"], observed_at_unix_ms);
     }
 }

@@ -12,7 +12,7 @@ CRF_SERVICE_ERROR_LOG=C:\ProgramData\CiRunnerFarm\logs\service-errors.log
 # Optional readiness projection for unattended deployment verification. Configure
 # both values together and replace the launch token for each service rollout.
 CRF_NODE_STATUS_PATH=C:\ProgramData\CiRunnerFarm\state\node-status.json
-CRF_NODE_LAUNCH_TOKEN=replace-with-a-unique-launch-token
+CRF_NODE_LAUNCH_TOKEN=REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345
 # Windows jobs run in one fresh Hyper-V-isolated Windows container per placement.
 CRF_EXECUTION_BACKEND=container
 CRF_CONTAINER_ADAPTER_PROGRAM=sibling

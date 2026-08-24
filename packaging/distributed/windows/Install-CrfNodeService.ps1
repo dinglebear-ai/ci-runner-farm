@@ -74,6 +74,12 @@ foreach ($key in $requiredKeys) {
 if ($values.ContainsKey('CRF_NODE_STATUS_PATH') -ne $values.ContainsKey('CRF_NODE_LAUNCH_TOKEN')) {
     throw 'CRF_NODE_STATUS_PATH and CRF_NODE_LAUNCH_TOKEN must be configured together'
 }
+if ($values.ContainsKey('CRF_NODE_LAUNCH_TOKEN')) {
+    $launchToken = $values['CRF_NODE_LAUNCH_TOKEN']
+    if ($launchToken -notmatch '^[A-Za-z0-9_-]{43}$' -or $launchToken -eq 'REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345') {
+        throw 'CRF_NODE_LAUNCH_TOKEN must be a unique 43-character base64url token'
+    }
+}
 $backend = if ($values.ContainsKey('CRF_EXECUTION_BACKEND')) { $values['CRF_EXECUTION_BACKEND'] } else { throw 'Missing required node environment key: CRF_EXECUTION_BACKEND' }
 switch ($backend) {
     'native_process' {
