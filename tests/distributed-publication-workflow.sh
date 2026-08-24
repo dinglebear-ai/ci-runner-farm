@@ -38,11 +38,15 @@ require_fixed 'release_tag:' 'release_tag workflow input is missing'
 require_fixed 'required: true' 'release_tag must be required'
 require_regex '\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$' \
   'release_tag must be validated as an exact vMAJOR.MINOR.PATCH tag'
+# shellcheck disable=SC2016 # Match literal GitHub expression syntax.
 require_fixed 'ref: refs/tags/${{ env.RELEASE_TAG }}' 'checkout must use the requested immutable release tag'
+# shellcheck disable=SC2016 # Match literal GitHub expression syntax.
 forbid_fixed 'ref: ${{ github.ref }}' 'publication must not checkout the mutable dispatch ref'
+# shellcheck disable=SC2016 # Match literal GitHub expression syntax.
 forbid_fixed 'ref: ${{ github.event.release.target_commitish }}' 'publication must not checkout mutable target_commitish'
 
 # The checked-out commit must be proven to be the commit named by the exact tag.
+# shellcheck disable=SC2016 # Match a literal shell fragment in the workflow.
 require_fixed 'git rev-parse "refs/tags/$RELEASE_TAG^{commit}"' 'workflow must resolve the release tag to its commit'
 require_fixed 'git rev-parse HEAD' 'workflow must resolve and compare the checked-out commit'
 
@@ -66,6 +70,7 @@ require_fixed 'scripts/build-distributed-bundle.sh' 'distributed bundle is not b
 require_fixed 'scripts/verify-distributed-bundle.sh' 'distributed bundle is not verified before upload'
 require_fixed 'gh release upload' 'distributed bundle is not attached to the GitHub release'
 require_fixed '.sha256' 'distributed bundle checksum asset is missing'
+# shellcheck disable=SC2016 # Match a literal shell fragment in the workflow.
 require_fixed 'sha256sum "$archive_name"' 'bundle checksum must be portable after release download'
 require_fixed 'gh release download' 'publication verification must download the release assets'
 require_regex 'sha256sum[[:space:]]+(-c|--check)' 'publication verification must verify the downloaded checksum'
