@@ -68,9 +68,13 @@ require_fixed 'deployments/distributed/runner.Dockerfile' 'distributed runner Do
 require_regex '(steps\.[A-Za-z0-9_-]+\.outputs\.digest|metadata-containerimage-digest)' \
   'published manifest digest is not captured'
 require_fixed 'docker buildx imagetools inspect' 'published manifest must be inspected from the registry'
+# shellcheck disable=SC2016
+require_fixed 'scripts/resolve-distributed-image.sh "$IMAGE_NAME" "$RELEASE_TAG"' 'release image tag lookup is not fail closed'
 require_fixed 'distributed-runner-image.txt' 'immutable image identity receipt is not published'
 require_fixed 'org.opencontainers.image.revision' 'existing images are not bound to the release commit'
 require_fixed 'visibility=public' 'published image is not made available to clean nodes'
+# shellcheck disable=SC2016
+require_fixed 'docker pull --platform "$platform"' 'anonymous verification does not pull both runtime images'
 
 # The release must carry the verified distributed Linux install bundle as well
 # as a checksum, and the workflow must re-download/inspect what it published.
@@ -115,6 +119,10 @@ if env "${resolver_env[@]}" MOCK_STATUS=401 "$IMAGE_RESOLVER" ghcr.io/example/im
 fi
 if env "${resolver_env[@]}" MOCK_DIGEST=invalid "$IMAGE_RESOLVER" ghcr.io/example/image "sha-$(printf 'b%.0s' {1..40})" actor token >/dev/null 2>&1; then
   fail 'malformed registry digest was accepted'
+fi
+[[ "$(env "${resolver_env[@]}" MOCK_STATUS=404 "$IMAGE_RESOLVER" ghcr.io/example/image v1.2.3 actor token)" == absent ]] || fail 'release-tag 404 was not classified as absent'
+if env "${resolver_env[@]}" MOCK_STATUS=503 "$IMAGE_RESOLVER" ghcr.io/example/image v1.2.3 actor token >/dev/null 2>&1; then
+  fail 'release-tag registry failure was treated as absence'
 fi
 
 # The source guard detects a force-moved remote tag instead of publishing

@@ -11,8 +11,8 @@ token="${4:-}"
   exit 1
 }
 repository="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-[[ "$tag" =~ ^sha-[0-9a-f]{40}$ ]] || {
-  echo "image tag must be sha- followed by a full commit ID" >&2
+[[ "$tag" =~ ^sha-[0-9a-f]{40}$ || "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "image tag must be an immutable commit or stable release tag" >&2
   exit 1
 }
 [[ -n "$actor" && -n "$token" ]] || {
