@@ -52,7 +52,12 @@ defmodule CrfController.ScaleSetEligibilityTest do
     assert {:error, :invalid_scaleset_eligibility_path} =
              ScaleSetEligibility.load("relative/path.json", "controller-1")
 
+    # Must be absolute on the *host* platform, not just POSIX-shaped: a
+    # hardcoded "/tmp/..." is :volumerelative on Windows, so the path check
+    # would fire first and mask the identity rejection under test.
+    absolute_path = Path.join(System.tmp_dir!(), "eligibility.json")
+
     assert {:error, :invalid_controller_instance_id} =
-             ScaleSetEligibility.persist("/tmp/eligibility.json", "", true)
+             ScaleSetEligibility.persist(absolute_path, "", true)
   end
 end
