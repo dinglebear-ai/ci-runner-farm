@@ -26,16 +26,19 @@ function Invoke-Runtime([string[]] $Arguments, [switch] $Capture) {
 
 function Write-StateAtomically([string] $Path, [hashtable] $State) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backup = "$Path.$([Guid]::NewGuid().ToString('N')).bak"
     try {
         $json = $State | ConvertTo-Json -Compress
         [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            [IO.File]::Replace($temporary, $Path, $null)
+            [IO.File]::Replace($temporary, $Path, $backup)
+            Remove-Item -LiteralPath $backup -Force
         } else {
             Move-Item -LiteralPath $temporary -Destination $Path
         }
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -173,5 +176,8 @@ try {
         default { Reject 'unsupported_action' }
     }
 } catch {
+    $message = [string]$_.Exception.Message
+    if ($message.Length -gt 2048) { $message = $message.Substring(0, 2048) }
+    [Console]::Error.WriteLine("adapter_failed: $message")
     Reject 'adapter_failed'
 }

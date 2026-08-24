@@ -86,6 +86,9 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:set_jit_states, states}, _from, state) do
+      states =
+        Enum.map(states, &Map.put_new(&1, :ownership_revision, state.snapshot.ownership_revision))
+
       {:reply, :ok, %{state | jit_states: states}}
     end
 
@@ -124,6 +127,7 @@ defmodule CrfController.DemandCoordinatorTest do
         scale_set_id: pool.scale_set_id,
         work_handle: handle,
         state: "issued",
+        ownership_revision: state.snapshot.ownership_revision,
         descriptor_available: true
       }
 
@@ -144,6 +148,10 @@ defmodule CrfController.DemandCoordinatorTest do
 
       {:reply, {:ok, %{"retired" => true}},
        %{state | retire_calls: state.retire_calls + 1, jit_states: jit_states}}
+    end
+
+    def handle_call({:call, "confirm_jit_retirement", _payload}, _from, state) do
+      {:reply, {:ok, %{"confirmed" => true}}, state}
     end
 
     defp snapshot(handles) do

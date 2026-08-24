@@ -299,7 +299,7 @@ defmodule CrfController.DemandCoordinator do
                      jit.pool_id,
                      jit.scale_set_id,
                      jit.work_handle,
-                     jit.ownership_revision
+                     Map.get(jit, :ownership_revision)
                    ) do
                 {:ok, _} -> errors
                 {:error, reason} -> [reason | errors]

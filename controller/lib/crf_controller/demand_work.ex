@@ -127,7 +127,7 @@ defmodule CrfController.DemandWork do
           jit.scale_set_id,
           jit.work_handle,
           ctx,
-          jit.ownership_revision
+          Map.get(jit, :ownership_revision)
         )
 
       %PoolPolicy{} = policy ->
@@ -140,7 +140,7 @@ defmodule CrfController.DemandWork do
                 jit.scale_set_id,
                 jit.work_handle,
                 ctx,
-                jit.ownership_revision
+                Map.get(jit, :ownership_revision)
               )
 
             {:ok, %Placement{} = placement} ->
@@ -161,7 +161,7 @@ defmodule CrfController.DemandWork do
                       jit.scale_set_id,
                       jit.work_handle,
                       ctx,
-                      jit.ownership_revision
+                      Map.get(jit, :ownership_revision)
                     )
                 end
               end
@@ -181,7 +181,7 @@ defmodule CrfController.DemandWork do
           jit.scale_set_id,
           jit.work_handle,
           ctx,
-          jit.ownership_revision
+          Map.get(jit, :ownership_revision)
         )
 
       true ->
@@ -388,7 +388,7 @@ defmodule CrfController.DemandWork do
              jit.scale_set_id,
              jit.work_handle,
              ctx,
-             jit.ownership_revision
+             Map.get(jit, :ownership_revision)
            ) do
       :ok
     end
