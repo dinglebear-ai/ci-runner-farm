@@ -198,26 +198,51 @@ jobs:
           retention-days: 30
 
   publish-image-visibility:
-    name: Publish runner image visibility
+    name: Assert runner image is anonymously pullable
     needs: publish-image
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      # This credential is deliberately isolated in a fresh job with no
-      # checkout, third-party actions, or release-controlled executable code.
-      - name: Make the first-party runner image anonymously pullable
+      # Package visibility is a sticky per-package setting, not a per-release
+      # one, and GitHub exposes no API to change it: PATCH
+      # /orgs/{org}/packages/container/{name} is not a routed endpoint (it
+      # returns a generic 404 regardless of token scope, unlike GET which
+      # returns a scope-specific 403). The previous mutation attempt here could
+      # never have worked, and its failure additionally skipped
+      # verify-publication via needs, so a release could ship a bundle whose
+      # publication was never verified.
+      #
+      # Assert the end state instead of assuming an API call produced it: prove
+      # the published digest is pullable with no credentials at all. Runs with
+      # permissions: {} and no checkout, so nothing here can borrow the
+      # workflow token's access.
+      - name: Assert anonymous pull of the published digest
         shell: bash
         env:
-          ADMIN_TOKEN: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+          IMAGE_REPO: ${{ github.repository_owner }}/ci-runner-farm-distributed
         run: |
           set -euo pipefail
-          [[ -n "$ADMIN_TOKEN" ]] || { echo "UNRAID_BOT_GITHUB_ADMIN_TOKEN is required to publish the package" >&2; exit 1; }
-          curl --fail-with-body --silent --show-error --request PATCH \
-            --header "Authorization: Bearer $ADMIN_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/ci-runner-farm-distributed" \
-            --data '{"visibility":"public"}' >/dev/null
+          [[ -n "$IMAGE_DIGEST" ]] || { echo "::error::publish-image produced no digest" >&2; exit 1; }
+
+          token="$(curl --fail-with-body --silent --show-error \
+            "https://ghcr.io/token?scope=repository:${IMAGE_REPO}:pull" | jq -r '.token // empty')"
+          [[ -n "$token" ]] || {
+            echo "::error::could not obtain an anonymous ghcr pull token for ${IMAGE_REPO}; the package is not public" >&2
+            exit 1
+          }
+
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $token" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            --header 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${IMAGE_REPO}/manifests/${IMAGE_DIGEST}")"
+          [[ "$status" == "200" ]] || {
+            echo "::error::anonymous manifest fetch for ${IMAGE_REPO}@${IMAGE_DIGEST} returned HTTP ${status}; make the package public in its GHCR settings" >&2
+            exit 1
+          }
+
+          echo "anonymous pull verified: ${IMAGE_REPO}@${IMAGE_DIGEST}"
 
   publish-bundle:
     name: Build and attach verified Linux bundle
