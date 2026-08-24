@@ -35,6 +35,7 @@ SOURCE_DATE_EPOCH=1700000000 "$builder" --output-dir "$tmp/payload" --platform l
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-node"
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-container-adapter"
 test -x "$tmp/payload/priv/bin/linux-x86_64/crf-scaleset"
+test -x "$tmp/payload/priv/bin/linux-x86_64/crf-scheduler"
 (cd "$tmp/payload" && sha256sum -c SHA256SUMS)
 python3 - "$tmp/payload/provenance.json" <<'PY'
 import json, sys
@@ -46,6 +47,7 @@ assert [item["path"] for item in data["files"]] == [
     "priv/bin/linux-x86_64/crf-container-adapter",
     "priv/bin/linux-x86_64/crf-node",
     "priv/bin/linux-x86_64/crf-scaleset",
+    "priv/bin/linux-x86_64/crf-scheduler",
 ]
 assert all(len(item["sha256"]) == 64 and item["size"] > 0 for item in data["files"])
 PY
@@ -59,6 +61,8 @@ cmp "$tmp/payload/priv/bin/linux-x86_64/crf-container-adapter" \
   "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-container-adapter"
 cmp "$tmp/payload/priv/bin/linux-x86_64/crf-scaleset" \
   "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-scaleset"
+cmp "$tmp/payload/priv/bin/linux-x86_64/crf-scheduler" \
+  "$tmp/payload-repeat/priv/bin/linux-x86_64/crf-scheduler"
 
 fail "$builder" --output-dir "$tmp/duplicate" --platform linux-x86_64 --platform linux-x86_64
 grep -q "duplicate platform" "$tmp/stderr"
