@@ -305,6 +305,15 @@ jobs:
             throw 'Reinstall did not replace the node binary'
           }
 
+      - name: Upload distributed Windows node package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-runner-farm-node-windows-x86_64
+          path: build/distributed/ci-runner-farm-node-*-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Remove disposable Windows service
         if: always() && runner.os == 'Windows'
         shell: pwsh
