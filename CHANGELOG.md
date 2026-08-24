@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [1.12.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.12.0...v1.12.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **distributed:** include PHP CLI in runner contract ([#87](https://github.com/dinglebear-ai/ci-runner-farm/issues/87)) ([fb9ab06](https://github.com/dinglebear-ai/ci-runner-farm/commit/fb9ab06cc4a32bbbefbbfe1196cb6b9bbdb61d80))
+
 ## [1.12.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.11.1...v1.12.0) (2026-08-24)
 
 
