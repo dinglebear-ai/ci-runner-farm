@@ -26,7 +26,7 @@ case "$(uname -m)" in
   *) exit 5 ;;
 esac
 
-php_version="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);' 2>/dev/null)"
+php_version="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);' 2>/dev/null)" || exit 6
 [[ "$php_version" =~ ^[0-9]+\.[0-9]+$ ]] || exit 6
 php_major="${php_version%%.*}"
 (( php_major >= 8 )) || exit 6

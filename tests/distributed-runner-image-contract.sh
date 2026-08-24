@@ -53,10 +53,18 @@ cat >"$tmp/bin/php" <<'EOF'
 exit 127
 EOF
 chmod +x "$tmp/bin/php"
-if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1; then
+set +e
+PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1
+missing_php_status=$?
+set -e
+if (( missing_php_status == 0 )); then
   echo 'probe accepted a missing PHP CLI runtime' >&2
   exit 1
 fi
+[[ "$missing_php_status" == 6 ]] || {
+  echo "probe used unexpected missing-PHP exit code: $missing_php_status" >&2
+  exit 1
+}
 
 grep -Fq 'FROM ubuntu:24.04@sha256:' "$dockerfile"
 grep -Eq '^[[:space:]]*ImageOS=ubuntu24([[:space:]\\]|$)' "$dockerfile"
