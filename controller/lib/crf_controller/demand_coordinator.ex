@@ -27,7 +27,7 @@ defmodule CrfController.DemandCoordinator do
     GenServer.start_link(__MODULE__, opts, genserver_opts)
   end
 
-  def status(server \\ __MODULE__), do: GenServer.call(server, :status)
+  def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
 
   def force_abandon_placement(placement_id, opts \\ []) do
     force_abandon_placement(__MODULE__, placement_id, opts)

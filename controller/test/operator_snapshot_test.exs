@@ -19,6 +19,14 @@ defmodule CrfController.OperatorSnapshotTest do
     def handle_call(:status, _from, status), do: {:reply, status, status}
   end
 
+  defmodule BlockingStatusServer do
+    use GenServer
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, nil)
+    def init(state), do: {:ok, state}
+    def handle_call(:status, _from, state), do: {:noreply, state}
+  end
+
   test "returns a deterministic secret-free controller view" do
     {:ok, nodes} = start_supervised({NodeRegistry, name: nil})
     {:ok, offers} = start_supervised({OfferLedger, name: nil})
@@ -123,6 +131,20 @@ defmodule CrfController.OperatorSnapshotTest do
     assert snapshot.placements == []
     assert snapshot.demand == nil
     assert snapshot.peer_authorization == nil
+  end
+
+  test "does not let a busy demand coordinator block an operator snapshot" do
+    {:ok, demand} = start_supervised(BlockingStatusServer)
+    started_at = System.monotonic_time(:millisecond)
+
+    snapshot =
+      OperatorSnapshot.snapshot(
+        %{nodes: nil, offers: nil, placements: nil, demand: demand, peers: nil, sidecar: nil},
+        call_timeout_ms: 20
+      )
+
+    assert snapshot.demand == nil
+    assert System.monotonic_time(:millisecond) - started_at < 200
   end
 
   test "projects only bounded sidecar operator fields" do

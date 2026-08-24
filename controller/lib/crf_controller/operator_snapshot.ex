@@ -13,6 +13,7 @@ defmodule CrfController.OperatorSnapshot do
 
   def snapshot(servers \\ %{}, opts \\ []) when is_map(servers) and is_list(opts) do
     now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
+    call_timeout_ms = Keyword.get(opts, :call_timeout_ms, 100)
     nodes = call(Map.get(servers, :nodes, NodeRegistry), &NodeRegistry.snapshot/1, [])
     offers = call(Map.get(servers, :offers, OfferLedger), &OfferLedger.snapshot/1, [])
 
@@ -26,7 +27,13 @@ defmodule CrfController.OperatorSnapshot do
         []
       )
 
-    demand = call(Map.get(servers, :demand, DemandCoordinator), &DemandCoordinator.status/1, nil)
+    demand =
+      call(
+        Map.get(servers, :demand, DemandCoordinator),
+        &DemandCoordinator.status(&1, call_timeout_ms),
+        nil
+      )
+
     peers = call(Map.get(servers, :peers, PeerRegistry), &PeerRegistry.status/1, nil)
     sidecar = call(Map.get(servers, :sidecar, ScaleSetSidecar), &ScaleSetSidecar.status/1, nil)
 
