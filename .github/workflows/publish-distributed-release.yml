@@ -189,28 +189,6 @@ jobs:
             gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
           fi
 
-      - name: Make the first-party runner image anonymously pullable
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
-          gh api --method PATCH "/orgs/${{ github.repository_owner }}/packages/container/ci-runner-farm-distributed" -f visibility=public >/dev/null
-          docker logout ghcr.io >/dev/null
-          digest="${{ steps.image.outputs.digest }}"
-          docker buildx imagetools inspect "$IMAGE_NAME@$digest" >/dev/null
-          for platform in linux/amd64 linux/arm64; do
-            [[ "$platform" == linux/amd64 ]] && contract_arch=x64 || contract_arch=arm64
-            docker pull --platform "$platform" "$IMAGE_NAME@$digest" >/dev/null
-            docker run --rm --platform "$platform" --network none --read-only \
-              --entrypoint /usr/local/bin/crf-runner-image-contract \
-              "$IMAGE_NAME@$digest" |
-              jq -e --arg arch "$contract_arch" \
-                '.compatible == true and .arch == $arch and (.capabilities | index("otp-28-compatible")) != null' >/dev/null
-            docker image rm "$IMAGE_NAME@$digest" >/dev/null 2>&1 || true
-          done
-
       - name: Upload image identity evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -218,6 +196,28 @@ jobs:
           path: distributed-runner-image.txt
           if-no-files-found: error
           retention-days: 30
+
+  publish-image-visibility:
+    name: Publish runner image visibility
+    needs: publish-image
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # This credential is deliberately isolated in a fresh job with no
+      # checkout, third-party actions, or release-controlled executable code.
+      - name: Make the first-party runner image anonymously pullable
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ADMIN_TOKEN" ]] || { echo "UNRAID_BOT_GITHUB_ADMIN_TOKEN is required to publish the package" >&2; exit 1; }
+          curl --fail-with-body --silent --show-error --request PATCH \
+            --header "Authorization: Bearer $ADMIN_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/ci-runner-farm-distributed" \
+            --data '{"visibility":"public"}' >/dev/null
 
   publish-bundle:
     name: Build and attach verified Linux bundle
@@ -307,6 +307,7 @@ jobs:
     needs:
       - validate-release
       - publish-image
+      - publish-image-visibility
       - publish-bundle
     runs-on: ubuntu-latest
     permissions:

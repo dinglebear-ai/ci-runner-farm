@@ -3,8 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$ROOT/.github/workflows/publish-distributed-release.yml"
+LINT_WORKFLOW="$ROOT/.github/workflows/lint.yml"
 SOURCE_GUARD="$ROOT/scripts/verify-distributed-release-source.sh"
 IMAGE_RESOLVER="$ROOT/scripts/resolve-distributed-image.sh"
+BUNDLE_BUILDER="$ROOT/scripts/build-distributed-bundle.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -36,6 +38,7 @@ forbid_fixed() {
 [[ -f "$WORKFLOW" ]] || fail "missing .github/workflows/publish-distributed-release.yml"
 [[ -x "$SOURCE_GUARD" ]] || fail "release source guard is missing or not executable"
 [[ -x "$IMAGE_RESOLVER" ]] || fail "image resolver is missing or not executable"
+[[ -x "$BUNDLE_BUILDER" ]] || fail "bundle builder is missing or not executable"
 
 # Publication is an explicit, immutable release operation. The only operator
 # input is a required semantic v-tag; it must not fall back to the workflow ref.
@@ -72,7 +75,7 @@ require_fixed 'docker buildx imagetools inspect' 'published manifest must be ins
 require_fixed 'scripts/resolve-distributed-image.sh "$IMAGE_NAME" "$RELEASE_TAG"' 'release image tag lookup is not fail closed'
 require_fixed 'distributed-runner-image.txt' 'immutable image identity receipt is not published'
 require_fixed 'org.opencontainers.image.revision' 'existing images are not bound to the release commit'
-require_fixed 'visibility=public' 'published image is not made available to clean nodes'
+require_fixed '{"visibility":"public"}' 'published image is not made available to clean nodes'
 # shellcheck disable=SC2016
 require_fixed 'docker pull --platform "$platform"' 'anonymous verification does not pull both runtime images'
 
@@ -86,6 +89,32 @@ require_fixed '.sha256' 'distributed bundle checksum asset is missing'
 require_fixed 'sha256sum "$archive_name"' 'bundle checksum must be portable after release download'
 require_fixed 'gh release download' 'publication verification must download the release assets'
 require_regex 'sha256sum[[:space:]]+(-c|--check)' 'publication verification must verify the downloaded checksum'
+
+# The hosted Linux gate must exercise the exact command-substitution contract,
+# require one existing archive, and feed that captured path to the verifier.
+# shellcheck disable=SC2016
+grep -Fq 'bundle="$(scripts/build-distributed-bundle.sh)"' "$LINT_WORKFLOW" || fail 'hosted bundle build does not exercise command substitution'
+# shellcheck disable=SC2016
+grep -Fq 'test "$(printf '\''%s\n'\'' "$bundle" | wc -l)" -eq 1' "$LINT_WORKFLOW" || fail 'hosted bundle build does not enforce exactly one stdout line'
+# shellcheck disable=SC2016
+grep -Fq 'test -f "$bundle"' "$LINT_WORKFLOW" || fail 'hosted bundle build does not require the captured archive to exist'
+# shellcheck disable=SC2016
+grep -Fq 'scripts/verify-distributed-bundle.sh "$CRF_DISTRIBUTED_BUNDLE"' "$LINT_WORKFLOW" || fail 'hosted verifier does not consume the captured archive path'
+if grep -Eq 'exec[[:space:]]+3>&1|>&3([^0-9]|$)' "$BUNDLE_BUILDER"; then
+  fail 'bundle builder leaks a preserved result descriptor into child tools'
+fi
+grep -Fq 'build_bundle >&2' "$BUNDLE_BUILDER" || fail 'bundle build diagnostics are not grouped onto stderr'
+# shellcheck disable=SC2016 # Match the literal archive variable in the builder.
+grep -Fq 'printf "%s\n" "$archive"' "$BUNDLE_BUILDER" || fail 'bundle path is not emitted on stdout'
+
+# shellcheck disable=SC2016
+require_fixed 'ADMIN_TOKEN: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN }}' 'package administration does not require the dedicated token'
+require_fixed 'publish-image-visibility:' 'package administration is not isolated in a dedicated job'
+require_fixed 'permissions: {}' 'package administration job retains unnecessary GitHub token permissions'
+require_fixed 'needs: publish-image' 'package visibility can run before the image is published'
+if grep -Fq 'UNRAID_BOT_GITHUB_ADMIN_TOKEN || github.token' "$WORKFLOW"; then
+  fail 'package administration silently falls back to an insufficient token'
+fi
 
 # Registry lookup distinguishes an absent immutable tag from operational or
 # malformed failures. Only a genuine 404 is allowed to select the build path.

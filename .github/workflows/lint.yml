@@ -424,12 +424,15 @@ jobs:
 
       - name: Build distributed Linux service bundle
         if: runner.os == 'Linux'
-        run: scripts/build-distributed-bundle.sh
+        shell: bash
+        run: |
+          bundle="$(scripts/build-distributed-bundle.sh)"
+          test "$(printf '%s\n' "$bundle" | wc -l)" -eq 1
+          test -f "$bundle"
+          printf 'CRF_DISTRIBUTED_BUNDLE=%s\n' "$bundle" >> "$GITHUB_ENV"
 
       - name: Verify distributed Linux service bundle
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          bundle="$(find build/distributed -maxdepth 1 -type f -name 'ci-runner-farm-distributed-*.tar.gz' -print -quit)"
-          test -n "$bundle"
-          scripts/verify-distributed-bundle.sh "$bundle"
+          scripts/verify-distributed-bundle.sh "$CRF_DISTRIBUTED_BUNDLE"
