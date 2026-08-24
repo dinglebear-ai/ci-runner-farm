@@ -16,6 +16,8 @@ defmodule CrfController.OperatorProjection do
   defp json_value(false), do: false
   defp json_value(value) when is_atom(value), do: Atom.to_string(value)
   defp json_value(value) when is_binary(value) or is_number(value), do: value
+  defp json_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp json_value(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
   defp json_value(value) when is_list(value), do: Enum.map(value, &json_value/1)
 
   defp json_value(value) when is_map(value) do

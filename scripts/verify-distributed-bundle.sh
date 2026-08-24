@@ -7,7 +7,7 @@ if [[ -z "$archive" || ! -f "$archive" ]]; then
   exit 2
 fi
 
-for command in tar sha256sum realpath readlink; do
+for command in tar sha256sum realpath readlink readelf; do
   command -v "$command" >/dev/null 2>&1 || { echo "missing required command: $command" >&2; exit 1; }
 done
 
@@ -40,6 +40,14 @@ test -x "$bundle/bin/crf-scaleset"
 test -x "$bundle/bin/crf-peer-admin"
 test -x "$bundle/bin/crf-cert-fingerprint"
 test -x "$bundle/bin/crf-container-adapter"
+if readelf -l "$bundle/bin/crf-container-adapter" | grep -q 'INTERP'; then
+  echo "crf-container-adapter must be statically linked: ELF interpreter found" >&2
+  exit 1
+fi
+if readelf -d "$bundle/bin/crf-container-adapter" 2>/dev/null | grep -q '(NEEDED)'; then
+  echo "crf-container-adapter must be statically linked: shared library dependency found" >&2
+  exit 1
+fi
 test -x "$bundle/libexec/runner-entrypoint.sh"
 bash -n "$bundle/bin/crf-peer-admin"
 bash -n "$bundle/bin/crf-cert-fingerprint"

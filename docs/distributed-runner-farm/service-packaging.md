@@ -77,9 +77,19 @@ CI runs this build+verification smoke on Linux in the distributed-core job.
 
 ## Windows node package
 
-On native Windows, run `scripts/build-distributed-windows-node.ps1`. The archive contains `crf-node.exe`, a strict environment example, the pinned runner manifest example, and `Install-CrfNodeService.ps1`.
+On native Windows, run `scripts/build-distributed-windows-node.ps1`. The archive contains `crf-node.exe`, the strict environment and runner-manifest examples, the service installer, the `nerdctl` adapter and launcher, the pinned Windows runner Dockerfile, its entrypoint, and the build-context preparation script.
 
-The installer requires an explicit node binary and completed environment file. It copies both into protected Program Files/ProgramData locations, rejects malformed or duplicate environment keys, registers `CiRunnerFarmNode` under the low-privilege `LocalService` identity, and leaves startup set to Manual. It never starts the service. The binary's `--windows-service` mode registers directly with the Windows Service Control Manager and maps SCM Stop to the same cooperative shutdown flag used by the console daemon, preserving durable runner adoption across agent restarts.
+The installer requires an explicit node binary and completed environment file. It copies the binary, adapter, and configuration into protected Program Files/ProgramData locations, rejects malformed or duplicate environment keys, registers `CiRunnerFarmNode` as `LocalSystem`, and leaves startup set to Manual. `LocalSystem` is required to reach the native containerd/HCS boundary; workflow code remains isolated inside one fresh Hyper-V container and never executes as the service identity. The installer never starts the service. The binary's `--windows-service` mode registers directly with the Windows Service Control Manager and maps SCM Stop to the same cooperative shutdown flag used by the console daemon, preserving durable container adoption across agent restarts. Once installed and started through SCM, no PowerShell window or recurring UAC prompt is required.
+
+### Windows Hyper-V container setup
+
+1. Enable the Windows **Containers** and **Hyper-V** features, install native Windows `containerd`, `nerdctl`, and BuildKit, and verify the `LocalSystem` account can reach the containerd socket. The adapter defaults to the `buildkit` containerd namespace; set `CRF_CONTAINERD_NAMESPACE` only if the image and runtime are intentionally kept in another validated namespace.
+2. Create a clean context with `Prepare-WindowsRunnerContext.ps1 -ContextDirectory C:\crf-runner-context`. Copy `WindowsRunner.Dockerfile` and `WindowsRunnerEntrypoint.ps1` from the release ZIP into that directory.
+3. Build directly into the adapter's namespace, for example `nerdctl --namespace buildkit build --isolation hyperv -t local/crf-windows-runner:reviewed -f C:\crf-runner-context\WindowsRunner.Dockerfile C:\crf-runner-context`. The pinned `ltsc2025` base requires a Windows host with Hyper-V-container support and compatible HCS/containerd tooling.
+4. Resolve the loaded content ID with `nerdctl --namespace buildkit image inspect local/crf-windows-runner:reviewed --format '{{.Id}}'`. Set `CRF_RUNNER_IMAGE=local/crf-windows-runner@sha256:<64 lowercase hex>` in `node.env`; tags without the immutable digest are rejected. Set `CRF_NERDCTL_PATH` and keep `CRF_EXECUTION_BACKEND=container`.
+   The node's configured CPU-millis and memory-byte totals govern admission. For each placement, the adapter converts the claimed CPU millis to `nerdctl --cpus` cores and applies the claimed bytes with `--memory`, so Windows resource claims are enforced container limits rather than accounting-only hints.
+5. If unattended deployment verification uses `CRF_NODE_STATUS_PATH`, generate a unique 32-byte launch token and configure both status variables. In PowerShell 5.1+, use `$bytes = New-Object byte[] 32; $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }; [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')`. The result must be exactly 43 base64url characters. The status file contains this token, so keep it beneath protected `ProgramData` state and do not publish or collect it as a nonsecret artifact.
+6. Run `Install-CrfNodeService.ps1` once from an elevated shell, then use `Start-Service CiRunnerFarmNode`. Verify `Get-Service CiRunnerFarmNode`, the configured service error log, the optional launch-token-bound private node status projection, and `nerdctl --namespace buildkit image inspect sha256:<digest>`. Final acceptance is a real Windows-labeled GitHub job whose runner name is ephemeral, whose machine reports Windows/x64, and whose container disappears after completion or cancellation.
 
 The hosted Windows distributed-core lane compiles the real service entry point,
 builds the release ZIP, parses the installer with PowerShell's AST parser, and
@@ -87,9 +97,9 @@ behaviorally installs/reinstalls a disposable service with ACL, registry,
 failure-policy, rollback-injection, and observable error-log assertions.
 PowerShell 5.1 and PowerShell 7 are supported: service creation avoids embedded
 native-argv quote loss by setting the exact quoted SCM `ImagePath` through the
-service registry before start. Live Steamy installation runs as LocalService
-and has registered with the Dookie controller; a real GitHub job lifecycle is
-still part of final acceptance.
+service registry before start. Historical LocalService/native-process acceptance
+does not satisfy the new container boundary; current acceptance requires the
+LocalSystem service plus an actual Hyper-V-isolated job lifecycle.
 
 `/opt/ci-runner-farm/current/bin/crf-operator-status` uses the release's authenticated local RPC channel to print a redacted snapshot of nodes, resources, offers, placements, orphan state, configured pools, peer authorization counts, and sidecar health. It also exposes generation-fenced `drain`/`undrain` and `force-abandon PLACEMENT_ID --force`. The fixed command grammar rejects unsafe identifiers and never includes JIT descriptors, idempotency keys, certificate bytes, or controller credentials.
 

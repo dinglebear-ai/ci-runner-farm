@@ -119,17 +119,43 @@ defmodule CrfController.DemandWork do
     end
   end
 
+  defp reconcile_jit(%{state: "retired"} = jit, ctx, now_ms, _now_unix_ms) do
+    with {:ok, identity} <-
+           WorkIdentity.for_handle(jit.pool_id, jit.scale_set_id, jit.work_handle),
+         :ok <- ensure_retired_placement_terminal(identity.placement_id, ctx, now_ms) do
+      confirm_retirement_and_release(
+        jit.pool_id,
+        jit.scale_set_id,
+        jit.work_handle,
+        ctx,
+        jit.ownership_revision
+      )
+    end
+  end
+
   defp reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
     case Map.get(ctx.policies, jit.pool_id) do
       nil ->
-        retire_and_release(jit.pool_id, jit.work_handle, ctx)
+        retire_and_release(
+          jit.pool_id,
+          jit.scale_set_id,
+          jit.work_handle,
+          ctx,
+          Map.get(jit, :ownership_revision)
+        )
 
       %PoolPolicy{} = policy ->
         with {:ok, identity} <-
                WorkIdentity.for_handle(jit.pool_id, jit.scale_set_id, jit.work_handle) do
           case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
             {:ok, %PlacementTombstone{}} ->
-              retire_and_release(jit.pool_id, jit.work_handle, ctx)
+              retire_and_release(
+                jit.pool_id,
+                jit.scale_set_id,
+                jit.work_handle,
+                ctx,
+                Map.get(jit, :ownership_revision)
+              )
 
             {:ok, %Placement{} = placement} ->
               reconcile_existing_jit(jit, policy, identity, placement, ctx, now_ms, now_unix_ms)
@@ -144,7 +170,13 @@ defmodule CrfController.DemandWork do
                     dispatch_replay(jit, policy, identity, ctx, now_ms, now_unix_ms)
 
                   true ->
-                    retire_and_release(jit.pool_id, jit.work_handle, ctx)
+                    retire_and_release(
+                      jit.pool_id,
+                      jit.scale_set_id,
+                      jit.work_handle,
+                      ctx,
+                      Map.get(jit, :ownership_revision)
+                    )
                 end
               end
 
@@ -155,10 +187,44 @@ defmodule CrfController.DemandWork do
     end
   end
 
+  defp ensure_retired_placement_terminal(placement_id, ctx, now_ms) do
+    case PlacementLedger.get(ctx.placement_ledger, placement_id) do
+      {:ok, %PlacementTombstone{}} ->
+        :ok
+
+      {:ok, %Placement{} = placement} ->
+        if Placement.terminal?(placement) do
+          :ok
+        else
+          case PlacementLedger.fail_placement(
+                 ctx.placement_ledger,
+                 placement_id,
+                 "jit_retired",
+                 now_ms: now_ms
+               ) do
+            {:ok, _} -> :ok
+            {:error, reason} -> {:error, {:retired_placement_compensation_failed, reason}}
+          end
+        end
+
+      {:error, :unknown_placement} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:retired_placement_lookup_failed, reason}}
+    end
+  end
+
   defp reconcile_existing_jit(jit, policy, identity, placement, ctx, now_ms, now_unix_ms) do
     cond do
       Placement.terminal?(placement) ->
-        retire_and_release(jit.pool_id, jit.work_handle, ctx)
+        retire_and_release(
+          jit.pool_id,
+          jit.scale_set_id,
+          jit.work_handle,
+          ctx,
+          Map.get(jit, :ownership_revision)
+        )
 
       true ->
         case active_node(identity.placement_id, ctx.node_registry) do
@@ -317,6 +383,7 @@ defmodule CrfController.DemandWork do
           case ScaleSetClient.issue_jit(
                  ctx.scale_set_client,
                  jit.pool_id,
+                 jit.scale_set_id,
                  jit.work_handle,
                  identity.runner_name,
                  policy.work_folder
@@ -325,6 +392,7 @@ defmodule CrfController.DemandWork do
             when scale_set_id == jit.scale_set_id ->
               dispatch(
                 jit.pool_id,
+                jit.scale_set_id,
                 jit.work_handle,
                 policy,
                 identity,
@@ -356,7 +424,14 @@ defmodule CrfController.DemandWork do
              detail_code,
              now_ms: now_ms
            ),
-         :ok <- retire_and_release(jit.pool_id, jit.work_handle, ctx) do
+         :ok <-
+           retire_and_release(
+             jit.pool_id,
+             jit.scale_set_id,
+             jit.work_handle,
+             ctx,
+             Map.get(jit, :ownership_revision)
+           ) do
       :ok
     end
   end
@@ -411,6 +486,7 @@ defmodule CrfController.DemandWork do
         case ScaleSetClient.issue_jit(
                ctx.scale_set_client,
                jit.pool_id,
+               jit.scale_set_id,
                jit.work_handle,
                identity.runner_name,
                policy.work_folder
@@ -419,6 +495,7 @@ defmodule CrfController.DemandWork do
           when scale_set_id == jit.scale_set_id ->
             dispatch(
               jit.pool_id,
+              jit.scale_set_id,
               jit.work_handle,
               policy,
               identity,
@@ -477,6 +554,7 @@ defmodule CrfController.DemandWork do
         case ScaleSetClient.issue_jit(
                ctx.scale_set_client,
                pool.pool_id,
+               pool.scale_set_id,
                handle,
                identity.runner_name,
                policy.work_folder
@@ -485,6 +563,7 @@ defmodule CrfController.DemandWork do
           when scale_set_id == pool.scale_set_id ->
             dispatch(
               pool.pool_id,
+              pool.scale_set_id,
               handle,
               policy,
               identity,
@@ -553,7 +632,18 @@ defmodule CrfController.DemandWork do
     end
   end
 
-  defp dispatch(pool_id, handle, policy, identity, offer, descriptor, ctx, now_ms, now_unix_ms) do
+  defp dispatch(
+         pool_id,
+         scale_set_id,
+         handle,
+         policy,
+         identity,
+         offer,
+         descriptor,
+         ctx,
+         now_ms,
+         now_unix_ms
+       ) do
     attrs = %{
       placement_id: identity.placement_id,
       command_id: identity.command_id,
@@ -579,18 +669,28 @@ defmodule CrfController.DemandWork do
         :ok
 
       {:error, reason} ->
-        case ScaleSetClient.retire_jit(ctx.scale_set_client, pool_id, handle) do
+        case ScaleSetClient.retire_jit(ctx.scale_set_client, pool_id, scale_set_id, handle) do
           {:ok, _} ->
-            _ =
-              PlacementLedger.fail_placement(
-                ctx.placement_ledger,
-                identity.placement_id,
-                "placement_dispatch_failed",
-                now_ms: now_ms
-              )
-
-            release_offer_id(ctx.offer_ledger, offer.id)
-            {:error, {:placement_dispatch_failed, reason}}
+            with {:ok, _} <-
+                   PlacementLedger.fail_placement(
+                     ctx.placement_ledger,
+                     identity.placement_id,
+                     "placement_dispatch_failed",
+                     now_ms: now_ms
+                   ),
+                 :ok <- release_offer_id(ctx.offer_ledger, offer.id),
+                 {:ok, _} <-
+                   ScaleSetClient.confirm_jit_retirement(
+                     ctx.scale_set_client,
+                     pool_id,
+                     scale_set_id,
+                     handle
+                   ) do
+              {:error, {:placement_dispatch_failed, reason}}
+            else
+              {:error, compensation_reason} ->
+                {:error, {:placement_dispatch_compensation_failed, reason, compensation_reason}}
+            end
 
           {:error, retire_reason} ->
             {:error, {:placement_dispatch_and_retire_failed, reason, retire_reason}}
@@ -598,21 +698,59 @@ defmodule CrfController.DemandWork do
     end
   end
 
-  defp retire_and_release(pool_id, handle, ctx) do
-    case ScaleSetClient.retire_jit(ctx.scale_set_client, pool_id, handle) do
+  defp retire_and_release(pool_id, scale_set_id, handle, ctx, proof_ownership_revision) do
+    case ScaleSetClient.retire_jit(
+           ctx.scale_set_client,
+           pool_id,
+           scale_set_id,
+           handle,
+           proof_ownership_revision
+         ) do
       {:ok, _} ->
-        release_offer_handle(ctx.offer_ledger, pool_id, handle)
-        :ok
+        confirm_retirement_and_release(
+          pool_id,
+          scale_set_id,
+          handle,
+          ctx,
+          proof_ownership_revision
+        )
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
+  defp confirm_retirement_and_release(
+         pool_id,
+         scale_set_id,
+         handle,
+         ctx,
+         proof_ownership_revision
+       ) do
+    with :ok <- release_offer_handle(ctx.offer_ledger, pool_id, handle),
+         {:ok, _} <-
+           ScaleSetClient.confirm_jit_retirement(
+             ctx.scale_set_client,
+             pool_id,
+             scale_set_id,
+             handle,
+             proof_ownership_revision
+           ) do
+      :ok
+    else
+      {:error, {:offer_release_failed, _reason} = release_error} ->
+        {:error, release_error}
+
+      {:error, reason} ->
+        {:error, {:jit_retirement_confirmation_pending, reason}}
+    end
+  end
+
   defp release_offer_handle(ledger, pool_id, handle) do
     case OfferLedger.find_by_handle(ledger, pool_id, handle) do
       {:ok, offer} -> release_offer_id(ledger, offer.id)
-      _ -> :ok
+      {:error, :unknown_offer} -> :ok
+      {:error, reason} -> {:error, {:offer_release_failed, reason}}
     end
   end
 
@@ -620,7 +758,7 @@ defmodule CrfController.DemandWork do
     case OfferLedger.release(ledger, offer_id) do
       {:ok, _} -> :ok
       {:error, :unknown_offer} -> :ok
-      _ -> :ok
+      {:error, reason} -> {:error, {:offer_release_failed, reason}}
     end
   end
 

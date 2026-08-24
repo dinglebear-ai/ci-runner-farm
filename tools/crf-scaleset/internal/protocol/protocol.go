@@ -23,6 +23,7 @@ var (
 		"publish_capacity_leases": true,
 		"issue_jit":               true,
 		"retire_jit":              true,
+		"confirm_jit_retirement":  true,
 		"read_snapshot":           true,
 		"read_jit_state":          true,
 		"reconcile_owned":         true,
@@ -142,6 +143,7 @@ type JITState struct {
 	ScaleSetID          int64  `json:"scale_set_id"`
 	WorkHandle          int64  `json:"work_handle"`
 	State               string `json:"state"`
+	OwnershipRevision   string `json:"ownership_revision"`
 	DescriptorAvailable bool   `json:"descriptor_available"`
 }
 
