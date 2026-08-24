@@ -27,7 +27,7 @@ defmodule CrfController.DemandCoordinator do
     GenServer.start_link(__MODULE__, opts, genserver_opts)
   end
 
-  def status(server \\ __MODULE__), do: GenServer.call(server, :status)
+  def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
 
   def force_abandon_placement(placement_id, opts \\ []) do
     force_abandon_placement(__MODULE__, placement_id, opts)
@@ -285,10 +285,25 @@ defmodule CrfController.DemandCoordinator do
         states
         |> Enum.filter(&jit_matches_placement?(&1, placement.id))
         |> Enum.reduce([], fn jit, errors ->
-          case ScaleSetClient.retire_jit(ctx.scale_set_client, jit.pool_id, jit.work_handle) do
+          case ScaleSetClient.retire_jit(
+                 ctx.scale_set_client,
+                 jit.pool_id,
+                 jit.scale_set_id,
+                 jit.work_handle
+               ) do
             {:ok, _result} ->
               release_offer_for_handle(ctx.offer_ledger, jit.pool_id, jit.work_handle)
-              errors
+
+              case ScaleSetClient.confirm_jit_retirement(
+                     ctx.scale_set_client,
+                     jit.pool_id,
+                     jit.scale_set_id,
+                     jit.work_handle,
+                     Map.get(jit, :ownership_revision)
+                   ) do
+                {:ok, _} -> errors
+                {:error, reason} -> [reason | errors]
+              end
 
             {:error, reason} ->
               [reason | errors]

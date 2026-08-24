@@ -143,6 +143,32 @@ func (*consumeFailPoller) ConsumeHandle(int64, int64) bool { return false }
 func (*consumeFailPoller) RetireHandle(int64, int64) error { return nil }
 func (*consumeFailPoller) Close(context.Context) error     { return nil }
 
+type fencePoller struct {
+	consumeFailPoller
+	hasCalls     int
+	consumeCalls int
+}
+
+func (p *fencePoller) HasHandle(int64, int64) bool {
+	p.hasCalls++
+	return true
+}
+
+func (p *fencePoller) ConsumeHandle(int64, int64) bool {
+	p.consumeCalls++
+	return true
+}
+
+type retireFailPoller struct {
+	fencePoller
+	retireCalls int
+}
+
+func (p *retireFailPoller) RetireHandle(int64, int64) error {
+	p.retireCalls++
+	return errors.New("retirement unavailable")
+}
+
 func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T) {
 	root := t.TempDir()
 	cfg := RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",
@@ -194,7 +220,7 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 		t.Fatalf("acquired handle never reached snapshot: %#v", snapshot)
 	}
 
-	jitPayload := `{"pool_id":"python","work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`
+	jitPayload := issueJITPayload(t, cfg, "python", snapshot.Pools[0].ScaleSetID, 501)
 	first := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, jitPayload))
 	sequence++
 	if !first.OK {
@@ -217,18 +243,107 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	if fmt.Sprint(first.Result) != fmt.Sprint(second.Result) {
 		t.Fatalf("replayed JIT descriptor changed: first=%#v second=%#v", first.Result, second.Result)
 	}
-	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
-		`{"pool_id":"python","work_handle":501}`)); !response.OK {
+	wrongIssueFence := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`,
+		snapshot.Pools[0].ScaleSetID, strings.Repeat("f", 64))
+	if response := restarted.Handle(context.Background(), request(cfg, "issue_jit", 2,
+		wrongIssueFence)); response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("JIT replay ignored persisted ownership fence: %#v", response)
+	}
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
+	currentCfg := cfg
+	currentCfg.OwnershipRevision = strings.Repeat("c", 64)
+	control.cfg.OwnershipRevision = currentCfg.OwnershipRevision
+	wrongScale := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID+1, cfg.OwnershipRevision)
+	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
+		wrongScale)); response.OK || response.Code != "scale_set_mismatch" {
+		t.Fatalf("JIT retirement ignored scale-set fence: %#v", response)
+	}
+	sequence++
+	wrongOwnership := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, strings.Repeat("f", 64))
+	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
+		wrongOwnership)); response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("JIT retirement ignored ownership fence: %#v", response)
+	}
+	sequence++
+	if _, err := os.Stat(descriptorPath); err != nil {
+		t.Fatalf("fenced retirement mutated descriptor: %v", err)
+	}
+	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
+		retirePayload)); !response.OK {
 		t.Fatalf("JIT retirement failed: %#v", response)
 	}
 	sequence++
+	if response := control.Handle(context.Background(), request(currentCfg, "read_jit_state", sequence,
+		`{}`)); !response.OK || !strings.Contains(fmt.Sprint(response.Result), "retired") {
+		t.Fatalf("pending retirement was not discoverable for recovery: %#v", response)
+	}
+	sequence++
+	if response := control.Handle(context.Background(), request(currentCfg, "retire_jit", sequence,
+		retirePayload)); !response.OK || fmt.Sprint(response.Result) != "map[retired:true]" {
+		t.Fatalf("JIT retirement replay was not idempotent: %#v", response)
+	}
+	sequence++
 	issued, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
-	if err != nil || strings.TrimSpace(string(issued)) != "{}" {
+	if err != nil || !strings.Contains(string(issued), `"records":{}`) {
 		t.Fatalf("terminal issued handle was not compacted: %q err=%v", issued, err)
 	}
 	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retired JIT descriptor cache remained: err=%v", err)
 	}
+	restartedRetire, err := New(currentCfg, api)
+	if err != nil {
+		t.Fatalf("historical retirement restart failed: %v", err)
+	}
+	if response := restartedRetire.Handle(context.Background(), request(currentCfg, "retire_jit", 1,
+		retirePayload)); !response.OK {
+		t.Fatalf("historical retirement proof did not survive restart: %#v", response)
+	}
+	wrongConfirmation := fmt.Sprintf(`{"pool_id":"wrong","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
+	if response := restartedRetire.Handle(context.Background(), request(currentCfg, "confirm_jit_retirement", 2,
+		wrongConfirmation)); response.OK || response.Code != "retirement_fence_mismatch" {
+		t.Fatalf("wrong retirement confirmation was not fenced: %#v", response)
+	}
+	if len(restartedRetire.retired) != 1 {
+		t.Fatalf("wrong retirement confirmation mutated proof: retired=%#v", restartedRetire.retired)
+	}
+	if response := restartedRetire.Handle(context.Background(), request(currentCfg, "confirm_jit_retirement", 3,
+		retirePayload)); !response.OK || fmt.Sprint(response.Result) != "map[confirmed:true]" {
+		t.Fatalf("retirement confirmation failed: %#v", response)
+	}
+	if len(restartedRetire.retired) != 0 {
+		t.Fatalf("retirement confirmation did not compact proof: retired=%#v", restartedRetire.retired)
+	}
+	// A lost success response is harmless: absent proof means confirmation was
+	// already durably applied, without retaining a second unbounded ledger.
+	for confirmSequence := uint64(4); confirmSequence < 104; confirmSequence++ {
+		if response := restartedRetire.Handle(context.Background(), request(currentCfg,
+			"confirm_jit_retirement", confirmSequence, retirePayload)); !response.OK {
+			t.Fatalf("lost-response confirmation replay failed: %#v", response)
+		}
+	}
+	retiredState, err := os.ReadFile(restartedRetire.retiredPath())
+	if err != nil || !strings.Contains(string(retiredState), `"records":{}`) {
+		t.Fatalf("confirmation cycles retained retired proofs: %q err=%v", retiredState, err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "confirmed-retirements.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmation created a secondary ledger: %v", err)
+	}
+	confirmedRestart, err := New(currentCfg, api)
+	if err != nil {
+		t.Fatalf("confirmed retirement restart failed: %v", err)
+	}
+	if response := confirmedRestart.Handle(context.Background(), request(currentCfg, "confirm_jit_retirement", 1,
+		retirePayload)); !response.OK || len(confirmedRestart.retired) != 0 || len(confirmedRestart.issued) != 0 {
+		t.Fatalf("confirmed retirement replay retained state: %#v retired=%#v",
+			response, confirmedRestart.retired)
+	}
+	confirmedRestart.Close()
+	restartedRetire.Close()
+	control.cfg.OwnershipRevision = cfg.OwnershipRevision
 
 	if response := control.Handle(context.Background(), request(cfg, "reconcile_owned", sequence,
 		`{"eligible":true}`)); !response.OK {
@@ -239,6 +354,64 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 		if !slices.Contains(set.Labels, "ci-pool-python") {
 			t.Fatalf("activation labels missing: %#v", set.Labels)
 		}
+	}
+	legacyKey := fmt.Sprintf("%d:%d", snapshot.Pools[0].ScaleSetID, 999)
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "issued-handles.json"),
+		[]byte(fmt.Sprintf("{%q:%q}\n", legacyKey, "issued")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := New(cfg, api)
+	if err != nil {
+		t.Fatalf("legacy issued migration failed: %v", err)
+	}
+	if record := migrated.issued[legacyKey]; record.PoolID != "python" ||
+		record.OwnershipRevision != "" || !record.LegacyUnbound || record.WorkHandle != 999 {
+		t.Fatalf("legacy issued binding changed: %#v", record)
+	}
+	migrated.poller = &consumeFailPoller{}
+	if response := migrated.Handle(context.Background(), request(cfg, "read_jit_state", 1,
+		`{}`)); !response.OK || !strings.Contains(fmt.Sprint(response.Result), cfg.OwnershipRevision) {
+		t.Fatalf("legacy issued state did not project a recoverable ownership fence: %#v", response)
+	}
+	historicalRevision := cfg.OwnershipRevision
+	wrongOuter := cfg
+	wrongOuter.ControllerInstanceID = "wrong-controller"
+	legacyExact := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":999}`,
+		snapshot.Pools[0].ScaleSetID, historicalRevision)
+	if response := migrated.Handle(context.Background(), request(wrongOuter, "retire_jit", 2,
+		legacyExact)); response.OK || response.Code != "identity_mismatch" {
+		t.Fatalf("wrong outer identity was not fenced: %#v", response)
+	}
+	if record := migrated.issued[legacyKey]; !record.LegacyUnbound || record.OwnershipRevision != "" {
+		t.Fatalf("wrong outer identity mutated legacy binding: %#v", record)
+	}
+	legacyWrong := fmt.Sprintf(`{"pool_id":"wrong","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":999}`,
+		snapshot.Pools[0].ScaleSetID, historicalRevision)
+	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 2,
+		legacyWrong)); response.OK {
+		t.Fatalf("wrong legacy retirement tuple was not fenced: %#v", response)
+	}
+	if record := migrated.issued[legacyKey]; !record.LegacyUnbound || record.OwnershipRevision != "" {
+		t.Fatalf("wrong legacy tuple mutated binding: %#v", record)
+	}
+	if response := migrated.Handle(context.Background(), request(cfg, "retire_jit", 3,
+		legacyExact)); !response.OK {
+		t.Fatalf("exact legacy retirement did not bind and retire: %#v", response)
+	}
+	if proof := migrated.retired[legacyKey]; proof.LegacyUnbound ||
+		proof.OwnershipRevision != historicalRevision {
+		t.Fatalf("legacy retirement proof was not durably bound: %#v", proof)
+	}
+	if response := migrated.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 4,
+		legacyExact)); !response.OK || len(migrated.retired) != 0 {
+		t.Fatalf("legacy retirement confirmation did not compact proof: %#v", response)
+	}
+	migrated.Close()
+	if err := os.Remove(filepath.Join(cfg.StateDir, "issued-handles.json")); err != nil {
+		t.Fatal(err)
 	}
 	if response := control.Handle(context.Background(), request(cfg, "delete_owned", sequence, `{}`)); !response.OK {
 		t.Fatalf("delete failed: %#v", response)
@@ -283,7 +456,7 @@ func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
 		t.Fatalf("acquired handle never reached snapshot: %#v", snapshot)
 	}
 
-	payload := "{\"pool_id\":\"python\",\"work_handle\":501,\"runner_name\":\"runner-501\",\"work_folder\":\"_work\"}"
+	payload := issueJITPayload(t, cfg, "python", snapshot.Pools[0].ScaleSetID, 501)
 	first := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, payload))
 	sequence++
 	if first.OK || first.Code != "jit_issue_ambiguous" || api.jitCalls != 1 {
@@ -296,15 +469,97 @@ func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
 	}
 
 	key := fmt.Sprintf("%d:%d", snapshot.Pools[0].ScaleSetID, 501)
-	if control.issued[key] != "issue_started" {
+	if control.issued[key].State != "issue_started" {
 		t.Fatalf("ambiguous JIT tombstone missing: %#v", control.issued)
 	}
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		snapshot.Pools[0].ScaleSetID, cfg.OwnershipRevision)
 	if response := control.Handle(context.Background(), request(cfg, "retire_jit", sequence,
-		"{\"pool_id\":\"python\",\"work_handle\":501}")); !response.OK {
+		retirePayload)); !response.OK {
 		t.Fatalf("ambiguous JIT retirement failed: %#v", response)
 	}
 	if len(control.issued) != 0 {
 		t.Fatalf("ambiguous JIT tombstone survived retirement: %#v", control.issued)
+	}
+}
+
+func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{}`)); !response.OK {
+		t.Fatalf("apply sessions failed: %#v", response)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := control.stopSessions(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
+	scaleSetID := owned.Records[0].ScaleSetID
+	failing := &retireFailPoller{}
+	control.poller = failing
+	issuePayload := issueJITPayload(t, cfg, "python", scaleSetID, 501)
+	if response := control.Handle(context.Background(), request(cfg, "issue_jit", 2, issuePayload)); !response.OK {
+		t.Fatalf("JIT issue failed: %#v", response)
+	}
+	descriptorPath := control.descriptorPath(scaleSetID, 501)
+	retirePayload := fmt.Sprintf(`{"pool_id":"python","expected_scale_set_id":%d,"expected_ownership_revision":%q,"work_handle":501}`,
+		scaleSetID, cfg.OwnershipRevision)
+	response := control.Handle(context.Background(), request(cfg, "retire_jit", 3, retirePayload))
+	if response.OK || response.Code != "jit_retirement_failed" || failing.retireCalls != 1 {
+		t.Fatalf("retirement failure was not reported after durable proof: response=%#v calls=%d",
+			response, failing.retireCalls)
+	}
+	key := fmt.Sprintf("%d:%d", scaleSetID, 501)
+	if _, ok := control.retired[key]; !ok {
+		t.Fatalf("retirement failure lost conservative proof: %#v", control.retired)
+	}
+	if _, ok := control.issued[key]; !ok {
+		t.Fatalf("retirement failure prematurely removed issued record: %#v", control.issued)
+	}
+	if _, err := os.Stat(descriptorPath); err != nil {
+		t.Fatalf("retirement failure prematurely removed descriptor: %v", err)
+	}
+	control.Close()
+
+	restarted, err := New(cfg, api)
+	if err != nil {
+		t.Fatalf("restart with pending retirement failed: %v", err)
+	}
+	defer restarted.Close()
+	restarted.poller = &consumeFailPoller{}
+	if _, ok := restarted.retired[key]; !ok {
+		t.Fatalf("restart lost durable retirement proof: %#v", restarted.retired)
+	}
+	if _, ok := restarted.issued[key]; !ok {
+		t.Fatalf("restart lost conservative issued record: %#v", restarted.issued)
+	}
+	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 1, retirePayload)); !response.OK {
+		t.Fatalf("retirement retry after restart failed: %#v", response)
+	}
+	if _, ok := restarted.retired[key]; !ok {
+		t.Fatalf("successful retry removed proof before confirmation: %#v", restarted.retired)
+	}
+	if _, ok := restarted.issued[key]; ok {
+		t.Fatalf("successful retry retained issued record: %#v", restarted.issued)
+	}
+	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful retry retained descriptor: %v", err)
+	}
+	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 2,
+		retirePayload)); !response.OK || len(restarted.retired) != 0 {
+		t.Fatalf("confirmation did not compact recovered proof: response=%#v retired=%#v",
+			response, restarted.retired)
 	}
 }
 
@@ -456,8 +711,12 @@ func TestIssueJITRollsBackDurableReservationWhenConsumeLosesRace(t *testing.T) {
 	}
 	cancel()
 	control.poller = &consumeFailPoller{}
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
 	response := control.Handle(context.Background(), request(cfg, "issue_jit", 2,
-		`{"pool_id":"python","work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`))
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID, 501)))
 	if response.OK || response.Code != "work_handle_not_available_after_reservation" {
 		t.Fatalf("consume race was not reported: %#v", response)
 	}
@@ -465,9 +724,73 @@ func TestIssueJITRollsBackDurableReservationWhenConsumeLosesRace(t *testing.T) {
 		t.Fatalf("failed reservation leaked state or issued JIT: issued=%#v calls=%d", control.issued, api.jitCalls)
 	}
 	data, err := os.ReadFile(filepath.Join(cfg.StateDir, "issued-handles.json"))
-	if err != nil || strings.TrimSpace(string(data)) != "{}" {
+	if err != nil || !strings.Contains(string(data), `"records":{}`) {
 		t.Fatalf("failed reservation tombstone remained durable: %q err=%v", data, err)
 	}
+}
+
+func TestIssueJITRejectsScaleSetRemapBeforeHandleOrGitHub(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if got := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{}`)); !got.OK {
+		t.Fatalf("apply sessions failed: %#v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := control.stopSessions(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	poller := &fencePoller{}
+	control.poller = poller
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
+
+	response := control.Handle(context.Background(), request(cfg, "issue_jit", 2,
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID+1, 501)))
+	if response.OK || response.Code != "scale_set_mismatch" {
+		t.Fatalf("scale-set remap was not fenced: %#v", response)
+	}
+	if poller.hasCalls != 0 || poller.consumeCalls != 0 || api.jitCalls != 0 || len(control.issued) != 0 {
+		t.Fatalf("fenced request reached mutable boundary: poller=%#v calls=%d issued=%#v",
+			poller, api.jitCalls, control.issued)
+	}
+
+	identityDrift := strings.Replace(
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID, 501),
+		cfg.OwnershipRevision, strings.Repeat("c", 64), 1)
+	response = control.Handle(context.Background(), request(cfg, "issue_jit", 3, identityDrift))
+	if response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("ownership drift was not fenced: %#v", response)
+	}
+	if poller.hasCalls != 0 || poller.consumeCalls != 0 || api.jitCalls != 0 || len(control.issued) != 0 {
+		t.Fatalf("ownership-fenced request reached mutable boundary: poller=%#v calls=%d issued=%#v",
+			poller, api.jitCalls, control.issued)
+	}
+}
+
+func issueJITPayload(t *testing.T, cfg RuntimeConfig, poolID string, scaleSetID, workHandle int64) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"pool_id":                     poolID,
+		"expected_scale_set_id":       scaleSetID,
+		"expected_ownership_revision": cfg.OwnershipRevision,
+		"work_handle":                 workHandle,
+		"runner_name":                 "runner-501",
+		"work_folder":                 "_work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
 }
 
 func TestLoadRuntimeConfigRejectsSymlink(t *testing.T) {
@@ -494,5 +817,30 @@ func TestLoadRuntimeConfigRejectsSymlink(t *testing.T) {
 	}
 	if _, err := LoadRuntimeConfig(link); err == nil {
 		t.Fatal("symlinked runtime config was accepted")
+	}
+}
+
+func TestWriteRecordStateRejectsOversizedEncodingBeforeWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issued-handles.json")
+	records := make(map[string]issuedRecord, 50_000)
+	poolID := "p" + strings.Repeat("x", 126)
+	revision := strings.Repeat("a", 64)
+	for handle := int64(1); handle <= 50_000; handle++ {
+		scaleSetID := handle + 100_000
+		key := fmt.Sprintf("%d:%d", scaleSetID, handle)
+		records[key] = issuedRecord{
+			State:             "issued",
+			PoolID:            poolID,
+			ScaleSetID:        scaleSetID,
+			OwnershipRevision: revision,
+			WorkHandle:        handle,
+		}
+	}
+
+	if err := writeRecordState(path, records); err == nil || err.Error() != "jit_state_encoded_size_exceeded" {
+		t.Fatalf("oversized encoded state was not rejected: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized state reached durable path: %v", err)
 	}
 }

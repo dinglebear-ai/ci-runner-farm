@@ -153,6 +153,11 @@ jobs:
         shell: pwsh
         run: scripts/build-distributed-windows-node.ps1
 
+      - name: Windows Hyper-V container adapter contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/windows-container-adapter.ps1
+
       - name: Validate Windows package and service behavior
         if: runner.os == 'Windows'
         shell: pwsh
@@ -183,7 +188,7 @@ jobs:
           $expanded = Join-Path $env:RUNNER_TEMP 'crf-windows-archive'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $expanded
           $names = Get-ChildItem -LiteralPath $expanded -Recurse -File | ForEach-Object Name
-          foreach ($required in @('crf-node.exe', 'Install-CrfNodeService.ps1', 'node-env.example', 'runner-manifest.example.json')) {
+          foreach ($required in @('crf-node.exe', 'crf-container-adapter.cmd', 'WindowsContainerAdapter.ps1', 'WindowsRunnerEntrypoint.ps1', 'WindowsRunner.Dockerfile', 'Prepare-WindowsRunnerContext.ps1', 'Install-CrfNodeService.ps1', 'node-env.example', 'runner-manifest.example.json')) {
             if ($required -notin $names) { throw "Archive is missing $required" }
           }
           $binary = (Get-ChildItem -LiteralPath $expanded -Recurse -Filter crf-node.exe -File).FullName
@@ -209,15 +214,40 @@ jobs:
           } catch {
             if ($_.Exception.Message -eq 'Installer accepted a duplicate CRF key') { throw }
           }
+          foreach ($missingPairKey in @('CRF_NODE_STATUS_PATH', 'CRF_NODE_LAUNCH_TOKEN')) {
+            $oneSided = Join-Path $env:RUNNER_TEMP "node-one-sided-$missingPairKey.env"
+            $oneSidedContent = ($example -split "`r?`n" | Where-Object { $_ -notmatch "^$missingPairKey=" }) -join "`n"
+            Set-Content -LiteralPath $oneSided -Value $oneSidedContent
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $oneSided -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw "Installer accepted one-sided node status configuration without $missingPairKey"
+            } catch {
+              if ($_.Exception.Message -like 'Installer accepted one-sided*') { throw }
+              if ($_.Exception.Message -notmatch 'must be configured together') { throw }
+            }
+          }
+
+          foreach ($invalidToken in @('too-short', ('a' * 42), ('a' * 44), ('a' * 42 + '!'))) {
+            $invalidLaunch = Join-Path $env:RUNNER_TEMP "node-invalid-launch-$($invalidToken.Length).env"
+            $invalidContent = $example.Replace('REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345', $invalidToken)
+            Set-Content -LiteralPath $invalidLaunch -Value $invalidContent
+            try {
+              & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $invalidLaunch -InstallRoot $installRoot -ConfigRoot $configRoot
+              throw 'Installer accepted an invalid node launch token'
+            } catch {
+              if ($_.Exception.Message -eq 'Installer accepted an invalid node launch token') { throw }
+              if ($_.Exception.Message -notmatch '43-character base64url token') { throw }
+            }
+          }
 
           $environmentFile = Join-Path $env:RUNNER_TEMP 'node-valid.env'
-          $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot)
+          $configured = $example.Replace('C:\ProgramData\CiRunnerFarm', $configRoot).Replace('REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345', ('v' * 43))
           Set-Content -LiteralPath $environmentFile -Value $configured
           & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
 
           $qc = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)
           if ($qc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START') { throw "Service is not Manual: $qc" }
-          if ($qc -notmatch 'SERVICE_START_NAME\s+: NT AUTHORITY\\LocalService') { throw "Service identity is not LocalService: $qc" }
+          if ($qc -notmatch 'SERVICE_START_NAME\s+: LocalSystem') { throw "Service identity is not LocalSystem: $qc" }
           if ((Get-Service -Name $serviceName).Status -ne 'Stopped') { throw 'Installer unexpectedly started the service' }
           $failure = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qfailure', $serviceName)
           if ($failure -notmatch 'RESTART -- Delay = 5000 milliseconds' -or $failure -notmatch 'RESTART -- Delay = 60000 milliseconds') {
@@ -228,7 +258,7 @@ jobs:
 
           $acl = Get-Acl -LiteralPath $configRoot
           if (-not $acl.AreAccessRulesProtected) { throw 'Configuration ACL still inherits permissions' }
-          $allowed = @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators', 'NT AUTHORITY\LOCAL SERVICE')
+          $allowed = @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')
           $unexpected = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }
           if ($unexpected) { throw "Configuration ACL grants unexpected identities: $($unexpected.IdentityReference.Value -join ', ')" }
           foreach ($identity in $allowed) {
@@ -251,8 +281,12 @@ jobs:
           # mutation boundary and require a byte/config/ACL/registry-exact rollback.
           $installedBinary = Join-Path $installRoot 'crf-node.exe'
           $installedEnvironment = Join-Path $configRoot 'node.env'
+          $installedAdapterLauncher = Join-Path $installRoot 'crf-container-adapter.cmd'
+          $installedAdapterScript = Join-Path $installRoot 'WindowsContainerAdapter.ps1'
           Set-Content -LiteralPath $installedBinary -Value 'pre-upgrade-binary'
           Add-Content -LiteralPath $installedEnvironment -Value '# pre-upgrade-environment'
+          Set-Content -LiteralPath $installedAdapterLauncher -Value 'pre-upgrade-launcher'
+          Set-Content -LiteralPath $installedAdapterScript -Value 'pre-upgrade-adapter'
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('config', $serviceName, 'binPath=', 'C:\Windows\System32\cmd.exe /c exit 0', 'start=', 'disabled', 'obj=', 'LocalSystem') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('description', $serviceName, 'Pre-upgrade rollback sentinel') | Out-Null
           Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('failure', $serviceName, 'reset=', '123', 'actions=', 'restart/3210') | Out-Null
@@ -265,6 +299,8 @@ jobs:
             @(
               (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash,
               (Get-FileHash -Algorithm SHA256 -LiteralPath $installedEnvironment).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAdapterLauncher).Hash,
+              (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAdapterScript).Hash,
               (Get-Acl -LiteralPath $configRoot).Sddl,
               (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)),
               (Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qdescription', $serviceName)),
@@ -293,12 +329,21 @@ jobs:
           # A successful reinstall must replace the restored sentinel state with the safe contract.
           & packaging/distributed/windows/Install-CrfNodeService.ps1 -NodeBinary $binary -EnvironmentFile $environmentFile -InstallRoot $installRoot -ConfigRoot $configRoot
           $reinstalledQc = Invoke-CheckedText "$env:SystemRoot\System32\sc.exe" @('qc', $serviceName)
-          if ($reinstalledQc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START' -or $reinstalledQc -notmatch 'SERVICE_START_NAME\s+: NT AUTHORITY\\LocalService') {
+          if ($reinstalledQc -notmatch 'START_TYPE\s+: 3\s+DEMAND_START' -or $reinstalledQc -notmatch 'SERVICE_START_NAME\s+: LocalSystem') {
             throw "Reinstall did not restore the safe service contract: $reinstalledQc"
           }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash) {
             throw 'Reinstall did not replace the node binary'
           }
+
+      - name: Upload distributed Windows node package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-runner-farm-node-windows-x86_64
+          path: build/distributed/ci-runner-farm-node-*-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Remove disposable Windows service
         if: always() && runner.os == 'Windows'

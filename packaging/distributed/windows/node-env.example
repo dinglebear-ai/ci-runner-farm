@@ -9,8 +9,15 @@ CRF_NODE_CPU_MILLIS=8000
 CRF_NODE_MEMORY_BYTES=17179869184
 CRF_STATE_DIR=C:\ProgramData\CiRunnerFarm\state
 CRF_SERVICE_ERROR_LOG=C:\ProgramData\CiRunnerFarm\logs\service-errors.log
-# Native execution is rejected because workflow code would share the node
-# service identity. Install a compatible isolated adapter before starting.
+# Optional readiness projection for unattended deployment verification. Configure
+# both values together and replace the launch token for each service rollout.
+CRF_NODE_STATUS_PATH=C:\ProgramData\CiRunnerFarm\state\node-status.json
+CRF_NODE_LAUNCH_TOKEN=REPLACE_ME_WITH_43_URLSAFE_CHARACTERS_12345
+# Windows jobs run in one fresh Hyper-V-isolated Windows container per placement.
 CRF_EXECUTION_BACKEND=container
-CRF_CONTAINER_ADAPTER_PROGRAM=C:\ProgramData\CiRunnerFarm\container-adapter.exe
+CRF_CONTAINER_ADAPTER_PROGRAM=sibling
 CRF_CONTAINER_ADAPTER_TIMEOUT_MS=15000
+CRF_CONTAINER_STATE_DIR=C:\ProgramData\CiRunnerFarm\container-adapter
+CRF_NERDCTL_PATH=C:\Program Files\nerdctl\nerdctl.exe
+# Pin a prepared Windows runner image by digest; tags are rejected.
+CRF_RUNNER_IMAGE=example.invalid/windows-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

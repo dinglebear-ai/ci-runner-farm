@@ -57,6 +57,7 @@ defmodule CrfController.ScaleSetWireTest do
                 scale_set_id: 74,
                 work_handle: 101,
                 state: "issued",
+                ownership_revision: @revision,
                 descriptor_available: true
               }
             ]} =
@@ -67,6 +68,7 @@ defmodule CrfController.ScaleSetWireTest do
                    "scale_set_id" => 74,
                    "work_handle" => 101,
                    "state" => "issued",
+                   "ownership_revision" => @revision,
                    "descriptor_available" => true
                  }
                ]
@@ -80,6 +82,7 @@ defmodule CrfController.ScaleSetWireTest do
                    "scale_set_id" => 74,
                    "work_handle" => 101,
                    "state" => "issued",
+                   "ownership_revision" => @revision,
                    "descriptor_available" => true,
                    "descriptor" => "must-never-be-exposed"
                  }

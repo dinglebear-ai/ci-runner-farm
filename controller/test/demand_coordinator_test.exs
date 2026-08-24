@@ -48,6 +48,9 @@ defmodule CrfController.DemandCoordinatorTest do
          apply_calls: 0,
          issue_calls: 0,
          retire_calls: 0,
+         confirm_calls: 0,
+         last_retire_payload: nil,
+         last_confirm_payload: nil,
          last_leases: %{},
          fail_next_snapshot: false
        }}
@@ -86,6 +89,9 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:set_jit_states, states}, _from, state) do
+      states =
+        Enum.map(states, &Map.put_new(&1, :ownership_revision, state.snapshot.ownership_revision))
+
       {:reply, :ok, %{state | jit_states: states}}
     end
 
@@ -124,6 +130,7 @@ defmodule CrfController.DemandCoordinatorTest do
         scale_set_id: pool.scale_set_id,
         work_handle: handle,
         state: "issued",
+        ownership_revision: state.snapshot.ownership_revision,
         descriptor_available: true
       }
 
@@ -143,7 +150,28 @@ defmodule CrfController.DemandCoordinatorTest do
         Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
 
       {:reply, {:ok, %{"retired" => true}},
-       %{state | retire_calls: state.retire_calls + 1, jit_states: jit_states}}
+       %{
+         state
+         | retire_calls: state.retire_calls + 1,
+           last_retire_payload: payload,
+           jit_states: jit_states
+       }}
+    end
+
+    def handle_call({:call, "confirm_jit_retirement", payload}, _from, state) do
+      pool_id = payload["pool_id"]
+      handle = payload["work_handle"]
+
+      jit_states =
+        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
+
+      {:reply, {:ok, %{"confirmed" => true}},
+       %{
+         state
+         | confirm_calls: state.confirm_calls + 1,
+           last_confirm_payload: payload,
+           jit_states: jit_states
+       }}
     end
 
     defp snapshot(handles) do
@@ -770,6 +798,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "ambiguous JIT tombstone is retired before new capacity is offered", ctx do
     unless ctx.disabled do
+      historical_revision = String.duplicate("c", 64)
       :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
 
       :ok =
@@ -779,6 +808,7 @@ defmodule CrfController.DemandCoordinatorTest do
             scale_set_id: 74,
             work_handle: 601,
             state: "issue_started",
+            ownership_revision: historical_revision,
             descriptor_available: false
           }
         ])
@@ -787,7 +817,43 @@ defmodule CrfController.DemandCoordinatorTest do
       assert result.leases == %{"build" => 2}
       sidecar = FakeScaleSet.state(ctx.scale_set)
       assert sidecar.retire_calls == 1
+      assert sidecar.last_retire_payload["expected_ownership_revision"] == historical_revision
       assert sidecar.jit_states == []
+    end
+  end
+
+  test "durable retired proof is confirmed directly with its historical ownership fence", ctx do
+    unless ctx.disabled do
+      historical_revision = String.duplicate("c", 64)
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 602)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 90
+               )
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 602,
+            state: "retired",
+            ownership_revision: historical_revision,
+            descriptor_available: false
+          }
+        ])
+
+      assert {:ok, _result} = reconcile(ctx.demand, 100)
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.retire_calls == 0
+      assert sidecar.confirm_calls == 1
+      assert sidecar.last_confirm_payload["expected_ownership_revision"] == historical_revision
+      assert sidecar.jit_states == []
+      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert placement.state == :failed
+      assert placement.detail_code == "jit_retired"
     end
   end
 
