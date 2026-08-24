@@ -52,17 +52,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          commit="$(git rev-parse HEAD)"
-          tagged_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          [[ "$commit" == "$tagged_commit" ]] || {
-            echo "::error::checkout does not match $RELEASE_TAG"
-            exit 1
-          }
-          version="$(tr -d '[:space:]' < VERSION)"
-          [[ "v$version" == "$RELEASE_TAG" ]] || {
-            echo "::error::VERSION $version does not match $RELEASE_TAG"
-            exit 1
-          }
+          commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "$commit"
+          version="${RELEASE_TAG#v}"
           release="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName)"
           jq -e --arg tag "$RELEASE_TAG" '.tagName == $tag and .isDraft == false and .isPrerelease == false' <<<"$release" >/dev/null
           printf 'commit=%s\nversion=%s\n' "$commit" "$version" >> "$GITHUB_OUTPUT"
@@ -96,16 +88,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Revalidate release tag before image publication
+        run: scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
+
       - id: existing
         name: Resolve an existing immutable commit image
         shell: bash
         env:
           COMMIT: ${{ needs.validate-release.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_NAME:sha-$COMMIT" 2>/dev/null | sed -n 's/^Digest:[[:space:]]*//p' || true)"
-          if [[ -n "$digest" ]]; then
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          digest="$(scripts/resolve-distributed-image.sh "$IMAGE_NAME" "sha-$COMMIT" "$GITHUB_ACTOR" "$GH_TOKEN")"
+          if [[ "$digest" != absent ]]; then
             printf 'digest=%s\nexists=true\n' "$digest" >> "$GITHUB_OUTPUT"
           else
             printf 'digest=\nexists=false\n' >> "$GITHUB_OUTPUT"
@@ -136,6 +131,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
         run: |
           set -euo pipefail
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "::error::build did not return an immutable manifest digest"
             exit 1
@@ -150,6 +146,14 @@ jobs:
               "$IMAGE_NAME@$IMAGE_DIGEST" |
               jq -e --arg arch "$contract_arch" \
                 '.compatible == true and .arch == $arch and (.capabilities | index("otp-28-compatible")) != null' >/dev/null
+            labels="$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE_NAME@$IMAGE_DIGEST")"
+            jq -e \
+              --arg source "https://github.com/${{ github.repository }}" \
+              --arg revision "${{ needs.validate-release.outputs.commit }}" \
+              --arg version "$RELEASE_TAG" \
+              '."org.opencontainers.image.source" == $source and ."org.opencontainers.image.revision" == $revision and ."org.opencontainers.image.version" == $version' \
+              <<<"$labels" >/dev/null
+            docker image rm "$IMAGE_NAME@$IMAGE_DIGEST" >/dev/null 2>&1 || true
           done
           existing_version="$(docker buildx imagetools inspect "$IMAGE_NAME:$RELEASE_TAG" 2>/dev/null | sed -n 's/^Digest:[[:space:]]*//p' || true)"
           if [[ -n "$existing_version" && "$existing_version" != "$IMAGE_DIGEST" ]]; then
@@ -173,6 +177,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
           asset=distributed-runner-image.txt
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
             tmp="$(mktemp -d)"
@@ -182,6 +187,17 @@ jobs:
           else
             gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
           fi
+
+      - name: Make the first-party runner image anonymously pullable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
+          gh api --method PATCH "/orgs/${{ github.repository_owner }}/packages/container/ci-runner-farm-distributed" -f visibility=public >/dev/null
+          docker logout ghcr.io >/dev/null
+          docker buildx imagetools inspect "$IMAGE_NAME@${{ steps.image.outputs.digest }}" >/dev/null
 
       - name: Upload image identity evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -251,6 +267,7 @@ jobs:
           CHECKSUM: ${{ steps.bundle.outputs.checksum }}
         run: |
           set -euo pipefail
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
           archive_name="$(basename "$ARCHIVE")"
           checksum_name="$(basename "$CHECKSUM")"
           assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
@@ -282,17 +299,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
     steps:
+      - name: Checkout validated release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.validate-release.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
-
-      - name: Authenticate to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
 
       - name: Verify image digest and release bundle
         shell: bash
@@ -302,6 +318,7 @@ jobs:
           VERSION: ${{ needs.validate-release.outputs.version }}
         run: |
           set -euo pipefail
+          scripts/verify-distributed-release-source.sh "$RELEASE_TAG" "${{ needs.validate-release.outputs.commit }}"
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST" >/dev/null
           asset="ci-runner-farm-distributed-${VERSION}-linux-ubuntu-24.04-x86_64.tar.gz"
           tmp="$(mktemp -d)"
