@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ImageVersion=24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates curl git gosu inotify-tools jq libicu74 libssl3 xz-utils \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates curl git gosu inotify-tools jq libicu74 libssl3 php-cli xz-utils \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1001 --shell /bin/bash runner \
  && install -d -o runner -g runner /actions-runner /_work

@@ -26,5 +26,10 @@ case "$(uname -m)" in
   *) exit 5 ;;
 esac
 
-printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","capabilities":["github-actions","container","otp-28-compatible"]}\n' \
-  "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch"
+php_version="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);' 2>/dev/null)"
+[[ "$php_version" =~ ^[0-9]+\.[0-9]+$ ]] || exit 6
+php_major="${php_version%%.*}"
+(( php_major >= 8 )) || exit 6
+
+printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli"]}\n' \
+  "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch" "$php_version"
