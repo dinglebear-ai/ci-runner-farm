@@ -86,6 +86,15 @@ type JITRequest struct {
 	WorkFolder string
 }
 
+// JITIssue carries both halves of a just-in-time runner registration: the
+// descriptor handed to the runner process, and the GitHub-side runner id that
+// must be removed if the runner never claims its job. Without the id an
+// unclaimed registration stays in the org forever.
+type JITIssue struct {
+	Descriptor []byte
+	RunnerID   int64
+}
+
 type ScaleSetAPI interface {
 	CreateRunnerScaleSet(context.Context, CreateSpec) (ScaleSet, error)
 	GetRunnerScaleSet(context.Context, int64) (ScaleSet, error)
@@ -98,7 +107,8 @@ type ScaleSetAPI interface {
 	GetAcquirableJobs(context.Context, int64) ([]AvailableJob, error)
 	AcquireJobs(context.Context, Session, AcquireRequest) (AcquireResult, error)
 	AcknowledgeMessage(context.Context, Session, int64) error
-	GenerateJitRunnerConfig(context.Context, int64, JITRequest) ([]byte, error)
+	GenerateJitRunnerConfig(context.Context, int64, JITRequest) (JITIssue, error)
+	RemoveRunner(context.Context, int64) error
 }
 
 type ScaleSetClientFactory func(int64) (*scaleset.Client, error)
@@ -475,16 +485,36 @@ func (a *Adapter) AcknowledgeMessage(ctx context.Context, s Session, id int64) e
 	}
 	return c.DeleteMessage(ctx, int(id))
 }
-func (a *Adapter) GenerateJitRunnerConfig(ctx context.Context, id int64, req JITRequest) ([]byte, error) {
+func (a *Adapter) GenerateJitRunnerConfig(ctx context.Context, id int64, req JITRequest) (JITIssue, error) {
 	client, err := a.clientForScaleSet(id)
 	if err != nil {
-		return nil, err
+		return JITIssue{}, err
 	}
 	v, err := client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: req.Name, WorkFolder: req.WorkFolder}, int(id))
 	if err != nil {
-		return nil, err
+		return JITIssue{}, err
 	}
-	return []byte(v.EncodedJITConfig), nil
+	if v.Runner == nil || v.Runner.ID <= 0 {
+		return JITIssue{}, ErrInvalidResponse
+	}
+	return JITIssue{Descriptor: []byte(v.EncodedJITConfig), RunnerID: int64(v.Runner.ID)}, nil
+}
+
+// RemoveRunner deletes one runner registration. Deleting an already-absent
+// runner is reported as ErrNotFound so callers can treat it as success.
+func (a *Adapter) RemoveRunner(ctx context.Context, runnerID int64) error {
+	if runnerID <= 0 {
+		return ErrInvalidResponse
+	}
+	client, err := a.adminClient()
+	if err != nil {
+		return err
+	}
+	err = client.RemoveRunner(ctx, runnerID)
+	if err != nil && (strings.Contains(err.Error(), `status="404`) || strings.Contains(err.Error(), "status code: 404")) {
+		return ErrNotFound
+	}
+	return err
 }
 
 var _ ScaleSetAPI = (*Adapter)(nil)

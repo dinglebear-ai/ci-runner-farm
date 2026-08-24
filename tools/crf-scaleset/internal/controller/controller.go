@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -517,6 +519,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 				return failure(req, "jit_issue_fence_mismatch", nil)
 			}
 			descriptor, descriptorErr := c.readJITDescriptor(scaleSetID, payload.WorkHandle)
+			_, runnerIDErr := c.readRunnerID(scaleSetID, payload.WorkHandle)
 			switch record.State {
 			case "issued":
 				if descriptorErr != nil {
@@ -526,6 +529,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			case "issue_started":
 				if descriptorErr != nil {
 					return failure(req, "jit_issue_ambiguous", descriptorErr)
+				}
+				if runnerIDErr != nil {
+					return failure(req, "jit_issue_ambiguous", runnerIDErr)
 				}
 				record.State = "issued"
 				c.issued[key] = record
@@ -555,12 +561,15 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			}
 			return failure(req, "work_handle_not_available_after_reservation", nil)
 		}
-		descriptor, err := c.api.GenerateJitRunnerConfig(ctx, scaleSetID,
+		issue, err := c.api.GenerateJitRunnerConfig(ctx, scaleSetID,
 			crfgithub.JITRequest{Name: payload.RunnerName, WorkFolder: payload.WorkFolder})
 		if err != nil {
 			return failure(req, "jit_issue_ambiguous", err)
 		}
-		if err := c.writeJITDescriptor(scaleSetID, payload.WorkHandle, descriptor); err != nil {
+		if err := c.writeRunnerID(scaleSetID, payload.WorkHandle, issue.RunnerID); err != nil {
+			return failure(req, "jit_state_failed", err)
+		}
+		if err := c.writeJITDescriptor(scaleSetID, payload.WorkHandle, issue.Descriptor); err != nil {
 			return failure(req, "jit_state_failed", err)
 		}
 		record := c.issued[key]
@@ -571,7 +580,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			c.issued[key] = record
 			return failure(req, "jit_state_failed", err)
 		}
-		return response(req, map[string]any{"descriptor": string(descriptor), "scale_set_id": scaleSetID})
+		return response(req, map[string]any{"descriptor": string(issue.Descriptor), "scale_set_id": scaleSetID})
 	case "retire_jit":
 		var payload retirementPayload
 		if err := decodePayload(req.Payload, &payload); err != nil ||
@@ -643,6 +652,11 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		}
 		if err := c.removeJITDescriptor(record.ScaleSetID, payload.WorkHandle); err != nil {
 			return failure(req, "jit_state_failed", err)
+		}
+		if err := c.deleteIssuedRunner(ctx, record.ScaleSetID, payload.WorkHandle); err != nil {
+			log.Printf("pool %s runner registration delete failed for handle %d: %v",
+				payload.PoolID, payload.WorkHandle, err)
+			return failure(req, "jit_runner_delete_failed", err)
 		}
 		if err := c.removeIssued(key); err != nil {
 			return failure(req, "jit_state_failed", err)
@@ -797,6 +811,95 @@ func (c *Control) readJITDescriptor(scaleSetID, workHandle int64) ([]byte, error
 		return nil, errors.New("invalid_jit_descriptor")
 	}
 	return descriptor, nil
+}
+
+func (c *Control) runnerIDPath(scaleSetID, workHandle int64) string {
+	return filepath.Join(c.descriptorDir(), fmt.Sprintf("%d-%d.runner", scaleSetID, workHandle))
+}
+
+func (c *Control) writeRunnerID(scaleSetID, workHandle, runnerID int64) error {
+	if scaleSetID <= 0 || workHandle <= 0 || runnerID <= 0 {
+		return errors.New("invalid_runner_id")
+	}
+	dir := c.descriptorDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".runner.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(strconv.FormatInt(runnerID, 10)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, c.runnerIDPath(scaleSetID, workHandle)); err != nil {
+		return fmt.Errorf("persist runner id: %w", err)
+	}
+	return syncDirectory(dir)
+}
+
+func (c *Control) readRunnerID(scaleSetID, workHandle int64) (int64, error) {
+	path := c.runnerIDPath(scaleSetID, workHandle)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() <= 0 || info.Size() > 20 {
+		return 0, errors.New("runner_id_permissions_or_size")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	runnerID, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil || runnerID <= 0 {
+		return 0, errors.New("invalid_runner_id")
+	}
+	return runnerID, nil
+}
+
+func (c *Control) removeRunnerID(scaleSetID, workHandle int64) error {
+	if err := os.Remove(c.runnerIDPath(scaleSetID, workHandle)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Stat(c.descriptorDir()); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return syncDirectory(c.descriptorDir())
+}
+
+func (c *Control) deleteIssuedRunner(ctx context.Context, scaleSetID, workHandle int64) error {
+	runnerID, err := c.readRunnerID(scaleSetID, workHandle)
+	if errors.Is(err, os.ErrNotExist) {
+		// Records issued by older releases did not persist the GitHub runner id.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := c.api.RemoveRunner(ctx, runnerID); err != nil && !errors.Is(err, crfgithub.ErrNotFound) {
+		return err
+	}
+	return c.removeRunnerID(scaleSetID, workHandle)
 }
 
 func (c *Control) removeJITDescriptor(scaleSetID, workHandle int64) error {

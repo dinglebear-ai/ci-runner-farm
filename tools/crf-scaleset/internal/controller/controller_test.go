@@ -27,6 +27,9 @@ type fakeAPI struct {
 	jitCalls    int
 	jitErr      error
 	deleted     []int64
+	runnerID    int64
+	removed     []int64
+	removeErr   error
 }
 
 func (f *fakeAPI) CreateRunnerScaleSet(_ context.Context, spec crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -94,14 +97,24 @@ func (f *fakeAPI) AcknowledgeMessage(context.Context, crfgithub.Session, int64) 
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
+func (f *fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) (crfgithub.JITIssue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.jitCalls++
 	if f.jitErr != nil {
-		return nil, f.jitErr
+		return crfgithub.JITIssue{}, f.jitErr
 	}
-	return []byte("single-use-jit"), nil
+	f.runnerID++
+	return crfgithub.JITIssue{Descriptor: []byte("single-use-jit"), RunnerID: f.runnerID}, nil
+}
+func (f *fakeAPI) RemoveRunner(_ context.Context, runnerID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removed = append(f.removed, runnerID)
+	return nil
 }
 
 func request(cfg RuntimeConfig, operation string, sequence uint64, payload string) protocol.Request {
@@ -292,6 +305,12 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 	}
 	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retired JIT descriptor cache remained: err=%v", err)
+	}
+	api.mu.Lock()
+	removedRunners := slices.Clone(api.removed)
+	api.mu.Unlock()
+	if len(removedRunners) != 1 || removedRunners[0] <= 0 {
+		t.Fatalf("retirement did not delete the GitHub runner registration: %#v", removedRunners)
 	}
 	restartedRetire, err := New(currentCfg, api)
 	if err != nil {
@@ -544,7 +563,22 @@ func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T)
 	if _, ok := restarted.issued[key]; !ok {
 		t.Fatalf("restart lost conservative issued record: %#v", restarted.issued)
 	}
-	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 1, retirePayload)); !response.OK {
+	api.removeErr = errors.New("github unavailable")
+	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 1,
+		retirePayload)); response.OK || response.Code != "jit_runner_delete_failed" {
+		t.Fatalf("runner deletion failure was not retained for retry: %#v", response)
+	}
+	if _, ok := restarted.retired[key]; !ok {
+		t.Fatalf("runner deletion failure removed retirement proof: %#v", restarted.retired)
+	}
+	if _, ok := restarted.issued[key]; !ok {
+		t.Fatalf("runner deletion failure removed issued record: %#v", restarted.issued)
+	}
+	if _, err := os.Stat(restarted.runnerIDPath(scaleSetID, 501)); err != nil {
+		t.Fatalf("runner deletion failure removed retry identity: %v", err)
+	}
+	api.removeErr = nil
+	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 2, retirePayload)); !response.OK {
 		t.Fatalf("retirement retry after restart failed: %#v", response)
 	}
 	if _, ok := restarted.retired[key]; !ok {
@@ -556,7 +590,7 @@ func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T)
 	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("successful retry retained descriptor: %v", err)
 	}
-	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 2,
+	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 3,
 		retirePayload)); !response.OK || len(restarted.retired) != 0 {
 		t.Fatalf("confirmation did not compact recovered proof: response=%#v retired=%#v",
 			response, restarted.retired)
