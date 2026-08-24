@@ -449,13 +449,16 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		return response(req, map[string]any{"records": records, "eligible": payload.Eligible})
 	case "issue_jit":
 		var payload struct {
-			PoolID     string `json:"pool_id"`
-			WorkHandle int64  `json:"work_handle"`
-			RunnerName string `json:"runner_name"`
-			WorkFolder string `json:"work_folder"`
+			PoolID                    string `json:"pool_id"`
+			ExpectedScaleSetID        int64  `json:"expected_scale_set_id"`
+			ExpectedOwnershipRevision string `json:"expected_ownership_revision"`
+			WorkHandle                int64  `json:"work_handle"`
+			RunnerName                string `json:"runner_name"`
+			WorkFolder                string `json:"work_folder"`
 		}
 		if err := decodePayload(req.Payload, &payload); err != nil ||
-			!identifier.MatchString(payload.PoolID) || payload.WorkHandle <= 0 ||
+			!identifier.MatchString(payload.PoolID) || payload.ExpectedScaleSetID <= 0 ||
+			!revision.MatchString(payload.ExpectedOwnershipRevision) || payload.WorkHandle <= 0 ||
 			!identifier.MatchString(payload.RunnerName) || !workFolder.MatchString(payload.WorkFolder) {
 			return failure(req, "invalid_jit_request", err)
 		}
@@ -465,6 +468,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		state, err := c.ownership.Load()
 		if err != nil {
 			return failure(req, "ownership_load_failed", err)
+		}
+		if payload.ExpectedOwnershipRevision != state.IdentityRevision {
+			return failure(req, "ownership_identity_mismatch", nil)
 		}
 		scaleSetID := int64(0)
 		for _, record := range state.Records {
@@ -476,6 +482,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		key := fmt.Sprintf("%d:%d", scaleSetID, payload.WorkHandle)
 		if scaleSetID <= 0 {
 			return failure(req, "work_handle_not_available", nil)
+		}
+		if scaleSetID != payload.ExpectedScaleSetID {
+			return failure(req, "scale_set_mismatch", nil)
 		}
 		if state := c.issued[key]; state != "" {
 			descriptor, descriptorErr := c.readJITDescriptor(scaleSetID, payload.WorkHandle)

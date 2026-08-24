@@ -143,6 +143,22 @@ func (*consumeFailPoller) ConsumeHandle(int64, int64) bool { return false }
 func (*consumeFailPoller) RetireHandle(int64, int64) error { return nil }
 func (*consumeFailPoller) Close(context.Context) error     { return nil }
 
+type fencePoller struct {
+	consumeFailPoller
+	hasCalls     int
+	consumeCalls int
+}
+
+func (p *fencePoller) HasHandle(int64, int64) bool {
+	p.hasCalls++
+	return true
+}
+
+func (p *fencePoller) ConsumeHandle(int64, int64) bool {
+	p.consumeCalls++
+	return true
+}
+
 func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T) {
 	root := t.TempDir()
 	cfg := RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",
@@ -194,7 +210,7 @@ func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T)
 		t.Fatalf("acquired handle never reached snapshot: %#v", snapshot)
 	}
 
-	jitPayload := `{"pool_id":"python","work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`
+	jitPayload := issueJITPayload(t, cfg, "python", snapshot.Pools[0].ScaleSetID, 501)
 	first := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, jitPayload))
 	sequence++
 	if !first.OK {
@@ -283,7 +299,7 @@ func TestAmbiguousJITRemainsSingleAttemptAndCanBeRetired(t *testing.T) {
 		t.Fatalf("acquired handle never reached snapshot: %#v", snapshot)
 	}
 
-	payload := "{\"pool_id\":\"python\",\"work_handle\":501,\"runner_name\":\"runner-501\",\"work_folder\":\"_work\"}"
+	payload := issueJITPayload(t, cfg, "python", snapshot.Pools[0].ScaleSetID, 501)
 	first := control.Handle(context.Background(), request(cfg, "issue_jit", sequence, payload))
 	sequence++
 	if first.OK || first.Code != "jit_issue_ambiguous" || api.jitCalls != 1 {
@@ -456,8 +472,12 @@ func TestIssueJITRollsBackDurableReservationWhenConsumeLosesRace(t *testing.T) {
 	}
 	cancel()
 	control.poller = &consumeFailPoller{}
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
 	response := control.Handle(context.Background(), request(cfg, "issue_jit", 2,
-		`{"pool_id":"python","work_handle":501,"runner_name":"runner-501","work_folder":"_work"}`))
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID, 501)))
 	if response.OK || response.Code != "work_handle_not_available_after_reservation" {
 		t.Fatalf("consume race was not reported: %#v", response)
 	}
@@ -468,6 +488,70 @@ func TestIssueJITRollsBackDurableReservationWhenConsumeLosesRace(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(data)) != "{}" {
 		t.Fatalf("failed reservation tombstone remained durable: %q err=%v", data, err)
 	}
+}
+
+func TestIssueJITRejectsScaleSetRemapBeforeHandleOrGitHub(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	api := &fakeAPI{nextID: 40, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if got := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{}`)); !got.OK {
+		t.Fatalf("apply sessions failed: %#v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := control.stopSessions(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	poller := &fencePoller{}
+	control.poller = poller
+	owned, err := control.ownership.Load()
+	if err != nil || len(owned.Records) != 1 {
+		t.Fatalf("ownership unavailable: state=%#v err=%v", owned, err)
+	}
+
+	response := control.Handle(context.Background(), request(cfg, "issue_jit", 2,
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID+1, 501)))
+	if response.OK || response.Code != "scale_set_mismatch" {
+		t.Fatalf("scale-set remap was not fenced: %#v", response)
+	}
+	if poller.hasCalls != 0 || poller.consumeCalls != 0 || api.jitCalls != 0 || len(control.issued) != 0 {
+		t.Fatalf("fenced request reached mutable boundary: poller=%#v calls=%d issued=%#v",
+			poller, api.jitCalls, control.issued)
+	}
+
+	identityDrift := strings.Replace(
+		issueJITPayload(t, cfg, "python", owned.Records[0].ScaleSetID, 501),
+		cfg.OwnershipRevision, strings.Repeat("c", 64), 1)
+	response = control.Handle(context.Background(), request(cfg, "issue_jit", 3, identityDrift))
+	if response.OK || response.Code != "ownership_identity_mismatch" {
+		t.Fatalf("ownership drift was not fenced: %#v", response)
+	}
+	if poller.hasCalls != 0 || poller.consumeCalls != 0 || api.jitCalls != 0 || len(control.issued) != 0 {
+		t.Fatalf("ownership-fenced request reached mutable boundary: poller=%#v calls=%d issued=%#v",
+			poller, api.jitCalls, control.issued)
+	}
+}
+
+func issueJITPayload(t *testing.T, cfg RuntimeConfig, poolID string, scaleSetID, workHandle int64) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"pool_id":                     poolID,
+		"expected_scale_set_id":       scaleSetID,
+		"expected_ownership_revision": cfg.OwnershipRevision,
+		"work_handle":                 workHandle,
+		"runner_name":                 "runner-501",
+		"work_folder":                 "_work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
 }
 
 func TestLoadRuntimeConfigRejectsSymlink(t *testing.T) {
