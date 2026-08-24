@@ -114,7 +114,7 @@ if ($PSCmdlet.ShouldProcess($serviceName, 'Install Windows node service without 
         New-Item -ItemType Directory -Force -Path $InstallRoot, $ConfigRoot | Out-Null
         if (Test-Path -LiteralPath $binaryPath) { Copy-Item -LiteralPath $binaryPath -Destination $binaryBackup }
         if (Test-Path -LiteralPath $privateEnvironment) { Copy-Item -LiteralPath $privateEnvironment -Destination $environmentBackup }
-        Invoke-Native "$env:SystemRoot\System32\icacls.exe" $ConfigRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'LOCAL SERVICE:(OI)(CI)F'
+        Invoke-Native "$env:SystemRoot\System32\icacls.exe" $ConfigRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F'
         Assert-NoInjectedFailure 'acl'
         $binaryMutationStarted = $true
         Copy-Item -LiteralPath $NodeBinary -Destination $binaryPath -Force
