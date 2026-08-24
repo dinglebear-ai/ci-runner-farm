@@ -188,18 +188,27 @@ grep -q 'runs-on: ci-pool-typescript' README.md && ok || bad 'TypeScript selecto
 grep -q 'never edits workflow files in sibling repositories' README.md && ok || bad 'workflow migration ownership is undocumented'
 
 WORKFLOW_DIR=".github/workflows"
-route_jobs="$(awk '/^[[:space:]]*runs-on:/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+mapfile -t routed_workflows < <(find "$WORKFLOW_DIR" -maxdepth 1 -name '*.yml' ! -name 'publish-distributed-release.yml' -print | sort)
+route_jobs="$(awk '/^[[:space:]]*runs-on:/ { n++ } END { print n + 0 }' "${routed_workflows[@]}")"
 [ "$route_jobs" -eq 8 ] && ok || bad "expected 8 workflow jobs with runner routes, found $route_jobs"
-ops_routes="$(awk '/^[[:space:]]*runs-on:.*ci-pool-ops/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+ops_routes="$(awk '/^[[:space:]]*runs-on:.*ci-pool-ops/ { n++ } END { print n + 0 }' "${routed_workflows[@]}")"
 [ "$ops_routes" -eq 7 ] && ok || bad "expected 7 trusted ops-pool routes, found $ops_routes"
-hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+hosted_fallbacks="$(awk '/^[[:space:]]*runs-on:.*ubuntu-latest/ { n++ } END { print n + 0 }' "${routed_workflows[@]}")"
 [ "$hosted_fallbacks" -eq 7 ] && ok || bad "expected 7 hosted fork fallbacks, found $hosted_fallbacks"
-owner_guards="$(awk '/^[[:space:]]*runs-on:.*github.repository_owner.*dinglebear-ai/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+owner_guards="$(awk '/^[[:space:]]*runs-on:.*github.repository_owner.*dinglebear-ai/ { n++ } END { print n + 0 }' "${routed_workflows[@]}")"
 [ "$owner_guards" -eq 7 ] && ok || bad "expected 7 dinglebear-ai owner guards, found $owner_guards"
-same_repo_guards="$(awk '/^[[:space:]]*runs-on:.*github.event.pull_request.head.repo.full_name == github.repository/ { n++ } END { print n + 0 }' "$WORKFLOW_DIR"/*.yml)"
+same_repo_guards="$(awk '/^[[:space:]]*runs-on:.*github.event.pull_request.head.repo.full_name == github.repository/ { n++ } END { print n + 0 }' "${routed_workflows[@]}")"
 [ "$same_repo_guards" -eq 7 ] && ok || bad "expected 7 same-repository PR guards, found $same_repo_guards"
-if grep -RInE '^[[:space:]]*runs-on:[[:space:]]*(ubuntu-latest|self-hosted|ci-pool-ops)[[:space:]]*$' "$WORKFLOW_DIR"; then
+if grep -HnE '^[[:space:]]*runs-on:[[:space:]]*(ubuntu-latest|self-hosted|ci-pool-ops)[[:space:]]*$' "${routed_workflows[@]}"; then
   bad 'workflow has an unguarded direct runner selector'
+else
+  ok
+fi
+publication_workflow="$WORKFLOW_DIR/publish-distributed-release.yml"
+publication_hosted="$(awk '/^[[:space:]]*runs-on:[[:space:]]+ubuntu-(latest|24\.04)[[:space:]]*$/ { n++ } END { print n + 0 }' "$publication_workflow")"
+[ "$publication_hosted" -eq 4 ] && ok || bad "distributed publication must use four independent hosted jobs"
+if grep -qE 'ci-pool-|self-hosted' "$publication_workflow"; then
+  bad 'distributed publication must not depend on the fleet it repairs'
 else
   ok
 fi
