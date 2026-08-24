@@ -264,6 +264,10 @@ pub struct RuntimeSyncOutcome {
     pub reports_sent: usize,
     pub immediate_acks: usize,
     pub deferred_commands: Vec<(String, String)>,
+    /// The runtime poll could not reach its execution backend this cycle.
+    /// Placement state remains authoritative from the durable store; the
+    /// session must stay up so the controller keeps fencing authority.
+    pub runtime_poll_degraded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -392,11 +396,16 @@ where
         &mut self,
         now_unix_ms: u64,
     ) -> Result<RuntimeSyncOutcome, AgentSessionError<T::Error>> {
-        self.core
-            .processor_mut()
-            .executor_mut()
-            .poll_runtime()
-            .map_err(AgentSessionError::Runtime)?;
+        let mut outcome = RuntimeSyncOutcome::default();
+        // A backend that cannot be polled (for example a container adapter
+        // whose runtime dependency is down) must degrade the node, not kill
+        // the session: a fatal exit here turns one broken adapter into a
+        // service crash-restart loop that re-spawns adapter probes forever.
+        match self.core.processor_mut().executor_mut().poll_runtime() {
+            Ok(()) => {}
+            Err(AgentRuntimeError::PollFailed) => outcome.runtime_poll_degraded = true,
+            Err(error) => return Err(AgentSessionError::Runtime(error)),
+        }
 
         let reports = self
             .core
@@ -404,7 +413,6 @@ where
             .executor()
             .pending_terminal_reports()
             .map_err(AgentSessionError::Runtime)?;
-        let mut outcome = RuntimeSyncOutcome::default();
 
         for report in reports.into_iter().take(MAX_TERMINAL_REPORT_BATCH) {
             let request = self
@@ -700,6 +708,7 @@ mod tests {
         active: BTreeSet<String>,
         reserved: Resources,
         poll_calls: usize,
+        poll_result: Result<(), AgentRuntimeError>,
     }
 
     impl CommandExecutor for RuntimeExecutor {
@@ -715,7 +724,7 @@ mod tests {
     impl PlacementRuntime for RuntimeExecutor {
         fn poll_runtime(&mut self) -> Result<(), AgentRuntimeError> {
             self.poll_calls += 1;
-            Ok(())
+            self.poll_result
         }
 
         fn reserved_resources(&self) -> Result<Resources, AgentRuntimeError> {
@@ -756,8 +765,9 @@ mod tests {
 
     impl PlacementRuntime for SharedRuntimeExecutor {
         fn poll_runtime(&mut self) -> Result<(), AgentRuntimeError> {
-            self.inner.lock().expect("runtime lock").poll_calls += 1;
-            Ok(())
+            let mut runtime = self.inner.lock().expect("runtime lock");
+            runtime.poll_calls += 1;
+            runtime.poll_result
         }
 
         fn reserved_resources(&self) -> Result<Resources, AgentRuntimeError> {
@@ -808,6 +818,7 @@ mod tests {
             active: BTreeSet::new(),
             reserved: Resources::default(),
             poll_calls: 0,
+            poll_result: Ok(()),
         }));
         let executor = SharedRuntimeExecutor {
             inner: state.clone(),
@@ -883,6 +894,46 @@ mod tests {
             session.runtime_heartbeat(NOW),
             Err(AgentSessionError::Runtime(
                 AgentRuntimeError::ReservedResourcesExceedTotal
+            ))
+        ));
+        assert!(session.transport().requests.is_empty());
+    }
+
+    #[test]
+    fn unpollable_backend_degrades_heartbeat_instead_of_killing_the_session() {
+        let (mut session, state) = runtime_session(vec![response("msg-7-1", None)]);
+        {
+            let mut state = state.lock().expect("runtime lock");
+            state.reports.clear();
+            state.active = BTreeSet::from(["placement-1".into()]);
+            state.poll_result = Err(AgentRuntimeError::PollFailed);
+        }
+
+        let outcome = session
+            .runtime_heartbeat(NOW)
+            .expect("degraded runtime heartbeat still succeeds");
+        assert!(outcome.terminal_sync.runtime_poll_degraded);
+        assert_eq!(session.transport().requests.len(), 1);
+        assert!(matches!(
+            &session.transport().requests[0].payload,
+            NodeMessage::Heartbeat { active_placements, .. }
+                if active_placements == &BTreeSet::from(["placement-1".into()])
+        ));
+    }
+
+    #[test]
+    fn unavailable_placement_state_still_fails_the_runtime_heartbeat() {
+        let (mut session, state) = runtime_session(vec![]);
+        {
+            let mut state = state.lock().expect("runtime lock");
+            state.reports.clear();
+            state.poll_result = Err(AgentRuntimeError::PlacementStateUnavailable);
+        }
+
+        assert!(matches!(
+            session.runtime_heartbeat(NOW),
+            Err(AgentSessionError::Runtime(
+                AgentRuntimeError::PlacementStateUnavailable
             ))
         ));
         assert!(session.transport().requests.is_empty());

@@ -21,9 +21,25 @@ pub struct ManagedProcess {
 
 impl ManagedProcess {
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        Self::spawn_with_scope(command, false)
+    }
+
+    /// Spawn a short-lived helper whose entire process tree must never outlive
+    /// this handle. On Windows the backing Job Object is created with
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so descendants die when the
+    /// handle drops even if an explicit terminate did not fully complete
+    /// (for example clients wedged in kernel I/O against a hung container
+    /// runtime) and whenever the node process itself exits. On Unix this is
+    /// identical to `spawn`; process-group termination already covers the
+    /// helper contract there.
+    pub fn spawn_contained(command: &mut Command) -> io::Result<Self> {
+        Self::spawn_with_scope(command, true)
+    }
+
+    fn spawn_with_scope(command: &mut Command, kill_on_close: bool) -> io::Result<Self> {
         ProcessTree::configure(command);
         let mut child = command.spawn()?;
-        match ProcessTree::attach_and_start(&mut child) {
+        match ProcessTree::attach_and_start(&mut child, kill_on_close) {
             Ok(tree) => Ok(Self { child, tree }),
             Err(error) => {
                 let _ = child.kill();
@@ -70,7 +86,7 @@ impl ProcessTree {
         command.process_group(0);
     }
 
-    fn attach_and_start(child: &mut Child) -> io::Result<Self> {
+    fn attach_and_start(child: &mut Child, _kill_on_close: bool) -> io::Result<Self> {
         let pgid =
             i32::try_from(child.id()).map_err(|_| io::Error::other("runner pid overflow"))?;
         Ok(Self { pgid })
@@ -136,15 +152,38 @@ impl ProcessTree {
         command.creation_flags(CREATE_SUSPENDED);
     }
 
-    fn attach_and_start(child: &mut Child) -> io::Result<Self> {
-        use std::{os::windows::io::AsRawHandle, ptr};
+    fn attach_and_start(child: &mut Child, kill_on_close: bool) -> io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::AsRawHandle, ptr};
         use windows_sys::Win32::{
             Foundation::CloseHandle,
-            System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW},
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
         };
         let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
+        }
+        if kill_on_close {
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let applied = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if applied == 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    CloseHandle(job);
+                }
+                return Err(error);
+            }
         }
         let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) };
         if assigned == 0 {

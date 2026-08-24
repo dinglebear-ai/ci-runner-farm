@@ -96,9 +96,11 @@ func (*fakeAPI) AcquireJobs(context.Context, crfgithub.Session, crfgithub.Acquir
 	return crfgithub.AcquireResult{}, nil
 }
 func (*fakeAPI) AcknowledgeMessage(context.Context, crfgithub.Session, int64) error { return nil }
-func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
-	return nil, nil
+func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) (crfgithub.JITIssue, error) {
+	return crfgithub.JITIssue{}, nil
 }
+
+func (*fakeAPI) RemoveRunner(context.Context, int64) error { return nil }
 
 func githubCase(labels []string) []string {
 	out := slices.Clone(labels)

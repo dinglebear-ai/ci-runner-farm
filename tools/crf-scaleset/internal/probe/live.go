@@ -160,8 +160,14 @@ func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Re
 	}
 	jit, err := api.GenerateJitRunnerConfig(ctx, created.ID,
 		crfgithub.JITRequest{Name: "crf-probe-runner-" + nonce, WorkFolder: "_work"})
-	if err != nil || len(jit) == 0 || len(jit) > 64<<10 {
+	if err != nil || len(jit.Descriptor) == 0 || len(jit.Descriptor) > 64<<10 || jit.RunnerID <= 0 {
 		return failWithCleanup(errors.New("jit_probe_failed"))
+	}
+	// The probe's own registration must be removable: an unclaimed JIT runner
+	// is never garbage-collected by GitHub, so a probe that cannot delete it
+	// would itself leak one offline runner per run.
+	if err := api.RemoveRunner(ctx, jit.RunnerID); err != nil {
+		return failWithCleanup(errors.New("jit_runner_delete_failed"))
 	}
 	workload := cfg.Workload
 	if !workload.TotalAssignedJobs || !workload.ZeroToOne || !workload.CancelReassign ||
@@ -177,7 +183,7 @@ func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Re
 		"restricted_group":           true,
 		"multiple_labels":            len(initialLabels) > 1,
 		"total_assigned_jobs":        workload.TotalAssignedJobs,
-		"jit_current_image":          len(jit) > 0,
+		"jit_current_image":          len(jit.Descriptor) > 0,
 		"zero_to_one":                workload.ZeroToOne,
 		"cancel_reassign":            workload.CancelReassign,
 		"ack_replay":                 workload.AckReplay,

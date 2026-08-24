@@ -155,9 +155,11 @@ func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id 
 	}
 	return f.ackErr
 }
-func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
-	return nil, nil
+func (*fakeAPI) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) (crfgithub.JITIssue, error) {
+	return crfgithub.JITIssue{}, nil
 }
+
+func (*fakeAPI) RemoveRunner(context.Context, int64) error { return nil }
 func (f *fakeAPI) CloseMessageSession(_ context.Context, _ crfgithub.Session) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

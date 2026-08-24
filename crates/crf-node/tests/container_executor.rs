@@ -300,6 +300,17 @@ esac
         executor.placement_state("placement-1"),
         Ok(LocalPlacementState::IntentOnly)
     );
+    // The failed start opened a backoff window; the retry is suppressed but
+    // the placement must stay intent-only rather than being claimed absent.
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Deferred("container_adapter_backoff".into())
+    );
+    assert_eq!(
+        executor.placement_state("placement-1"),
+        Ok(LocalPlacementState::IntentOnly)
+    );
+    std::thread::sleep(Duration::from_millis(1_100));
     assert_eq!(
         executor.reconcile_pending(&command),
         ExecutionResult::Deferred("runtime_uncertain".into())
@@ -450,5 +461,141 @@ fn native_runtime_identity_is_preserved_under_container_executor() {
     assert!(
         !marker.exists(),
         "mismatched runtime must not call container adapter"
+    );
+}
+
+#[test]
+fn broken_adapter_backs_off_instead_of_respawning_every_cycle() {
+    let root = TestRoot::new();
+    let log = root.root.join("adapter.log");
+    // The one-second timeout leaves the shell enough scheduling headroom to
+    // record its invocation before the deadline kills it, even under a fully
+    // parallel test suite.
+    let script = root.script(
+        "adapter.sh",
+        &format!(
+            r#"
+printf 'invoked\n' >> '{}'
+cat >/dev/null
+sleep 30
+"#,
+            log.display()
+        ),
+    );
+    let store = root.store();
+    let command = start_command();
+    store.begin(&command).expect("intent");
+    let mut executor = ContainerRunnerExecutor::new(
+        ProcessContainerAdapter::new(script, Duration::from_secs(1)).expect("adapter"),
+        store,
+    );
+
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Deferred("container_adapter_uncertain".into())
+    );
+    let calls_after_first = fs::read_to_string(&log)
+        .expect("adapter log")
+        .lines()
+        .count();
+    assert_eq!(calls_after_first, 1);
+
+    // Every immediate retry surface must be suppressed while the failure
+    // backoff window is open: command reconciliation, cancellation, and the
+    // heartbeat-driven runtime poll must not spawn new adapter processes.
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Deferred("container_adapter_backoff".into())
+    );
+    assert_eq!(
+        executor.execute_new(&cancel_command()),
+        ExecutionResult::Deferred("container_adapter_backoff".into())
+    );
+    assert_eq!(
+        executor.poll_runtime_state(),
+        Err(ContainerExecutorError::AdapterUnavailable)
+    );
+    let calls_after_backoff = fs::read_to_string(&log)
+        .expect("adapter log")
+        .lines()
+        .count();
+    assert_eq!(
+        calls_after_backoff, 1,
+        "backoff window must not spawn additional adapter processes"
+    );
+}
+
+#[test]
+fn recovered_adapter_resets_the_backoff_after_the_window_expires() {
+    let root = TestRoot::new();
+    let log = root.root.join("adapter.log");
+    let broken_once = root.root.join("broken-once");
+    // Touch the broken-once flag before anything else so a deadline kill under
+    // heavy test parallelism cannot leave the script permanently broken, and
+    // give the shell a one-second deadline for scheduling headroom.
+    let script = root.script(
+        "adapter.sh",
+        &format!(
+            r#"
+if [ ! -e '{flag}' ]; then
+  : > '{flag}'
+  printf 'invoked\n' >> '{log}'
+  cat >/dev/null
+  sleep 30
+fi
+printf 'invoked\n' >> '{log}'
+cat >/dev/null
+printf '%s\n' '{{"schema_version":1,"payload":{{"result":"running","id":"container-recovered"}}}}'
+"#,
+            log = log.display(),
+            flag = broken_once.display()
+        ),
+    );
+    let store = root.store();
+    let command = start_command();
+    store.begin(&command).expect("intent");
+    let mut executor = ContainerRunnerExecutor::new(
+        ProcessContainerAdapter::new(script, Duration::from_secs(1)).expect("adapter"),
+        store,
+    );
+
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Deferred("container_adapter_uncertain".into())
+    );
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Deferred("container_adapter_backoff".into())
+    );
+
+    // First failure opens a one-second window; wait it out, then a healthy
+    // adapter response must be adopted and clear the failure streak so the
+    // next poll runs immediately.
+    std::thread::sleep(Duration::from_millis(1_100));
+    assert_eq!(
+        executor.reconcile_pending(&command),
+        ExecutionResult::Applied
+    );
+    assert_eq!(
+        executor.placement_state("placement-1"),
+        Ok(LocalPlacementState::Spawned {
+            runtime: RuntimeIdentity::Container {
+                id: "container-recovered".into(),
+            },
+        })
+    );
+    let calls_before_poll = fs::read_to_string(&log)
+        .expect("adapter log")
+        .lines()
+        .count();
+    assert_eq!(executor.poll_runtime_state(), Ok(()));
+    let calls_after_poll = fs::read_to_string(&log)
+        .expect("adapter log")
+        .lines()
+        .count();
+    assert_eq!(
+        calls_after_poll,
+        calls_before_poll + 1,
+        "a recovered adapter must be polled again without residual backoff"
     );
 }

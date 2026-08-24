@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, thread};
+use std::{
+    collections::BTreeSet,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crf_protocol::wire::{ControllerCommand, ControllerEnvelope};
 use crf_protocol::{ExecutionBackend, Resources, valid_identifier};
@@ -23,11 +27,48 @@ pub enum ContainerExecutorError {
     RuntimeIdentityMismatch,
 }
 
+const ADAPTER_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const ADAPTER_BACKOFF_CAP: Duration = Duration::from_secs(300);
+pub const ADAPTER_BACKOFF_DETAIL_CODE: &str = "container_adapter_backoff";
+
+/// Tracks consecutive adapter process failures so a broken container runtime
+/// is probed at a bounded, exponentially decaying rate instead of on every
+/// heartbeat. Without this, each retry spawns a fresh adapter process tree;
+/// against a hung runtime those trees accumulate until the host exhausts
+/// memory (observed as 100+ leaked nerdctl clients on a Windows node).
+#[derive(Debug, Default)]
+struct AdapterHealth {
+    consecutive_failures: u32,
+    retry_after: Option<Instant>,
+}
+
+impl AdapterHealth {
+    fn in_backoff(&self) -> bool {
+        self.retry_after
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(16);
+        let delay = ADAPTER_BACKOFF_BASE
+            .saturating_mul(1u32 << exponent)
+            .min(ADAPTER_BACKOFF_CAP);
+        self.retry_after = Some(Instant::now() + delay);
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.retry_after = None;
+    }
+}
+
 pub struct ContainerRunnerExecutor {
     adapter: ProcessContainerAdapter,
     store: PlacementStore,
     draining: bool,
     poll_cursor: usize,
+    adapter_health: AdapterHealth,
 }
 
 impl ContainerRunnerExecutor {
@@ -37,7 +78,20 @@ impl ContainerRunnerExecutor {
             store,
             draining: false,
             poll_cursor: 0,
+            adapter_health: AdapterHealth::default(),
         }
+    }
+
+    fn call_adapter(
+        &mut self,
+        request: &ContainerAdapterRequest,
+    ) -> Result<ContainerAdapterResponse, ContainerAdapterError> {
+        let result = self.adapter.call(request);
+        match &result {
+            Ok(_) => self.adapter_health.record_success(),
+            Err(_) => self.adapter_health.record_failure(),
+        }
+        result
     }
 
     pub fn is_draining(&self) -> bool {
@@ -104,7 +158,10 @@ impl ContainerRunnerExecutor {
             Ok(request) => request,
             Err(_) => return ExecutionResult::Rejected("invalid_container_request".into()),
         };
-        match self.adapter.call(&request) {
+        if self.adapter_health.in_backoff() {
+            return ExecutionResult::Deferred(ADAPTER_BACKOFF_DETAIL_CODE.into());
+        }
+        match self.call_adapter(&request) {
             Ok(response) => self.handle_start_response(placement_id, response),
             Err(error) => map_adapter_error(error),
         }
@@ -144,7 +201,10 @@ impl ContainerRunnerExecutor {
             placement_id: placement_id.to_owned(),
             expected_id: None,
         };
-        match self.adapter.call(&inspect) {
+        if self.adapter_health.in_backoff() {
+            return ExecutionResult::Deferred(ADAPTER_BACKOFF_DETAIL_CODE.into());
+        }
+        match self.call_adapter(&inspect) {
             Ok(ContainerAdapterResponse::Running { id })
             | Ok(ContainerAdapterResponse::Started { id }) => {
                 self.record_container_started(placement_id, id)
@@ -175,7 +235,7 @@ impl ContainerRunnerExecutor {
                         return ExecutionResult::Rejected("invalid_container_request".into());
                     }
                 };
-                match self.adapter.call(&request) {
+                match self.call_adapter(&request) {
                     Ok(response) => self.handle_start_response(placement_id, response),
                     Err(error) => map_adapter_error(error),
                 }
@@ -190,7 +250,7 @@ impl ContainerRunnerExecutor {
                         return ExecutionResult::Rejected("invalid_container_request".into());
                     }
                 };
-                match self.adapter.call(&request) {
+                match self.call_adapter(&request) {
                     Ok(response) => self.handle_start_response(placement_id, response),
                     Err(error) => map_adapter_error(error),
                 }
@@ -286,7 +346,10 @@ impl ContainerRunnerExecutor {
             placement_id: placement_id.to_owned(),
             expected_id,
         };
-        match self.adapter.call(&request) {
+        if self.adapter_health.in_backoff() {
+            return ExecutionResult::Deferred(ADAPTER_BACKOFF_DETAIL_CODE.into());
+        }
+        match self.call_adapter(&request) {
             Ok(ContainerAdapterResponse::Cancelled) | Ok(ContainerAdapterResponse::Absent) => {
                 self.record_terminal_applied(placement_id, TerminalOutcome::Cancelled)
             }
@@ -318,6 +381,13 @@ impl ContainerRunnerExecutor {
         if placements.is_empty() {
             self.poll_cursor = 0;
             return Ok(());
+        }
+        if self.adapter_health.in_backoff() {
+            // The adapter recently failed; skip this poll cycle entirely so a
+            // broken runtime is not probed with a fresh process tree on every
+            // heartbeat. Still report the backend as unavailable so the
+            // session stays visibly degraded until a probe succeeds.
+            return Err(ContainerExecutorError::AdapterUnavailable);
         }
         let start = self.poll_cursor % placements.len();
         let selected: Vec<_> = (0..placements.len().min(MAX_CONCURRENT_POLLS))
@@ -358,18 +428,26 @@ impl ContainerRunnerExecutor {
             })
             .collect();
         let mut adapter_failed = false;
+        let mut adapter_succeeded = false;
         for handle in handles {
             let (placement_id, expected_id, response) = handle
                 .join()
                 .map_err(|_| ContainerExecutorError::AdapterUnavailable)?;
             match response {
-                Ok(response) => self.apply_poll_response(&placement_id, expected_id, response)?,
+                Ok(response) => {
+                    adapter_succeeded = true;
+                    self.apply_poll_response(&placement_id, expected_id, response)?;
+                }
                 Err(_) => adapter_failed = true,
             }
         }
         if adapter_failed {
+            self.adapter_health.record_failure();
             Err(ContainerExecutorError::AdapterUnavailable)
         } else {
+            if adapter_succeeded {
+                self.adapter_health.record_success();
+            }
             Ok(())
         }
     }

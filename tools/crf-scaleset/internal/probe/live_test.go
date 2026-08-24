@@ -10,13 +10,14 @@ import (
 )
 
 type liveFake struct {
-	group         crfgithub.RunnerGroup
-	quarantine    crfgithub.RunnerGroup
-	set           crfgithub.ScaleSet
-	capacities    []int
-	closed        bool
-	deleted       bool
-	partialUpdate bool
+	group          crfgithub.RunnerGroup
+	quarantine     crfgithub.RunnerGroup
+	set            crfgithub.ScaleSet
+	capacities     []int
+	closed         bool
+	deleted        bool
+	partialUpdate  bool
+	removedRunners int
 }
 
 func (f *liveFake) CreateRunnerScaleSet(_ context.Context, spec crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -63,8 +64,13 @@ func (*liveFake) AcquireJobs(context.Context, crfgithub.Session, crfgithub.Acqui
 	return crfgithub.AcquireResult{}, nil
 }
 func (*liveFake) AcknowledgeMessage(context.Context, crfgithub.Session, int64) error { return nil }
-func (*liveFake) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) ([]byte, error) {
-	return []byte("jit"), nil
+func (*liveFake) GenerateJitRunnerConfig(context.Context, int64, crfgithub.JITRequest) (crfgithub.JITIssue, error) {
+	return crfgithub.JITIssue{Descriptor: []byte("jit"), RunnerID: 4242}, nil
+}
+
+func (f *liveFake) RemoveRunner(context.Context, int64) error {
+	f.removedRunners++
+	return nil
 }
 func (f *liveFake) CloseMessageSession(context.Context, crfgithub.Session) error {
 	f.closed = true

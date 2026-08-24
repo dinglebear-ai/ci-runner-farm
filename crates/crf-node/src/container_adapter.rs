@@ -233,8 +233,12 @@ impl ProcessContainerAdapter {
             ))
             .stderr(Stdio::null());
         let deadline = Instant::now() + self.timeout;
-        let mut process =
-            ManagedProcess::spawn(&mut command).map_err(|_| ContainerAdapterError::SpawnFailed)?;
+        // Contained spawn: the adapter helper is a short-lived RPC, so its
+        // whole tree must die with this handle. On Windows this closes the
+        // leak where clients of a hung container runtime survived tree
+        // termination and accumulated across retries.
+        let mut process = ManagedProcess::spawn_contained(&mut command)
+            .map_err(|_| ContainerAdapterError::SpawnFailed)?;
         let status = loop {
             match process.try_wait() {
                 Ok(Some(status)) => break status,
