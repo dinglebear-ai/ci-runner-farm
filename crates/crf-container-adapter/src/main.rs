@@ -581,7 +581,7 @@ fn ensure_container(config: &Config, state: &State) -> Result<(), &'static str> 
         "/run/crf:rw,noexec,nosuid,nodev,size=1m".into(),
         "--mount".into(),
         format!(
-            "type=volume,src={},dst=/_work,volume-nocopy",
+            "type=volume,src={},dst=/actions-runner/_work,volume-nocopy",
             state.work_volume_name
         ),
         "--mount".into(),
@@ -599,7 +599,7 @@ fn ensure_container(config: &Config, state: &State) -> Result<(), &'static str> 
         "CRF_CREDENTIAL_KIND=jit",
         "EPHEMERAL=true",
         "RUN_AS_ROOT=false",
-        "RUNNER_WORKDIR=/_work",
+        "RUNNER_WORKDIR=/actions-runner/_work",
         "DISABLE_AUTO_UPDATE=true",
         "DISABLE_AUTOMATIC_DEREGISTRATION=true",
     ] {
@@ -1242,7 +1242,7 @@ fn container_contract(config: &Config, id: &str, state: &State) -> Result<bool, 
         return Ok(false);
     }
     Ok([
-        (&state.work_volume_name, "/_work", true),
+        (&state.work_volume_name, "/actions-runner/_work", true),
         (&state.bootstrap_volume_name, "/opt/crf-bootstrap", false),
     ]
     .into_iter()

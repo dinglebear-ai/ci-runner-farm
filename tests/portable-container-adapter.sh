@@ -63,7 +63,7 @@ case "$cmd" in
     work_mount="${mounts[0]}"; bootstrap_mount="${mounts[1]}"
     work_name="${work_mount#*src=}"; work_name="${work_name%%,*}"
     bootstrap_name="${bootstrap_mount#*src=}"; bootstrap_name="${bootstrap_name%%,*}"
-    printf '[{"Type":"volume","Name":"%s","Destination":"/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_name" "$bootstrap_name" >"$mock/mounts"
+    printf '[{"Type":"volume","Name":"%s","Destination":"/actions-runner/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_name" "$bootstrap_name" >"$mock/mounts"
     printf '%s\n' "$id"
     ;;
   cp)
@@ -280,7 +280,7 @@ if grep -Fq "$jit" "$tmp/mock/run.args"; then exit 1; fi
 grep -Fq -- '--cpus 0.750' "$tmp/mock/run.args"
 grep -Fq -- '--memory 1073741824' "$tmp/mock/run.args"
 grep -Fq -- 'type=volume,src=crf-dist-work-' "$tmp/mock/run.args"
-grep -Fq -- 'dst=/_work,volume-nocopy' "$tmp/mock/run.args"
+grep -Fq -- 'dst=/actions-runner/_work,volume-nocopy' "$tmp/mock/run.args"
 grep -Fq -- 'dst=/opt/crf-bootstrap,readonly,volume-nocopy' "$tmp/mock/run.args"
 if grep -Eq 'type=bind|src=.*/tmp|entrypoint\.sh' "$tmp/mock/run.args"; then exit 1; fi
 grep -Eq '^- b{64}:/opt/crf-bootstrap$' "$tmp/mock/cp.args"
@@ -292,7 +292,7 @@ nonce="$(jq -r '.ownership_nonce' "$state_file")"
 work_volume="$(jq -r '.work_volume_name' "$state_file")"
 bootstrap_volume="$(jq -r '.bootstrap_volume_name' "$state_file")"
 [[ "$work_volume" != "$bootstrap_volume" ]]
-printf '[{"Type":"volume","Name":"%s","Destination":"/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_volume" "$bootstrap_volume" >"$tmp/mock/mounts"
+printf '[{"Type":"volume","Name":"%s","Destination":"/actions-runner/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_volume" "$bootstrap_volume" >"$tmp/mock/mounts"
 
 inspect='{"schema_version":1,"payload":{"action":"inspect","placement_id":"placement-1","expected_id":null}}'
 reply="$(printf '%s\n' "$inspect" | "$adapter")"
@@ -312,10 +312,10 @@ reply="$(printf '%s\n' "$inspect" | "$adapter")"
 jq -e '.payload.result == "deferred" and .payload.detail_code == "container_identity_ambiguous"' <<<"$reply" >/dev/null
 unset CRF_TEST_VOLUME_OPTIONS
 
-printf '[{"Type":"volume","Name":"wrong-volume","Destination":"/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$bootstrap_volume" >"$tmp/mock/mounts"
+printf '[{"Type":"volume","Name":"wrong-volume","Destination":"/actions-runner/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$bootstrap_volume" >"$tmp/mock/mounts"
 reply="$(printf '%s\n' "$inspect" | "$adapter")"
 jq -e '.payload.result == "deferred" and .payload.detail_code == "container_identity_ambiguous"' <<<"$reply" >/dev/null
-printf '[{"Type":"volume","Name":"%s","Destination":"/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_volume" "$bootstrap_volume" >"$tmp/mock/mounts"
+printf '[{"Type":"volume","Name":"%s","Destination":"/actions-runner/_work","RW":true},{"Type":"volume","Name":"%s","Destination":"/opt/crf-bootstrap","RW":false}]\n' "$work_volume" "$bootstrap_volume" >"$tmp/mock/mounts"
 
 printf 'wrong-command' >"$tmp/mock/label.command-id"
 reply="$(printf '%s\n' "$inspect" | "$adapter")"

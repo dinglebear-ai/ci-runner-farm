@@ -79,11 +79,14 @@ grep -Fq 'FROM ubuntu:24.04@sha256:' "$dockerfile"
 grep -Eq '^[[:space:]]*ImageOS=ubuntu24([[:space:]\\]|$)' "$dockerfile"
 grep -Fq 'HEALTHCHECK' "$dockerfile"
 grep -Fq 'build-essential' "$dockerfile"
+grep -Fq 'clang' "$dockerfile"
+grep -Fq 'lld' "$dockerfile"
 grep -Fq 'inotify-tools' "$dockerfile"
+grep -Fq 'sudo' "$dockerfile"
 grep -Fq 'xz-utils' "$dockerfile"
 grep -Fq 'php-cli' "$dockerfile"
 if grep -Eq '^USER[[:space:]]+runner' "$dockerfile"; then
-  echo 'runner image must start as root so the injected entrypoint can prepare /_work' >&2
+  echo 'runner image must start as root so the injected entrypoint can prepare /actions-runner/_work' >&2
   exit 1
 fi
 grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>' "$example"

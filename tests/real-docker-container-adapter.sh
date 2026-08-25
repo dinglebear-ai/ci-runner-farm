@@ -7,8 +7,8 @@ set -euo pipefail
 }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="$(sed -n 's/^FROM \(myoung34\/github-runner@sha256:[0-9a-f]\{64\}\)$/\1/p' "$root/src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile")"
-[[ "$image" =~ ^myoung34/github-runner@sha256:[0-9a-f]{64}$ ]] || { echo 'authoritative runner image pin missing' >&2; exit 1; }
+image="${CRF_REAL_DOCKER_RUNNER_IMAGE:-$(sed -n 's/^FROM \([^[:space:]]*@sha256:[0-9a-f]\{64\}\)$/\1/p' "$root/src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile")}"
+[[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || { echo 'authoritative runner image pin missing' >&2; exit 1; }
 
 run_id="accept-$(date +%s)-$$"
 tmp="$(mktemp -d "/tmp/crf-real-docker-${run_id}.XXXXXX")"
