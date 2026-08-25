@@ -31,8 +31,32 @@ php_version="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);' 2
 php_major="${php_version%%.*}"
 (( php_major >= 8 )) || exit 6
 
-command -v python3 >/dev/null 2>&1 || exit 7
-command -v ssh >/dev/null 2>&1 || exit 7
+# Floor at 3.11, not mere presence: tests/nashost-kache-profile.sh imports
+# tomllib, which only entered the stdlib in 3.11 and has no fallback here. A
+# bare presence check passes on 3.10 and then fails inside the job instead.
+python_version="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || exit 7
+[[ "$python_version" =~ ^[0-9]+\.[0-9]+$ ]] || exit 7
+python_major="${python_version%%.*}"; python_minor="${python_version#*.}"
+(( python_major > 3 || (python_major == 3 && python_minor >= 11) )) || exit 7
 
-printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client"]}\n' \
-  "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch" "$php_version"
+# Execute it rather than command -v: a name that resolves but cannot run
+# (missing shared library, truncated layer) must fail the contract too.
+ssh -V >/dev/null 2>&1 || exit 8
+
+# Archive and transfer tooling the hosted-runner images provide and that stock
+# actions assume: actions/cache shells out to zstd, and @actions/tool-cache
+# extractZip shells out to unzip, so a runner without them fails inside the job
+# with an opaque error rather than at admission. Executed, not command -v'd.
+unzip -v >/dev/null 2>&1 || exit 9
+zip -v   >/dev/null 2>&1 || exit 9
+zstd --version >/dev/null 2>&1 || exit 9
+wget --version >/dev/null 2>&1 || exit 9
+rsync --version >/dev/null 2>&1 || exit 9
+file --version >/dev/null 2>&1 || exit 9
+# ripgrep is a hard dependency of this repo's own regression suite: several
+# tests (worktree-toolchain.sh, flash-write-paths.sh, security-review-contracts.sh)
+# call rg unguarded, so an image without it fails lint with "rg: command not found".
+rg --version >/dev/null 2>&1 || exit 9
+
+printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s","python":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client","archive-tools"]}\n' \
+  "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch" "$php_version" "$python_version"
