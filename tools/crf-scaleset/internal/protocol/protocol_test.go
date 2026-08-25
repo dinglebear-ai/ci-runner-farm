@@ -107,7 +107,7 @@ func TestSnapshotRejectsDuplicatePoolsAndUnboundedValues(t *testing.T) {
 		{"too many handles", []PoolSnapshot{{PoolID: "python", AcquiredHandles: make([]int64, 65)}}},
 		{"invalid handle", []PoolSnapshot{{PoolID: "python", AcquiredHandles: []int64{0}}}},
 		{"invalid pool freshness", []PoolSnapshot{{PoolID: "python", ObservedAt: now,
-			ValidUntil: now.Add(31 * time.Second)}}},
+			ValidUntil: now.Add(2*time.Minute + time.Millisecond)}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
