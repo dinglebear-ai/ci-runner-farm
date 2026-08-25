@@ -43,5 +43,20 @@ python_major="${python_version%%.*}"; python_minor="${python_version#*.}"
 # (missing shared library, truncated layer) must fail the contract too.
 ssh -V >/dev/null 2>&1 || exit 8
 
-printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s","python":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client"]}\n' \
+# Archive and transfer tooling the hosted-runner images provide and that stock
+# actions assume: actions/cache shells out to zstd, and @actions/tool-cache
+# extractZip shells out to unzip, so a runner without them fails inside the job
+# with an opaque error rather than at admission. Executed, not command -v'd.
+unzip -v >/dev/null 2>&1 || exit 9
+zip -v   >/dev/null 2>&1 || exit 9
+zstd --version >/dev/null 2>&1 || exit 9
+wget --version >/dev/null 2>&1 || exit 9
+rsync --version >/dev/null 2>&1 || exit 9
+file --version >/dev/null 2>&1 || exit 9
+# ripgrep is a hard dependency of this repo's own regression suite: several
+# tests (worktree-toolchain.sh, flash-write-paths.sh, security-review-contracts.sh)
+# call rg unguarded, so an image without it fails lint with "rg: command not found".
+rg --version >/dev/null 2>&1 || exit 9
+
+printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s","python":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client","archive-tools"]}\n' \
   "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch" "$php_version" "$python_version"

@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ImageVersion=24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git gosu inotify-tools jq libicu74 libssl3 lld openssh-client php-cli python3 sudo xz-utils \
+ && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file git gnupg gosu inotify-tools jq libicu74 libssl3 libssl-dev lld locales lsb-release mold openssh-client php-cli pkg-config python3 ripgrep rsync sudo unzip wget xz-utils zip zstd \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1001 --shell /bin/bash runner \
  && install -d -o runner -g runner /actions-runner /actions-runner/_work \
