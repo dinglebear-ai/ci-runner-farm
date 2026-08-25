@@ -2,8 +2,6 @@ package session
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -20,8 +18,7 @@ import (
 var ErrAmbiguousAcquire = errors.New("ambiguous_acquisition_session_reset")
 
 const (
-	maxJSONSafeInteger      int64 = 1<<53 - 1
-	acquirableLookupTimeout       = 2 * time.Second
+	acquirableLookupTimeout = 2 * time.Second
 )
 
 type Config struct {
@@ -157,43 +154,6 @@ func (p *Poller) clearPending(scaleSetID int64) {
 	delete(p.pending, scaleSetID)
 }
 
-func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capacity int) error {
-	if capacity < 0 || capacity > 64 {
-		return errors.New("invalid_advertised_capacity")
-	}
-	current := p.pendingSnapshot(scaleSetID)
-	if len(current) >= capacity {
-		return nil
-	}
-	handles := slices.Clone(current)
-	for len(handles) < capacity {
-		var encoded [8]byte
-		if _, err := rand.Read(encoded[:]); err != nil {
-			return err
-		}
-		handle := int64(binary.BigEndian.Uint64(encoded[:]) & uint64(maxJSONSafeInteger))
-		if handle == 0 || slices.Contains(handles, handle) {
-			continue
-		}
-		p.mu.Lock()
-		consumed := p.consumed[handleKey(scaleSetID, handle)]
-		p.mu.Unlock()
-		if consumed {
-			continue
-		}
-		handles = append(handles, handle)
-	}
-	entry := journal.Entry{ScaleSetID: scaleSetID, SessionID: sessionID, MessageID: 0,
-		Phase: "acked", AssignedCount: p.assignedCount(scaleSetID),
-		AcquiredHandles: handles, ConfigRevision: p.cfg.ConfigRevision,
-		OwnershipRevision: p.cfg.OwnershipRevision}
-	if err := p.append(entry); err != nil {
-		return err
-	}
-	p.appendPending(scaleSetID, handles...)
-	return nil
-}
-
 func (p *Poller) fastLaneStatus(scaleSetID int64, capacity int) (string, int64, int64, int, int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -228,11 +188,8 @@ func (p *Poller) fastLaneStatus(scaleSetID int64, capacity int) (string, int64, 
 	return state, longThreshold.Milliseconds(), holdDuration.Milliseconds(), reservedSlots, lane.holdUntil.UnixMilli()
 }
 
-func (p *Poller) result(scaleSetID int64, sessionID string, capacity int,
+func (p *Poller) result(scaleSetID int64, _ string, capacity int,
 	messageID int64) (supervisor.PollResult, error) {
-	if err := p.ensureCapacityHandles(scaleSetID, sessionID, capacity); err != nil {
-		return supervisor.PollResult{}, err
-	}
 	state, thresholdMS, holdDurationMS, reservedSlots, holdUntilMS := p.fastLaneStatus(scaleSetID, capacity)
 	return supervisor.PollResult{AssignedJobs: p.assignedCount(scaleSetID),
 		MessageID: messageID, AcquiredHandles: p.pendingSnapshot(scaleSetID),
