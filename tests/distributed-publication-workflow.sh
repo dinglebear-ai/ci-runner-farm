@@ -75,7 +75,15 @@ require_fixed 'docker buildx imagetools inspect' 'published manifest must be ins
 require_fixed 'scripts/resolve-distributed-image.sh "$IMAGE_NAME" "$RELEASE_TAG"' 'release image tag lookup is not fail closed'
 require_fixed 'distributed-runner-image.txt' 'immutable image identity receipt is not published'
 require_fixed 'org.opencontainers.image.revision' 'existing images are not bound to the release commit'
-require_fixed '{"visibility":"public"}' 'published image is not made available to clean nodes'
+# Availability to clean nodes is now *proven* rather than assumed: GitHub has
+# no API to set container visibility (PATCH /orgs/{org}/packages/container/{name}
+# is unrouted and 404s regardless of scope), so the workflow asserts an
+# anonymous pull of the published digest instead of attempting a mutation.
+# shellcheck disable=SC2016
+require_fixed 'https://ghcr.io/token?scope=repository:' 'published image availability to clean nodes is not proven anonymously'
+# shellcheck disable=SC2016
+require_fixed 'https://ghcr.io/v2/${IMAGE_REPO}/manifests/${IMAGE_DIGEST}' 'anonymous availability proof does not target the published digest'
+require_fixed 'the package is not public' 'anonymous availability proof does not fail closed'
 # shellcheck disable=SC2016
 require_fixed 'docker pull --platform "$platform"' 'anonymous verification does not pull both runtime images'
 
@@ -107,8 +115,16 @@ grep -Fq 'build_bundle >&2' "$BUNDLE_BUILDER" || fail 'bundle build diagnostics 
 # shellcheck disable=SC2016 # Match the literal archive variable in the builder.
 grep -Fq 'printf "%s\n" "$archive"' "$BUNDLE_BUILDER" || fail 'bundle path is not emitted on stdout'
 
-# shellcheck disable=SC2016
-require_fixed 'ADMIN_TOKEN: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN }}' 'package administration does not require the dedicated token'
+# The availability proof must need no credential whatsoever. This is stricter
+# than the previous contract (which required a dedicated admin token): a job
+# that carries no secret cannot leak or misuse one, and a proof that passes
+# without credentials is exactly the property clean nodes depend on.
+if grep -Eq 'publish-image-visibility:' "$WORKFLOW"; then
+  visibility_job="$(awk '/^  publish-image-visibility:/{flag=1} /^  [a-z-]+:$/{if(flag && $0 !~ /publish-image-visibility/) flag=0} flag' "$WORKFLOW")"
+  if printf '%s' "$visibility_job" | grep -Eq 'secrets\.'; then
+    fail 'anonymous availability proof must not consume any secret'
+  fi
+fi
 require_fixed 'publish-image-visibility:' 'package administration is not isolated in a dedicated job'
 require_fixed 'permissions: {}' 'package administration job retains unnecessary GitHub token permissions'
 require_fixed 'needs: publish-image' 'package visibility can run before the image is published'
