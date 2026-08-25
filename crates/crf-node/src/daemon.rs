@@ -149,13 +149,10 @@ pub fn run_until_stopped(config: NodeConfig, running: Arc<AtomicBool>) -> Result
         capabilities.insert("operator-projection-v1".into());
     }
 
-    let mut available = resources;
     let reserved = executor
         .reserved_resources()
         .map_err(|_| DaemonError::PlacementState)?;
-    if !available.subtract(reserved) {
-        return Err(DaemonError::ResourceBudgetExceedsHost);
-    }
+    let available = available_after_reservations(resources, reserved);
 
     let node = NodeSnapshot {
         node_id: platform.node_id.clone(),
@@ -498,6 +495,22 @@ fn now_unix_ms() -> Result<u64, DaemonError> {
     u64::try_from(millis).map_err(|_| DaemonError::Clock)
 }
 
+fn available_after_reservations(
+    total: crf_protocol::Resources,
+    reserved: crf_protocol::Resources,
+) -> crf_protocol::Resources {
+    let mut available = total;
+    if available.subtract(reserved) {
+        available
+    } else {
+        // Durable placements can temporarily exceed a reduced resource budget
+        // after a restart.  The node must reconnect with zero availability so
+        // it can reconcile and report those placements; exiting here strands
+        // both the runtime and its terminal outbox forever.
+        crf_protocol::Resources::default()
+    }
+}
+
 fn next_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(MAX_RECONNECT_BACKOFF)
 }
@@ -516,6 +529,28 @@ fn sleep_interruptible(duration: Duration, running: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_advertises_remaining_capacity_when_reservations_fit() {
+        assert_eq!(
+            available_after_reservations(
+                crf_protocol::Resources::new(8_000, 16),
+                crf_protocol::Resources::new(2_000, 4)
+            ),
+            crf_protocol::Resources::new(6_000, 12)
+        );
+    }
+
+    #[test]
+    fn startup_advertises_zero_when_durable_reservations_exceed_budget() {
+        assert_eq!(
+            available_after_reservations(
+                crf_protocol::Resources::new(8_000, 16),
+                crf_protocol::Resources::new(9_000, 17)
+            ),
+            crf_protocol::Resources::default()
+        );
+    }
 
     #[test]
     fn reconnect_backoff_is_bounded() {
