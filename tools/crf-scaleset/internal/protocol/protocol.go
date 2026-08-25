@@ -183,7 +183,7 @@ func (s Snapshot) Validate(now time.Time) error {
 		if !pool.ObservedAt.IsZero() &&
 			(pool.ObservedAt.After(now.Add(5*time.Second)) ||
 				!pool.ValidUntil.After(pool.ObservedAt) ||
-				pool.ValidUntil.Sub(pool.ObservedAt) > 30*time.Second) {
+				pool.ValidUntil.Sub(pool.ObservedAt) > 2*time.Minute) {
 			return errors.New("invalid_pool_freshness")
 		}
 		seenPools[pool.PoolID] = true
