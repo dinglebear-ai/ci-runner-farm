@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [1.13.4](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.3...v1.13.4) (2026-08-25)
+
+
+### Bug Fixes
+
+* demand-aware capacity + Docker/gh/Node runner parity ([#105](https://github.com/dinglebear-ai/ci-runner-farm/issues/105)) ([9a4fe70](https://github.com/dinglebear-ai/ci-runner-farm/commit/9a4fe70))
+
 ## [1.13.3](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.2...v1.13.3) (2026-08-25)
 
 
