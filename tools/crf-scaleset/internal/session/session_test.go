@@ -1014,7 +1014,7 @@ func TestRestartDropsPendingHandlesWhenLatestAssignedCountIsZero(t *testing.T) {
 	}
 }
 
-func TestIdleCapacityCreatesDurableJSONSafeWorkHandle(t *testing.T) {
+func TestIdleCapacityDoesNotManufactureWork(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store}
 	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
@@ -1026,43 +1026,12 @@ func TestIdleCapacityCreatesDurableJSONSafeWorkHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.AcquiredHandles) != 1 || result.AcquiredHandles[0] <= 0 ||
-		result.AcquiredHandles[0] > maxJSONSafeInteger {
-		t.Fatalf("invalid idle-capacity handle: %#v", result.AcquiredHandles)
+	if len(result.AcquiredHandles) != 0 {
+		t.Fatalf("idle capacity manufactured work: %#v", result.AcquiredHandles)
 	}
 	replayed, err := store.Replay()
-	capacity := replayed[journal.Key{ScaleSetID: 12, MessageID: 0}]
-	if err != nil || capacity.Phase != "acked" ||
-		!slices.Equal(capacity.AcquiredHandles, result.AcquiredHandles) {
-		t.Fatalf("capacity handle was not durable: entry=%#v err=%v", capacity, err)
-	}
-}
-
-func TestConsumedIdleCapacityHandleIsNotReofferedAfterRestart(t *testing.T) {
-	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
-	api := &fakeAPI{store: store}
-	cfg := Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
-		OwnershipRevision: strings.Repeat("b", 64)}
-	first, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial, err := first.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := initial.AcquiredHandles[0]
-	cfg.ConsumedHandles = map[string]bool{handleKey(12, old): true}
-	restarted, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := restarted.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after.AcquiredHandles) != 1 || after.AcquiredHandles[0] == old {
-		t.Fatalf("consumed capacity handle was reused: old=%d after=%#v", old, after.AcquiredHandles)
+	if err != nil || len(replayed) != 0 {
+		t.Fatalf("idle capacity mutated the replay journal: entries=%#v err=%v", replayed, err)
 	}
 }
 
@@ -1146,7 +1115,7 @@ func TestDifferentScaleSetsPollConcurrently(t *testing.T) {
 	}
 }
 
-func TestCapacityChangeReturnsHandleWithoutWaitingForLongPoll(t *testing.T) {
+func TestCapacityChangeReturnsWithoutManufacturingWorkOrWaitingForLongPoll(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store}
 	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
@@ -1164,8 +1133,8 @@ func TestCapacityChangeReturnsHandleWithoutWaitingForLongPoll(t *testing.T) {
 	}()
 	select {
 	case result := <-done:
-		if len(result.AcquiredHandles) != 1 {
-			t.Fatalf("capacity change did not immediately advertise a handle: %#v", result)
+		if len(result.AcquiredHandles) != 0 || result.AssignedJobs != 0 {
+			t.Fatalf("capacity change manufactured work: %#v", result)
 		}
 	case <-time.After(250 * time.Millisecond):
 		close(api.block)
