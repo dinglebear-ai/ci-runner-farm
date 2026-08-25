@@ -1038,6 +1038,47 @@ func TestIdleCapacityCreatesDurableJSONSafeWorkHandle(t *testing.T) {
 	}
 }
 
+func TestIdleCapacityStopsFabricatingHandlesWithoutDemand(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 21, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 0, TotalAssignedJobs: 0},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// GitHub reported nothing queued and nothing assigned for this scale set, so
+	// synthesising handles would burn shared node concurrency that a pool with
+	// real work needs.
+	if len(result.AcquiredHandles) != 0 {
+		t.Fatalf("fabricated handles for a pool with no demand: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestIdleCapacityFabricatesHandlesOnlyUpToDemand(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
+		MessageID: 22, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1, TotalAssignedJobs: 0},
+	}}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 13}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.AcquiredHandles) != 1 {
+		t.Fatalf("expected one handle for one queued job, got %#v", result.AcquiredHandles)
+	}
+}
+
 func TestConsumedIdleCapacityHandleIsNotReofferedAfterRestart(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store}

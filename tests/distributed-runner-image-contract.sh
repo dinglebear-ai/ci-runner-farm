@@ -34,11 +34,11 @@ cat >"$tmp/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-for tool in unzip zip zstd wget rsync file rg; do
+for tool in unzip zip zstd wget rsync file rg docker gh node; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/$tool"
 done
 chmod +x "$tmp/bin/getconf" "$tmp/bin/uname" "$tmp/bin/php" "$tmp/bin/python3" "$tmp/bin/ssh" \
-  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg"
+  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg" "$tmp/bin/docker" "$tmp/bin/gh" "$tmp/bin/node"
 
 result="$(PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe")"
 jq -e '
@@ -47,7 +47,7 @@ jq -e '
   .os.id == "ubuntu" and .os.version_id == "24.04" and
   .image_os == "ubuntu24" and .glibc == "2.39" and .arch == "x64" and
   .runtimes.php == "8.3" and .runtimes.python == "3.12" and
-  .capabilities == ["github-actions", "container", "otp-28-compatible", "php-cli", "python3", "ssh-client", "archive-tools"]
+  .capabilities == ["github-actions", "container", "otp-28-compatible", "php-cli", "python3", "ssh-client", "archive-tools", "docker-cli", "github-cli", "node"]
 ' <<<"$result" >/dev/null
 
 if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu26 "$probe" >/dev/null 2>&1; then
@@ -147,7 +147,9 @@ chmod +x "$tmp/bin/ssh"
 
 # Every archive/transfer tool is individually required: a runner missing any one
 # of them fails inside the job, so the contract must reject the image up front.
-for tool in unzip zip zstd wget rsync file rg; do
+for tool in unzip:9 zip:9 zstd:9 wget:9 rsync:9 file:9 rg:9 docker:10 gh:10 node:10; do
+  expected="${tool##*:}"
+  tool="${tool%%:*}"
   cat >"$tmp/bin/$tool" <<'EOF'
 #!/usr/bin/env bash
 exit 127
@@ -157,8 +159,8 @@ EOF
   PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1
   missing_tool_status=$?
   set -e
-  [[ "$missing_tool_status" == 9 ]] || {
-    echo "probe accepted a missing $tool (exit $missing_tool_status)" >&2
+  [[ "$missing_tool_status" == "$expected" ]] || {
+    echo "probe accepted a missing $tool (exit $missing_tool_status, want $expected)" >&2
     exit 1
   }
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/$tool"
@@ -176,7 +178,7 @@ grep -Fq 'sudo' "$dockerfile"
 grep -Fq 'xz-utils' "$dockerfile"
 grep -Fq 'php-cli' "$dockerfile"
 grep -Fq 'python3' "$dockerfile"
-for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep libssl-dev mold; do
+for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep libssl-dev mold docker-ce-cli docker-buildx-plugin docker-compose-plugin gh nodejs npm python3-pip python3-venv gettext-base iptables uidmap; do
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
 grep -Fq 'openssh-client' "$dockerfile"

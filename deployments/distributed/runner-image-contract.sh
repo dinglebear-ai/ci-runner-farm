@@ -58,5 +58,14 @@ file --version >/dev/null 2>&1 || exit 9
 # call rg unguarded, so an image without it fails lint with "rg: command not found".
 rg --version >/dev/null 2>&1 || exit 9
 
-printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s","python":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client","archive-tools"]}\n' \
+# Container and GitHub tooling. The CLIs must run even though this image never
+# starts a daemon: workflows call docker/gh directly, and a missing binary fails
+# inside the job instead of at admission.
+docker --version >/dev/null 2>&1 || exit 10
+docker buildx version >/dev/null 2>&1 || exit 10
+docker compose version >/dev/null 2>&1 || exit 10
+gh --version >/dev/null 2>&1 || exit 10
+node --version >/dev/null 2>&1 || exit 10
+
+printf '{"schema_version":1,"compatible":true,"os":{"id":"%s","version_id":"%s"},"image_os":"%s","glibc":"%s","arch":"%s","runtimes":{"php":"%s","python":"%s"},"capabilities":["github-actions","container","otp-28-compatible","php-cli","python3","ssh-client","archive-tools","docker-cli","github-cli","node"]}\n' \
   "$os_id" "$version_id" "$expected_image_os" "$glibc" "$arch" "$php_version" "$python_version"

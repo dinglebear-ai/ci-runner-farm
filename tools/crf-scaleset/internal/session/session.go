@@ -61,6 +61,7 @@ type Poller struct {
 	runtimeDirty       bool
 	runtimeGeneration  uint64
 	acquirableHealth   map[int64]string
+	demand             map[int64]int
 	fastLanes          map[int64]fastLaneState
 	fastLaneTunings    map[int64]fastLanePolicy
 	fastLanePersistMu  sync.Mutex
@@ -85,7 +86,8 @@ func New(cfg Config) (*Poller, error) {
 		advertised: map[int64]int{},
 		pending:    map[int64][]int64{}, replay: replayed, consumed: map[string]bool{},
 		poolMu: map[int64]*sync.Mutex{}, pollCancels: map[int64]context.CancelFunc{}, pollActive: map[int64]int{}, runtimes: runtimes,
-		acquirableHealth: map[int64]string{}, fastLanes: fastLanes, fastLaneTunings: map[int64]fastLanePolicy{}}
+		acquirableHealth: map[int64]string{}, demand: map[int64]int{},
+		fastLanes: fastLanes, fastLaneTunings: map[int64]fastLanePolicy{}}
 	for key, consumed := range cfg.ConsumedHandles {
 		if consumed {
 			p.consumed[key] = true
@@ -161,12 +163,23 @@ func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capac
 	if capacity < 0 || capacity > 64 {
 		return errors.New("invalid_advertised_capacity")
 	}
+	// Synthetic handles exist so an idle pool can still be handed capacity and
+	// pick work up. Fabricating them up to the full advertised capacity, though,
+	// lets a pool with nothing queued consume every node slot and starve a pool
+	// that has real jobs waiting -- the node's concurrency is shared across all
+	// pools. Cap them at the work GitHub actually reports for this scale set.
+	// Until a statistics-bearing batch has been observed the demand is unknown,
+	// and the original full-capacity behaviour is kept rather than guessing zero.
+	target := capacity
+	if observed, known := p.demandCount(scaleSetID); known && observed < target {
+		target = observed
+	}
 	current := p.pendingSnapshot(scaleSetID)
-	if len(current) >= capacity {
+	if len(current) >= target {
 		return nil
 	}
 	handles := slices.Clone(current)
-	for len(handles) < capacity {
+	for len(handles) < target {
 		var encoded [8]byte
 		if _, err := rand.Read(encoded[:]); err != nil {
 			return err
@@ -251,6 +264,29 @@ func (p *Poller) setAssigned(scaleSetID int64, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.assigned[scaleSetID] = count
+}
+
+// demandCount reports the last observed real work for a scale set: jobs GitHub
+// has queued for it plus jobs already assigned to it. The bool is false until a
+// statistics-bearing batch has been seen, so callers can tell "no demand" apart
+// from "not measured yet".
+func (p *Poller) demandCount(scaleSetID int64) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	value, ok := p.demand[scaleSetID]
+	return value, ok
+}
+
+func (p *Poller) setDemand(scaleSetID int64, count int) {
+	if count < 0 {
+		count = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.demand == nil {
+		p.demand = map[int64]int{}
+	}
+	p.demand[scaleSetID] = count
 }
 
 func (p *Poller) setAdvertised(scaleSetID int64, capacity int) {
@@ -826,6 +862,8 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		p.setAdvertised(pool.ScaleSetID, capacity)
 	}
 	p.setAssigned(pool.ScaleSetID, batch.Statistics.TotalAssignedJobs)
+	p.setDemand(pool.ScaleSetID,
+		batch.Statistics.TotalAvailableJobs+batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)
 	if p.assignedCount(pool.ScaleSetID) == 0 {
 		p.clearPending(pool.ScaleSetID)
