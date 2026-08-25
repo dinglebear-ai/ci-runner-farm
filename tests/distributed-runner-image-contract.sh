@@ -35,7 +35,7 @@ jq -e '
   .os.id == "ubuntu" and .os.version_id == "24.04" and
   .image_os == "ubuntu24" and .glibc == "2.39" and .arch == "x64" and
   .runtimes.php == "8.3" and
-  .capabilities == ["github-actions", "container", "otp-28-compatible", "php-cli"]
+  .capabilities == ["github-actions", "container", "otp-28-compatible", "php-cli", "python3", "ssh-client"]
 ' <<<"$result" >/dev/null
 
 if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu26 "$probe" >/dev/null 2>&1; then
@@ -85,6 +85,10 @@ grep -Fq 'inotify-tools' "$dockerfile"
 grep -Fq 'sudo' "$dockerfile"
 grep -Fq 'xz-utils' "$dockerfile"
 grep -Fq 'php-cli' "$dockerfile"
+grep -Fq 'python3' "$dockerfile"
+grep -Fq 'openssh-client' "$dockerfile"
+grep -Fq '"python3"' "$probe"
+grep -Fq '"ssh-client"' "$probe"
 if grep -Eq '^USER[[:space:]]+runner' "$dockerfile"; then
   echo 'runner image must start as root so the injected entrypoint can prepare /actions-runner/_work' >&2
   exit 1
