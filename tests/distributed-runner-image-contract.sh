@@ -26,7 +26,15 @@ cat >"$tmp/bin/php" <<'EOF'
 #!/usr/bin/env bash
 printf '8.3'
 EOF
-chmod +x "$tmp/bin/getconf" "$tmp/bin/uname" "$tmp/bin/php"
+cat >"$tmp/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '3.12\n'
+EOF
+cat >"$tmp/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmp/bin/getconf" "$tmp/bin/uname" "$tmp/bin/php" "$tmp/bin/python3" "$tmp/bin/ssh"
 
 result="$(PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe")"
 jq -e '
@@ -34,7 +42,7 @@ jq -e '
   .compatible == true and
   .os.id == "ubuntu" and .os.version_id == "24.04" and
   .image_os == "ubuntu24" and .glibc == "2.39" and .arch == "x64" and
-  .runtimes.php == "8.3" and
+  .runtimes.php == "8.3" and .runtimes.python == "3.12" and
   .capabilities == ["github-actions", "container", "otp-28-compatible", "php-cli", "python3", "ssh-client"]
 ' <<<"$result" >/dev/null
 
@@ -74,6 +82,58 @@ if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 
   echo 'probe accepted PHP older than 8' >&2
   exit 1
 fi
+cat >"$tmp/bin/php" <<'EOF'
+#!/usr/bin/env bash
+printf '8.3'
+EOF
+chmod +x "$tmp/bin/php"
+
+# Python must be gated on version, not presence: tomllib lands in 3.11.
+cat >"$tmp/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+chmod +x "$tmp/bin/python3"
+set +e
+PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1
+missing_python_status=$?
+set -e
+if (( missing_python_status == 0 )); then
+  echo 'probe accepted a missing python3 runtime' >&2
+  exit 1
+fi
+[[ "$missing_python_status" == 7 ]] || {
+  echo "probe used unexpected missing-python exit code: $missing_python_status" >&2
+  exit 1
+}
+cat >"$tmp/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '3.10\n'
+EOF
+chmod +x "$tmp/bin/python3"
+if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1; then
+  echo 'probe accepted python older than 3.11 (tomllib would be absent)' >&2
+  exit 1
+fi
+cat >"$tmp/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '3.12\n'
+EOF
+chmod +x "$tmp/bin/python3"
+
+cat >"$tmp/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+chmod +x "$tmp/bin/ssh"
+set +e
+PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1
+missing_ssh_status=$?
+set -e
+[[ "$missing_ssh_status" == 8 ]] || {
+  echo "probe used unexpected missing-ssh exit code: $missing_ssh_status" >&2
+  exit 1
+}
 
 grep -Fq 'FROM ubuntu:24.04@sha256:' "$dockerfile"
 grep -Eq '^[[:space:]]*ImageOS=ubuntu24([[:space:]\\]|$)' "$dockerfile"
@@ -97,6 +157,7 @@ grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha2
 grep -Fq -- '-f deployments/distributed/runner.Dockerfile' "$workflow"
 grep -Fq -- '--entrypoint /usr/local/bin/crf-runner-image-contract' "$workflow"
 grep -Fq -- '--entrypoint php' "$workflow"
+grep -Fq -- '--entrypoint python3' "$workflow"
 grep -Fq -- '--platform linux/arm64 --load' "$workflow"
 grep -Fq '.arch == "arm64"' "$workflow"
 
