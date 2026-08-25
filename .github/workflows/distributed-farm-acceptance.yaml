@@ -21,6 +21,7 @@ on:
         default: ci-pool-ops
         options:
           - ci-pool-ops
+          - ci-pool-rust
           - ci-pool-acceptance-linux
       windows_pool:
         description: Windows scale-set routing label (use the isolated lane for fleet qualification)
