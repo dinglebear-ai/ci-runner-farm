@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [1.13.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.0...v1.13.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **distributed:** use modern runner work contract ([#97](https://github.com/dinglebear-ai/ci-runner-farm/issues/97)) ([4616a7e](https://github.com/dinglebear-ai/ci-runner-farm/commit/4616a7e3051f8c2ea8cba7b86dc550e7f083d397))
+* **node:** recover overcommitted durable placements ([#96](https://github.com/dinglebear-ai/ci-runner-farm/issues/96)) ([27e098e](https://github.com/dinglebear-ai/ci-runner-farm/commit/27e098ed1d4979505fa99972592e859a0772636d))
+* **scaleset:** accept long-poll snapshot freshness ([#93](https://github.com/dinglebear-ai/ci-runner-farm/issues/93)) ([d72a41e](https://github.com/dinglebear-ai/ci-runner-farm/commit/d72a41e3fb9b8991dd73f88174272723c869f2ba))
+
 ## [1.13.0](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.12.1...v1.13.0) (2026-08-24)
 
 
