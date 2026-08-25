@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [1.13.2](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.1...v1.13.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* **release:** assert anonymous pullability instead of mutating visibility ([#92](https://github.com/dinglebear-ai/ci-runner-farm/issues/92)) ([23bd726](https://github.com/dinglebear-ai/ci-runner-farm/commit/23bd726fe810bedc934c23ca23752f4807536f54))
+* **release:** validate existing distributed bundle ([#99](https://github.com/dinglebear-ai/ci-runner-farm/issues/99)) ([83d0597](https://github.com/dinglebear-ai/ci-runner-farm/commit/83d0597a9618faef167aa2da88ed86db9500ad85))
+
 ## [1.13.1](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.0...v1.13.1) (2026-08-25)
 
 
