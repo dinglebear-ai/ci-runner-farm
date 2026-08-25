@@ -12,12 +12,39 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ImageVersion=24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file git gnupg gosu inotify-tools jq libicu74 libssl3 libssl-dev lld locales lsb-release mold openssh-client php-cli pkg-config python3 ripgrep rsync sudo unzip wget xz-utils zip zstd \
+ && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file gettext-base git gnupg gosu inotify-tools iptables jq libicu74 libssl3 libssl-dev lld locales lsb-release mold nodejs npm openssh-client php-cli pkg-config python3 python3-pip python3-venv ripgrep rsync sudo uidmap unzip wget xz-utils zip zstd \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1001 --shell /bin/bash runner \
  && install -d -o runner -g runner /actions-runner /actions-runner/_work \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
+
+# Docker and GitHub CLIs ship from their own signed repositories rather than the
+# Ubuntu archive. Only the CLIs and the buildx/compose plugins are installed --
+# not the daemon. Workflows reach a daemon through a socket the node supplies;
+# nothing here starts dockerd.
+RUN set -eux; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    arch="$(dpkg --print-architecture)"; \
+    codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"; \
+    curl -fsSL --retry 3 https://download.docker.com/linux/ubuntu/gpg \
+      -o /etc/apt/keyrings/docker.asc; \
+    chmod a+r /etc/apt/keyrings/docker.asc; \
+    echo "deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" \
+      > /etc/apt/sources.list.d/docker.list; \
+    curl -fsSL --retry 3 https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli.gpg; \
+    chmod a+r /etc/apt/keyrings/githubcli.gpg; \
+    echo "deb [arch=$arch signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
+    rm -rf /var/lib/apt/lists/*; \
+    docker --version; \
+    docker buildx version; \
+    docker compose version; \
+    gh --version
 
 WORKDIR /actions-runner
 RUN set -eux; \
