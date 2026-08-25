@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [1.13.3](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.2...v1.13.3) (2026-08-25)
+
+
+### Bug Fixes
+
+* **distributed:** runner-image parity — Python >=3.11, ripgrep, archive tools ([#102](https://github.com/dinglebear-ai/ci-runner-farm/issues/102)) ([eb632e8](https://github.com/dinglebear-ai/ci-runner-farm/commit/eb632e8))
+* **release:** synchronize 1.13.2 artifacts ([#101](https://github.com/dinglebear-ai/ci-runner-farm/issues/101)) ([440f119](https://github.com/dinglebear-ai/ci-runner-farm/commit/440f119))
+
 ## [1.13.2](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.1...v1.13.2) (2026-08-25)
 
 
