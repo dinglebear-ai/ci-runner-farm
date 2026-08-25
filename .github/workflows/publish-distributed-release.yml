@@ -321,8 +321,14 @@ jobs:
             trap 'rm -rf "$tmp"' EXIT
             gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --pattern "$archive_name" --pattern "$checksum_name" --dir "$tmp"
-            cmp "$ARCHIVE" "$tmp/$archive_name"
-            cmp "$CHECKSUM" "$tmp/$checksum_name"
+            # A release rerun rebuilds the bundle from the same validated source,
+            # but compiler and archive metadata do not promise byte-for-byte
+            # reproducibility across fresh hosted runners. Treat an existing
+            # release asset as immutable and validate its own checksum identity and
+            # complete bundle contract instead of comparing it with this rerun's
+            # independently built bytes.
+            (cd "$tmp" && sha256sum -c "$checksum_name")
+            scripts/verify-distributed-bundle.sh "$tmp/$archive_name"
           else
             gh release upload "$RELEASE_TAG" "$ARCHIVE" "$CHECKSUM" --repo "$GITHUB_REPOSITORY"
           fi
