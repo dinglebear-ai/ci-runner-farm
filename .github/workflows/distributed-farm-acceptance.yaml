@@ -78,7 +78,15 @@ jobs:
           test -r /sys/fs/cgroup/cgroup.controllers
           grep -Eq '(^| )cpu( |$)' /sys/fs/cgroup/cgroup.controllers
           grep -Eq '(^| )memory( |$)' /sys/fs/cgroup/cgroup.controllers
-          docker info --format 'cgroup_driver={{.CgroupDriver}} cgroup_version={{.CgroupVersion}}'
+          grep -Eq ' - cgroup2 ' /proc/self/mountinfo
+          test ! -S /var/run/docker.sock
+          test "$(cat /sys/fs/cgroup/memory.max)" != max
+          test "$(cut -d ' ' -f 1 /sys/fs/cgroup/cpu.max)" != max
+          test "$(cat /sys/fs/cgroup/pids.max)" != max
+          printf 'memory.max=%s cpu.max=%s pids.max=%s\n' \
+            "$(cat /sys/fs/cgroup/memory.max)" \
+            "$(cat /sys/fs/cgroup/cpu.max)" \
+            "$(cat /sys/fs/cgroup/pids.max)"
 
   distributed-linux:
     if: inputs.target == 'distributed-linux'
