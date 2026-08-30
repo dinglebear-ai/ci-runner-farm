@@ -117,6 +117,19 @@ defmodule CrfController.ScaleSetWireTest do
 
     assert {:error, :unexpected_scaleset_fields} =
              ScaleSetWire.decode_response(unexpected, "scaleset-1")
+
+    regression =
+      :json.encode(%{
+        "schema_version" => 1,
+        "request_id" => "scaleset-1",
+        "ok" => false,
+        "code" => "sequence_regression",
+        "result" => %{"last_sequence" => 41}
+      })
+      |> IO.iodata_to_binary()
+
+    assert {:error, {:scaleset_sequence_regression, 41}} =
+             ScaleSetWire.decode_response(regression, "scaleset-1")
   end
 
   test "fresh snapshot parses acquired handles while stale snapshot is rejected" do

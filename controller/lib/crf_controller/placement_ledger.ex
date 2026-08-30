@@ -58,12 +58,12 @@ defmodule CrfController.PlacementLedger do
     )
   end
 
+  def release_terminal_fence(server \\ __MODULE__, placement_id) do
+    GenServer.call(server, {:release_terminal_fence, placement_id})
+  end
+
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
   def tombstone_snapshot(server \\ __MODULE__), do: GenServer.call(server, :tombstone_snapshot)
-
-  def prune_before_generation(server \\ __MODULE__, node_id, generation) do
-    GenServer.call(server, {:prune_before_generation, node_id, generation})
-  end
 
   @impl true
   def init(opts) do
@@ -106,34 +106,6 @@ defmodule CrfController.PlacementLedger do
       {:reply, {:ok, placement}, next_state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:prune_before_generation, node_id, generation}, _from, state)
-      when is_binary(node_id) and is_integer(generation) and generation > 0 do
-    retained =
-      Map.reject(state.tombstones, fn {_id, tombstone} ->
-        tombstone.node_id == node_id and tombstone.node_generation < generation
-      end)
-
-    if map_size(retained) == map_size(state.tombstones) do
-      {:reply, :ok, state}
-    else
-      next_state = %{state | tombstones: retained} |> rebuild_commands()
-
-      case PlacementStateStore.append(
-             state.state_path,
-             {:prune_before_generation, node_id, generation}
-           ) do
-        :ok ->
-          # The prune is now authoritative in the WAL. A checkpoint failure is
-          # non-ambiguous: recovery replays this record after any stale puts.
-          _ = checkpoint_state(next_state)
-          {:reply, :ok, next_state}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
     end
   end
 
@@ -249,6 +221,30 @@ defmodule CrfController.PlacementLedger do
 
   def handle_call({:get, placement_id}, _from, state) do
     {:reply, fetch_record(state, placement_id), state}
+  end
+
+  def handle_call({:release_terminal_fence, placement_id}, _from, state) do
+    case Map.fetch(state.tombstones, placement_id) do
+      {:ok, tombstone} ->
+        next_state = %{
+          state
+          | tombstones: Map.delete(state.tombstones, placement_id),
+            commands: Map.delete(state.commands, tombstone.command_id)
+        }
+
+        case PlacementStateStore.append(state.state_path, {:delete_tombstone, placement_id}) do
+          :ok -> {:reply, :ok, maybe_checkpoint(next_state)}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        if Map.has_key?(state.placements, placement_id) do
+          {:reply, {:error, :placement_not_terminal}, state}
+        else
+          # Idempotent after a lost success response or restart.
+          {:reply, :ok, state}
+        end
+    end
   end
 
   def handle_call(:snapshot, _from, state) do
@@ -383,16 +379,6 @@ defmodule CrfController.PlacementLedger do
     end
 
     state
-  end
-
-  defp rebuild_commands(state) do
-    commands =
-      Map.new(
-        Map.values(state.placements) ++ Map.values(state.tombstones),
-        &{&1.command_id, &1.id}
-      )
-
-    %{state | commands: commands}
   end
 
   defp put_placement(state, %Placement{} = placement) do

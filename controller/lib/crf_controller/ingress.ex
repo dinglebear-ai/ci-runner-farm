@@ -99,16 +99,7 @@ defmodule CrfController.Ingress do
       draining: false
     }
 
-    NodeRegistry.register(state.node_registry, attrs,
-      now_ms: now_ms,
-      before_commit: fn registered ->
-        PlacementLedger.prune_before_generation(
-          state.placement_ledger,
-          registered.id,
-          registered.generation
-        )
-      end
-    )
+    NodeRegistry.register(state.node_registry, attrs, now_ms: now_ms)
     |> normalize()
   end
 

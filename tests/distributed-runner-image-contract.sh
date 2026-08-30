@@ -34,11 +34,11 @@ cat >"$tmp/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-for tool in unzip zip zstd wget rsync file rg docker gh node; do
+for tool in unzip zip zstd wget rsync file rg docker dockerd gh node; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/$tool"
 done
 chmod +x "$tmp/bin/getconf" "$tmp/bin/uname" "$tmp/bin/php" "$tmp/bin/python3" "$tmp/bin/ssh" \
-  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg" "$tmp/bin/docker" "$tmp/bin/gh" "$tmp/bin/node"
+  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg" "$tmp/bin/docker" "$tmp/bin/dockerd" "$tmp/bin/gh" "$tmp/bin/node"
 
 result="$(PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe")"
 jq -e '
@@ -147,7 +147,7 @@ chmod +x "$tmp/bin/ssh"
 
 # Every archive/transfer tool is individually required: a runner missing any one
 # of them fails inside the job, so the contract must reject the image up front.
-for tool in unzip:9 zip:9 zstd:9 wget:9 rsync:9 file:9 rg:9 docker:10 gh:10 node:10; do
+for tool in unzip:9 zip:9 zstd:9 wget:9 rsync:9 file:9 rg:9 docker:10 dockerd:10 gh:10 node:10; do
   expected="${tool##*:}"
   tool="${tool%%:*}"
   cat >"$tmp/bin/$tool" <<'EOF'
@@ -178,9 +178,11 @@ grep -Fq 'sudo' "$dockerfile"
 grep -Fq 'xz-utils' "$dockerfile"
 grep -Fq 'php-cli' "$dockerfile"
 grep -Fq 'python3' "$dockerfile"
-for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep libssl-dev mold docker-ce-cli docker-buildx-plugin docker-compose-plugin gh nodejs npm python3-pip python3-venv gettext-base iptables uidmap; do
+for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep ruby libssl-dev mold containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh nodejs npm python3-pip python3-venv gettext-base iptables uidmap; do
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
+grep -Fq 'usermod -aG docker runner' "$dockerfile"
+grep -Fq "'{\"storage-driver\":\"vfs\"}'" "$dockerfile"
 grep -Fq 'openssh-client' "$dockerfile"
 grep -Fq '"python3"' "$probe"
 grep -Fq '"ssh-client"' "$probe"

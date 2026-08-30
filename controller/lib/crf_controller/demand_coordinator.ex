@@ -157,9 +157,15 @@ defmodule CrfController.DemandCoordinator do
     result =
       case ensure_sessions(state) do
         {:ok, state} ->
-          case do_reconcile(state, now_ms, now_unix_ms) do
-            {:ok, value, state} -> {{:ok, value}, state}
-            {:error, reason, state} -> {{:error, reason}, maybe_reset_sessions(state, reason)}
+          case reclaim_orphaned_placements(state, now_ms) do
+            :ok ->
+              case do_reconcile(state, now_ms, now_unix_ms) do
+                {:ok, value, state} -> {{:ok, value}, state}
+                {:error, reason, state} -> {{:error, reason}, maybe_reset_sessions(state, reason)}
+              end
+
+            {:error, reason} ->
+              {{:error, reason}, state}
           end
 
         {:error, reason, state} ->
@@ -251,6 +257,21 @@ defmodule CrfController.DemandCoordinator do
   end
 
   defp force_abandon_now(placement_id, now_ms, state) do
+    abandon_now(placement_id, "operator_abandoned", now_ms, state)
+  end
+
+  defp reclaim_orphaned_placements(state, now_ms) do
+    state.placement_health.orphaned
+    |> Enum.reduce_while(:ok, fn orphan, :ok ->
+      case abandon_now(orphan.placement_id, "placement_lost", now_ms, state) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, :placement_terminal} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:lost_placement_reclaim_failed, reason}}}
+      end
+    end)
+  end
+
+  defp abandon_now(placement_id, detail_code, now_ms, state) do
     with {:ok, %Placement{} = placement} <-
            PlacementLedger.get(state.ctx.placement_ledger, placement_id),
          false <- Placement.terminal?(placement),
@@ -258,7 +279,7 @@ defmodule CrfController.DemandCoordinator do
            PlacementLedger.fail_placement(
              state.ctx.placement_ledger,
              placement_id,
-             "operator_abandoned",
+             detail_code,
              now_ms: now_ms
            ) do
       discard_mailbox_command(state.ctx.node_mailbox, placement.command_id)
@@ -294,14 +315,21 @@ defmodule CrfController.DemandCoordinator do
             {:ok, _result} ->
               release_offer_for_handle(ctx.offer_ledger, jit.pool_id, jit.work_handle)
 
-              case ScaleSetClient.confirm_jit_retirement(
-                     ctx.scale_set_client,
-                     jit.pool_id,
-                     jit.scale_set_id,
-                     jit.work_handle,
-                     Map.get(jit, :ownership_revision)
-                   ) do
-                {:ok, _} -> errors
+              with :ok <-
+                     PlacementLedger.release_terminal_fence(
+                       ctx.placement_ledger,
+                       placement.id
+                     ),
+                   {:ok, _} <-
+                     ScaleSetClient.confirm_jit_retirement(
+                       ctx.scale_set_client,
+                       jit.pool_id,
+                       jit.scale_set_id,
+                       jit.work_handle,
+                       Map.get(jit, :ownership_revision)
+                     ) do
+                errors
+              else
                 {:error, reason} -> [reason | errors]
               end
 

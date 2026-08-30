@@ -120,14 +120,9 @@ defmodule CrfController.PlacementStateStore do
     encode_journal_map(%{"op" => "put_tombstone", "record" => tombstone_map(tombstone)})
   end
 
-  defp encode_journal_record({:prune_before_generation, node_id, generation})
-       when is_binary(node_id) and byte_size(node_id) in 1..128 and is_integer(generation) and
-              generation > 0 do
-    encode_journal_map(%{
-      "op" => "prune_before_generation",
-      "node_id" => node_id,
-      "generation" => generation
-    })
+  defp encode_journal_record({:delete_tombstone, placement_id})
+       when is_binary(placement_id) and byte_size(placement_id) in 1..128 do
+    encode_journal_map(%{"op" => "delete_tombstone", "placement_id" => placement_id})
   end
 
   defp encode_journal_record(_), do: {:error, :invalid_placement_state}
@@ -205,6 +200,15 @@ defmodule CrfController.PlacementStateStore do
                tombstones: Map.put(state.tombstones, tombstone.id, tombstone)
              }}
           end
+
+        %{"op" => "delete_tombstone", "placement_id" => placement_id} = value
+        when map_size(value) == 2 and is_binary(placement_id) and
+               byte_size(placement_id) in 1..128 ->
+          {:ok,
+           %{
+             state
+             | tombstones: Map.delete(state.tombstones, placement_id)
+           }}
 
         %{
           "op" => "prune_before_generation",

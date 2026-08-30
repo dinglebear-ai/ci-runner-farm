@@ -44,4 +44,19 @@ defmodule CrfController.ScaleSetSequenceTest do
 
     File.rm_rf!(root)
   end
+
+  test "advance_to durably fast-forwards a sidecar replay fence" do
+    root =
+      Path.join(System.tmp_dir!(), "crf-sequence-advance-#{System.unique_integer([:positive])}")
+
+    path = Path.join(root, "sequence.json")
+
+    assert :ok = ScaleSetSequence.advance_to(path, "controller-1", 41)
+    assert {:ok, 42} = ScaleSetSequence.reserve(path, "controller-1")
+
+    assert {:error, :invalid_scaleset_sequence_advance} =
+             ScaleSetSequence.advance_to(path, "controller-1", 40)
+
+    File.rm_rf!(root)
+  end
 end

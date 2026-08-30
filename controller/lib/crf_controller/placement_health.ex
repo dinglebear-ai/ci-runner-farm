@@ -56,8 +56,8 @@ defmodule CrfController.PlacementHealth do
   defp unavailable?(%Placement{} = placement, %Node{} = node) do
     cond do
       node.generation < placement.node_generation -> true
-      node.generation == placement.node_generation -> false
       MapSet.member?(node.active_placements, placement.id) -> false
+      placement.state == :commanded and node.generation == placement.node_generation -> false
       true -> true
     end
   end

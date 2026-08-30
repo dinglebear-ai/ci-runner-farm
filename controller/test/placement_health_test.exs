@@ -32,6 +32,19 @@ defmodule CrfController.PlacementHealthTest do
     assert healthy.orphaned == []
   end
 
+  test "same-generation node must keep reporting an acknowledged placement active" do
+    {:ok, placement} = placement(7)
+    {:ok, acknowledged} = Placement.command_ack(placement, :accepted, nil, 20)
+    {:ok, node} = node(7, [])
+
+    first = PlacementHealth.update([acknowledged], [node], %{}, 100, 1_000)
+    assert first.missing_since == %{"placement-1" => 100}
+    assert first.orphaned == []
+
+    expired = PlacementHealth.update([acknowledged], [node], first.missing_since, 1_100, 1_000)
+    assert [%{placement_id: "placement-1", missing_for_ms: 1_000}] = expired.orphaned
+  end
+
   test "terminal placements never remain orphaned" do
     {:ok, placement} = placement(7)
     {:ok, finished} = Placement.advance(placement, :finished, nil, 20)

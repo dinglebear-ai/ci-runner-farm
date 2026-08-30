@@ -12,17 +12,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ImageVersion=24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file gettext-base git gnupg gosu inotify-tools iptables jq libicu74 libssl3 libssl-dev lld locales lsb-release mold nodejs npm openssh-client php-cli pkg-config python3 python3-pip python3-venv ripgrep rsync sudo uidmap unzip wget xz-utils zip zstd \
+ && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file gettext-base git gnupg gosu inotify-tools iptables jq libicu74 libssl3 libssl-dev lld locales lsb-release mold nodejs npm openssh-client php-cli pkg-config python3 python3-pip python3-venv ripgrep rsync ruby sudo uidmap unzip wget xz-utils zip zstd \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1001 --shell /bin/bash runner \
  && install -d -o runner -g runner /actions-runner /actions-runner/_work \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
 
-# Docker and GitHub CLIs ship from their own signed repositories rather than the
-# Ubuntu archive. Only the CLIs and the buildx/compose plugins are installed --
-# not the daemon. Workflows reach a daemon through a socket the node supplies;
-# nothing here starts dockerd.
+# Docker and GitHub tooling ships from signed upstream repositories rather than
+# the Ubuntu archive. The daemon is installed but remains stopped by default;
+# only an explicitly privileged, START_DOCKER_SERVICE=true runner starts its
+# container-local daemon. No host Docker socket is mounted.
 RUN set -eux; \
     install -m 0755 -d /etc/apt/keyrings; \
     arch="$(dpkg --print-architecture)"; \
@@ -39,12 +39,21 @@ RUN set -eux; \
       > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
+      containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
+    usermod -aG docker runner; \
     rm -rf /var/lib/apt/lists/*; \
     docker --version; \
+    dockerd --version; \
     docker buildx version; \
     docker compose version; \
     gh --version
+
+# The runner itself is a container. An inner overlay2 snapshotter cannot mount
+# another overlay filesystem on the outer overlay upperdir on Unraid, so Buildx
+# fails while booting BuildKit. Prefer correctness over copy-on-write speed for
+# this explicitly enabled, ephemeral DinD daemon.
+RUN install -d /etc/docker \
+ && printf '%s\n' '{"storage-driver":"vfs"}' > /etc/docker/daemon.json
 
 WORKDIR /actions-runner
 RUN set -eux; \

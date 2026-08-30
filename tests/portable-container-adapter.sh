@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/crf-container-adapter.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/mock" "$tmp/state" "$tmp/work"
 
@@ -212,7 +212,8 @@ set -euo pipefail
 [[ "${RUNNER_ALLOW_RUNASROOT:-}" == 1 ]]
 [[ ! -e "${CRF_SECRET_DIR}/secret.in" ]]
 for file in .runner .credentials .credentials_rsaparams; do
-  [[ -s "$file" && "$(stat -c %a "$file")" == 600 ]]
+  mode="$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file")"
+  [[ -s "$file" && "$mode" == 600 ]]
 done
 printf passed >"${CRF_TEST_DOCKER_ROOT}/entrypoint-ran"
 RUNNER
@@ -282,6 +283,7 @@ grep -Fq -- '--memory 1073741824' "$tmp/mock/run.args"
 grep -Fq -- 'type=volume,src=crf-dist-work-' "$tmp/mock/run.args"
 grep -Fq -- 'dst=/actions-runner/_work,volume-nocopy' "$tmp/mock/run.args"
 grep -Fq -- 'dst=/opt/crf-bootstrap,readonly,volume-nocopy' "$tmp/mock/run.args"
+if grep -Eq -- '--privileged|START_DOCKER_SERVICE=true' "$tmp/mock/run.args"; then exit 1; fi
 if grep -Eq 'type=bind|src=.*/tmp|entrypoint\.sh' "$tmp/mock/run.args"; then exit 1; fi
 grep -Eq '^- b{64}:/opt/crf-bootstrap$' "$tmp/mock/cp.args"
 [[ "$(tar -tf "$tmp/mock/adapter.tar")" == crf-container-adapter ]]
@@ -426,6 +428,22 @@ reply="$(printf '%s\n' "$retry_start" | "$adapter")"
 jq -e '.payload.result == "deferred" and .payload.detail_code == "container_start_uncertain"' <<<"$reply" >/dev/null
 reply="$(printf '%s\n' "$retry_start" | "$adapter")"
 jq -e '.payload.result == "started"' <<<"$reply" >/dev/null
+
+# Retire the retry fixture before starting a second placement. The Docker mock
+# models one live container at a time, matching a single-slot node.
+retry_cancel="$(jq -cn '{schema_version:1,payload:{action:"cancel",placement_id:"placement-retry",expected_id:null}}')"
+reply="$(printf '%s\n' "$retry_cancel" | "$adapter")"
+jq -e '.payload.result == "terminal" and .payload.outcome == "cancelled"' <<<"$reply" >/dev/null
+
+# Trusted nodes can opt into isolated DinD explicitly. The default remains
+# unprivileged, and malformed configuration fails closed.
+dind_start="$(jq -cn --arg jit "$jit" '{schema_version:1,payload:{action:"start",placement_id:"placement-dind",command_id:"command-dind",pool_id:"ops",runner_name:"runner-dind",resources:{cpu_millis:750,memory_bytes:1073741824},jit_config:$jit}}')"
+reply="$(printf '%s\n' "$dind_start" | CRF_ENABLE_DIND=true "$adapter")"
+jq -e '.payload.result == "started"' <<<"$reply" >/dev/null
+grep -Fq -- '--privileged' "$tmp/mock/run.args"
+grep -Fq -- 'START_DOCKER_SERVICE=true' "$tmp/mock/run.args"
+reply="$(printf '%s\n' "$inspect" | CRF_ENABLE_DIND=invalid "$adapter")"
+jq -e '.payload.result == "rejected" and .payload.detail_code == "invalid_runtime_configuration"' <<<"$reply" >/dev/null
 
 export CRF_RUNNER_IMAGE=example.invalid/runner:latest
 reply="$(printf '%s\n' "$inspect" | "$adapter")"

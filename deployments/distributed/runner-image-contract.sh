@@ -58,10 +58,11 @@ file --version >/dev/null 2>&1 || exit 9
 # call rg unguarded, so an image without it fails lint with "rg: command not found".
 rg --version >/dev/null 2>&1 || exit 9
 
-# Container and GitHub tooling. The CLIs must run even though this image never
-# starts a daemon: workflows call docker/gh directly, and a missing binary fails
-# inside the job instead of at admission.
+# Container and GitHub tooling. The daemon stays stopped unless an explicitly
+# privileged runner opts into container-local DinD, but its binary must be
+# present so that opt-in cannot fail only after a job has been assigned.
 docker --version >/dev/null 2>&1 || exit 10
+dockerd --version >/dev/null 2>&1 || exit 10
 docker buildx version >/dev/null 2>&1 || exit 10
 docker compose version >/dev/null 2>&1 || exit 10
 gh --version >/dev/null 2>&1 || exit 10

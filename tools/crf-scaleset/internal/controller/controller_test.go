@@ -659,6 +659,30 @@ func TestApplySessionsRestoresEffectiveEligibilityAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRepeatedEligibilityReassertionPreservesMatchingSessions(t *testing.T) {
+	cfg := validRuntimeConfig(t.TempDir())
+	api := &fakeAPI{nextID: 3, sets: map[int64]crfgithub.ScaleSet{}}
+	control, err := New(cfg, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+
+	first := control.Handle(context.Background(), request(cfg, "apply_sessions", 1, `{"eligible":true}`))
+	if !first.OK {
+		t.Fatalf("initial session application failed: %#v", first)
+	}
+	originalSupervisor, originalPoller := control.super, control.poller
+
+	second := control.Handle(context.Background(), request(cfg, "apply_sessions", 2, `{"eligible":true}`))
+	if !second.OK {
+		t.Fatalf("eligibility reassertion failed: %#v", second)
+	}
+	if control.super != originalSupervisor || control.poller != originalPoller {
+		t.Fatal("unchanged eligibility reassertion restarted healthy sessions")
+	}
+}
+
 func TestStopSessionsClosesPollerAfterSupervisorError(t *testing.T) {
 	poller := &closeTrackingPoller{}
 	done := make(chan error, 1)

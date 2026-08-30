@@ -37,6 +37,7 @@ defmodule CrfController.DemandCoordinatorTest do
       do: GenServer.call(server, {:set_pool_health, pool_id, healthy})
 
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
+    def fail_retirement(server, enabled), do: GenServer.call(server, {:fail_retirement, enabled})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
     @impl true
@@ -52,6 +53,7 @@ defmodule CrfController.DemandCoordinatorTest do
          last_retire_payload: nil,
          last_confirm_payload: nil,
          last_leases: %{},
+         fail_retirement: false,
          fail_next_snapshot: false
        }}
     end
@@ -93,6 +95,10 @@ defmodule CrfController.DemandCoordinatorTest do
         Enum.map(states, &Map.put_new(&1, :ownership_revision, state.snapshot.ownership_revision))
 
       {:reply, :ok, %{state | jit_states: states}}
+    end
+
+    def handle_call({:fail_retirement, enabled}, _from, state) when is_boolean(enabled) do
+      {:reply, :ok, %{state | fail_retirement: enabled}}
     end
 
     def handle_call(:fail_next_snapshot, _from, state) do
@@ -143,19 +149,12 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:call, "retire_jit", payload}, _from, state) do
-      pool_id = payload["pool_id"]
-      handle = payload["work_handle"]
-
-      jit_states =
-        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
-
-      {:reply, {:ok, %{"retired" => true}},
-       %{
-         state
-         | retire_calls: state.retire_calls + 1,
-           last_retire_payload: payload,
-           jit_states: jit_states
-       }}
+      if state.fail_retirement do
+        {:reply, {:error, {:scaleset_error, "jit_runner_delete_failed"}},
+         %{state | retire_calls: state.retire_calls + 1, last_retire_payload: payload}}
+      else
+        retire_jit(payload, state)
+      end
     end
 
     def handle_call({:call, "confirm_jit_retirement", payload}, _from, state) do
@@ -170,6 +169,22 @@ defmodule CrfController.DemandCoordinatorTest do
          state
          | confirm_calls: state.confirm_calls + 1,
            last_confirm_payload: payload,
+           jit_states: jit_states
+       }}
+    end
+
+    defp retire_jit(payload, state) do
+      pool_id = payload["pool_id"]
+      handle = payload["work_handle"]
+
+      jit_states =
+        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
+
+      {:reply, {:ok, %{"retired" => true}},
+       %{
+         state
+         | retire_calls: state.retire_calls + 1,
+           last_retire_payload: payload,
            jit_states: jit_states
        }}
     end
@@ -321,6 +336,76 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "replayed acquired handle behind a terminal fence is issued only to retire", ctx do
+    unless ctx.disabled do
+      handle = 104
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, handle)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 80
+               )
+
+      assert {:ok, _terminal} =
+               PlacementLedger.fail_placement(
+                 ctx.placements,
+                 identity.placement_id,
+                 "historical_failure",
+                 now_ms: 90
+               )
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [handle], 1)
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.issue_calls == 1
+      assert sidecar.retire_calls == 1
+      assert sidecar.confirm_calls == 1
+
+      assert sidecar.last_retire_payload["expected_ownership_revision"] ==
+               sidecar.snapshot.ownership_revision
+
+      assert {:error, :unknown_placement} =
+               PlacementLedger.get(ctx.placements, identity.placement_id)
+    end
+  end
+
+  test "replayed acquired retirement failure preserves its terminal fence", ctx do
+    unless ctx.disabled do
+      handle = 105
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, handle)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 80
+               )
+
+      assert {:ok, _terminal} =
+               PlacementLedger.fail_placement(
+                 ctx.placements,
+                 identity.placement_id,
+                 "historical_failure",
+                 now_ms: 90
+               )
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [handle], 1)
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.blocked_pools == ["build"]
+      assert {:ok, terminal} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert terminal.state == :failed
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.issue_calls == 1
+      assert sidecar.retire_calls == 1
+      assert sidecar.confirm_calls == 0
+    end
+  end
+
   test "active deterministic placement is reconstructed without another JIT issuance", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 501)
@@ -354,7 +439,7 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "unassigned active JIT placement is cancelled after the idle timeout", ctx do
+  test "queue demand dropping to zero does not cancel an active JIT placement", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 502)
 
@@ -394,20 +479,11 @@ defmodule CrfController.DemandCoordinatorTest do
       assert unchanged.updated_at_ms == 100
 
       assert {:ok, after_timeout} = reconcile(ctx.demand, 90_100)
-      assert after_timeout.reclaimed_idle_placements == 1
-      assert NodeMailbox.size(ctx.mailbox) == 1
-      assert {:ok, cancelling} = PlacementLedger.get(ctx.placements, identity.placement_id)
-      assert cancelling.updated_at_ms == 90_100
-      assert cancelling.detail_code == "idle_cancel_requested"
-
-      assert {:ok, pending} = reconcile(ctx.demand, 90_101)
-      assert pending.reclaimed_idle_placements == 0
-      assert NodeMailbox.size(ctx.mailbox) == 1
-
-      assert {:ok, command} =
-               NodeMailbox.next_for(ctx.mailbox, "dookie", 7, now_unix_ms: @now_unix_ms + 90_100)
-
-      assert command.payload == {:cancel_placement, identity.placement_id}
+      assert after_timeout.reclaimed_idle_placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert {:ok, still_active} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert still_active.state == :observed
+      assert still_active.updated_at_ms == 100
     end
   end
 
@@ -552,7 +628,7 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "missing placement becomes operator-visible orphan without automatic retry", ctx do
+  test "missing placement is reclaimed after the configured loss grace", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 801)
 
@@ -576,7 +652,19 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, ^command} =
                NodeMailbox.enqueue(ctx.mailbox, command, now_unix_ms: @now_unix_ms)
 
-      assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
+      assert {:ok, accepted} =
+               PlacementLedger.command_ack(
+                 ctx.placements,
+                 "dookie",
+                 7,
+                 placement.command_id,
+                 placement.idempotency_key,
+                 :accepted,
+                 nil,
+                 now_ms: 75
+               )
+
+      assert accepted.state == :accepted
       assert {:ok, _} = reconcile(ctx.demand, 100)
       assert CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements == []
 
@@ -588,15 +676,11 @@ defmodule CrfController.DemandCoordinatorTest do
 
       assert {:ok, _} = reconcile(ctx.demand, 1_100)
 
-      assert [orphan] =
-               CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements
-
-      assert orphan.placement_id == identity.placement_id
-      assert orphan.state == :commanded
-      assert orphan.missing_for_ms == 1_000
-      assert NodeMailbox.size(ctx.mailbox) == 1
-      assert {:ok, still_live} = PlacementLedger.get(ctx.placements, identity.placement_id)
-      assert still_live.state == :commanded
+      assert CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements == []
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert {:ok, reclaimed} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert reclaimed.state == :failed
+      assert reclaimed.detail_code == "placement_lost"
     end
   end
 
@@ -637,7 +721,6 @@ defmodule CrfController.DemandCoordinatorTest do
 
       assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
       assert {:ok, _} = reconcile(ctx.demand, 100)
-      assert {:ok, _} = reconcile(ctx.demand, 1_100)
 
       assert {:error, :explicit_force_required} =
                DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
@@ -671,7 +754,12 @@ defmodule CrfController.DemandCoordinatorTest do
 
       assert ["dookie"] = NodeRegistry.prune_stale(ctx.registry, 20_000)
       assert {:ok, _} = reconcile(ctx.demand, 100)
-      assert {:ok, _} = reconcile(ctx.demand, 1_100)
+
+      assert {:error, :explicit_force_required} =
+               DemandCoordinator.force_abandon_placement(ctx.demand, identity.placement_id,
+                 now_ms: 1_100
+               )
+
       assert [_orphan] = CrfController.DemandCoordinator.status(ctx.demand).orphaned_placements
 
       assert {:ok, _node} = register_node_generation(ctx.registry, 7)
@@ -822,6 +910,40 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "a busy runner retirement blocks only its pool and does not reset sessions", ctx do
+    unless ctx.disabled do
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 611,
+            state: "retirement_started",
+            descriptor_available: false
+          },
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 612,
+            state: "retirement_started",
+            descriptor_available: false
+          }
+        ])
+
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.blocked_pools == ["build"]
+      assert first.leases == %{"build" => 0}
+      assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 1
+
+      assert {:ok, second} = reconcile(ctx.demand, 200)
+      assert second.blocked_pools == ["build"]
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 2
+    end
+  end
+
   test "durable retired proof is confirmed directly with its historical ownership fence", ctx do
     unless ctx.disabled do
       historical_revision = String.duplicate("c", 64)
@@ -851,9 +973,9 @@ defmodule CrfController.DemandCoordinatorTest do
       assert sidecar.confirm_calls == 1
       assert sidecar.last_confirm_payload["expected_ownership_revision"] == historical_revision
       assert sidecar.jit_states == []
-      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
-      assert placement.state == :failed
-      assert placement.detail_code == "jit_retired"
+
+      assert {:error, :unknown_placement} =
+               PlacementLedger.get(ctx.placements, identity.placement_id)
     end
   end
 

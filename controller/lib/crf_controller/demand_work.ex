@@ -1,7 +1,6 @@
 defmodule CrfController.DemandWork do
   alias CrfController.{
     Node,
-    NodeCommand,
     NodeMailbox,
     NodeRegistry,
     OfferLedger,
@@ -20,13 +19,31 @@ defmodule CrfController.DemandWork do
   def reconcile_jit_states(jit_states, ctx, now_ms, now_unix_ms) when is_list(jit_states) do
     jit_states
     |> Enum.sort_by(&{&1.pool_id, &1.scale_set_id, &1.work_handle})
-    |> Enum.reduce_while({:ok, MapSet.new()}, fn jit, {:ok, blocked} ->
-      case reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
-        :ok -> {:cont, {:ok, blocked}}
-        {:blocked, pool_id} -> {:cont, {:ok, MapSet.put(blocked, pool_id)}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    |> Enum.reduce_while({:ok, MapSet.new(), MapSet.new()}, fn jit,
+                                                               {:ok, blocked, retry_blocked} ->
+      if MapSet.member?(retry_blocked, jit.pool_id) do
+        {:cont, {:ok, blocked, retry_blocked}}
+      else
+        case reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
+          :ok ->
+            {:cont, {:ok, blocked, retry_blocked}}
+
+          {:blocked, pool_id} ->
+            {:cont, {:ok, MapSet.put(blocked, pool_id), retry_blocked}}
+
+          {:error, {:scaleset_error, "jit_runner_delete_failed"}} ->
+            {:cont,
+             {:ok, MapSet.put(blocked, jit.pool_id), MapSet.put(retry_blocked, jit.pool_id)}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
       end
     end)
+    |> case do
+      {:ok, blocked, _retry_blocked} -> {:ok, blocked}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   def reconcile_acquired(snapshot, jit_states, ctx, now_ms, now_unix_ms) do
@@ -52,7 +69,16 @@ defmodule CrfController.DemandWork do
         if MapSet.member?(issued, {pool.pool_id, handle}) do
           {:cont, {:ok, blocked, slots}}
         else
-          reconcile_acquired_with_capacity(pool, handle, slots, ctx, now_ms, now_unix_ms, blocked)
+          reconcile_acquired_with_capacity(
+            pool,
+            handle,
+            slots,
+            snapshot.ownership_revision,
+            ctx,
+            now_ms,
+            now_unix_ms,
+            blocked
+          )
         end
       end)
       |> case do
@@ -62,32 +88,19 @@ defmodule CrfController.DemandWork do
     end)
   end
 
-  def reclaim_unassigned(snapshot, ctx, now_ms, now_unix_ms) do
-    assigned_by_pool = Map.new(snapshot.pools, &{&1.pool_id, &1.assigned_jobs})
-
-    ctx.placement_ledger
-    |> PlacementLedger.snapshot()
-    |> Enum.reduce_while({:ok, 0}, fn placement, {:ok, reclaimed} ->
-      idle =
-        Map.get(assigned_by_pool, placement.pool_id, 0) == 0 and
-          placement.state in [:observed, :running] and
-          now_ms - placement.updated_at_ms >= ctx.offer_ttl_ms
-
-      if idle do
-        case enqueue_idle_cancel(placement, ctx, now_ms, now_unix_ms) do
-          :ok -> {:cont, {:ok, reclaimed + 1}}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      else
-        {:cont, {:ok, reclaimed}}
-      end
-    end)
-  end
+  # Scale-set `assigned_jobs` is queue demand, not runner busy state. It drops to
+  # zero as soon as GitHub hands a job to a runner, so using it to reclaim an
+  # observed placement kills long-running jobs after `offer_ttl_ms`. Issued JIT
+  # runners are instead retired by their single-job lifecycle or by the existing
+  # inactive/lost-placement reconciliation paths, both of which have terminal
+  # evidence that this demand snapshot lacks.
+  def reclaim_unassigned(_snapshot, _ctx, _now_ms, _now_unix_ms), do: {:ok, 0}
 
   defp reconcile_acquired_with_capacity(
          pool,
          handle,
          slots,
+         ownership_revision,
          ctx,
          now_ms,
          now_unix_ms,
@@ -96,7 +109,17 @@ defmodule CrfController.DemandWork do
     with {:ok, identity} <- WorkIdentity.for_handle(pool.pool_id, pool.scale_set_id, handle) do
       case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
         {:ok, %PlacementTombstone{}} ->
-          {:cont, {:ok, blocked, slots}}
+          case retire_replayed_acquired(
+                 pool,
+                 handle,
+                 identity,
+                 ownership_revision,
+                 ctx
+               ) do
+            :ok -> {:cont, {:ok, blocked, slots}}
+            :blocked -> {:cont, {:ok, MapSet.put(blocked, pool.pool_id), slots}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
 
         {:ok, %Placement{}} ->
           {:cont, {:ok, blocked, slots}}
@@ -116,6 +139,53 @@ defmodule CrfController.DemandWork do
       end
     else
       {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp retire_replayed_acquired(pool, handle, identity, ownership_revision, ctx) do
+    case Map.get(ctx.policies, pool.pool_id) do
+      nil ->
+        :blocked
+
+      %PoolPolicy{} = policy ->
+        with {:ok, %{scale_set_id: scale_set_id}} <-
+               ScaleSetClient.issue_jit(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 identity.runner_name,
+                 policy.work_folder
+               ),
+             true <- scale_set_id == pool.scale_set_id,
+             {:ok, _} <-
+               ScaleSetClient.retire_jit(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 ownership_revision
+               ),
+             :ok <-
+               PlacementLedger.release_terminal_fence(
+                 ctx.placement_ledger,
+                 identity.placement_id
+               ),
+             {:ok, _} <-
+               ScaleSetClient.confirm_jit_retirement(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 ownership_revision
+               ) do
+          :ok
+        else
+          false -> {:error, :jit_scale_set_mismatch}
+          {:error, {:scaleset_error, "jit_issue_ambiguous"}} -> :blocked
+          {:error, {:scaleset_error, "jit_runner_delete_failed"}} -> :blocked
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
@@ -277,40 +347,6 @@ defmodule CrfController.DemandWork do
       {:ok, _command} -> :ok
       {:error, :unknown_command} -> :ok
       {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp enqueue_idle_cancel(placement, ctx, now_ms, now_unix_ms) do
-    command_id = "cancel-#{placement.id}"
-    idempotency_key = "cancel-idle-#{placement.id}"
-
-    with {:ok, command} <-
-           NodeCommand.cancel_placement(
-             placement,
-             command_id,
-             idempotency_key,
-             now_unix_ms,
-             now_unix_ms + @command_ttl_ms
-           ),
-         {:ok, ^command} <-
-           NodeMailbox.enqueue(ctx.node_mailbox, command, now_unix_ms: now_unix_ms) do
-      case PlacementLedger.placement_update(
-             ctx.placement_ledger,
-             placement.node_id,
-             placement.node_generation,
-             placement.id,
-             placement.command_id,
-             placement.state,
-             "idle_cancel_requested",
-             now_ms: now_ms
-           ) do
-        {:ok, _updated} ->
-          :ok
-
-        {:error, reason} ->
-          _ = NodeMailbox.discard(ctx.node_mailbox, command.command_id)
-          {:error, reason}
-      end
     end
   end
 
@@ -679,6 +715,11 @@ defmodule CrfController.DemandWork do
                      now_ms: now_ms
                    ),
                  :ok <- release_offer_id(ctx.offer_ledger, offer.id),
+                 :ok <-
+                   PlacementLedger.release_terminal_fence(
+                     ctx.placement_ledger,
+                     identity.placement_id
+                   ),
                  {:ok, _} <-
                    ScaleSetClient.confirm_jit_retirement(
                      ctx.scale_set_client,
@@ -728,6 +769,12 @@ defmodule CrfController.DemandWork do
          proof_ownership_revision
        ) do
     with :ok <- release_offer_handle(ctx.offer_ledger, pool_id, handle),
+         {:ok, identity} <- WorkIdentity.for_handle(pool_id, scale_set_id, handle),
+         :ok <-
+           PlacementLedger.release_terminal_fence(
+             ctx.placement_ledger,
+             identity.placement_id
+           ),
          {:ok, _} <-
            ScaleSetClient.confirm_jit_retirement(
              ctx.scale_set_client,

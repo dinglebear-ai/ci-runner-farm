@@ -353,6 +353,16 @@ where
             if response.operator_projection.is_some() {
                 operator_projection = response.operator_projection.clone();
             }
+            if immediate_acks > 0
+                && response.status == MessageResponseStatus::Rejected
+                && response.code.as_deref() == Some("unknown_command")
+            {
+                return Ok(SessionOutcome {
+                    immediate_acks,
+                    deferred: None,
+                    operator_projection,
+                });
+            }
             match self
                 .core
                 .handle_response(&response, now_unix_ms)
@@ -419,7 +429,19 @@ where
                 .core
                 .placement_update(&report, now_unix_ms)
                 .map_err(AgentSessionError::Agent)?;
-            let report_outcome = self.exchange_and_drain(request, now_unix_ms)?;
+            let report_outcome = match self.exchange_and_drain(request, now_unix_ms) {
+                Ok(outcome) => outcome,
+                Err(AgentSessionError::Agent(AgentError::ControllerRejected { ref code }))
+                    if terminal_report_already_converged(code) =>
+                {
+                    SessionOutcome {
+                        immediate_acks: 0,
+                        deferred: None,
+                        operator_projection: None,
+                    }
+                }
+                Err(error) => return Err(error),
+            };
 
             self.core
                 .processor()
@@ -468,6 +490,10 @@ where
             heartbeat,
         })
     }
+}
+
+fn terminal_report_already_converged(code: &str) -> bool {
+    matches!(code, "terminal_state_conflict" | "unknown_placement")
 }
 
 fn valid_agent_version(value: &str) -> bool {
@@ -626,6 +652,28 @@ mod tests {
             }
             other => panic!("expected command ack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn expired_controller_command_after_local_commit_finishes_the_ack_chain() {
+        let executor = FakeExecutor {
+            new_result: ExecutionResult::Applied,
+            pending_result: ExecutionResult::Applied,
+        };
+        let mut expired = response("msg-7-2", None);
+        expired.status = MessageResponseStatus::Rejected;
+        expired.code = Some("unknown_command".into());
+        let mut session = session(
+            executor,
+            vec![response("msg-7-1", Some(command())), expired],
+        );
+
+        let outcome = session
+            .heartbeat(Resources::new(8_000, 16 * GIB), BTreeSet::new(), NOW)
+            .expect("an expired controller mailbox entry is already converged");
+
+        assert_eq!(outcome.immediate_acks, 1);
+        assert_eq!(session.transport().requests.len(), 2);
     }
 
     #[test]
@@ -859,6 +907,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn stale_terminal_report_is_retired_when_controller_is_already_terminal_or_pruned() {
+        for code in ["terminal_state_conflict", "unknown_placement"] {
+            let mut rejected = response("msg-7-1", None);
+            rejected.status = MessageResponseStatus::Rejected;
+            rejected.code = Some(code.into());
+            let (mut session, state) = runtime_session(vec![rejected]);
+
+            let outcome = session
+                .sync_runtime(NOW)
+                .expect("controller convergence retires the stale local report");
+
+            assert_eq!(outcome.reports_sent, 1);
+            assert_eq!(
+                state.lock().expect("runtime lock").reported,
+                BTreeSet::from(["placement-1".into()])
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_controller_rejection_keeps_terminal_report_pending() {
+        let mut rejected = response("msg-7-1", None);
+        rejected.status = MessageResponseStatus::Rejected;
+        rejected.code = Some("unauthorized".into());
+        let (mut session, state) = runtime_session(vec![rejected]);
+
+        assert!(matches!(
+            session.sync_runtime(NOW),
+            Err(AgentSessionError::Agent(AgentError::ControllerRejected { ref code }))
+                if code == "unauthorized"
+        ));
+        assert!(state.lock().expect("runtime lock").reported.is_empty());
     }
 
     #[test]

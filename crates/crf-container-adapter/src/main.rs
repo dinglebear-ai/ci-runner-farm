@@ -29,6 +29,7 @@ const OTP_28_CAPABILITY: &str = "otp-28-compatible";
 struct Config {
     state_root: PathBuf,
     image: String,
+    enable_dind: bool,
     docker: DockerExecutable,
 }
 
@@ -340,10 +341,12 @@ impl Config {
         if !immutable_image(&image) {
             return Err("immutable_image_required");
         }
+        let enable_dind = env_flag("CRF_ENABLE_DIND")?;
         let docker = DockerExecutable::load()?;
         Ok(Self {
             state_root,
             image,
+            enable_dind,
             docker,
         })
     }
@@ -592,6 +595,10 @@ fn ensure_container(config: &Config, state: &State) -> Result<(), &'static str> 
         "--entrypoint".into(),
         "/opt/crf-bootstrap/crf-container-adapter".into(),
     ];
+    if config.enable_dind {
+        args.push("--privileged".into());
+        args.extend(["-e".into(), "START_DOCKER_SERVICE=true".into()]);
+    }
     for label in container_labels(state) {
         args.extend(["--label".into(), label]);
     }
@@ -1552,7 +1559,7 @@ fn relative_name(name: &str) -> io::Result<std::ffi::CString> {
 
 fn openat_file(dir: &fs::File, name: &str, flags: i32, mode: libc::mode_t) -> io::Result<fs::File> {
     let name = relative_name(name)?;
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) };
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -1957,6 +1964,14 @@ fn immutable_image(v: &str) -> bool {
         && digest
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+fn env_flag(name: &str) -> Result<bool, &'static str> {
+    match env::var(name).as_deref() {
+        Err(env::VarError::NotPresent) | Ok("false") => Ok(false),
+        Ok("true") => Ok(true),
+        _ => Err("invalid_runtime_configuration"),
+    }
 }
 fn identifier(v: &str) -> bool {
     let mut b = v.bytes();
