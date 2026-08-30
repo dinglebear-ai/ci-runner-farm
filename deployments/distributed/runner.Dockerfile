@@ -19,10 +19,10 @@ RUN apt-get update \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
 
-# Docker and GitHub CLIs ship from their own signed repositories rather than the
-# Ubuntu archive. Only the CLIs and the buildx/compose plugins are installed --
-# not the daemon. Workflows reach a daemon through a socket the node supplies;
-# nothing here starts dockerd.
+# Docker and GitHub tooling ships from signed upstream repositories rather than
+# the Ubuntu archive. The daemon is installed but remains stopped by default;
+# only an explicitly privileged, START_DOCKER_SERVICE=true runner starts its
+# container-local daemon. No host Docker socket is mounted.
 RUN set -eux; \
     install -m 0755 -d /etc/apt/keyrings; \
     arch="$(dpkg --print-architecture)"; \
@@ -39,9 +39,10 @@ RUN set -eux; \
       > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
+      containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
     rm -rf /var/lib/apt/lists/*; \
     docker --version; \
+    dockerd --version; \
     docker buildx version; \
     docker compose version; \
     gh --version
