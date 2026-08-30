@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## [1.13.5](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.4...v1.13.5) (2026-08-30)
+
+
+### Bug Fixes
+
+* **controller:** fence terminal work until retirement ([19e0869](https://github.com/dinglebear-ai/ci-runner-farm/commit/19e086925c7735d39a7de866c41d0dc4f30eb72f))
+* **controller:** isolate stuck JIT retirement retries ([982c5a1](https://github.com/dinglebear-ai/ci-runner-farm/commit/982c5a1f1ea58b2f6fe0b98d5596a34ca29a02f0))
+* **controller:** preserve active JIT runners ([aad5a82](https://github.com/dinglebear-ai/ci-runner-farm/commit/aad5a82b75b4f1be25ecf817e3beffcb0594ab7e))
+* **controller:** reclaim lost JIT placements ([d9f5776](https://github.com/dinglebear-ai/ci-runner-farm/commit/d9f57761b60bff2e7bd28dded151e133c3753ea5))
+* **controller:** reconcile ownership without session churn ([c86756d](https://github.com/dinglebear-ai/ci-runner-farm/commit/c86756d17b10d4b4862115a2815c8c91fd06b14e))
+* **controller:** resync surviving sidecar replay fence ([8c30130](https://github.com/dinglebear-ai/ci-runner-farm/commit/8c301305317af5aac5dbeb0e8f6f577b84902c6e))
+* **controller:** retire tombstoned acquired replays ([9955f58](https://github.com/dinglebear-ai/ci-runner-farm/commit/9955f5855db5281316cd593536a4a58f830d9867))
+* **distributed:** opt into trusted DinD runners ([ab68069](https://github.com/dinglebear-ai/ci-runner-farm/commit/ab68069e48ac05748c6de43b53af8946a5c41e61))
+* **distributed:** opt into trusted DinD runners ([9a9029b](https://github.com/dinglebear-ai/ci-runner-farm/commit/9a9029b791536b65341b3435bb4b7c3669b9e4f2))
+* **farm:** harden distributed production acceptance ([98517a1](https://github.com/dinglebear-ai/ci-runner-farm/commit/98517a14183964566980126328f87776f2a12113))
+* **farm:** harden distributed production acceptance ([ebc18f1](https://github.com/dinglebear-ai/ci-runner-farm/commit/ebc18f13a1b03ffbf9f3034da1cb02da4c49f3db))
+* **image:** include daemon for isolated DinD runners ([acfcbe1](https://github.com/dinglebear-ai/ci-runner-farm/commit/acfcbe1ac8078ade796f65b6b511877a5cab761e))
+* **node:** converge stale terminal reports ([9cfa8c7](https://github.com/dinglebear-ai/ci-runner-farm/commit/9cfa8c7d48b637e4d74a70bc0969d3d3d00c5a78))
+* **node:** recover controller state skew ([9b87646](https://github.com/dinglebear-ai/ci-runner-farm/commit/9b87646441a4ce83c4046973de9a95c3f15e2ba8))
+* **runners:** grant DinD socket access ([fef01e2](https://github.com/dinglebear-ai/ci-runner-farm/commit/fef01e2cdeea1642f8b03b2bd455d77726be0f3e))
+* **runners:** retire stranded JIT listeners ([f59af8c](https://github.com/dinglebear-ai/ci-runner-farm/commit/f59af8ca9f76e93f557ad87a0fc5cfda527c93a7))
+* **runners:** use nested-safe DinD storage ([dac6e0f](https://github.com/dinglebear-ai/ci-runner-farm/commit/dac6e0f4449de2838305748d78ca8b3555e316ae))
+* **scaleset:** preserve matching live sessions ([4fa0a4f](https://github.com/dinglebear-ai/ci-runner-farm/commit/4fa0a4f47663d36e0f81f6dbdf505312a01274bb))
+
 ## [1.13.4](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.3...v1.13.4) (2026-08-25)
 
 
