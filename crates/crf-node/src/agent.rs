@@ -353,6 +353,16 @@ where
             if response.operator_projection.is_some() {
                 operator_projection = response.operator_projection.clone();
             }
+            if immediate_acks > 0
+                && response.status == MessageResponseStatus::Rejected
+                && response.code.as_deref() == Some("unknown_command")
+            {
+                return Ok(SessionOutcome {
+                    immediate_acks,
+                    deferred: None,
+                    operator_projection,
+                });
+            }
             match self
                 .core
                 .handle_response(&response, now_unix_ms)
@@ -642,6 +652,28 @@ mod tests {
             }
             other => panic!("expected command ack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn expired_controller_command_after_local_commit_finishes_the_ack_chain() {
+        let executor = FakeExecutor {
+            new_result: ExecutionResult::Applied,
+            pending_result: ExecutionResult::Applied,
+        };
+        let mut expired = response("msg-7-2", None);
+        expired.status = MessageResponseStatus::Rejected;
+        expired.code = Some("unknown_command".into());
+        let mut session = session(
+            executor,
+            vec![response("msg-7-1", Some(command())), expired],
+        );
+
+        let outcome = session
+            .heartbeat(Resources::new(8_000, 16 * GIB), BTreeSet::new(), NOW)
+            .expect("an expired controller mailbox entry is already converged");
+
+        assert_eq!(outcome.immediate_acks, 1);
+        assert_eq!(session.transport().requests.len(), 2);
     }
 
     #[test]

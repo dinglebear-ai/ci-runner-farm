@@ -306,7 +306,15 @@ fn heartbeat_error_reconnectable<T>(error: &AgentSessionError<T>) -> bool {
         || matches!(
             error,
             AgentSessionError::Agent(crate::agent::AgentError::ControllerRejected { code })
-                if code == "unknown_node" || code == "node_not_registered"
+                if matches!(
+                    code.as_str(),
+                    "unknown_node"
+                        | "node_not_registered"
+                        | "unknown_command"
+                        | "unknown_placement"
+                        | "terminal_state_conflict"
+                        | "message_id_conflict"
+                )
         )
 }
 
@@ -570,8 +578,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_controller_registration_reconnects_but_other_rejections_are_fatal() {
-        for code in ["unknown_node", "node_not_registered"] {
+    fn recoverable_controller_state_skew_reconnects_but_authorization_failure_is_fatal() {
+        for code in [
+            "unknown_node",
+            "node_not_registered",
+            "unknown_command",
+            "unknown_placement",
+            "terminal_state_conflict",
+            "message_id_conflict",
+        ] {
             let error =
                 AgentSessionError::<()>::Agent(crate::agent::AgentError::ControllerRejected {
                     code: code.into(),
