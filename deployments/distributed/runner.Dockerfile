@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ImageVersion=24.04
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file gettext-base git gnupg gosu inotify-tools iptables jq libicu74 libssl3 libssl-dev lld locales lsb-release mold nodejs npm openssh-client php-cli pkg-config python3 python3-pip python3-venv ripgrep rsync sudo uidmap unzip wget xz-utils zip zstd \
+ && apt-get install -y --no-install-recommends apt-transport-https build-essential ca-certificates clang cmake curl file gettext-base git gnupg gosu inotify-tools iptables jq libicu74 libssl3 libssl-dev lld locales lsb-release mold nodejs npm openssh-client php-cli pkg-config python3 python3-pip python3-venv ripgrep rsync ruby sudo uidmap unzip wget xz-utils zip zstd \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1001 --shell /bin/bash runner \
  && install -d -o runner -g runner /actions-runner /actions-runner/_work \
@@ -40,6 +40,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh; \
+    usermod -aG docker runner; \
     rm -rf /var/lib/apt/lists/*; \
     docker --version; \
     dockerd --version; \

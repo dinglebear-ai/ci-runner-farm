@@ -178,9 +178,10 @@ grep -Fq 'sudo' "$dockerfile"
 grep -Fq 'xz-utils' "$dockerfile"
 grep -Fq 'php-cli' "$dockerfile"
 grep -Fq 'python3' "$dockerfile"
-for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep libssl-dev mold containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh nodejs npm python3-pip python3-venv gettext-base iptables uidmap; do
+for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-release apt-transport-https ripgrep ruby libssl-dev mold containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin gh nodejs npm python3-pip python3-venv gettext-base iptables uidmap; do
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
+grep -Fq 'usermod -aG docker runner' "$dockerfile"
 grep -Fq 'openssh-client' "$dockerfile"
 grep -Fq '"python3"' "$probe"
 grep -Fq '"ssh-client"' "$probe"

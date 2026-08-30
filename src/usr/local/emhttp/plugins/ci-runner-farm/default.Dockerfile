@@ -11,8 +11,10 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
 # --- Add your packages / tools here ---
-# RUN apt-get update && apt-get install -y --no-install-recommends <your-packages> \
-#  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ruby \
+ && rm -rf /var/lib/apt/lists/* \
+ && usermod -aG docker runner
 
 # Pre-create the default CACHE_MOUNTS destinations as runner-owned. When these
 # paths are absent from the image, Docker's bind-mount auto-creation makes the

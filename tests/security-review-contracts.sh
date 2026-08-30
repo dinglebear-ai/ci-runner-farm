@@ -35,6 +35,8 @@ grep -Fq "crf_sel(\$cfg,'DIND','false','false')" src/usr/local/emhttp/plugins/ci
 
 base='myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537'
 grep -Fxq "FROM $base" src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile || crf_fail 'runner base is not digest pinned'
+grep -Fq 'apt-get install -y --no-install-recommends ruby' src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile || crf_fail 'stock runner image is missing Ruby parity'
+grep -Fq 'usermod -aG docker runner' src/usr/local/emhttp/plugins/ci-runner-farm/default.Dockerfile || crf_fail 'stock runner cannot access its DinD socket'
 grep -Fq "RUNNER_BASE=\"$base\"" build-plg.sh || crf_fail 'release digest gate is missing'
 grep -Fq 'https://github.com/dinglebear-ai/ci-runner-farm/releases/' ci-runner-farm.plg || crf_fail 'generated plugin release URLs do not use the authoritative repository'
 grep -Fq 'https://github.com/dinglebear-ai/ci-runner-farm' ci-runner-farm.plg || crf_fail 'generated plugin support URL does not use the authoritative repository'
