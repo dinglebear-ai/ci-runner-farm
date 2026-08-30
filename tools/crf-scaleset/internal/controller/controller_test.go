@@ -571,6 +571,10 @@ func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T)
 	if _, ok := restarted.retired[key]; !ok {
 		t.Fatalf("runner deletion failure removed retirement proof: %#v", restarted.retired)
 	}
+	pending := restarted.Handle(context.Background(), request(cfg, "read_jit_state", 2, `{}`))
+	if !pending.OK || !strings.Contains(fmt.Sprint(pending.Result), "retirement_started") {
+		t.Fatalf("runner deletion failure was exposed as completed retirement: %#v", pending)
+	}
 	if _, ok := restarted.issued[key]; !ok {
 		t.Fatalf("runner deletion failure removed issued record: %#v", restarted.issued)
 	}
@@ -578,7 +582,7 @@ func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T)
 		t.Fatalf("runner deletion failure removed retry identity: %v", err)
 	}
 	api.removeErr = nil
-	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 2, retirePayload)); !response.OK {
+	if response := restarted.Handle(context.Background(), request(cfg, "retire_jit", 3, retirePayload)); !response.OK {
 		t.Fatalf("retirement retry after restart failed: %#v", response)
 	}
 	if _, ok := restarted.retired[key]; !ok {
@@ -590,7 +594,7 @@ func TestRetirementFailurePersistsConservativeProofForRestartRetry(t *testing.T)
 	if _, err := os.Stat(descriptorPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("successful retry retained descriptor: %v", err)
 	}
-	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 3,
+	if response := restarted.Handle(context.Background(), request(cfg, "confirm_jit_retirement", 4,
 		retirePayload)); !response.OK || len(restarted.retired) != 0 {
 		t.Fatalf("confirmation did not compact recovered proof: response=%#v retired=%#v",
 			response, restarted.retired)

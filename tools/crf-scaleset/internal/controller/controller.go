@@ -438,9 +438,13 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 				WorkHandle: workHandle, State: record.State, OwnershipRevision: c.wireOwnershipRevision(record),
 				DescriptorAvailable: descriptorErr == nil})
 		}
-		for _, record := range c.retired {
+		for key, record := range c.retired {
+			state := "retired"
+			if _, pending := c.issued[key]; pending {
+				state = "retirement_started"
+			}
 			states = append(states, protocol.JITState{PoolID: record.PoolID, ScaleSetID: record.ScaleSetID,
-				WorkHandle: record.WorkHandle, State: "retired", OwnershipRevision: c.wireOwnershipRevision(record),
+				WorkHandle: record.WorkHandle, State: state, OwnershipRevision: c.wireOwnershipRevision(record),
 				DescriptorAvailable: false})
 		}
 		slices.SortFunc(states, func(a, b protocol.JITState) int {
