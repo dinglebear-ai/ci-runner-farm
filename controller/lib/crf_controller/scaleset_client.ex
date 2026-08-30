@@ -136,7 +136,8 @@ defmodule CrfController.ScaleSetClient do
       # from a prior run's persisted intent). `nil` means "never explicitly
       # commanded" — reconciliation stays a no-op until a real caller sets it,
       # so a fresh deployment never gets an opinionated default injected.
-      last_known_eligible: nil
+      last_known_eligible: nil,
+      sessions_applied: false
     }
 
     with :ok <- validate_state(state),
@@ -167,7 +168,9 @@ defmodule CrfController.ScaleSetClient do
     do: maybe_schedule_tick(state, opts)
 
   defp reconcile_eligibility(%{last_known_eligible: eligible} = state, opts) do
-    case perform_call(state, "apply_sessions", %{"eligible" => eligible}) do
+    operation = if state.sessions_applied, do: "reconcile_owned", else: "apply_sessions"
+
+    case perform_call(state, operation, %{"eligible" => eligible}) do
       {{:ok, _result}, next_state} ->
         maybe_schedule_tick(next_state, opts)
 
@@ -191,7 +194,12 @@ defmodule CrfController.ScaleSetClient do
 
   @impl true
   def handle_call({:update_revisions, config_revision, ownership_revision}, _from, state) do
-    updated = %{state | config_revision: config_revision, ownership_revision: ownership_revision}
+    updated = %{
+      state
+      | config_revision: config_revision,
+        ownership_revision: ownership_revision,
+        sessions_applied: false
+    }
 
     case validate_state(updated) do
       :ok -> {:reply, :ok, updated}
@@ -259,7 +267,7 @@ defmodule CrfController.ScaleSetClient do
            eligible
          ) do
       :ok ->
-        %{state | last_known_eligible: eligible}
+        %{state | last_known_eligible: eligible, sessions_applied: true}
 
       {:error, reason} ->
         Logger.warning(

@@ -281,6 +281,61 @@ defmodule CrfController.ScaleSetClientTest do
     end
   end
 
+  test "periodic eligibility reconciliation preserves already-applied sessions" do
+    if :os.type() |> elem(0) == :win32 do
+      assert true
+    else
+      path = socket_path()
+      eligibility_path = path <> ".eligibility"
+      assert :ok = ScaleSetEligibility.persist(eligibility_path, "controller-periodic", true)
+
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      :ok = :socket.listen(listener, 2)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          for _ <- 1..2 do
+            {:ok, socket} = :socket.accept(listener, 5_000)
+            request = recv_json(socket)
+            send(parent, {:periodic_request, request})
+            response = response_for(request)
+            :ok = :socket.send(socket, :json.encode(response) |> IO.iodata_to_binary(), 5_000)
+            :socket.close(socket)
+          end
+        end)
+
+      start_supervised!(
+        {ScaleSetClient,
+         name: nil,
+         socket_path: path,
+         controller_instance_id: "controller-periodic",
+         config_revision: @revision,
+         ownership_revision: @revision,
+         timeout_ms: 2_000,
+         reconcile_interval_ms: 50}
+      )
+
+      requests =
+        for _ <- 1..2,
+            do:
+              receive(
+                do: ({:periodic_request, request} -> request),
+                after: (5_000 -> flunk("missing periodic eligibility request"))
+              )
+
+      assert Enum.map(requests, & &1["operation"]) == ["apply_sessions", "reconcile_owned"]
+      assert Enum.all?(requests, &(&1["payload"] == %{"eligible" => true}))
+
+      Task.await(server, 5_000)
+      :socket.close(listener)
+      File.rm(path)
+      File.rm(path <> ".sequence")
+      File.rm(eligibility_path)
+    end
+  end
+
   test "public calls outlive the implicit five second GenServer timeout" do
     if :os.type() |> elem(0) == :win32 do
       assert true
@@ -326,6 +381,15 @@ defmodule CrfController.ScaleSetClientTest do
       "request_id" => request_id,
       "ok" => true,
       "result" => %{"applied" => true}
+    }
+  end
+
+  defp response_for(%{"operation" => "reconcile_owned", "request_id" => request_id}) do
+    %{
+      "schema_version" => 1,
+      "request_id" => request_id,
+      "ok" => true,
+      "result" => %{"records" => [], "eligible" => true}
     }
   end
 
