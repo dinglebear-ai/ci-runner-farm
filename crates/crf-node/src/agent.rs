@@ -419,7 +419,19 @@ where
                 .core
                 .placement_update(&report, now_unix_ms)
                 .map_err(AgentSessionError::Agent)?;
-            let report_outcome = self.exchange_and_drain(request, now_unix_ms)?;
+            let report_outcome = match self.exchange_and_drain(request, now_unix_ms) {
+                Ok(outcome) => outcome,
+                Err(AgentSessionError::Agent(AgentError::ControllerRejected { ref code }))
+                    if terminal_report_already_converged(code) =>
+                {
+                    SessionOutcome {
+                        immediate_acks: 0,
+                        deferred: None,
+                        operator_projection: None,
+                    }
+                }
+                Err(error) => return Err(error),
+            };
 
             self.core
                 .processor()
@@ -468,6 +480,10 @@ where
             heartbeat,
         })
     }
+}
+
+fn terminal_report_already_converged(code: &str) -> bool {
+    matches!(code, "terminal_state_conflict" | "unknown_placement")
 }
 
 fn valid_agent_version(value: &str) -> bool {
@@ -859,6 +875,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn stale_terminal_report_is_retired_when_controller_is_already_terminal_or_pruned() {
+        for code in ["terminal_state_conflict", "unknown_placement"] {
+            let mut rejected = response("msg-7-1", None);
+            rejected.status = MessageResponseStatus::Rejected;
+            rejected.code = Some(code.into());
+            let (mut session, state) = runtime_session(vec![rejected]);
+
+            let outcome = session
+                .sync_runtime(NOW)
+                .expect("controller convergence retires the stale local report");
+
+            assert_eq!(outcome.reports_sent, 1);
+            assert_eq!(
+                state.lock().expect("runtime lock").reported,
+                BTreeSet::from(["placement-1".into()])
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_controller_rejection_keeps_terminal_report_pending() {
+        let mut rejected = response("msg-7-1", None);
+        rejected.status = MessageResponseStatus::Rejected;
+        rejected.code = Some("unauthorized".into());
+        let (mut session, state) = runtime_session(vec![rejected]);
+
+        assert!(matches!(
+            session.sync_runtime(NOW),
+            Err(AgentSessionError::Agent(AgentError::ControllerRejected { ref code }))
+                if code == "unauthorized"
+        ));
+        assert!(state.lock().expect("runtime lock").reported.is_empty());
     }
 
     #[test]
