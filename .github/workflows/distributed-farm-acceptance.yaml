@@ -73,12 +73,13 @@ jobs:
         run: |
           set -euo pipefail
           printf 'runner=%s\nhost=%s\nkernel=%s\n' "$RUNNER_NAME" "$(hostname)" "$(uname -srmo)"
+          test -r /.dockerenv
+          test ! -e /var/run/docker.sock
           test -r /proc/self/cgroup
           cat /proc/self/cgroup
           test -r /sys/fs/cgroup/cgroup.controllers
           grep -Eq '(^| )cpu( |$)' /sys/fs/cgroup/cgroup.controllers
           grep -Eq '(^| )memory( |$)' /sys/fs/cgroup/cgroup.controllers
-          docker info --format 'cgroup_driver={{.CgroupDriver}} cgroup_version={{.CgroupVersion}}'
 
   distributed-linux:
     if: inputs.target == 'distributed-linux'
