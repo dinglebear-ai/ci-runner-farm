@@ -20,13 +20,31 @@ defmodule CrfController.DemandWork do
   def reconcile_jit_states(jit_states, ctx, now_ms, now_unix_ms) when is_list(jit_states) do
     jit_states
     |> Enum.sort_by(&{&1.pool_id, &1.scale_set_id, &1.work_handle})
-    |> Enum.reduce_while({:ok, MapSet.new()}, fn jit, {:ok, blocked} ->
-      case reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
-        :ok -> {:cont, {:ok, blocked}}
-        {:blocked, pool_id} -> {:cont, {:ok, MapSet.put(blocked, pool_id)}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    |> Enum.reduce_while({:ok, MapSet.new(), MapSet.new()}, fn jit,
+                                                               {:ok, blocked, retry_blocked} ->
+      if MapSet.member?(retry_blocked, jit.pool_id) do
+        {:cont, {:ok, blocked, retry_blocked}}
+      else
+        case reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
+          :ok ->
+            {:cont, {:ok, blocked, retry_blocked}}
+
+          {:blocked, pool_id} ->
+            {:cont, {:ok, MapSet.put(blocked, pool_id), retry_blocked}}
+
+          {:error, {:scaleset_error, "jit_runner_delete_failed"}} ->
+            {:cont,
+             {:ok, MapSet.put(blocked, jit.pool_id), MapSet.put(retry_blocked, jit.pool_id)}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
       end
     end)
+    |> case do
+      {:ok, blocked, _retry_blocked} -> {:ok, blocked}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   def reconcile_acquired(snapshot, jit_states, ctx, now_ms, now_unix_ms) do

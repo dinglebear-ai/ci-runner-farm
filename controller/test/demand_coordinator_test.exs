@@ -37,6 +37,7 @@ defmodule CrfController.DemandCoordinatorTest do
       do: GenServer.call(server, {:set_pool_health, pool_id, healthy})
 
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
+    def fail_retirement(server, enabled), do: GenServer.call(server, {:fail_retirement, enabled})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
     @impl true
@@ -52,6 +53,7 @@ defmodule CrfController.DemandCoordinatorTest do
          last_retire_payload: nil,
          last_confirm_payload: nil,
          last_leases: %{},
+         fail_retirement: false,
          fail_next_snapshot: false
        }}
     end
@@ -93,6 +95,10 @@ defmodule CrfController.DemandCoordinatorTest do
         Enum.map(states, &Map.put_new(&1, :ownership_revision, state.snapshot.ownership_revision))
 
       {:reply, :ok, %{state | jit_states: states}}
+    end
+
+    def handle_call({:fail_retirement, enabled}, _from, state) when is_boolean(enabled) do
+      {:reply, :ok, %{state | fail_retirement: enabled}}
     end
 
     def handle_call(:fail_next_snapshot, _from, state) do
@@ -143,19 +149,12 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:call, "retire_jit", payload}, _from, state) do
-      pool_id = payload["pool_id"]
-      handle = payload["work_handle"]
-
-      jit_states =
-        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
-
-      {:reply, {:ok, %{"retired" => true}},
-       %{
-         state
-         | retire_calls: state.retire_calls + 1,
-           last_retire_payload: payload,
-           jit_states: jit_states
-       }}
+      if state.fail_retirement do
+        {:reply, {:error, {:scaleset_error, "jit_runner_delete_failed"}},
+         %{state | retire_calls: state.retire_calls + 1, last_retire_payload: payload}}
+      else
+        retire_jit(payload, state)
+      end
     end
 
     def handle_call({:call, "confirm_jit_retirement", payload}, _from, state) do
@@ -170,6 +169,22 @@ defmodule CrfController.DemandCoordinatorTest do
          state
          | confirm_calls: state.confirm_calls + 1,
            last_confirm_payload: payload,
+           jit_states: jit_states
+       }}
+    end
+
+    defp retire_jit(payload, state) do
+      pool_id = payload["pool_id"]
+      handle = payload["work_handle"]
+
+      jit_states =
+        Enum.reject(state.jit_states, &(&1.pool_id == pool_id and &1.work_handle == handle))
+
+      {:reply, {:ok, %{"retired" => true}},
+       %{
+         state
+         | retire_calls: state.retire_calls + 1,
+           last_retire_payload: payload,
            jit_states: jit_states
        }}
     end
@@ -819,6 +834,40 @@ defmodule CrfController.DemandCoordinatorTest do
       assert sidecar.retire_calls == 1
       assert sidecar.last_retire_payload["expected_ownership_revision"] == historical_revision
       assert sidecar.jit_states == []
+    end
+  end
+
+  test "a busy runner retirement blocks only its pool and does not reset sessions", ctx do
+    unless ctx.disabled do
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
+
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 611,
+            state: "retirement_started",
+            descriptor_available: false
+          },
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 612,
+            state: "retirement_started",
+            descriptor_available: false
+          }
+        ])
+
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.blocked_pools == ["build"]
+      assert first.leases == %{"build" => 0}
+      assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 1
+
+      assert {:ok, second} = reconcile(ctx.demand, 200)
+      assert second.blocked_pools == ["build"]
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 2
     end
   end
 
