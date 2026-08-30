@@ -176,6 +176,54 @@ if grep -Fq "$descriptor" "$task_tmp/jit-stdout" "$task_tmp/jit-stderr"; then
   crf_fail "JIT descriptor leaked to output"
 fi
 
+# A JIT listener that never receives its one job must not reserve capacity
+# forever. The runner's job-start hook is authoritative: an unfired hook
+# retires the listener, while a fired hook protects a running job regardless of
+# how long that job subsequently runs.
+cat >"$task_tmp/waiting-jit-runner" <<EOF
+#!/usr/bin/env bash
+trap 'exit 42' TERM
+: > "$task_tmp/waiting-started"
+while true; do sleep 1; done
+EOF
+chmod +x "$task_tmp/waiting-jit-runner"
+mkdir -p "$task_tmp/waiting-config"
+export CRF_SECRET_DIR="$task_tmp/waiting-secret"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_CONFIG_DIR="$task_tmp/waiting-config" \
+  CRF_JIT_RUNNER="$task_tmp/waiting-jit-runner" CRF_JIT_JOB_START_TIMEOUT_SECONDS=3 \
+  START_DOCKER_SERVICE=false RUN_AS_ROOT=true \
+  "$entrypoint" >"$task_tmp/waiting-stdout" 2>"$task_tmp/waiting-stderr" &
+entry_pid=$!
+wait_for_secret_fifo waiting-JIT "$task_tmp/waiting-stderr"
+printf '%s\n' "$descriptor" >"$task_tmp/waiting-secret/secret.in"
+set +e
+wait "$entry_pid"
+waiting_status=$?
+set -e
+[ -e "$task_tmp/waiting-started" ] || crf_fail 'never-started JIT listener did not launch'
+[ "$waiting_status" -eq 42 ] || crf_fail "never-started JIT listener exited with $waiting_status instead of watchdog status 42"
+
+cat >"$task_tmp/started-jit-runner" <<'EOF'
+#!/usr/bin/env bash
+"$ACTIONS_RUNNER_HOOK_JOB_STARTED"
+sleep 2
+EOF
+chmod +x "$task_tmp/started-jit-runner"
+mkdir -p "$task_tmp/started-config"
+export CRF_SECRET_DIR="$task_tmp/started-secret"
+CRF_CREDENTIAL_KIND=jit CRF_JIT_CONFIG_DIR="$task_tmp/started-config" \
+  CRF_JIT_RUNNER="$task_tmp/started-jit-runner" CRF_JIT_JOB_START_TIMEOUT_SECONDS=3 \
+  START_DOCKER_SERVICE=false RUN_AS_ROOT=true \
+  "$entrypoint" >"$task_tmp/started-stdout" 2>"$task_tmp/started-stderr" &
+entry_pid=$!
+wait_for_secret_fifo started-JIT "$task_tmp/started-stderr"
+printf '%s\n' "$descriptor" >"$task_tmp/started-secret/secret.in"
+wait "$entry_pid" || crf_fail 'job-started JIT listener was retired'
+[ -e "$task_tmp/started-config/.crf-job-started" ] || crf_fail 'JIT job-start hook did not record the transition'
+if grep -Fq 'received no job' "$task_tmp/started-stderr"; then
+  crf_fail 'watchdog retired a JIT runner after its job started'
+fi
+
 # Non-root JIT mode keeps privileged bootstrap in the wrapper, then transfers
 # only the listener files and workdir before dropping to the runner account.
 cat > "$task_tmp/bin/id" <<'SCRIPT'

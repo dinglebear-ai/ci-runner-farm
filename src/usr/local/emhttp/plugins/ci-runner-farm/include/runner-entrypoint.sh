@@ -65,6 +65,17 @@ chmod 0600 "$secret_dir/consumed"
 if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
   jit_runner="${CRF_JIT_RUNNER:-./run.sh}"
   jit_config_dir="${CRF_JIT_CONFIG_DIR:-$(pwd)}"
+  jit_job_start_timeout="${CRF_JIT_JOB_START_TIMEOUT_SECONDS:-900}"
+  case "$jit_job_start_timeout" in
+    ''|*[!0-9]*)
+      echo "ci-runner-farm: JIT job-start timeout must be an integer" >&2
+      exit 1
+      ;;
+  esac
+  [ "$jit_job_start_timeout" -ge 1 ] && [ "$jit_job_start_timeout" -le 86400 ] || {
+    echo "ci-runner-farm: JIT job-start timeout must be between 1 and 86400 seconds" >&2
+    exit 1
+  }
   if ! command -v jq >/dev/null 2>&1 || ! command -v base64 >/dev/null 2>&1; then
     echo "ci-runner-farm: JIT descriptor decoding requires jq and base64" >&2
     exit 1
@@ -133,10 +144,50 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
   trap - EXIT
   jit_json=""
   unset jit_json jit_tmp jit_tmp_files jit_final_files jit_allowed_files jit_file jit_final jit_index jit_committed
+
+  # A JIT runner is single-use, but GitHub can strand it after registration:
+  # the listener remains online without ever receiving its assigned job. Do
+  # not infer safety from the scale-set assigned count because that count also
+  # drops when a real job starts. The runner's documented job-start hook is the
+  # authoritative transition. It creates a marker before the job executes;
+  # until then, a bounded watchdog may retire this never-started listener.
+  jit_job_started="$jit_config_dir/.crf-job-started"
+  jit_job_start_hook="$jit_config_dir/.crf-job-start-hook"
+  rm -f -- "$jit_job_started" "$jit_job_start_hook"
+  cat >"$jit_job_start_hook" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: > "$CRF_JIT_JOB_STARTED_MARKER"
+EOF
+  chmod 0700 "$jit_job_start_hook"
+  export CRF_JIT_JOB_STARTED_MARKER="$jit_job_started"
+  export ACTIONS_RUNNER_HOOK_JOB_STARTED="$jit_job_start_hook"
+
+  crf_run_jit_listener() {
+    "$@" &
+    local listener_pid=$! watchdog_pid status
+    trap 'kill -TERM "$listener_pid" 2>/dev/null || true' TERM INT
+    (
+      sleep "$jit_job_start_timeout"
+      if [ ! -e "$jit_job_started" ]; then
+        echo "ci-runner-farm: JIT runner received no job within ${jit_job_start_timeout}s; retiring" >&2
+        kill -TERM "$listener_pid" 2>/dev/null || true
+      fi
+    ) &
+    watchdog_pid=$!
+    set +e
+    wait "$listener_pid"
+    status=$?
+    set -e
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    trap - TERM INT
+    return "$status"
+  }
   case "${RUN_AS_ROOT:-false}" in
     true)
       export RUNNER_ALLOW_RUNASROOT=1
-      exec "$jit_runner"
+      crf_run_jit_listener "$jit_runner"
       ;;
     false)
       command -v gosu >/dev/null 2>&1 && id -u runner >/dev/null 2>&1 || {
@@ -152,8 +203,9 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
         "$jit_config_dir/.runner" \
         "$jit_config_dir/.credentials" \
         "$jit_config_dir/.credentials_rsaparams" \
+        "$jit_job_start_hook" \
         "$runner_workdir"
-      exec gosu runner env HOME=/home/runner USER=runner LOGNAME=runner "$jit_runner"
+      crf_run_jit_listener gosu runner env HOME=/home/runner USER=runner LOGNAME=runner "$jit_runner"
       ;;
     *)
       echo "ci-runner-farm: RUN_AS_ROOT must be true or false" >&2
