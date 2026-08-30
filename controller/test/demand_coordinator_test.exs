@@ -336,6 +336,76 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "replayed acquired handle behind a terminal fence is issued only to retire", ctx do
+    unless ctx.disabled do
+      handle = 104
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, handle)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 80
+               )
+
+      assert {:ok, _terminal} =
+               PlacementLedger.fail_placement(
+                 ctx.placements,
+                 identity.placement_id,
+                 "historical_failure",
+                 now_ms: 90
+               )
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [handle], 1)
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.issue_calls == 1
+      assert sidecar.retire_calls == 1
+      assert sidecar.confirm_calls == 1
+
+      assert sidecar.last_retire_payload["expected_ownership_revision"] ==
+               sidecar.snapshot.ownership_revision
+
+      assert {:error, :unknown_placement} =
+               PlacementLedger.get(ctx.placements, identity.placement_id)
+    end
+  end
+
+  test "replayed acquired retirement failure preserves its terminal fence", ctx do
+    unless ctx.disabled do
+      handle = 105
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, handle)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 80
+               )
+
+      assert {:ok, _terminal} =
+               PlacementLedger.fail_placement(
+                 ctx.placements,
+                 identity.placement_id,
+                 "historical_failure",
+                 now_ms: 90
+               )
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [handle], 1)
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.blocked_pools == ["build"]
+      assert {:ok, terminal} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert terminal.state == :failed
+
+      sidecar = FakeScaleSet.state(ctx.scale_set)
+      assert sidecar.issue_calls == 1
+      assert sidecar.retire_calls == 1
+      assert sidecar.confirm_calls == 0
+    end
+  end
+
   test "active deterministic placement is reconstructed without another JIT issuance", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 501)

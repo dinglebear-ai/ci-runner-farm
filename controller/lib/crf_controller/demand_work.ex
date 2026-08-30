@@ -70,7 +70,16 @@ defmodule CrfController.DemandWork do
         if MapSet.member?(issued, {pool.pool_id, handle}) do
           {:cont, {:ok, blocked, slots}}
         else
-          reconcile_acquired_with_capacity(pool, handle, slots, ctx, now_ms, now_unix_ms, blocked)
+          reconcile_acquired_with_capacity(
+            pool,
+            handle,
+            slots,
+            snapshot.ownership_revision,
+            ctx,
+            now_ms,
+            now_unix_ms,
+            blocked
+          )
         end
       end)
       |> case do
@@ -106,6 +115,7 @@ defmodule CrfController.DemandWork do
          pool,
          handle,
          slots,
+         ownership_revision,
          ctx,
          now_ms,
          now_unix_ms,
@@ -114,7 +124,17 @@ defmodule CrfController.DemandWork do
     with {:ok, identity} <- WorkIdentity.for_handle(pool.pool_id, pool.scale_set_id, handle) do
       case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
         {:ok, %PlacementTombstone{}} ->
-          {:cont, {:ok, blocked, slots}}
+          case retire_replayed_acquired(
+                 pool,
+                 handle,
+                 identity,
+                 ownership_revision,
+                 ctx
+               ) do
+            :ok -> {:cont, {:ok, blocked, slots}}
+            :blocked -> {:cont, {:ok, MapSet.put(blocked, pool.pool_id), slots}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
 
         {:ok, %Placement{}} ->
           {:cont, {:ok, blocked, slots}}
@@ -134,6 +154,53 @@ defmodule CrfController.DemandWork do
       end
     else
       {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp retire_replayed_acquired(pool, handle, identity, ownership_revision, ctx) do
+    case Map.get(ctx.policies, pool.pool_id) do
+      nil ->
+        :blocked
+
+      %PoolPolicy{} = policy ->
+        with {:ok, %{scale_set_id: scale_set_id}} <-
+               ScaleSetClient.issue_jit(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 identity.runner_name,
+                 policy.work_folder
+               ),
+             true <- scale_set_id == pool.scale_set_id,
+             {:ok, _} <-
+               ScaleSetClient.retire_jit(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 ownership_revision
+               ),
+             :ok <-
+               PlacementLedger.release_terminal_fence(
+                 ctx.placement_ledger,
+                 identity.placement_id
+               ),
+             {:ok, _} <-
+               ScaleSetClient.confirm_jit_retirement(
+                 ctx.scale_set_client,
+                 pool.pool_id,
+                 pool.scale_set_id,
+                 handle,
+                 ownership_revision
+               ) do
+          :ok
+        else
+          false -> {:error, :jit_scale_set_mismatch}
+          {:error, {:scaleset_error, "jit_issue_ambiguous"}} -> :blocked
+          {:error, {:scaleset_error, "jit_runner_delete_failed"}} -> :blocked
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
