@@ -157,17 +157,19 @@ type sessionPoller interface {
 }
 
 type Control struct {
-	cfg       RuntimeConfig
-	api       crfgithub.ScaleSetAPI
-	ownership *ownership.Manager
-	mu        sync.Mutex
-	poller    sessionPoller
-	super     *supervisor.Supervisor
-	cancel    context.CancelFunc
-	superDone chan error
-	issued    map[string]issuedRecord
-	retired   map[string]issuedRecord
-	lastSeq   uint64
+	cfg             RuntimeConfig
+	api             crfgithub.ScaleSetAPI
+	ownership       *ownership.Manager
+	mu              sync.Mutex
+	poller          sessionPoller
+	super           *supervisor.Supervisor
+	cancel          context.CancelFunc
+	superDone       chan error
+	issued          map[string]issuedRecord
+	retired         map[string]issuedRecord
+	sessionSets     map[string]int64
+	sessionEligible *bool
+	lastSeq         uint64
 }
 
 type issuedRecord struct {
@@ -240,7 +242,7 @@ func (c *Control) poolRecords() []ownership.Pool {
 	return out
 }
 
-func (c *Control) startSessions(records []ownership.Record) error {
+func (c *Control) startSessions(records []ownership.Record, eligible bool) error {
 	ctx, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStop()
 	if err := c.stopSessions(ctx); err != nil {
@@ -282,8 +284,27 @@ func (c *Control) startSessions(records []ownership.Record) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	c.poller, c.super, c.cancel, c.superDone = poller, runner, cancel, done
+	c.sessionSets = make(map[string]int64, len(records))
+	for _, record := range records {
+		c.sessionSets[record.PoolID] = record.ScaleSetID
+	}
+	c.sessionEligible = new(bool)
+	*c.sessionEligible = eligible
 	go func() { done <- runner.Run(ctx) }()
 	return nil
+}
+
+func (c *Control) sessionsMatch(records []ownership.Record, eligible bool) bool {
+	if c.super == nil || c.sessionEligible == nil || *c.sessionEligible != eligible ||
+		len(c.sessionSets) != len(records) {
+		return false
+	}
+	for _, record := range records {
+		if c.sessionSets[record.PoolID] != record.ScaleSetID {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Control) stopSessions(ctx context.Context) error {
@@ -314,6 +335,8 @@ func (c *Control) stopSessions(ctx context.Context) error {
 		c.poller = nil
 	}
 	c.super = nil
+	c.sessionSets = nil
+	c.sessionEligible = nil
 	return joinErr
 }
 
@@ -389,7 +412,10 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err != nil {
 			return failure(req, "ownership_reconcile_failed", err)
 		}
-		if err := c.startSessions(records); err != nil {
+		if c.sessionsMatch(records, payload.Eligible) {
+			return response(req, map[string]any{"records": records})
+		}
+		if err := c.startSessions(records, payload.Eligible); err != nil {
 			return failure(req, "session_start_failed", err)
 		}
 		return response(req, map[string]any{"records": records})
