@@ -164,6 +164,60 @@ defmodule CrfController.ScaleSetClientTest do
     end
   end
 
+  test "client fast-forwards when a surviving sidecar reports a higher replay fence" do
+    if elem(:os.type(), 0) == :win32 do
+      assert true
+    else
+      path = socket_path()
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      :ok = :socket.listen(listener, 2)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          for response <- [
+                %{
+                  "schema_version" => 1,
+                  "ok" => false,
+                  "code" => "sequence_regression",
+                  "result" => %{"last_sequence" => 41}
+                },
+                nil
+              ] do
+            {:ok, socket} = :socket.accept(listener, 5_000)
+            request = recv_json(socket)
+            send(parent, {:resync_request, request})
+            reply = response || response_for(request)
+            reply = Map.put(reply, "request_id", request["request_id"])
+            :ok = :socket.send(socket, :json.encode(reply) |> IO.iodata_to_binary(), 5_000)
+            :socket.close(socket)
+          end
+        end)
+
+      {:ok, client} =
+        ScaleSetClient.start_link(
+          name: nil,
+          socket_path: path,
+          controller_instance_id: "controller-resync",
+          config_revision: @revision,
+          ownership_revision: @revision,
+          timeout_ms: 5_000
+        )
+
+      assert {:ok, [%{pool_id: "build"}]} = ScaleSetClient.read_jit_state(client)
+      assert_receive {:resync_request, %{"sequence" => 1}}
+      assert_receive {:resync_request, %{"sequence" => 42}}
+
+      GenServer.stop(client)
+      Task.await(server, 5_000)
+      :socket.close(listener)
+      File.rm(path)
+      File.rm(path <> ".sequence")
+      File.rm(path <> ".eligibility")
+    end
+  end
+
   test "a persisted eligibility value is reasserted automatically on start, before any caller asks" do
     if :os.type() |> elem(0) == :win32 do
       assert true

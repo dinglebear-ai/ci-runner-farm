@@ -397,7 +397,9 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 	}
 	defer c.mu.Unlock()
 	if req.Sequence <= c.lastSeq {
-		return failure(req, "sequence_regression", nil)
+		response := failure(req, "sequence_regression", nil)
+		response.Result = map[string]any{"last_sequence": c.lastSeq}
+		return response
 	}
 	c.lastSeq = req.Sequence
 	switch req.Operation {

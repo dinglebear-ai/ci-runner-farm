@@ -120,7 +120,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	last, known := s.lastSeq[req.ControllerInstanceID]
 	if known && req.Sequence <= last {
 		s.mu.Unlock()
-		_ = json.NewEncoder(conn).Encode(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: false, Code: "sequence_regression"})
+		_ = json.NewEncoder(conn).Encode(protocol.Response{SchemaVersion: 1, RequestID: req.RequestID, OK: false, Code: "sequence_regression", Result: map[string]any{"last_sequence": last}})
 		return
 	}
 	maxReplayIdentities := s.MaxReplayIdentities

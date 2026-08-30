@@ -214,7 +214,9 @@ defmodule CrfController.ScaleSetClient do
 
   # Shared by the public GenServer call path and the internal eligibility
   # reconciler, so both go through the same sequencing and persistence.
-  defp perform_call(state, operation, payload) do
+  defp perform_call(state, operation, payload), do: perform_call(state, operation, payload, true)
+
+  defp perform_call(state, operation, payload, allow_resync?) do
     payload = add_operation_fence(operation, payload, state.ownership_revision)
 
     case ScaleSetSequence.reserve(state.sequence_path, state.controller_instance_id) do
@@ -238,10 +240,25 @@ defmodule CrfController.ScaleSetClient do
             decode_operation(operation, decoded)
           end
 
-        next_state =
-          record_commanded_eligibility(%{state | sequence: sequence}, operation, payload, result)
+        next_state = %{state | sequence: sequence}
 
-        {result, next_state}
+        case result do
+          {:error, {:scaleset_sequence_regression, last_sequence}} when allow_resync? ->
+            case ScaleSetSequence.advance_to(
+                   state.sequence_path,
+                   state.controller_instance_id,
+                   last_sequence
+                 ) do
+              :ok ->
+                perform_call(%{next_state | sequence: last_sequence}, operation, payload, false)
+
+              {:error, reason} ->
+                {{:error, reason}, next_state}
+            end
+
+          _ ->
+            {result, record_commanded_eligibility(next_state, operation, payload, result)}
+        end
 
       {:ok, _stale_sequence} ->
         {{:error, :scaleset_sequence_regression}, state}

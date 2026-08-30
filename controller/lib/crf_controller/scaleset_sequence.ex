@@ -28,6 +28,19 @@ defmodule CrfController.ScaleSetSequence do
     end
   end
 
+  def advance_to(path, controller_instance_id, sequence) do
+    with :ok <- validate_args(path, controller_instance_id),
+         true <- is_integer(sequence) and sequence > 0 and sequence < 18_446_744_073_709_551_615,
+         {:ok, current} <- load(path, controller_instance_id),
+         true <- sequence >= current,
+         :ok <- persist(path, controller_instance_id, sequence) do
+      :ok
+    else
+      false -> {:error, :invalid_scaleset_sequence_advance}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp validate_args(path, controller_instance_id) do
     cond do
       not is_binary(path) or Path.type(path) != :absolute ->

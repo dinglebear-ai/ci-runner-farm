@@ -170,9 +170,17 @@ defmodule CrfController.ScaleSetWire do
     cond do
       request_id not in [nil, "", expected_request_id] -> {:error, :scaleset_response_mismatch}
       not is_binary(code) or not Identifier.valid?(code) -> {:error, :invalid_scaleset_response}
+      code == "sequence_regression" -> decode_sequence_regression(decoded)
       true -> {:error, {:scaleset_error, code}}
     end
   end
+
+  defp decode_sequence_regression(%{"result" => %{"last_sequence" => sequence} = result})
+       when map_size(result) == 1 and is_integer(sequence) and sequence > 0 and
+              sequence < 18_446_744_073_709_551_615,
+       do: {:error, {:scaleset_sequence_regression, sequence}}
+
+  defp decode_sequence_regression(_), do: {:error, :invalid_scaleset_response}
 
   defp allowed_keys(map) when is_map(map) do
     allowed = MapSet.new(["schema_version", "request_id", "ok", "code", "error", "result"])
