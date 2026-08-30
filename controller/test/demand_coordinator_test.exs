@@ -439,7 +439,7 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "unassigned active JIT placement is cancelled after the idle timeout", ctx do
+  test "queue demand dropping to zero does not cancel an active JIT placement", ctx do
     unless ctx.disabled do
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 502)
 
@@ -479,20 +479,11 @@ defmodule CrfController.DemandCoordinatorTest do
       assert unchanged.updated_at_ms == 100
 
       assert {:ok, after_timeout} = reconcile(ctx.demand, 90_100)
-      assert after_timeout.reclaimed_idle_placements == 1
-      assert NodeMailbox.size(ctx.mailbox) == 1
-      assert {:ok, cancelling} = PlacementLedger.get(ctx.placements, identity.placement_id)
-      assert cancelling.updated_at_ms == 90_100
-      assert cancelling.detail_code == "idle_cancel_requested"
-
-      assert {:ok, pending} = reconcile(ctx.demand, 90_101)
-      assert pending.reclaimed_idle_placements == 0
-      assert NodeMailbox.size(ctx.mailbox) == 1
-
-      assert {:ok, command} =
-               NodeMailbox.next_for(ctx.mailbox, "dookie", 7, now_unix_ms: @now_unix_ms + 90_100)
-
-      assert command.payload == {:cancel_placement, identity.placement_id}
+      assert after_timeout.reclaimed_idle_placements == 0
+      assert NodeMailbox.size(ctx.mailbox) == 0
+      assert {:ok, still_active} = PlacementLedger.get(ctx.placements, identity.placement_id)
+      assert still_active.state == :observed
+      assert still_active.updated_at_ms == 100
     end
   end
 
