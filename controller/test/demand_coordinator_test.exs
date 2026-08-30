@@ -900,9 +900,9 @@ defmodule CrfController.DemandCoordinatorTest do
       assert sidecar.confirm_calls == 1
       assert sidecar.last_confirm_payload["expected_ownership_revision"] == historical_revision
       assert sidecar.jit_states == []
-      assert {:ok, placement} = PlacementLedger.get(ctx.placements, identity.placement_id)
-      assert placement.state == :failed
-      assert placement.detail_code == "jit_retired"
+
+      assert {:error, :unknown_placement} =
+               PlacementLedger.get(ctx.placements, identity.placement_id)
     end
   end
 

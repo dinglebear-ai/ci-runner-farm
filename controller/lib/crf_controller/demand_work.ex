@@ -697,6 +697,11 @@ defmodule CrfController.DemandWork do
                      now_ms: now_ms
                    ),
                  :ok <- release_offer_id(ctx.offer_ledger, offer.id),
+                 :ok <-
+                   PlacementLedger.release_terminal_fence(
+                     ctx.placement_ledger,
+                     identity.placement_id
+                   ),
                  {:ok, _} <-
                    ScaleSetClient.confirm_jit_retirement(
                      ctx.scale_set_client,
@@ -746,6 +751,12 @@ defmodule CrfController.DemandWork do
          proof_ownership_revision
        ) do
     with :ok <- release_offer_handle(ctx.offer_ledger, pool_id, handle),
+         {:ok, identity} <- WorkIdentity.for_handle(pool_id, scale_set_id, handle),
+         :ok <-
+           PlacementLedger.release_terminal_fence(
+             ctx.placement_ledger,
+             identity.placement_id
+           ),
          {:ok, _} <-
            ScaleSetClient.confirm_jit_retirement(
              ctx.scale_set_client,

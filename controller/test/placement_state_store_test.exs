@@ -97,33 +97,28 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
-  test "tombstone replay fences are retained until a newer node generation is durable" do
+  test "terminal replay fence is released only by durable retirement confirmation" do
     root =
       Path.join(System.tmp_dir!(), "crf-placement-compact-#{System.unique_integer([:positive])}")
 
     path = Path.join(root, "placements.json")
 
-    tombstones =
-      Map.new(0..8_192, fn index ->
-        id = "placement-#{index}"
-
-        {id,
-         %PlacementTombstone{
-           id: id,
-           command_id: "command-#{index}",
-           idempotency_sha256: PlacementTombstone.digest("key-#{index}"),
-           node_id: "dookie",
-           node_generation: 7,
-           state: :finished,
-           detail_code: nil,
-           updated_at_ms: index
-         }}
-      end)
+    tombstones = %{
+      "placement-0" => %PlacementTombstone{
+        id: "placement-0",
+        command_id: "command-0",
+        idempotency_sha256: PlacementTombstone.digest("key-0"),
+        node_id: "dookie",
+        node_generation: 7,
+        state: :finished,
+        detail_code: nil,
+        updated_at_ms: 1
+      }
+    }
 
     compacted = PlacementStateStore.compact(%{}, tombstones)
-    assert map_size(compacted.tombstones) == 8_193
+    assert map_size(compacted.tombstones) == 1
     assert Map.has_key?(compacted.tombstones, "placement-0")
-    assert Map.has_key?(compacted.tombstones, "placement-8192")
     assert :ok = PlacementStateStore.persist(path, %{}, compacted.tombstones)
 
     {:ok, ledger} = PlacementLedger.start_link(name: nil, state_path: path)
@@ -133,18 +128,23 @@ defmodule CrfController.PlacementStateStoreTest do
                ledger,
                "dookie",
                7,
-               "command-8192",
-               "key-8192",
+               "command-0",
+               "key-0",
                :duplicate,
                nil,
                now_ms: 9_000
              )
 
     assert {:ok, %PlacementTombstone{}} = PlacementLedger.get(ledger, "placement-0")
-    assert :ok = PlacementLedger.prune_before_generation(ledger, "dookie", 8)
+    assert :ok = PlacementLedger.release_terminal_fence(ledger, "placement-0")
     assert [] = PlacementLedger.tombstone_snapshot(ledger)
     assert {:error, :unknown_placement} = PlacementLedger.get(ledger, "placement-0")
     GenServer.stop(ledger)
+
+    {:ok, restarted} = PlacementLedger.start_link(name: nil, state_path: path)
+    assert {:error, :unknown_placement} = PlacementLedger.get(restarted, "placement-0")
+    assert :ok = PlacementLedger.release_terminal_fence(restarted, "placement-0")
+    GenServer.stop(restarted)
     File.rm_rf!(root)
   end
 
@@ -203,7 +203,7 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
-  test "generation prune with no older tombstones performs no durable write" do
+  test "idempotent release of an absent terminal fence performs no durable write" do
     root =
       Path.join(
         System.tmp_dir!(),
@@ -215,7 +215,7 @@ defmodule CrfController.PlacementStateStoreTest do
     assert {:ok, before_stat} = File.stat(path)
     assert {:ok, before_contents} = File.read(path)
 
-    assert :ok = PlacementLedger.prune_before_generation(ledger, "dookie", 8)
+    assert :ok = PlacementLedger.release_terminal_fence(ledger, "placement-missing")
 
     assert {:ok, after_stat} = File.stat(path)
     assert {:ok, ^before_contents} = File.read(path)
@@ -317,7 +317,7 @@ defmodule CrfController.PlacementStateStoreTest do
     File.rm_rf!(root)
   end
 
-  test "stale pre-checkpoint WAL cannot resurrect an acknowledged generation prune" do
+  test "stale pre-checkpoint WAL cannot resurrect an acknowledged terminal-fence release" do
     root =
       Path.join(
         System.tmp_dir!(),
@@ -337,28 +337,15 @@ defmodule CrfController.PlacementStateStoreTest do
       updated_at_ms: 10
     }
 
-    current = %PlacementTombstone{
-      id: "current",
-      command_id: "current-command",
-      idempotency_sha256: PlacementTombstone.digest("current-key"),
-      node_id: "dookie",
-      node_generation: 2,
-      state: :finished,
-      detail_code: nil,
-      updated_at_ms: 20
-    }
-
-    assert :ok = PlacementStateStore.persist(path, %{}, %{old.id => old, current.id => current})
+    assert :ok = PlacementStateStore.persist(path, %{}, %{old.id => old})
     assert :ok = PlacementStateStore.append(path, {:put, old})
-    assert :ok = PlacementStateStore.append(path, {:put, current})
-    assert :ok = PlacementStateStore.append(path, {:prune_before_generation, "dookie", 2})
+    assert :ok = PlacementStateStore.append(path, {:delete_tombstone, old.id})
 
     # Model a crash after the compacted snapshot is durable but before the old
-    # WAL is unlinked: recovery must replay the durable prune after stale puts.
-    assert :ok = PlacementStateStore.persist(path, %{}, %{current.id => current})
+    # WAL is unlinked: recovery must replay the durable release after stale puts.
+    assert :ok = PlacementStateStore.persist(path, %{}, %{})
     assert {:ok, %{placements: %{}, tombstones: tombstones}} = PlacementStateStore.load(path)
     refute Map.has_key?(tombstones, old.id)
-    assert Map.has_key?(tombstones, current.id)
 
     File.rm_rf!(root)
   end

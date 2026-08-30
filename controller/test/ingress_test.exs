@@ -57,6 +57,36 @@ defmodule CrfController.IngressTest do
     assert length(NodeRegistry.snapshot(context.registry)) == 1
   end
 
+  test "new node generation does not discard terminal work-handle fences", context do
+    attrs = TestFixtures.placement_attrs("dookie", 7)
+    assert {:ok, _} = PlacementLedger.begin_placement(context.placements, attrs, now_ms: 1)
+
+    assert {:ok, _} =
+             PlacementLedger.fail_placement(
+               context.placements,
+               attrs.id,
+               "operator_abandoned",
+               now_ms: 2
+             )
+
+    register = TestFixtures.registration("dookie", 8, :linux, :container, "generation-8")
+
+    assert {:ok, response} =
+             Ingress.ingest(context.ingress, TestFixtures.peer("dookie"), register,
+               now_ms: 3,
+               now_unix_ms: @now_unix_ms
+             )
+
+    assert TestFixtures.decode_json(response)["status"] == "accepted"
+
+    assert {:error, :placement_terminal} =
+             PlacementLedger.begin_placement(
+               context.placements,
+               %{attrs | node_generation: 8},
+               now_ms: 4
+             )
+  end
+
   test "same message id with changed contents is rejected", context do
     peer = TestFixtures.peer("dookie")
     first = TestFixtures.registration("dookie", 7, :linux, :container, "message-2")

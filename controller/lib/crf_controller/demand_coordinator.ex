@@ -294,14 +294,21 @@ defmodule CrfController.DemandCoordinator do
             {:ok, _result} ->
               release_offer_for_handle(ctx.offer_ledger, jit.pool_id, jit.work_handle)
 
-              case ScaleSetClient.confirm_jit_retirement(
-                     ctx.scale_set_client,
-                     jit.pool_id,
-                     jit.scale_set_id,
-                     jit.work_handle,
-                     Map.get(jit, :ownership_revision)
-                   ) do
-                {:ok, _} -> errors
+              with :ok <-
+                     PlacementLedger.release_terminal_fence(
+                       ctx.placement_ledger,
+                       placement.id
+                     ),
+                   {:ok, _} <-
+                     ScaleSetClient.confirm_jit_retirement(
+                       ctx.scale_set_client,
+                       jit.pool_id,
+                       jit.scale_set_id,
+                       jit.work_handle,
+                       Map.get(jit, :ownership_revision)
+                     ) do
+                errors
+              else
                 {:error, reason} -> [reason | errors]
               end
 
