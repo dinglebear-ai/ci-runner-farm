@@ -182,6 +182,7 @@ for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-rel
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
 grep -Fq 'usermod -aG docker runner' "$dockerfile"
+grep -Fq "'{\"storage-driver\":\"vfs\"}'" "$dockerfile"
 grep -Fq 'openssh-client' "$dockerfile"
 grep -Fq '"python3"' "$probe"
 grep -Fq '"ssh-client"' "$probe"

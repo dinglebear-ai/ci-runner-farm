@@ -48,6 +48,13 @@ RUN set -eux; \
     docker compose version; \
     gh --version
 
+# The runner itself is a container. An inner overlay2 snapshotter cannot mount
+# another overlay filesystem on the outer overlay upperdir on Unraid, so Buildx
+# fails while booting BuildKit. Prefer correctness over copy-on-write speed for
+# this explicitly enabled, ephemeral DinD daemon.
+RUN install -d /etc/docker \
+ && printf '%s\n' '{"storage-driver":"vfs"}' > /etc/docker/daemon.json
+
 WORKDIR /actions-runner
 RUN set -eux; \
     case "$TARGETARCH" in \
