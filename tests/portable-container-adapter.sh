@@ -429,6 +429,12 @@ jq -e '.payload.result == "deferred" and .payload.detail_code == "container_star
 reply="$(printf '%s\n' "$retry_start" | "$adapter")"
 jq -e '.payload.result == "started"' <<<"$reply" >/dev/null
 
+# Retire the retry fixture before starting a second placement. The Docker mock
+# models one live container at a time, matching a single-slot node.
+retry_cancel="$(jq -cn '{schema_version:1,payload:{action:"cancel",placement_id:"placement-retry",expected_id:null}}')"
+reply="$(printf '%s\n' "$retry_cancel" | "$adapter")"
+jq -e '.payload.result == "terminal" and .payload.outcome == "cancelled"' <<<"$reply" >/dev/null
+
 # Trusted nodes can opt into isolated DinD explicitly. The default remains
 # unprivileged, and malformed configuration fails closed.
 dind_start="$(jq -cn --arg jit "$jit" '{schema_version:1,payload:{action:"start",placement_id:"placement-dind",command_id:"command-dind",pool_id:"ops",runner_name:"runner-dind",resources:{cpu_millis:750,memory_bytes:1073741824},jit_config:$jit}}')"

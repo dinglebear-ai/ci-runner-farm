@@ -34,11 +34,11 @@ cat >"$tmp/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-for tool in unzip zip zstd wget rsync file rg docker gh node; do
+for tool in unzip zip zstd wget rsync file rg docker dockerd gh node; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/$tool"
 done
 chmod +x "$tmp/bin/getconf" "$tmp/bin/uname" "$tmp/bin/php" "$tmp/bin/python3" "$tmp/bin/ssh" \
-  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg" "$tmp/bin/docker" "$tmp/bin/gh" "$tmp/bin/node"
+  "$tmp/bin/unzip" "$tmp/bin/zip" "$tmp/bin/zstd" "$tmp/bin/wget" "$tmp/bin/rsync" "$tmp/bin/file" "$tmp/bin/rg" "$tmp/bin/docker" "$tmp/bin/dockerd" "$tmp/bin/gh" "$tmp/bin/node"
 
 result="$(PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe")"
 jq -e '
