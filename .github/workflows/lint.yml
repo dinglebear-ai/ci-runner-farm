@@ -182,6 +182,9 @@ jobs:
           docker run --rm --platform linux/arm64 --network none --read-only --entrypoint sh "$arm_image" \
             -c 'unzip -v >/dev/null && zip -v >/dev/null && zstd --version >/dev/null && wget --version >/dev/null && rsync --version >/dev/null && file --version >/dev/null && rg --version >/dev/null && docker --version >/dev/null && docker buildx version >/dev/null && docker compose version >/dev/null && gh --version >/dev/null && node --version >/dev/null'
           test "$(docker run --rm --platform linux/arm64 --network none --entrypoint id "$arm_image" -u)" = 0
+          docker image rm -f "$image" "$arm_image" >/dev/null 2>&1 || true
+          docker buildx prune --all --force
+          docker system prune --all --force
 
       - name: Native plugin payload
         if: runner.os == 'Linux'
