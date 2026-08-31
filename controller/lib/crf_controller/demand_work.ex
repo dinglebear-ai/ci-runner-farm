@@ -106,6 +106,7 @@ defmodule CrfController.DemandWork do
       |> MapSet.new()
 
     issued = MapSet.new(jit_states, &{&1.pool_id, &1.work_handle})
+    current_scale_sets = Map.new(snapshot.pools, &{&1.pool_id, &1.scale_set_id})
 
     ctx.offer_ledger
     |> OfferLedger.snapshot(now_ms: now_ms)
@@ -116,7 +117,8 @@ defmodule CrfController.DemandWork do
       if MapSet.member?(acquired, key) or MapSet.member?(issued, key) do
         {:cont, :ok}
       else
-        with scale_set_id when is_integer(scale_set_id) <- offer.scale_set_id,
+        with scale_set_id when is_integer(scale_set_id) <-
+               Map.get(offer, :scale_set_id) || Map.get(current_scale_sets, offer.pool_id),
              {:ok, identity} <-
                WorkIdentity.for_handle(offer.pool_id, scale_set_id, offer.work_handle) do
           case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do

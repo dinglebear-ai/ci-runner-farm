@@ -97,7 +97,7 @@ The distributed model preserves the legacy single-host invariant that GitHub cap
 8. JIT is issued/replayed through the Go adapter.
 9. `PlacementCoordinator` atomically converts the assigned offer into a durable placement and JIT-bearing node command.
 
-Assigned offers do not expire while a handle is in flight. Their originating scale-set identity is persisted so cleanup remains correct if a pool disappears or is replaced. Free offers may expire or be trimmed if pool policy shrinks.
+Assigned offers do not expire while a handle is in flight. Their originating scale-set identity is stored on the in-memory offer reservation so cleanup remains correct if a pool disappears or is replaced. Free offers may expire or be trimmed if pool policy shrinks.
 
 ## Placement and node flow
 

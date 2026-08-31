@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,10 +14,7 @@ import (
 )
 
 func TestClientRoundTripUsesBoundedUnixFrame(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := shortRuntimeDir(t)
 	path := filepath.Join(dir, "control.sock")
 	uid := uint32(os.Geteuid())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,7 +43,7 @@ func TestClientRoundTripUsesBoundedUnixFrame(t *testing.T) {
 }
 
 func TestClientContextBoundsConnectedRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stalled.sock")
+	path := filepath.Join(shortRuntimeDir(t), "stalled.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -75,10 +73,7 @@ func TestClientContextBoundsConnectedRead(t *testing.T) {
 func TestClientRejectsOversizedResponse(t *testing.T) {
 	// The production server is already bounded on requests. The client must also
 	// avoid trusting an unbounded or compromised local peer response.
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := shortRuntimeDir(t)
 	path := filepath.Join(dir, "control.sock")
 	uid := uint32(os.Geteuid())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,10 +107,7 @@ func TestClientRejectsOversizedResponse(t *testing.T) {
 }
 
 func TestServerBoundsReplayIdentitiesWithoutEvictingProtection(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := shortRuntimeDir(t)
 	path := filepath.Join(dir, "control.sock")
 	uid := uint32(os.Geteuid())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,10 +149,7 @@ func TestServerBoundsReplayIdentitiesWithoutEvictingProtection(t *testing.T) {
 }
 
 func TestServerRefusesToUnlinkNonSocketPaths(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := shortRuntimeDir(t)
 	uid := uint32(os.Geteuid())
 	for _, kind := range []string{"regular", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
@@ -186,7 +175,7 @@ func TestServerRefusesToUnlinkNonSocketPaths(t *testing.T) {
 }
 
 func TestServerRequiresPrivateRuntimeDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortRuntimeDir(t)
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -197,4 +186,55 @@ func TestServerRequiresPrivateRuntimeDirectory(t *testing.T) {
 	if err == nil || err.Error() != "socket_runtime_dir_not_private" {
 		t.Fatalf("expected private runtime rejection, got %v", err)
 	}
+}
+
+func TestServerRejectsMismatchedPeerUID(t *testing.T) {
+	path := filepath.Join(shortRuntimeDir(t), "control.sock")
+	disallowedUID := uint32(os.Geteuid()) + 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &Server{Path: path, AllowedUID: &disallowedUID, Handler: func(context.Context, protocol.Request) protocol.Response {
+		return protocol.Response{SchemaVersion: 1, OK: true}
+	}}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		conn, err := net.Dial("unix", path)
+		if err == nil {
+			var response protocol.Response
+			if err := json.NewDecoder(conn).Decode(&response); err != nil {
+				_ = conn.Close()
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+			if response.Code != "peer_not_root" {
+				t.Fatalf("mismatched peer UID was not rejected: %#v", response)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func shortRuntimeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "crf-i.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

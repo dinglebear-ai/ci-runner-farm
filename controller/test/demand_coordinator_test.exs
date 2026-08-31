@@ -410,6 +410,26 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "stale assigned offer cleanup enriches a nil legacy scale-set identity", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 905)
+      replace_offer(ctx.offers, assigned.id, &Map.put(&1, :scale_set_id, nil))
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "stale assigned offer cleanup safely handles a pre-upgrade offer shape", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 906)
+      replace_offer(ctx.offers, assigned.id, &Map.delete(&1, :scale_set_id))
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
   test "an active pool does not reserve speculative capacity beyond assigned demand", ctx do
     unless ctx.disabled do
       :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 1)
@@ -1188,6 +1208,12 @@ defmodule CrfController.DemandCoordinatorTest do
     snapshot = FakeScaleSet.state(ctx.scale_set).snapshot
     work_ctx = :sys.get_state(ctx.demand).ctx
     {snapshot, work_ctx, assigned}
+  end
+
+  defp replace_offer(ledger, offer_id, fun) do
+    :sys.replace_state(ledger, fn state ->
+      %{state | offers: Map.update!(state.offers, offer_id, fun)}
+    end)
   end
 
   defp register_node(registry), do: register_node_generation(registry, 7)
