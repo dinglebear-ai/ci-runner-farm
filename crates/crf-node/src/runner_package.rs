@@ -563,7 +563,6 @@ fn sync_directory(_path: &Path) -> Result<(), io::Error> {
 #[cfg(test)]
 mod download_tests {
     use std::{
-        io::Write as _,
         net::TcpListener,
         thread,
         time::{Duration, Instant},

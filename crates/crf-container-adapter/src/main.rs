@@ -2057,7 +2057,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--memory=128m", "--memory-swap=128m"])
         );
-        assert!(!args.iter().any(|arg| *arg == "--memory=64m"));
+        assert!(!args.contains(&"--memory=64m"));
     }
 
     #[test]
