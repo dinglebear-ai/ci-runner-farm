@@ -16,24 +16,33 @@ defmodule CrfController.DemandWork do
 
   @command_ttl_ms 60_000
 
-  def reconcile_jit_states(jit_states, ctx, now_ms, now_unix_ms) when is_list(jit_states) do
+  def reconcile_jit_states(jit_states, _snapshot, ctx, now_ms, now_unix_ms)
+      when is_list(jit_states) do
     jit_states
     |> Enum.sort_by(&{&1.pool_id, &1.scale_set_id, &1.work_handle})
     |> Enum.reduce_while({:ok, MapSet.new(), MapSet.new()}, fn jit,
-                                                               {:ok, blocked, retry_blocked} ->
-      if MapSet.member?(retry_blocked, jit.pool_id) do
-        {:cont, {:ok, blocked, retry_blocked}}
+                                                               {:ok, blocked, retry_deferred} ->
+      retry_key = {jit.pool_id, jit.work_handle}
+
+      if MapSet.member?(retry_deferred, retry_key) do
+        {:cont, {:ok, blocked, retry_deferred}}
       else
-        case reconcile_jit(jit, ctx, now_ms, now_unix_ms) do
+        result = reconcile_jit(jit, ctx, now_ms, now_unix_ms)
+
+        case result do
           :ok ->
-            {:cont, {:ok, blocked, retry_blocked}}
+            {:cont, {:ok, blocked, retry_deferred}}
 
           {:blocked, pool_id} ->
-            {:cont, {:ok, MapSet.put(blocked, pool_id), retry_blocked}}
+            {:cont, {:ok, MapSet.put(blocked, pool_id), retry_deferred}}
 
+          # GitHub refuses to delete a JIT runner while it is executing its one
+          # job. Keep the pool schedulable, but retry each handle only once per
+          # tick because the sidecar reports both issued and retirement-started
+          # records for the same lifecycle. Other idle handles in the pool must
+          # still be allowed to retire.
           {:error, {:scaleset_error, "jit_runner_delete_failed"}} ->
-            {:cont,
-             {:ok, MapSet.put(blocked, jit.pool_id), MapSet.put(retry_blocked, jit.pool_id)}}
+            {:cont, {:ok, blocked, MapSet.put(retry_deferred, retry_key)}}
 
           {:error, reason} ->
             {:halt, {:error, reason}}
@@ -41,7 +50,7 @@ defmodule CrfController.DemandWork do
       end
     end)
     |> case do
-      {:ok, blocked, _retry_blocked} -> {:ok, blocked}
+      {:ok, blocked, _retry_deferred} -> {:ok, blocked}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -88,6 +97,47 @@ defmodule CrfController.DemandWork do
     end)
   end
 
+  def release_stale_assigned_offers(snapshot, jit_states, ctx, now_ms) do
+    acquired =
+      snapshot.pools
+      |> Enum.flat_map(fn pool ->
+        Enum.map(pool.acquired_handles, &{pool.pool_id, &1})
+      end)
+      |> MapSet.new()
+
+    issued = MapSet.new(jit_states, &{&1.pool_id, &1.work_handle})
+
+    ctx.offer_ledger
+    |> OfferLedger.snapshot(now_ms: now_ms)
+    |> Enum.filter(&(&1.state == :assigned))
+    |> Enum.reduce_while(:ok, fn offer, :ok ->
+      key = {offer.pool_id, offer.work_handle}
+
+      if MapSet.member?(acquired, key) or MapSet.member?(issued, key) do
+        {:cont, :ok}
+      else
+        with {:ok, identity} <- WorkIdentity.for_handle(offer.pool_id, scale_set_id(snapshot, offer), offer.work_handle) do
+          case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
+            {:error, :unknown_placement} ->
+              case OfferLedger.release(ctx.offer_ledger, offer.id) do
+                {:ok, _} -> {:cont, :ok}
+                {:error, :unknown_offer} -> {:cont, :ok}
+                {:error, reason} -> {:halt, {:error, reason}}
+              end
+
+            {:ok, _record} ->
+              {:cont, :ok}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end
+    end)
+  end
+
   # Scale-set `assigned_jobs` is queue demand, not runner busy state. It drops to
   # zero as soon as GitHub hands a job to a runner, so using it to reclaim an
   # observed placement kills long-running jobs after `offer_ttl_ms`. Issued JIT
@@ -95,6 +145,12 @@ defmodule CrfController.DemandWork do
   # inactive/lost-placement reconciliation paths, both of which have terminal
   # evidence that this demand snapshot lacks.
   def reclaim_unassigned(_snapshot, _ctx, _now_ms, _now_unix_ms), do: {:ok, 0}
+
+  defp scale_set_id(snapshot, offer) do
+    snapshot.pools
+    |> Enum.find(&(&1.pool_id == offer.pool_id))
+    |> Map.fetch!(:scale_set_id)
+  end
 
   defp reconcile_acquired_with_capacity(
          pool,
@@ -130,6 +186,7 @@ defmodule CrfController.DemandWork do
         {:error, :unknown_placement} ->
           case reconcile_acquired_handle(pool, handle, ctx, now_ms, now_unix_ms) do
             :ok -> {:cont, {:ok, blocked, slots - 1}}
+            :stale -> {:cont, {:ok, blocked, slots}}
             :blocked -> {:cont, {:ok, MapSet.put(blocked, pool.pool_id), slots}}
             {:error, reason} -> {:halt, {:error, reason}}
           end
@@ -615,6 +672,12 @@ defmodule CrfController.DemandWork do
 
           {:error, {:scaleset_error, "jit_issue_ambiguous"}} ->
             :blocked
+
+          {:error, {:scaleset_error, "work_handle_not_available"}} ->
+            case release_offer_id(ctx.offer_ledger, offer.id) do
+              :ok -> :stale
+              {:error, reason} -> {:error, reason}
+            end
 
           {:error, reason} ->
             {:error, reason}

@@ -250,8 +250,11 @@ fn image_capabilities(config: &Config) -> Result<Value, &'static str> {
             "--security-opt=no-new-privileges",
             "--pids-limit=32",
             "--cpus=0.25",
-            "--memory=64m",
-            "--memory-swap=64m",
+            // The image contract probes bundled tooling such as buildx. 64 MiB
+            // is below its observed peak on otherwise healthy nodes and lets
+            // the kernel kill the probe, falsely quarantining the image.
+            "--memory=128m",
+            "--memory-swap=128m",
             "--user=65534:65534",
             "--entrypoint",
             "/usr/local/bin/crf-runner-image-contract",

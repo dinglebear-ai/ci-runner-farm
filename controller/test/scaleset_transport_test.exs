@@ -58,6 +58,40 @@ defmodule CrfController.ScaleSetTransportTest do
     end
   end
 
+  test "response deadline cannot become an unbounded socket wait" do
+    if :os.type() |> elem(0) != :win32 do
+      path = socket_path("deadline")
+      {:ok, listener} = :socket.open(:local, :stream, :default)
+      :ok = :socket.bind(listener, %{family: :local, path: path})
+      :ok = :socket.listen(listener, 1)
+
+      server =
+        Task.async(fn ->
+          {:ok, socket} = :socket.accept(listener, 5_000)
+          _request = recv_to_eof(socket, <<>>)
+
+          Enum.reduce_while(1..100, :ok, fn _, :ok ->
+            Process.sleep(10)
+
+            case :socket.send(socket, ".", 100) do
+              :ok -> {:cont, :ok}
+              {:error, _reason} -> {:halt, :closed}
+            end
+          end)
+
+          :socket.close(socket)
+        end)
+
+      started_at = System.monotonic_time(:millisecond)
+      assert {:error, :scaleset_timeout} = ScaleSetTransport.call(path, "request", 50)
+      assert System.monotonic_time(:millisecond) - started_at < 400
+
+      Task.await(server, 1_000)
+      :socket.close(listener)
+      File.rm(path)
+    end
+  end
+
   defp recv_to_eof(socket, acc) do
     case :socket.recv(socket, 0, 5_000) do
       {:ok, data} -> recv_to_eof(socket, <<acc::binary, data::binary>>)

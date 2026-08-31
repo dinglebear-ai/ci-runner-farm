@@ -35,26 +35,45 @@ defmodule CrfController.OfferPlanner do
     placements = PlacementLedger.snapshot(ctx.placement_ledger)
     offers = OfferLedger.snapshot(ctx.offer_ledger, now_ms: now_ms)
     health = Map.new(snapshot.pools, &{&1.pool_id, &1.session_healthy})
-    sessions_ready = Enum.all?(Map.keys(ctx.policies), &(Map.get(health, &1, false) == true))
+    assigned = Map.new(snapshot.pools, &{&1.pool_id, &1.assigned_jobs})
 
-    if not sessions_ready do
-      {:ok, planner}
-    else
-      plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms)
-    end
+    unhealthy =
+      ctx.policies
+      |> Map.keys()
+      |> Enum.reject(&(Map.get(health, &1, false) == true))
+      |> MapSet.new()
+
+    plan_ready_pools(
+      placements,
+      offers,
+      assigned,
+      MapSet.union(blocked, unhealthy),
+      ctx,
+      planner,
+      now_ms
+    )
   end
 
-  defp plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms) do
+  defp plan_ready_pools(placements, offers, assigned, blocked, ctx, planner, now_ms) do
     needs =
       Map.new(ctx.policies, fn {pool_id, policy} ->
         service = Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
         pool_offers = Enum.count(offers, &(&1.pool_id == pool_id))
 
+        # Keep one bootstrap lease so GitHub can reveal demand for an idle scale
+        # set. Once demand appears, match the jobs GitHub has assigned without
+        # adding speculative slots. Extra discovery slots can permanently hold
+        # scarce node resources after the assigned jobs are already running and
+        # starve another idle scale set of the bootstrap lease it needs to make
+        # its own queued work visible.
+        assigned_jobs = Map.get(assigned, pool_id, 0)
+        target = min(policy.max_concurrency, max(assigned_jobs, 1))
+
         need =
           if MapSet.member?(blocked, pool_id) do
             0
           else
-            max(policy.max_concurrency - service - pool_offers, 0)
+            max(target - service - pool_offers, 0)
           end
 
         {pool_id, need}

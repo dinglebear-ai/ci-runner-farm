@@ -123,6 +123,30 @@ func TestRetireHandleInterruptsLongPoll(t *testing.T) {
 		t.Fatalf("poll error = %v", err)
 	}
 }
+
+func TestRetireHandleCancellationKeepsPollHealthy(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{})}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pollDone := make(chan error, 1)
+	go func() {
+		_, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+		pollDone <- err
+	}()
+	<-api.started
+
+	if err := poller.RetireHandle(7, 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-pollDone; err != nil {
+		t.Fatalf("intentional retirement cancellation marked pool unhealthy: %v", err)
+	}
+}
 func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.AvailableJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1038,7 +1062,50 @@ func TestIdleCapacityCreatesDurableJSONSafeWorkHandle(t *testing.T) {
 	}
 }
 
-func TestIdleCapacityStopsFabricatingHandlesWithoutDemand(t *testing.T) {
+func TestUnknownDemandKeepsOnlyOneBootstrapHandle(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 13)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.AcquiredHandles) != 1 {
+		t.Fatalf("unknown demand consumed the full controller lease: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestBootstrapHandlesShrinkWhenDemandFalls(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.setDemand(12, 4)
+	first, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.AcquiredHandles) != 4 {
+		t.Fatalf("expected four handles for observed demand: %#v", first.AcquiredHandles)
+	}
+	poller.setDemand(12, 0)
+	shrunk, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shrunk.AcquiredHandles) != 1 {
+		t.Fatalf("stale bootstrap handles were not released: %#v", shrunk.AcquiredHandles)
+	}
+}
+
+func TestIdleCapacityKeepsOneBootstrapHandleWithoutDemand(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
 		MessageID: 21, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 0, TotalAssignedJobs: 0},
@@ -1052,11 +1119,45 @@ func TestIdleCapacityStopsFabricatingHandlesWithoutDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// GitHub reported nothing queued and nothing assigned for this scale set, so
-	// synthesising handles would burn shared node concurrency that a pool with
-	// real work needs.
-	if len(result.AcquiredHandles) != 0 {
-		t.Fatalf("fabricated handles for a pool with no demand: %#v", result.AcquiredHandles)
+	// GitHub can withhold queued work from a scale set advertising zero capacity.
+	// Keep exactly one handle so the pool can bootstrap without consuming its
+	// entire controller lease while idle.
+	if len(result.AcquiredHandles) != 1 {
+		t.Fatalf("expected one bootstrap handle for an idle pool: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestAssignedHandleReplacesBootstrapHandle(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := poller.Poll(
+		context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bootstrap.AcquiredHandles) != 1 {
+		t.Fatalf("expected one bootstrap handle, got %#v", bootstrap.AcquiredHandles)
+	}
+
+	api.mu.Lock()
+	api.batch = crfgithub.MessageBatch{
+		MessageID:       22,
+		Statistics:      &crfgithub.Statistics{TotalAssignedJobs: 1},
+		AssignedHandles: []int64{9001},
+	}
+	api.mu.Unlock()
+	assigned, err := poller.Poll(
+		context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(assigned.AcquiredHandles, []int64{9001}) {
+		t.Fatalf("bootstrap handle remained ahead of assigned work: %#v", assigned.AcquiredHandles)
 	}
 }
 

@@ -159,6 +159,23 @@ func (p *Poller) clearPending(scaleSetID int64) {
 	delete(p.pending, scaleSetID)
 }
 
+func (p *Poller) dropBootstrapHandles(scaleSetID int64, sessionID string) error {
+	p.mu.Lock()
+	bootstrap := slices.Clone(p.replay[journal.Key{ScaleSetID: scaleSetID, MessageID: 0}].AcquiredHandles)
+	p.mu.Unlock()
+	if len(bootstrap) == 0 {
+		return nil
+	}
+	entry := journal.Entry{ScaleSetID: scaleSetID, SessionID: sessionID, MessageID: 0,
+		Phase: "acked", AssignedCount: p.assignedCount(scaleSetID),
+		ConfigRevision: p.cfg.ConfigRevision, OwnershipRevision: p.cfg.OwnershipRevision}
+	if err := p.append(entry); err != nil {
+		return err
+	}
+	p.removePending(scaleSetID, bootstrap...)
+	return nil
+}
+
 func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capacity int) error {
 	if capacity < 0 || capacity > 64 {
 		return errors.New("invalid_advertised_capacity")
@@ -167,14 +184,37 @@ func (p *Poller) ensureCapacityHandles(scaleSetID int64, sessionID string, capac
 	// pick work up. Fabricating them up to the full advertised capacity, though,
 	// lets a pool with nothing queued consume every node slot and starve a pool
 	// that has real jobs waiting -- the node's concurrency is shared across all
-	// pools. Cap them at the work GitHub actually reports for this scale set.
-	// Until a statistics-bearing batch has been observed the demand is unknown,
-	// and the original full-capacity behaviour is kept rather than guessing zero.
-	target := capacity
-	if observed, known := p.demandCount(scaleSetID); known && observed < target {
-		target = observed
+	// pools. Cap them at the work GitHub actually reports for this scale set,
+	// while preserving one bootstrap handle. GitHub does not necessarily expose
+	// queued work to a zero-capacity scale set, so reducing the target all the
+	// way to zero creates a permanent queue/capacity deadlock.
+	// A single handle is sufficient to bootstrap an idle or not-yet-observed
+	// pool. The advertised capacity header still tells GitHub the real lease;
+	// manufacturing one handle per leased slot here only reserves idle node
+	// placements before GitHub has reported any work.
+	target := min(capacity, 1)
+	if observed, known := p.demandCount(scaleSetID); known {
+		target = min(capacity, observed)
+		if capacity > 0 && target == 0 {
+			target = 1
+		}
 	}
 	current := p.pendingSnapshot(scaleSetID)
+	p.mu.Lock()
+	bootstrap := slices.Clone(p.replay[journal.Key{ScaleSetID: scaleSetID, MessageID: 0}].AcquiredHandles)
+	p.mu.Unlock()
+	if len(bootstrap) > target {
+		kept := slices.Clone(bootstrap[:target])
+		entry := journal.Entry{ScaleSetID: scaleSetID, SessionID: sessionID, MessageID: 0,
+			Phase: "acked", AssignedCount: p.assignedCount(scaleSetID),
+			AcquiredHandles: kept, ConfigRevision: p.cfg.ConfigRevision,
+			OwnershipRevision: p.cfg.OwnershipRevision}
+		if err := p.append(entry); err != nil {
+			return err
+		}
+		p.removePending(scaleSetID, bootstrap[target:]...)
+		current = p.pendingSnapshot(scaleSetID)
+	}
 	if len(current) >= target {
 		return nil
 	}
@@ -770,6 +810,7 @@ func (p *Poller) selectForAcquire(ctx context.Context, pool supervisor.Pool, bat
 }
 
 func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (supervisor.PollResult, error) {
+	parentCtx := ctx
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -841,6 +882,13 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		if !advertisedKnown {
 			p.setAdvertised(pool.ScaleSetID, capacity)
 		}
+		// RetireHandle deliberately cancels this pool's long-poll to avoid
+		// blocking terminal cleanup behind GitHub's poll deadline. Preserve a
+		// healthy snapshot for that internal interrupt; cancellation of the
+		// supervisor's parent context remains a real shutdown signal.
+		if errors.Is(err, context.Canceled) && parentCtx.Err() == nil {
+			return p.result(pool.ScaleSetID, session.ID, capacity, last)
+		}
 		return supervisor.PollResult{}, err
 	}
 	if batch.MessageID == 0 {
@@ -865,6 +913,11 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	p.setDemand(pool.ScaleSetID,
 		batch.Statistics.TotalAvailableJobs+batch.Statistics.TotalAssignedJobs)
 	p.removePending(pool.ScaleSetID, batch.ReleasedHandles...)
+	if len(batch.AssignedHandles) > 0 {
+		if err := p.dropBootstrapHandles(pool.ScaleSetID, session.ID); err != nil {
+			return supervisor.PollResult{}, err
+		}
+	}
 	if p.assignedCount(pool.ScaleSetID) == 0 {
 		p.clearPending(pool.ScaleSetID)
 	}
