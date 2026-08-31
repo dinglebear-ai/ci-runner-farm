@@ -90,14 +90,14 @@ The distributed model preserves the legacy single-host invariant that GitHub cap
 1. Elixir reconciles central JIT recovery state before admitting new work.
 2. Elixir reads a fresh scale-set snapshot and acquired handles.
 3. Existing acquired/JIT handles are reconciled first.
-4. For free capacity, Elixir asks Rust to place a bounded number of synthetic offer requirements.
-5. Every successful placement becomes a node-bound `Offer` reservation.
+4. An idle healthy pool receives exactly one resource-backed bootstrap lease. Once GitHub reports assigned demand, Elixir asks Rust to place only the additional offer requirements needed to match that observed demand.
+5. Every successful placement becomes a node-bound `Offer` reservation. Synthetic bootstrap offers are assigned to real work handles when those handles arrive; stale assigned offers are released only when acquired-handle, JIT, and durable-placement evidence are all absent.
 6. Published GitHub capacity for a pool is exactly `nonterminal placements + live offers`, capped by the same 64-runner fuse.
 7. When GitHub returns a work handle, the oldest matching offer is assigned to the handle. If no offer exists, the actual work handle is placed through Rust before JIT issuance.
 8. JIT is issued/replayed through the Go adapter.
 9. `PlacementCoordinator` atomically converts the assigned offer into a durable placement and JIT-bearing node command.
 
-Assigned offers do not expire while a handle is in flight. Free offers may expire or be trimmed if pool policy shrinks.
+Assigned offers do not expire while a handle is in flight. Their originating scale-set identity is persisted so cleanup remains correct if a pool disappears or is replaced. Free offers may expire or be trimmed if pool policy shrinks.
 
 ## Placement and node flow
 

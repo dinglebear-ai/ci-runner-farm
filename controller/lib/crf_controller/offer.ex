@@ -14,7 +14,7 @@ defmodule CrfController.Offer do
     :created_at_ms,
     :expires_at_ms
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [scale_set_id: nil]
 
   def new(attrs, now_ms) when is_map(attrs) and is_integer(now_ms) do
     with {:ok, id} <- identifier(Map.get(attrs, :id), :invalid_offer_id),
@@ -24,6 +24,8 @@ defmodule CrfController.Offer do
            Map.get(attrs, :node_generation),
          {:ok, resources} <- Resources.new(Map.get(attrs, :resources)),
          true <- resources.cpu_millis > 0 and resources.memory_bytes > 0,
+         scale_set_id when is_nil(scale_set_id) or (is_integer(scale_set_id) and scale_set_id > 0) <-
+           Map.get(attrs, :scale_set_id),
          expires_at_ms when is_integer(expires_at_ms) <- Map.get(attrs, :expires_at_ms),
          true <- expires_at_ms > now_ms and expires_at_ms - now_ms <= @max_ttl_ms do
       {:ok,
@@ -33,6 +35,7 @@ defmodule CrfController.Offer do
          node_id: node_id,
          node_generation: generation,
          resources: resources,
+         scale_set_id: scale_set_id,
          state: :offered,
          work_handle: nil,
          created_at_ms: now_ms,
@@ -64,7 +67,8 @@ defmodule CrfController.Offer do
 
   def same_reservation?(%__MODULE__{} = left, %__MODULE__{} = right) do
     left.id == right.id and left.pool_id == right.pool_id and left.node_id == right.node_id and
-      left.node_generation == right.node_generation and left.resources == right.resources
+      left.node_generation == right.node_generation and left.resources == right.resources and
+      left.scale_set_id == right.scale_set_id
   end
 
   defp identifier(value, error) when is_binary(value) do

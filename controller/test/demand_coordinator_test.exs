@@ -3,6 +3,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   alias CrfController.{
     DemandCoordinator,
+    DemandWork,
     NodeCommand,
     NodeMailbox,
     NodeRegistry,
@@ -345,7 +346,8 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "assigned offers without acquired, JIT, or placement evidence release their capacity", ctx do
+  test "assigned offers without acquired, JIT, or placement evidence release their capacity",
+       ctx do
     unless ctx.disabled do
       assert {:ok, first} = reconcile(ctx.demand, 100)
       assert first.offers == 1
@@ -354,7 +356,57 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, second} = reconcile(ctx.demand, 200)
       assert second.offers == 1
       assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
-      assert [%{state: :offered, work_handle: nil}] = OfferLedger.snapshot(ctx.offers, now_ms: 201)
+
+      assert [%{state: :offered, work_handle: nil}] =
+               OfferLedger.snapshot(ctx.offers, now_ms: 201)
+    end
+  end
+
+  test "assigned offers retain capacity while acquired evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 901)
+      [pool] = snapshot.pools
+      snapshot = %{snapshot | pools: [%{pool | acquired_handles: [901]}]}
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:ok, %{id: id, state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+      assert id == assigned.id
+    end
+  end
+
+  test "assigned offers retain capacity while JIT evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 902)
+      jit_states = [%{pool_id: "build", scale_set_id: 74, work_handle: 902}]
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, jit_states, work_ctx, 200)
+      assert {:ok, %{state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "assigned offers retain capacity while placement evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 903)
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 903)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 150
+               )
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:ok, %{state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "stale assigned offer cleanup uses persisted scale-set identity when pool disappears",
+       ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 904)
+      snapshot = %{snapshot | pools: []}
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
     end
   end
 
@@ -1128,6 +1180,14 @@ defmodule CrfController.DemandCoordinatorTest do
       now_unix_ms: @now_unix_ms + now_ms,
       timeout: 10_000
     )
+  end
+
+  defp assigned_offer(ctx, handle) do
+    assert {:ok, _result} = reconcile(ctx.demand, 100)
+    assert {:ok, assigned} = OfferLedger.assign_next(ctx.offers, "build", handle, now_ms: 101)
+    snapshot = FakeScaleSet.state(ctx.scale_set).snapshot
+    work_ctx = :sys.get_state(ctx.demand).ctx
+    {snapshot, work_ctx, assigned}
   end
 
   defp register_node(registry), do: register_node_generation(registry, 7)

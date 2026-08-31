@@ -810,25 +810,17 @@ func (p *Poller) selectForAcquire(ctx context.Context, pool supervisor.Pool, bat
 }
 
 func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (supervisor.PollResult, error) {
-	parentCtx := ctx
 	lock := p.poolLock(pool.ScaleSetID)
 	lock.Lock()
 	defer lock.Unlock()
-	pollCtx, cancel := context.WithCancel(ctx)
 	p.mu.Lock()
-	if p.pollCancels == nil {
-		p.pollCancels = map[int64]context.CancelFunc{}
-	}
 	if p.pollActive == nil {
 		p.pollActive = map[int64]int{}
 	}
-	p.pollCancels[pool.ScaleSetID] = cancel
 	p.pollActive[pool.ScaleSetID]++
 	p.mu.Unlock()
 	defer func() {
-		cancel()
 		p.mu.Lock()
-		delete(p.pollCancels, pool.ScaleSetID)
 		p.pollActive[pool.ScaleSetID]--
 		if p.pollActive[pool.ScaleSetID] == 0 {
 			delete(p.pollActive, pool.ScaleSetID)
@@ -841,7 +833,6 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		}
 		p.mu.Unlock()
 	}()
-	ctx = pollCtx
 	if err := p.retryRejectedSession(ctx, pool.ScaleSetID); err != nil {
 		return supervisor.PollResult{}, err
 	}
@@ -876,7 +867,18 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 	// as the scale set capacity the backend may rely on for assignment. Hidden
 	// backlog is inspected through the separate admin acquirable-jobs endpoint;
 	// never inflate this capacity header merely to manufacture lookahead.
-	batch, err := p.cfg.API.GetMessage(ctx, session, last, capacity)
+	messageCtx, cancelMessage := context.WithCancel(ctx)
+	p.mu.Lock()
+	if p.pollCancels == nil {
+		p.pollCancels = map[int64]context.CancelFunc{}
+	}
+	p.pollCancels[pool.ScaleSetID] = cancelMessage
+	p.mu.Unlock()
+	batch, err := p.cfg.API.GetMessage(messageCtx, session, last, capacity)
+	cancelMessage()
+	p.mu.Lock()
+	delete(p.pollCancels, pool.ScaleSetID)
+	p.mu.Unlock()
 	if err != nil {
 		p.commitSession(session, sessionIsNew)
 		if !advertisedKnown {
@@ -886,7 +888,7 @@ func (p *Poller) Poll(ctx context.Context, pool supervisor.Pool, capacity int) (
 		// blocking terminal cleanup behind GitHub's poll deadline. Preserve a
 		// healthy snapshot for that internal interrupt; cancellation of the
 		// supervisor's parent context remains a real shutdown signal.
-		if errors.Is(err, context.Canceled) && parentCtx.Err() == nil {
+		if errors.Is(err, context.Canceled) && ctx.Err() == nil {
 			return p.result(pool.ScaleSetID, session.ID, capacity, last)
 		}
 		return supervisor.PollResult{}, err

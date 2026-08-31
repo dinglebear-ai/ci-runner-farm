@@ -116,7 +116,9 @@ defmodule CrfController.DemandWork do
       if MapSet.member?(acquired, key) or MapSet.member?(issued, key) do
         {:cont, :ok}
       else
-        with {:ok, identity} <- WorkIdentity.for_handle(offer.pool_id, scale_set_id(snapshot, offer), offer.work_handle) do
+        with scale_set_id when is_integer(scale_set_id) <- offer.scale_set_id,
+             {:ok, identity} <-
+               WorkIdentity.for_handle(offer.pool_id, scale_set_id, offer.work_handle) do
           case PlacementLedger.get(ctx.placement_ledger, identity.placement_id) do
             {:error, :unknown_placement} ->
               case OfferLedger.release(ctx.offer_ledger, offer.id) do
@@ -132,6 +134,7 @@ defmodule CrfController.DemandWork do
               {:halt, {:error, reason}}
           end
         else
+          nil -> {:cont, :ok}
           {:error, reason} -> {:halt, {:error, reason}}
         end
       end
@@ -145,12 +148,6 @@ defmodule CrfController.DemandWork do
   # inactive/lost-placement reconciliation paths, both of which have terminal
   # evidence that this demand snapshot lacks.
   def reclaim_unassigned(_snapshot, _ctx, _now_ms, _now_unix_ms), do: {:ok, 0}
-
-  defp scale_set_id(snapshot, offer) do
-    snapshot.pools
-    |> Enum.find(&(&1.pool_id == offer.pool_id))
-    |> Map.fetch!(:scale_set_id)
-  end
 
   defp reconcile_acquired_with_capacity(
          pool,
@@ -465,6 +462,7 @@ defmodule CrfController.DemandWork do
                  %{
                    id: identity.offer_id,
                    pool_id: policy.id,
+                   scale_set_id: jit.scale_set_id,
                    node_id: placement.node_id,
                    node_generation: placement.node_generation,
                    resources: placement.resources,
@@ -574,7 +572,7 @@ defmodule CrfController.DemandWork do
   end
 
   defp dispatch_replay(jit, policy, identity, ctx, now_ms, now_unix_ms) do
-    case ensure_offer(policy, identity, jit.work_handle, ctx, now_ms) do
+    case ensure_offer(policy, identity, jit.scale_set_id, jit.work_handle, ctx, now_ms) do
       {:ok, offer} ->
         case ScaleSetClient.issue_jit(
                ctx.scale_set_client,
@@ -642,7 +640,7 @@ defmodule CrfController.DemandWork do
   end
 
   defp issue_new(pool, handle, policy, identity, ctx, now_ms, now_unix_ms) do
-    case ensure_offer(policy, identity, handle, ctx, now_ms) do
+    case ensure_offer(policy, identity, pool.scale_set_id, handle, ctx, now_ms) do
       {:ok, offer} ->
         case ScaleSetClient.issue_jit(
                ctx.scale_set_client,
@@ -691,7 +689,7 @@ defmodule CrfController.DemandWork do
     end
   end
 
-  defp ensure_offer(policy, identity, handle, ctx, now_ms) do
+  defp ensure_offer(policy, identity, scale_set_id, handle, ctx, now_ms) do
     case OfferLedger.assign_next(ctx.offer_ledger, policy.id, handle, now_ms: now_ms) do
       {:ok, offer} ->
         {:ok, offer}
@@ -706,6 +704,7 @@ defmodule CrfController.DemandWork do
                 %{
                   id: identity.offer_id,
                   pool_id: policy.id,
+                  scale_set_id: scale_set_id,
                   node_id: placement.node_id,
                   node_generation: placement.node_generation,
                   resources: policy.resources,

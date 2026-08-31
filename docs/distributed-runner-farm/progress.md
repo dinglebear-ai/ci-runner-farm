@@ -227,6 +227,8 @@ The implemented path is:
 - back-to-back placements cannot oversubscribe stale heartbeat capacity;
 - a pool work handle cannot own two distributed offers;
 - assigned offers do not expire while the handle is in flight;
+- idle pools advertise exactly one resource-backed bootstrap lease, then expand only to observed assigned demand;
+- synthetic bootstrap offers are replaced by real assigned handles, and assigned capacity is released only when acquired, JIT, and placement evidence are all absent;
 - advertised scale-set capacity equals resource-backed nonterminal placements plus live offers.
 
 ## Remaining major work

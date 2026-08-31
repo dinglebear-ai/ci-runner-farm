@@ -36,6 +36,7 @@ defmodule CrfController.OfferPlanner do
     offers = OfferLedger.snapshot(ctx.offer_ledger, now_ms: now_ms)
     health = Map.new(snapshot.pools, &{&1.pool_id, &1.session_healthy})
     assigned = Map.new(snapshot.pools, &{&1.pool_id, &1.assigned_jobs})
+    scale_sets = Map.new(snapshot.pools, &{&1.pool_id, &1.scale_set_id})
 
     unhealthy =
       ctx.policies
@@ -47,6 +48,7 @@ defmodule CrfController.OfferPlanner do
       placements,
       offers,
       assigned,
+      scale_sets,
       MapSet.union(blocked, unhealthy),
       ctx,
       planner,
@@ -54,7 +56,7 @@ defmodule CrfController.OfferPlanner do
     )
   end
 
-  defp plan_ready_pools(placements, offers, assigned, blocked, ctx, planner, now_ms) do
+  defp plan_ready_pools(placements, offers, assigned, scale_sets, blocked, ctx, planner, now_ms) do
     needs =
       Map.new(ctx.policies, fn {pool_id, policy} ->
         service = Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
@@ -89,7 +91,7 @@ defmodule CrfController.OfferPlanner do
       with {:ok, schedule} <- Scheduler.schedule(requirements, scheduler_opts(ctx)) do
         by_work = Map.new(candidates, &{&1.requirement.work_id, &1})
 
-        case reserve_scheduled(schedule.placements, by_work, ctx, now_ms) do
+        case reserve_scheduled(schedule.placements, by_work, scale_sets, ctx, now_ms) do
           # An unplaceable candidate must not pin the fairness cursor forever.
           # Advance to the next pool so a later, feasible policy can advertise
           # capacity on the following tick.
@@ -121,7 +123,7 @@ defmodule CrfController.OfferPlanner do
     end)
   end
 
-  defp reserve_scheduled(placements, by_work, ctx, now_ms) do
+  defp reserve_scheduled(placements, by_work, scale_sets, ctx, now_ms) do
     Enum.reduce_while(placements, :ok, fn placement, :ok ->
       case Map.fetch(by_work, placement.work_id) do
         {:ok, candidate} ->
@@ -130,6 +132,7 @@ defmodule CrfController.OfferPlanner do
                  %{
                    id: candidate.offer_id,
                    pool_id: candidate.policy.id,
+                   scale_set_id: Map.get(scale_sets, candidate.policy.id),
                    node_id: placement.node_id,
                    node_generation: placement.node_generation,
                    resources: candidate.policy.resources,
