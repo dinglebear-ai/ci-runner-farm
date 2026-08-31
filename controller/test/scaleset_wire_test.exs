@@ -74,6 +74,30 @@ defmodule CrfController.ScaleSetWireTest do
                ]
              })
 
+    assert {:ok,
+            [
+              %{
+                pool_id: "build",
+                scale_set_id: 74,
+                work_handle: 102,
+                state: "retirement_started",
+                ownership_revision: @revision,
+                descriptor_available: false
+              }
+            ]} =
+             ScaleSetWire.decode_jit_states(%{
+               "states" => [
+                 %{
+                   "pool_id" => "build",
+                   "scale_set_id" => 74,
+                   "work_handle" => 102,
+                   "state" => "retirement_started",
+                   "ownership_revision" => @revision,
+                   "descriptor_available" => false
+                 }
+               ]
+             })
+
     assert {:error, :invalid_jit_state_response} =
              ScaleSetWire.decode_jit_states(%{
                "states" => [
