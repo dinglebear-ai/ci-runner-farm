@@ -71,7 +71,6 @@ defmodule CrfController.OperatorSnapshot do
   defp call(nil, _fun, fallback, _timeout), do: fallback
 
   defp call(server, fun, fallback, timeout) do
-    caller = self()
     result_ref = make_ref()
 
     {pid, monitor_ref} =
@@ -83,16 +82,19 @@ defmodule CrfController.OperatorSnapshot do
             :exit, _ -> :failed
           end
 
-        send(caller, {result_ref, result})
+        # Returning the result as the monitored process's exit reason keeps the
+        # result and completion signal in one message.  Sending the result and
+        # then monitoring the worker races the ordinary message against :DOWN;
+        # if :DOWN wins, the result leaks into the caller's mailbox.
+        exit({:operator_snapshot_result, result_ref, result})
       end)
 
     receive do
-      {^result_ref, {:ok, result}} ->
-        Process.demonitor(monitor_ref, [:flush])
+      {:DOWN, ^monitor_ref, :process, ^pid,
+       {:operator_snapshot_result, ^result_ref, {:ok, result}}} ->
         result
 
-      {^result_ref, :failed} ->
-        Process.demonitor(monitor_ref, [:flush])
+      {:DOWN, ^monitor_ref, :process, ^pid, {:operator_snapshot_result, ^result_ref, :failed}} ->
         fallback
 
       {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
