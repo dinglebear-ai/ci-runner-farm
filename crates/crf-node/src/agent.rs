@@ -50,7 +50,6 @@ pub trait PlacementRuntime {
 pub enum AgentRuntimeError {
     PollFailed,
     PlacementStateUnavailable,
-    ReservedResourcesExceedTotal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -480,9 +479,13 @@ where
             .map_err(AgentSessionError::Runtime)?;
         let mut available = self.core.node().total;
         if !available.subtract(reserved) {
-            return Err(AgentSessionError::Runtime(
-                AgentRuntimeError::ReservedResourcesExceedTotal,
-            ));
+            // Durable placement records can temporarily exceed a node's
+            // configured budget after a restart or an interrupted cleanup.
+            // Keep the session alive with no capacity so subsequent runtime
+            // polls can report and prune the stale records. Exiting here
+            // restarts the daemon, resets the poll cursor, and permanently
+            // strands exactly the state that needs reconciliation.
+            available = Resources::default();
         }
         let heartbeat = self.heartbeat(available, active_placements, now_unix_ms)?;
         Ok(RuntimeHeartbeatOutcome {
@@ -965,21 +968,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_heartbeat_fails_closed_when_reservations_exceed_budget() {
-        let (mut session, state) = runtime_session(vec![]);
+    fn runtime_heartbeat_advertises_zero_while_reservations_exceed_budget() {
+        let (mut session, state) = runtime_session(vec![response("msg-7-1", None)]);
         {
             let mut state = state.lock().expect("runtime lock");
             state.reports.clear();
             state.reserved = Resources::new(9_000, 17 * GIB);
         }
 
+        session
+            .runtime_heartbeat(NOW)
+            .expect("over-budget durable state must still reconcile");
         assert!(matches!(
-            session.runtime_heartbeat(NOW),
-            Err(AgentSessionError::Runtime(
-                AgentRuntimeError::ReservedResourcesExceedTotal
-            ))
+            &session.transport().requests[0].payload,
+            NodeMessage::Heartbeat { available, .. } if *available == Resources::default()
         ));
-        assert!(session.transport().requests.is_empty());
     }
 
     #[test]

@@ -18,6 +18,7 @@ defmodule CrfController.OfferLedgerTest do
     assert assigned.id == first.id
     assert assigned.state == :assigned
     assert assigned.work_handle == 101
+    assert assigned.scale_set_id == 74
 
     assert {:ok, ^assigned} = OfferLedger.assign_next(ledger, "build", 101, now_ms: 13)
     assert {:ok, ^assigned} = OfferLedger.consume(ledger, assigned.id, 101)
@@ -55,10 +56,26 @@ defmodule CrfController.OfferLedgerTest do
     assert {:ok, ^offer} = OfferLedger.find_by_handle(ledger, "build", 901)
   end
 
+  test "scale-set identity must be positive", %{ledger: ledger} do
+    for scale_set_id <- [0, -1] do
+      invalid = Map.put(attrs("offer-#{scale_set_id}"), :scale_set_id, scale_set_id)
+      assert {:error, :invalid_offer} = OfferLedger.reserve(ledger, invalid, now_ms: 10)
+    end
+  end
+
+  test "scale-set identity participates in reservation replay equality", %{ledger: ledger} do
+    assert {:ok, %{scale_set_id: 74}} =
+             OfferLedger.reserve(ledger, attrs("offer-a"), now_ms: 10)
+
+    conflicting = Map.put(attrs("offer-a"), :scale_set_id, 75)
+    assert {:error, :offer_conflict} = OfferLedger.reserve(ledger, conflicting, now_ms: 11)
+  end
+
   defp attrs(id, expires_at_ms \\ 100) do
     %{
       id: id,
       pool_id: "build",
+      scale_set_id: 74,
       node_id: "dookie",
       node_generation: 7,
       resources: %{cpu_millis: 2_000, memory_bytes: 4 * @gib},

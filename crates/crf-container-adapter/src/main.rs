@@ -238,26 +238,8 @@ fn image_capabilities(config: &Config) -> Result<Value, &'static str> {
         ],
     )?)
     .map_err(|_| "image_contract_unavailable")?;
-    let contract = docker_output(
-        config,
-        &[
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--pids-limit=32",
-            "--cpus=0.25",
-            "--memory=64m",
-            "--memory-swap=64m",
-            "--user=65534:65534",
-            "--entrypoint",
-            "/usr/local/bin/crf-runner-image-contract",
-            &config.image,
-        ],
-    )?;
+    let contract_args = image_contract_run_args(&config.image);
+    let contract = docker_output(config, &contract_args)?;
     let architecture = docker_output(
         config,
         &[
@@ -271,6 +253,29 @@ fn image_capabilities(config: &Config) -> Result<Value, &'static str> {
     let capabilities =
         validated_image_capabilities(&config.image, &repo_digests, &architecture, &contract)?;
     Ok(json!(capabilities))
+}
+
+fn image_contract_run_args(image: &str) -> Vec<&str> {
+    vec![
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=32",
+        "--cpus=0.25",
+        // The image contract probes bundled tooling such as buildx. 64 MiB
+        // is below its observed peak on otherwise healthy nodes and lets the
+        // kernel kill the probe, falsely quarantining the image.
+        "--memory=128m",
+        "--memory-swap=128m",
+        "--user=65534:65534",
+        "--entrypoint",
+        "/usr/local/bin/crf-runner-image-contract",
+        image,
+    ]
 }
 
 fn validated_image_capabilities(
@@ -2042,6 +2047,17 @@ mod tests {
             "registry/image@sha256:{}",
             "A".repeat(64)
         )));
+    }
+
+    #[test]
+    fn image_contract_probe_uses_exact_bounded_memory_contract() {
+        let args = image_contract_run_args("registry/image@sha256:digest");
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--memory=128m", "--memory-swap=128m"])
+        );
+        assert!(!args.contains(&"--memory=64m"));
     }
 
     #[test]

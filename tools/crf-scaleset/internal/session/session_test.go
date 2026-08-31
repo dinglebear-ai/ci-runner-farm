@@ -44,6 +44,12 @@ type fakeAPI struct {
 	started             chan int64
 	block               chan struct{}
 	ignoreMessageCancel bool
+	acquireStarted      chan struct{}
+	acquireBlock        chan struct{}
+	acquireContextErr   error
+	ackStarted          chan struct{}
+	ackBlock            chan struct{}
+	ackContextErr       error
 }
 
 func (*fakeAPI) CreateRunnerScaleSet(context.Context, crfgithub.CreateSpec) (crfgithub.ScaleSet, error) {
@@ -123,6 +129,125 @@ func TestRetireHandleInterruptsLongPoll(t *testing.T) {
 		t.Fatalf("poll error = %v", err)
 	}
 }
+
+func TestRetireHandleCancellationKeepsPollHealthy(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{})}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pollDone := make(chan error, 1)
+	go func() {
+		_, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+		pollDone <- err
+	}()
+	<-api.started
+
+	if err := poller.RetireHandle(7, 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-pollDone; err != nil {
+		t.Fatalf("intentional retirement cancellation marked pool unhealthy: %v", err)
+	}
+}
+
+func TestParentCancellationStopsPoll(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store, started: make(chan int64, 1), block: make(chan struct{})}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pollDone := make(chan error, 1)
+	go func() {
+		_, err := poller.Poll(ctx, supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+		pollDone <- err
+	}()
+	<-api.started
+	cancel()
+
+	if err := <-pollDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was treated as a healthy retirement interrupt: %v", err)
+	}
+}
+
+func TestRetireHandleDoesNotCancelAcquireOrAcknowledge(t *testing.T) {
+	t.Run("acquire", func(t *testing.T) {
+		store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+		job := testJob(101, "soma", "dinglebear-ai/soma/.github/workflows/ci.yml@refs/heads/main", "unit", time.Now().UTC())
+		api := &fakeAPI{
+			store: store,
+			batch: crfgithub.MessageBatch{
+				MessageID: 12, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 1},
+				Available: []int64{101}, AvailableJobs: []crfgithub.AvailableJob{job},
+			},
+			acquireStarted: make(chan struct{}),
+			acquireBlock:   make(chan struct{}),
+		}
+		poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+			OwnershipRevision: strings.Repeat("b", 64)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		poller.setAdvertised(7, 1)
+
+		pollDone := make(chan error, 1)
+		go func() {
+			_, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+			pollDone <- err
+		}()
+		<-api.acquireStarted
+		if err := poller.RetireHandle(7, 101); err != nil {
+			t.Fatal(err)
+		}
+		close(api.acquireBlock)
+		if err := <-pollDone; err != nil {
+			t.Fatal(err)
+		}
+		if api.acquireContextErr != nil {
+			t.Fatalf("retirement canceled acquire context: %v", api.acquireContextErr)
+		}
+	})
+
+	t.Run("acknowledge", func(t *testing.T) {
+		store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+		api := &fakeAPI{
+			store:      store,
+			batch:      crfgithub.MessageBatch{MessageID: 12, Statistics: &crfgithub.Statistics{}},
+			ackStarted: make(chan struct{}),
+			ackBlock:   make(chan struct{}),
+		}
+		poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+			OwnershipRevision: strings.Repeat("b", 64)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		poller.setAdvertised(7, 1)
+
+		pollDone := make(chan error, 1)
+		go func() {
+			_, err := poller.Poll(context.Background(), supervisor.Pool{ID: "build", ScaleSetID: 7}, 1)
+			pollDone <- err
+		}()
+		<-api.ackStarted
+		if err := poller.RetireHandle(7, 101); err != nil {
+			t.Fatal(err)
+		}
+		close(api.ackBlock)
+		if err := <-pollDone; err != nil {
+			t.Fatal(err)
+		}
+		if api.ackContextErr != nil {
+			t.Fatalf("retirement canceled acknowledge context: %v", api.ackContextErr)
+		}
+	})
+}
 func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.AvailableJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -130,9 +255,16 @@ func (f *fakeAPI) GetAcquirableJobs(ctx context.Context, _ int64) ([]crfgithub.A
 	_, f.acquirableDeadline = ctx.Deadline()
 	return slices.Clone(f.acquirable), f.acquirableErr
 }
-func (f *fakeAPI) AcquireJobs(_ context.Context, _ crfgithub.Session, req crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
+func (f *fakeAPI) AcquireJobs(ctx context.Context, _ crfgithub.Session, req crfgithub.AcquireRequest) (crfgithub.AcquireResult, error) {
+	if f.acquireStarted != nil {
+		close(f.acquireStarted)
+	}
+	if f.acquireBlock != nil {
+		<-f.acquireBlock
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acquireContextErr = ctx.Err()
 	f.acquireCalls++
 	f.acquireIDs = slices.Clone(req.RequestIDs)
 	if !f.acquireResultSet && f.acquire.AcquiredIDs == nil && f.acquireErr == nil {
@@ -140,9 +272,16 @@ func (f *fakeAPI) AcquireJobs(_ context.Context, _ crfgithub.Session, req crfgit
 	}
 	return f.acquire, f.acquireErr
 }
-func (f *fakeAPI) AcknowledgeMessage(_ context.Context, _ crfgithub.Session, id int64) error {
+func (f *fakeAPI) AcknowledgeMessage(ctx context.Context, _ crfgithub.Session, id int64) error {
+	if f.ackStarted != nil {
+		close(f.ackStarted)
+	}
+	if f.ackBlock != nil {
+		<-f.ackBlock
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ackContextErr = ctx.Err()
 	f.ackCalls++
 	replayed, _ := f.store.Replay()
 	for key, entry := range replayed {
@@ -1038,7 +1177,50 @@ func TestIdleCapacityCreatesDurableJSONSafeWorkHandle(t *testing.T) {
 	}
 }
 
-func TestIdleCapacityStopsFabricatingHandlesWithoutDemand(t *testing.T) {
+func TestUnknownDemandKeepsOnlyOneBootstrapHandle(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 13)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.AcquiredHandles) != 1 {
+		t.Fatalf("unknown demand consumed the full controller lease: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestBootstrapHandlesShrinkWhenDemandFalls(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.setDemand(12, 4)
+	first, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.AcquiredHandles) != 4 {
+		t.Fatalf("expected four handles for observed demand: %#v", first.AcquiredHandles)
+	}
+	poller.setDemand(12, 0)
+	shrunk, err := poller.Poll(context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shrunk.AcquiredHandles) != 1 {
+		t.Fatalf("stale bootstrap handles were not released: %#v", shrunk.AcquiredHandles)
+	}
+}
+
+func TestIdleCapacityKeepsOneBootstrapHandleWithoutDemand(t *testing.T) {
 	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
 	api := &fakeAPI{store: store, batch: crfgithub.MessageBatch{
 		MessageID: 21, Statistics: &crfgithub.Statistics{TotalAvailableJobs: 0, TotalAssignedJobs: 0},
@@ -1052,11 +1234,45 @@ func TestIdleCapacityStopsFabricatingHandlesWithoutDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// GitHub reported nothing queued and nothing assigned for this scale set, so
-	// synthesising handles would burn shared node concurrency that a pool with
-	// real work needs.
-	if len(result.AcquiredHandles) != 0 {
-		t.Fatalf("fabricated handles for a pool with no demand: %#v", result.AcquiredHandles)
+	// GitHub can withhold queued work from a scale set advertising zero capacity.
+	// Keep exactly one handle so the pool can bootstrap without consuming its
+	// entire controller lease while idle.
+	if len(result.AcquiredHandles) != 1 {
+		t.Fatalf("expected one bootstrap handle for an idle pool: %#v", result.AcquiredHandles)
+	}
+}
+
+func TestAssignedHandleReplacesBootstrapHandle(t *testing.T) {
+	store := journal.Store{Path: filepath.Join(t.TempDir(), "replay.jsonl")}
+	api := &fakeAPI{store: store}
+	poller, err := New(Config{API: api, Store: store, ConfigRevision: strings.Repeat("a", 64),
+		OwnershipRevision: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := poller.Poll(
+		context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bootstrap.AcquiredHandles) != 1 {
+		t.Fatalf("expected one bootstrap handle, got %#v", bootstrap.AcquiredHandles)
+	}
+
+	api.mu.Lock()
+	api.batch = crfgithub.MessageBatch{
+		MessageID:       22,
+		Statistics:      &crfgithub.Statistics{TotalAssignedJobs: 1},
+		AssignedHandles: []int64{9001},
+	}
+	api.mu.Unlock()
+	assigned, err := poller.Poll(
+		context.Background(), supervisor.Pool{ID: "go", ScaleSetID: 12}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(assigned.AcquiredHandles, []int64{9001}) {
+		t.Fatalf("bootstrap handle remained ahead of assigned work: %#v", assigned.AcquiredHandles)
 	}
 }
 
