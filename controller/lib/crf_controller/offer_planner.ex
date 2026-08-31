@@ -57,6 +57,21 @@ defmodule CrfController.OfferPlanner do
   end
 
   defp plan_ready_pools(placements, offers, assigned, scale_sets, blocked, ctx, planner, now_ms) do
+    # A bootstrap lease is only for discovering demand in an otherwise idle
+    # fleet. Once a pool has more GitHub-assigned jobs than live placements,
+    # speculative listeners for unrelated pools must yield the scheduler to
+    # that concrete work. Otherwise a small fleet can fill its memory budget
+    # with one idle JIT runner per pool while assigned jobs remain queued.
+    demand_waiting? =
+      Enum.any?(ctx.policies, fn {pool_id, _policy} ->
+        assigned_jobs = Map.get(assigned, pool_id, 0)
+
+        service =
+          Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
+
+        assigned_jobs > service
+      end)
+
     needs =
       Map.new(ctx.policies, fn {pool_id, policy} ->
         service = Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
@@ -69,7 +84,8 @@ defmodule CrfController.OfferPlanner do
         # starve another idle scale set of the bootstrap lease it needs to make
         # its own queued work visible.
         assigned_jobs = Map.get(assigned, pool_id, 0)
-        target = min(policy.max_concurrency, max(assigned_jobs, 1))
+        bootstrap = if demand_waiting?, do: 0, else: 1
+        target = min(policy.max_concurrency, max(assigned_jobs, bootstrap))
 
         need =
           if MapSet.member?(blocked, pool_id) do

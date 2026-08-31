@@ -76,9 +76,12 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:set_assigned_jobs, assigned_jobs}, _from, state) do
-      [pool] = state.snapshot.pools
-      pool = %{pool | assigned_jobs: assigned_jobs}
-      state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
+      pools =
+        Enum.map(state.snapshot.pools, fn pool ->
+          if pool.pool_id == "build", do: %{pool | assigned_jobs: assigned_jobs}, else: pool
+        end)
+
+      state = %{state | snapshot: %{state.snapshot | pools: pools}}
       {:reply, :ok, state}
     end
 
@@ -343,6 +346,46 @@ defmodule CrfController.DemandCoordinatorTest do
       assert {:ok, result} = reconcile(ctx.demand, 100)
       assert result.leases == %{"build" => 1}
       assert result.offers == 1
+    end
+  end
+
+  test "assigned work suppresses unrelated bootstrap leases", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.add_pool(ctx.scale_set, %{
+          pool_id: "other",
+          scale_set_id: 75,
+          assigned_jobs: 0,
+          advertised_capacity: 0,
+          last_message_id: 0,
+          session_healthy: true,
+          acquired_handles: []
+        })
+
+      demand =
+        start_supervised!(
+          Supervisor.child_spec(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(2), %{policy(1) | id: "other"}],
+             scale_set_client: ctx.scale_set,
+             scheduler_client: ctx.scheduler,
+             node_registry: ctx.registry,
+             placement_ledger: ctx.placements,
+             offer_ledger: ctx.offers,
+             node_mailbox: ctx.mailbox,
+             placement_coordinator: ctx.coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 4},
+            id: :demand_priority_over_bootstrap
+          )
+        )
+
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
+
+      assert {:ok, result} = reconcile(demand, 100)
+      assert result.leases == %{"build" => 2, "other" => 0}
+      assert Enum.all?(OfferLedger.snapshot(ctx.offers, now_ms: 101), &(&1.pool_id == "build"))
     end
   end
 
