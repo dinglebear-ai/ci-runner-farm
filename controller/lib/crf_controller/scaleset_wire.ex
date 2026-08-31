@@ -92,7 +92,9 @@ defmodule CrfController.ScaleSetWire do
            scale_set_id when is_integer(scale_set_id) and scale_set_id > 0 <-
              state["scale_set_id"],
            work_handle when is_integer(work_handle) and work_handle > 0 <- state["work_handle"],
-           lifecycle when lifecycle in ["issue_started", "issued", "retired"] <- state["state"],
+           lifecycle
+           when lifecycle in ["issue_started", "issued", "retirement_started", "retired"] <-
+             state["state"],
            true <- revision?(state["ownership_revision"]),
            true <- is_boolean(state["descriptor_available"]) do
         decoded = %{
