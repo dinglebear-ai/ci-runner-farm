@@ -35,8 +35,15 @@ ENV CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 # so the sudoers file below is belt-and-braces over what the base already gives.
 # Do not delete it casually: /usr/local/bin/wait-docker.sh now depends on the
 # runner user being able to sudo, and degrades loudly if it cannot.
+# Erlang/OTP is built from source by mise (kerl) on the Elixir pools, so the
+# OTP build prerequisites belong here rather than in each workflow: without
+# libncurses-dev, erts/configure aborts with "No curses library functions
+# found" and every Elixir job fails in toolchain setup. m4 and autoconf are
+# kerl's other hard requirements. libncurses5-dev is deliberately absent: it
+# does not exist on this base (ubuntu 26.04) and naming it fails the build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev cmake sudo php-cli ripgrep file clang lld mold \
+      libncurses-dev m4 autoconf \
  && rm -rf /var/lib/apt/lists/* \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
