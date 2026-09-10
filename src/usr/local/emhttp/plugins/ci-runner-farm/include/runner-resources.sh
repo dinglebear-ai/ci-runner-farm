@@ -365,7 +365,18 @@ resource_inventory_totals() {
   [ -f "$inventory" ] || return 0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    IFS='|' read -r _ _ _ nano memory _ pool _ _ _ identity _ <<<"$row"
+    IFS='|' read -r _ _ _ nano memory _ pool _ _ _ identity backend _ <<<"$row"
+    # Only rows this plugin's admission governs may consume its budget. The
+    # inventory schema already carries backend in field 12 and
+    # inventory_backend_names() filters on it; this consumer previously did not
+    # bind the field at all, so a foreign row (e.g. a stopped distributed
+    # placement) fell through to the unaccountable branch below and was charged
+    # RESOURCE_CPU_BUDGET_MILLI -- one such row zeroes admissible capacity and
+    # silently stops all classic scale-up.
+    case "${backend:-classic}" in
+      classic|scaleset) ;;
+      *) continue ;;
+    esac
     if resource_positive_uint_valid "$nano" 256000000000; then
       cpu=$((nano / 1000000))
     elif [ "$identity" = valid ] && pool_record "$pool" >/dev/null 2>&1; then

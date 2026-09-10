@@ -111,6 +111,25 @@ resource_snapshot_refresh "$inventory"
 crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "invalid managed runner must consume CPU conservatively"
 crf_assert_eq 0 "$RESOURCE_MEMORY_ADMISSIBLE_BYTES" "invalid managed runner must consume memory conservatively"
 
+# Regression: a row belonging to a backend this plugin does not govern must not
+# consume its budget. Before the field-12 bind in resource_inventory_totals, a
+# stopped distributed placement (NanoCpus=0, identity=invalid-managed) fell into
+# the unaccountable branch and was charged the ENTIRE budget, zeroing admissible
+# capacity and silently stopping all classic scale-up.
+printf 'ci-runner-dist-rust-abc123|exited|unhealthy|0|0|hash|invalid||| |invalid-managed|distributed\n' > "$inventory"
+resource_snapshot_refresh "$inventory"
+crf_assert_eq 0 "$RESOURCE_INVENTORY_CPU_MILLI" "distributed row must not consume classic CPU"
+crf_assert_eq 0 "$RESOURCE_INVENTORY_MEMORY_BYTES" "distributed row must not consume classic memory"
+if [ "$RESOURCE_CPU_ADMISSIBLE_MILLI" -le 0 ]; then
+  printf 'FAIL: distributed row pinned classic admission to zero (field-12 regression)\n' >&2
+  exit 1
+fi
+
+# A classic row with the same unaccountable shape MUST still fail closed.
+printf 'unknown|running|healthy|0|0|hash|invalid||| |invalid-managed|classic\n' > "$inventory"
+resource_snapshot_refresh "$inventory"
+crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "classic unaccountable row must still fail closed"
+
 RUNNER_POOLS='v2|tiny|ci-tiny||1|1|1|1|1|1g'
 POOL_SNAPSHOT_INPUT=""; POOL_CONFIG_REVISION=""; pool_snapshot_load
 RESOURCE_CPU_BUDGET=4
