@@ -1,5 +1,9 @@
 # Distributed Runner Farm Progress
 
+> **Status 2026-09-10: DECOMMISSIONED.** The distributed control plane described below no
+> longer runs. This file is a historical record; see
+> [decommission-2026-09-10.md](decommission-2026-09-10.md).
+
 Last updated: 2026-08-22
 
 ## Active checkpoint
