@@ -57,9 +57,17 @@ ENV CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 # found" and every Elixir job fails in toolchain setup. m4 and autoconf are
 # kerl's other hard requirements. libncurses5-dev is deliberately absent: it
 # does not exist on this base (ubuntu 26.04) and naming it fails the build.
+# The libnss3 .. fonts-liberation group is the Chromium runtime set that
+# Playwright's browsers need. The browser binaries come from the bind-mounted
+# ms-playwright cache, but a binary alone dies at launch with "Target page,
+# context or browser has been closed" when these shared libraries are absent;
+# ldd on the cached chrome reported twenty of them missing. Hosted runner
+# images ship them, so no workflow installs them, so they belong here. Every
+# name was checked against this base with apt-cache before being added.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev cmake sudo php-cli ripgrep file clang lld mold \
-      libncurses-dev m4 autoconf \
+      libncurses-dev m4 autoconf ruby \
+      libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 libcups2t64 libdbus-1-3 libxkbcommon0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libgbm1 libdrm2 libcairo2 libpango-1.0-0 libasound2t64 libglib2.0-0t64 fonts-liberation \
  && rm -rf /var/lib/apt/lists/* \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
