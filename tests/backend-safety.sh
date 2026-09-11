@@ -157,12 +157,20 @@ fi
 build_candidate_state_load || crf_fail 'direct build did not preserve verified candidate metadata'
 [ "$BUILD_CANDIDATE_TAG" != "$BUILTIN_IMAGE" ] || crf_fail 'direct build targeted the production image tag'
 
+# The local-base guard only applies to a literal local/... FROM. The canonical
+# Dockerfile pins a registry base, so exercise the guard with a variant whose
+# first FROM is host-local, then restore the canonical Dockerfile.
+canonical_df="$TEST_ROOT/canonical.Dockerfile"
+cp "$CFGDIR/Dockerfile" "$canonical_df"
+awk '!done && toupper($1) == "FROM" { print "FROM local/github-runner:ubuntu-resolute"; done = 1; next } { print }' \
+  "$canonical_df" > "$CFGDIR/Dockerfile"
 rm -f "$(image_path local/github-runner:ubuntu-resolute)"
 if cmd_build_image "" >/dev/null 2>&1; then
   crf_fail 'candidate build allowed BuildKit to pull a missing local base image'
 fi
 grep -Fq "local base image 'local/github-runner:ubuntu-resolute' is unavailable" "$TEST_ROOT/error" ||
   crf_fail 'missing local base image did not produce an actionable error'
+cp "$canonical_df" "$CFGDIR/Dockerfile"
 printf 'sha256:%064d\n' 0 | tr 0 b > "$(image_path local/github-runner:ubuntu-resolute)"
 expected_df_sha="$(sha256sum "$CFGDIR/Dockerfile" | awk '{print $1}')"
 expected_supervisor_sha="$(sha256sum "$CFGDIR/kache-supervise.sh" | awk '{print $1}')"
