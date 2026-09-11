@@ -16,3 +16,14 @@ build/
 /controller/cover/
 /controller/.elixir_ls/
 /controller/erl_crash.dump
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+# Ignore the whole local beads database in this PUBLIC repository. Until now it
+# was ignored only by a machine-global git rule, which does not travel with the
+# repo; .beads/.gitignore covers the Dolt internals but not interactions.jsonl,
+# backup/ or config.yaml. Beads sync uses refs/dolt/data, not tracked files.
+.beads/
