@@ -19,6 +19,10 @@ RESOURCE_RESERVATION_MEMORY_BYTES=0
 RESOURCE_INVENTORY_CPU_MILLI=0
 RESOURCE_INVENTORY_MEMORY_BYTES=0
 CRF_RESERVATION_ID=""
+# Set when the snapshot failed closed because some input could not be
+# accounted for, so admission can report that cause instead of a misleading
+# "budget fully reserved". Fail-closed behavior itself is unchanged.
+RESOURCE_DEGRADED_REASON=""
 
 resource_error() {
   RESOURCE_REASON="$1"
@@ -327,6 +331,7 @@ reservation_totals() {
   for file in "$RESERVATION_DIR"/*.state; do
     [ -f "$file" ] || continue
     if ! reservation_state_valid "$file"; then
+      RESOURCE_DEGRADED_REASON="${RESOURCE_DEGRADED_REASON:-reservation_state_unreadable}"
       RESOURCE_RESERVATION_CPU_MILLI="$RESOURCE_CPU_BUDGET_MILLI"
       RESOURCE_RESERVATION_MEMORY_BYTES="$RESOURCE_MEMORY_BUDGET_BYTES"
       continue
@@ -383,12 +388,14 @@ resource_inventory_totals() {
       cpu="$(pool_cpu_milli "$pool" 2>/dev/null || echo 0)"
     else
       cpu="$RESOURCE_CPU_BUDGET_MILLI"
+      RESOURCE_DEGRADED_REASON="${RESOURCE_DEGRADED_REASON:-inventory_row_unaccountable}"
     fi
     if ! resource_positive_uint_valid "$memory" 1099511627776; then
       if [ "$identity" = valid ] && pool_record "$pool" >/dev/null 2>&1; then
         memory="$(pool_memory_bytes "$pool" 2>/dev/null || echo 0)"
       else
         memory="$RESOURCE_MEMORY_BUDGET_BYTES"
+        RESOURCE_DEGRADED_REASON="${RESOURCE_DEGRADED_REASON:-inventory_row_unaccountable}"
       fi
     fi
     resource_positive_uint_valid "$cpu" 256000 || cpu="$RESOURCE_CPU_BUDGET_MILLI"
@@ -400,6 +407,7 @@ resource_inventory_totals() {
 
 resource_snapshot_refresh() {
   local inventory="$1"
+  RESOURCE_DEGRADED_REASON=""
   resource_budget_resolve || return 1
   if [ "${POOL_CONFIG_VERSION:-}" = v2 ]; then
     resource_configured_totals || return 1
@@ -426,8 +434,8 @@ resource_admit_one() {
   fi
   [ "$cpu" -le "$RESOURCE_CPU_BUDGET_MILLI" ] || { resource_error cpu_claim_exceeds_budget; return 1; }
   [ "$memory" -le "$RESOURCE_MEMORY_BUDGET_BYTES" ] || { resource_error memory_claim_exceeds_budget; return 1; }
-  [ "$cpu" -le "$RESOURCE_CPU_ADMISSIBLE_MILLI" ] || { resource_error cpu_exhausted; return 1; }
-  [ "$memory" -le "$RESOURCE_MEMORY_ADMISSIBLE_BYTES" ] || { resource_error memory_exhausted; return 1; }
+  [ "$cpu" -le "$RESOURCE_CPU_ADMISSIBLE_MILLI" ] || { resource_error "${RESOURCE_DEGRADED_REASON:-cpu_exhausted}"; return 1; }
+  [ "$memory" -le "$RESOURCE_MEMORY_ADMISSIBLE_BYTES" ] || { resource_error "${RESOURCE_DEGRADED_REASON:-memory_exhausted}"; return 1; }
 }
 
 resource_reason_text() {
@@ -437,6 +445,8 @@ resource_reason_text() {
     memory_claim_exceeds_budget) echo "One runner needs more memory than the host scheduling budget." ;;
     cpu_exhausted) echo "CPU scheduling budget is fully reserved." ;;
     memory_exhausted) echo "Memory scheduling budget is fully reserved." ;;
+    reservation_state_unreadable) echo "A reservation state file is unreadable, so admission fails closed until it is repaired or removed." ;;
+    inventory_row_unaccountable) echo "A managed container cannot be accounted for, so admission fails closed until it is identified or removed." ;;
     configured_cpu_exceeds_budget) echo "Configured pool baseline exceeds the post-reserve CPU scheduling budget." ;;
     configured_memory_exceeds_budget) echo "Configured pool baseline exceeds the post-reserve memory scheduling budget." ;;
     invalid_configured_capacity) echo "Configured pool baseline is invalid." ;;
