@@ -806,7 +806,9 @@ function crfRefresh(){
     if(warn){
       if(warnText&&window.CRF_DISMISSED_WARNING!==warnText){
         const detail=blocked&&blocked.blocked_reason==='cpu_exhausted'?'host CPU is saturated; scale requests are queued until load drops.':
-          blocked&&blocked.blocked_reason==='memory_exhausted'?'host memory is saturated; scale requests are queued until capacity is available.':'';
+          blocked&&blocked.blocked_reason==='memory_exhausted'?'host memory is saturated; scale requests are queued until capacity is available.':
+          blocked&&blocked.blocked_reason==='reservation_state_unreadable'?'a reservation state file is unreadable, so scaling fails closed until it is repaired or removed.':
+          blocked&&blocked.blocked_reason==='inventory_row_unaccountable'?'a managed container cannot be accounted for, so scaling fails closed until it is identified or removed.':'';
         warn.dataset.warningKey=warnText;
         warn.innerHTML='<img src="/plugins/ci-runner-farm/assets/icons/warning.svg" alt=""><strong>'+crfEsc(warnText)+'</strong>'+
           (detail?'<span class="crf-warning-detail">&mdash; '+crfEsc(detail)+'</span>':'')+

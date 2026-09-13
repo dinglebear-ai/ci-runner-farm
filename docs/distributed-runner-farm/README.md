@@ -1,5 +1,9 @@
 # Distributed Runner Farm
 
+> **Status 2026-09-10: the standalone distributed control plane is DECOMMISSIONED.** See
+> [decommission-2026-09-10.md](decommission-2026-09-10.md). The documents below describe the
+> design as built and remain the reference for the `my-core-plugs` port.
+
 This directory is the source of truth for the multi-device CI Runner Farm design and implementation.
 
 The design extends the existing single-host Unraid runner farm into one logical farm with a central control plane and portable node agents. The current Unraid implementation remains a supported local execution backend.
