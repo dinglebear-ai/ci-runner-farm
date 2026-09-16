@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [1.13.7](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.6...v1.13.7) (2026-09-16)
+
+
+### Bug Fixes
+
+* **distributed:** pin runner repository keys ([eb6332c](https://github.com/dinglebear-ai/ci-runner-farm/commit/eb6332c85b234f3695a12598e9db273702a21916))
+* **images:** harden live nashost rustup install ([963549e](https://github.com/dinglebear-ai/ci-runner-farm/commit/963549e13e2e80ff378c23dc248cb344dac11d93))
+* **images:** harden runner toolchain downloads ([31b16fa](https://github.com/dinglebear-ai/ci-runner-farm/commit/31b16fabf1e01410b89ee2e995ee7b2d63a75f6e))
+* **images:** pin runner toolchain downloads ([edf9ec4](https://github.com/dinglebear-ai/ci-runner-farm/commit/edf9ec4d051c4a600d6a330c7a58b63f62a8ecd0))
+* **images:** use POSIX shell flags for rustup install ([3afe293](https://github.com/dinglebear-ai/ci-runner-farm/commit/3afe2936af81f7ebb1a9d58534a05416f7814a25))
+
 ## [1.13.6](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.5...v1.13.6) (2026-09-16)
 
 
