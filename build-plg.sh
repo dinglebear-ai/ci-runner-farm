@@ -202,7 +202,14 @@ DF="\$CFGDIR/Dockerfile"
 # added packages below it. Other custom FROM lines remain untouched.
 # BEGIN_RUNNER_BASE_MIGRATION
 if [ -f "\$DF" ] && grep -Fxq 'FROM myoung34/github-runner:latest' "\$DF"; then
-  sed -i 's|^FROM myoung34/github-runner:latest$|FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537|' "\$DF"
+  BASE_MIGRATION_TMP=\$(mktemp) || exit 1
+  if sed 's|^FROM myoung34/github-runner:latest$|FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537|' "\$DF" > "\$BASE_MIGRATION_TMP"; then
+    cat "\$BASE_MIGRATION_TMP" > "\$DF"
+    rm -f "\$BASE_MIGRATION_TMP"
+  else
+    rm -f "\$BASE_MIGRATION_TMP"
+    exit 1
+  fi
   echo "ci-runner-farm: pinned the saved stock runner base to the reviewed immutable digest (press Build to rebuild the runner image)."
 fi
 # END_RUNNER_BASE_MIGRATION

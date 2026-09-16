@@ -61,6 +61,17 @@ assert document.count('endpoint = ') == 1
 PY
 done
 
+# The full fleet image must use a checksum-pinned rustup-init binary. A mutable
+# curl-to-shell installer can report success after a failed download and leave
+# the supposedly Rust-ready image without its pinned toolchain.
+grep -Fq 'ARG RUSTUP_INIT_VERSION=1.28.2' "$FULL"
+grep -Fq 'ARG RUSTUP_INIT_X64_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c' "$FULL"
+grep -Fq 'static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/x86_64-unknown-linux-gnu/rustup-init' "$FULL"
+grep -Fq 'echo "$RUSTUP_INIT_X64_SHA256  /tmp/rustup-init" | sha256sum -c -' "$FULL"
+grep -Fq "/home/runner/.cargo/bin/rustc --version | grep -Eq '^rustc 1\.97\.1 '" "$FULL"
+! grep -Fq 'sh.rustup.rs' "$FULL"
+! grep -Eq 'curl[^|]*\|[[:space:]]*(sh|bash)' "$FULL"
+
 grep -Fq 'FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804' "$OVERLAY"
 ! grep -Fq 'remote key cache populated' "$SUPERVISOR"
 ! grep -Fq 'daemon status' "$SUPERVISOR"

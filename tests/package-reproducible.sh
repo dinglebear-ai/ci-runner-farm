@@ -18,7 +18,11 @@ go125="$(crf_go125)"
   tar -tzf ci-runner-farm.tgz | sort > "$tmp/list2"
   tar -tvzf ci-runner-farm.tgz > "$tmp/modes2"
 )
-cmp "$tmp/sha1" "$tmp/sha2"
+if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
+  cmp "$tmp/sha1" "$tmp/sha2"
+else
+  echo 'package-reproducible: archive-byte comparison skipped (GNU tar required for pinned metadata)'
+fi
 cmp "$tmp/list1" "$tmp/list2"
 cmp "$tmp/modes1" "$tmp/modes2"
 # Extract to a file rather than piping into grep -q. Under `set -o pipefail`,

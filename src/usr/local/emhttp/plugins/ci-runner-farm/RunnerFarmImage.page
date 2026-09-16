@@ -33,7 +33,9 @@ $crf_df_chars = strlen($crf_dockerfile);
 $crfi_tc = [];
 $crfi_tc['rust'] = <<<'DFBLOCK'
 # >>> ci-runner-farm toolchain: rust >>>
-# Rust stable, native build tools, and a verified prebuilt sccache binary.
+# Rust 1.97.1, native build tools, and verified prebuilt rustup/sccache binaries.
+ARG RUST_TOOLCHAIN=1.97.1
+ARG RUSTUP_INIT_VERSION=1.28.2
 ARG SCCACHE_VERSION=0.16.0
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/home/runner/.cargo \
@@ -48,10 +50,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld cmake pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$SCCACHE_DIR" \
- && curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh https://sh.rustup.rs \
- && sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain stable --profile minimal -c clippy,rustfmt \
- && rm -f /tmp/rustup-init.sh \
  && arch="$(dpkg --print-architecture)" \
+ && case "$arch" in \
+      amd64) rustup_target="x86_64-unknown-linux-gnu"; rustup_sha256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c" ;; \
+      arm64) rustup_target="aarch64-unknown-linux-gnu"; rustup_sha256="e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c" ;; \
+      *) echo "Unsupported architecture for rustup: $arch" >&2; exit 1 ;; \
+    esac \
+ && curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/$rustup_target/rustup-init" \
+ && echo "$rustup_sha256  /tmp/rustup-init" | sha256sum -c - \
+ && chmod 0755 /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN" --profile minimal -c clippy,rustfmt \
+ && rm -f /tmp/rustup-init \
  && case "$arch" in \
       amd64) sccache_target="x86_64-unknown-linux-musl"; sccache_sha256="aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588" ;; \
       arm64) sccache_target="aarch64-unknown-linux-musl"; sccache_sha256="f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784" ;; \
@@ -77,7 +87,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 DFBLOCK;
 $crfi_tc['node'] = <<<'DFBLOCK'
 # >>> ci-runner-farm toolchain: node >>>
-RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+ARG NODESOURCE_NODE_MAJOR=24
+ARG NODESOURCE_KEY_SHA256=b42e0321dabdc24e892115da705cf061167eac12a317f23d329862d0aa0a271d
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /tmp/nodesource-repo.gpg.key \
+      https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+ && echo "$NODESOURCE_KEY_SHA256  /tmp/nodesource-repo.gpg.key" | sha256sum -c - \
+ && gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg /tmp/nodesource-repo.gpg.key \
+ && rm -f /tmp/nodesource-repo.gpg.key \
+ && arch="$(dpkg --print-architecture)" \
+ && printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/nodesource.gpg\n' \
+      "$NODESOURCE_NODE_MAJOR" "$arch" > /etc/apt/sources.list.d/nodesource.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
  && corepack enable \
  && rm -rf /var/lib/apt/lists/*
@@ -86,12 +109,16 @@ DFBLOCK;
 $crfi_tc['android'] = <<<'DFBLOCK'
 # >>> ci-runner-farm toolchain: android >>>
 # Android SDK — large (~3-4 GB); the first Build will be slow.
+ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
+ARG ANDROID_CMDLINE_TOOLS_SHA256=2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk-headless unzip \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" \
- && curl -fsSL -o /tmp/actools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+ && curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /tmp/actools.zip \
+      "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
+ && echo "$ANDROID_CMDLINE_TOOLS_SHA256  /tmp/actools.zip" | sha256sum -c - \
  && unzip -q /tmp/actools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" \
  && mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" \
  && rm /tmp/actools.zip \

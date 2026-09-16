@@ -97,11 +97,18 @@ RUN set -euo pipefail \
 ENV KACHE_VERIFY_RESTORES=sampled
 
 # Rust 1.97.1 (fleet standard) baked as the runner user: saves the per-job
-# toolchain download on fresh containers. dtolnay/rust-toolchain in jobs
-# no-ops when the requested toolchain is already installed.
-RUN gosu runner env HOME=/home/runner bash -c \
-      "curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal -c clippy -c rustfmt" \
- && ls /home/runner/.rustup/toolchains
+# toolchain download on fresh containers. Pin rustup-init itself so a mutable
+# installer script or truncated download cannot silently change the image.
+ARG RUSTUP_INIT_VERSION=1.28.2
+ARG RUSTUP_INIT_X64_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+RUN set -euo pipefail \
+ && curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "$RUSTUP_INIT_X64_SHA256  /tmp/rustup-init" | sha256sum -c - \
+ && chmod 0755 /tmp/rustup-init \
+ && gosu runner env HOME=/home/runner /tmp/rustup-init -y --default-toolchain 1.97.1 --profile minimal -c clippy -c rustfmt \
+ && rm -f /tmp/rustup-init \
+ && gosu runner env HOME=/home/runner /home/runner/.cargo/bin/rustc --version | grep -Eq '^rustc 1\.97\.1 '
 
 # Cache-mount destinations: pre-create as runner-owned, otherwise Docker's
 # bind-mount auto-creation leaves root-owned parents and rustup/kache/npm
