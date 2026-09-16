@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	crfgithub "github.com/dinglebear-ai/ci-runner-farm/tools/crf-scaleset/internal/github"
@@ -161,6 +162,7 @@ type Control struct {
 	api             crfgithub.ScaleSetAPI
 	ownership       *ownership.Manager
 	mu              sync.Mutex
+	sequenceMu      sync.Mutex
 	poller          sessionPoller
 	super           *supervisor.Supervisor
 	cancel          context.CancelFunc
@@ -170,6 +172,16 @@ type Control struct {
 	sessionSets     map[string]int64
 	sessionEligible *bool
 	lastSeq         uint64
+	status          atomic.Pointer[statusSnapshot]
+}
+
+// statusSnapshot is a copy-on-write view for observability requests.  Mutating
+// control-plane operations can wait on GitHub, so monitoring must not share
+// their lock or it will falsely make a working runner fleet appear unavailable.
+type statusSnapshot struct {
+	super   *supervisor.Supervisor
+	issued  map[string]issuedRecord
+	retired map[string]issuedRecord
 }
 
 type issuedRecord struct {
@@ -220,12 +232,14 @@ func New(cfg RuntimeConfig, api crfgithub.ScaleSetAPI) (*Control, error) {
 	if err := control.loadRetired(); err != nil {
 		return nil, err
 	}
+	control.publishStatusLocked()
 	return control, nil
 }
 
 func (c *Control) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	defer c.publishStatusLocked()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	if err := c.stopSessions(ctx); err != nil {
 		log.Printf("controller %s session shutdown failed: %v", c.cfg.ControllerInstanceID, err)
@@ -386,22 +400,121 @@ func (c *Control) lock(ctx context.Context) bool {
 	}
 }
 
+func (c *Control) acceptSequence(ctx context.Context, req protocol.Request) protocol.Response {
+	for {
+		if c.sequenceMu.TryLock() {
+			defer c.sequenceMu.Unlock()
+			if req.Sequence <= c.lastSeq {
+				response := failure(req, "sequence_regression", nil)
+				response.Result = map[string]any{"last_sequence": c.lastSeq}
+				return response
+			}
+			c.lastSeq = req.Sequence
+			return protocol.Response{}
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return failure(req, "request_timeout", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func cloneIssuedRecords(records map[string]issuedRecord) map[string]issuedRecord {
+	copy := make(map[string]issuedRecord, len(records))
+	for key, record := range records {
+		copy[key] = record
+	}
+	return copy
+}
+
+// publishStatusLocked publishes a fully copied view while c.mu is held.
+func (c *Control) publishStatusLocked() {
+	c.status.Store(&statusSnapshot{
+		super:   c.super,
+		issued:  cloneIssuedRecords(c.issued),
+		retired: cloneIssuedRecords(c.retired),
+	})
+}
+
+func (c *Control) readSnapshot(req protocol.Request) protocol.Response {
+	status := c.status.Load()
+	if status == nil || status.super == nil {
+		return failure(req, "sessions_not_applied", nil)
+	}
+	return response(req, status.super.Snapshot())
+}
+
+func (c *Control) readJITState(req protocol.Request) protocol.Response {
+	status := c.status.Load()
+	if status == nil {
+		return failure(req, "sessions_not_applied", nil)
+	}
+	states := make([]protocol.JITState, 0, len(status.issued)+len(status.retired))
+	for key, record := range status.issued {
+		var scaleSetID, workHandle int64
+		if _, err := fmt.Sscanf(key, "%d:%d", &scaleSetID, &workHandle); err != nil ||
+			scaleSetID <= 0 || workHandle <= 0 {
+			return failure(req, "invalid_issued_state", err)
+		}
+		_, descriptorErr := c.readJITDescriptor(scaleSetID, workHandle)
+		states = append(states, protocol.JITState{PoolID: record.PoolID, ScaleSetID: scaleSetID,
+			WorkHandle: workHandle, State: record.State, OwnershipRevision: c.wireOwnershipRevision(record),
+			DescriptorAvailable: descriptorErr == nil})
+	}
+	for key, record := range status.retired {
+		state := "retired"
+		if _, pending := status.issued[key]; pending {
+			state = "retirement_started"
+		}
+		states = append(states, protocol.JITState{PoolID: record.PoolID, ScaleSetID: record.ScaleSetID,
+			WorkHandle: record.WorkHandle, State: state, OwnershipRevision: c.wireOwnershipRevision(record),
+			DescriptorAvailable: false})
+	}
+	slices.SortFunc(states, func(a, b protocol.JITState) int {
+		if a.ScaleSetID < b.ScaleSetID {
+			return -1
+		}
+		if a.ScaleSetID > b.ScaleSetID {
+			return 1
+		}
+		if a.WorkHandle < b.WorkHandle {
+			return -1
+		}
+		if a.WorkHandle > b.WorkHandle {
+			return 1
+		}
+		return 0
+	})
+	return response(req, map[string]any{"states": states})
+}
+
 func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Response {
 	if req.ConfigRevision != c.cfg.ConfigRevision ||
 		req.OwnershipRevision != c.cfg.OwnershipRevision ||
 		req.ControllerInstanceID != c.cfg.ControllerInstanceID {
 		return failure(req, "identity_mismatch", nil)
 	}
+	if sequenceResponse := c.acceptSequence(ctx, req); sequenceResponse.Code != "" {
+		return sequenceResponse
+	}
+	// Status reads intentionally bypass the mutation lock.  The sidecar must
+	// keep answering these while a GitHub request is slow or unavailable.
+	switch req.Operation {
+	case "read_snapshot":
+		return c.readSnapshot(req)
+	case "read_jit_state":
+		return c.readJITState(req)
+	}
 	if !c.lock(ctx) {
 		return failure(req, "request_timeout", ctx.Err())
 	}
 	defer c.mu.Unlock()
-	if req.Sequence <= c.lastSeq {
-		response := failure(req, "sequence_regression", nil)
-		response.Result = map[string]any{"last_sequence": c.lastSeq}
-		return response
-	}
-	c.lastSeq = req.Sequence
+	defer c.publishStatusLocked()
 	switch req.Operation {
 	case "apply_sessions":
 		var payload struct {
@@ -447,50 +560,6 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 			return failure(req, "invalid_leases", err)
 		}
 		return response(req, map[string]bool{"applied": true})
-	case "read_snapshot":
-		if c.super == nil {
-			return failure(req, "sessions_not_applied", nil)
-		}
-		return response(req, c.super.Snapshot())
-	case "read_jit_state":
-		states := make([]protocol.JITState, 0, len(c.issued)+len(c.retired))
-		for key, record := range c.issued {
-			var scaleSetID, workHandle int64
-			if _, err := fmt.Sscanf(key, "%d:%d", &scaleSetID, &workHandle); err != nil ||
-				scaleSetID <= 0 || workHandle <= 0 {
-				return failure(req, "invalid_issued_state", err)
-			}
-			pool := record.PoolID
-			_, descriptorErr := c.readJITDescriptor(scaleSetID, workHandle)
-			states = append(states, protocol.JITState{PoolID: pool, ScaleSetID: scaleSetID,
-				WorkHandle: workHandle, State: record.State, OwnershipRevision: c.wireOwnershipRevision(record),
-				DescriptorAvailable: descriptorErr == nil})
-		}
-		for key, record := range c.retired {
-			state := "retired"
-			if _, pending := c.issued[key]; pending {
-				state = "retirement_started"
-			}
-			states = append(states, protocol.JITState{PoolID: record.PoolID, ScaleSetID: record.ScaleSetID,
-				WorkHandle: record.WorkHandle, State: state, OwnershipRevision: c.wireOwnershipRevision(record),
-				DescriptorAvailable: false})
-		}
-		slices.SortFunc(states, func(a, b protocol.JITState) int {
-			if a.ScaleSetID < b.ScaleSetID {
-				return -1
-			}
-			if a.ScaleSetID > b.ScaleSetID {
-				return 1
-			}
-			if a.WorkHandle < b.WorkHandle {
-				return -1
-			}
-			if a.WorkHandle > b.WorkHandle {
-				return 1
-			}
-			return 0
-		})
-		return response(req, map[string]any{"states": states})
 	case "reconcile_owned":
 		var payload struct {
 			Eligible bool `json:"eligible"`

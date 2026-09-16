@@ -182,6 +182,33 @@ func (p *retireFailPoller) RetireHandle(int64, int64) error {
 	return errors.New("retirement unavailable")
 }
 
+func TestStatusReadsDoNotWaitForSlowControlPlaneMutation(t *testing.T) {
+	root := t.TempDir()
+	cfg := validRuntimeConfig(root)
+	control, err := New(cfg, &fakeAPI{sets: map[int64]crfgithub.ScaleSet{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+
+	// A GitHub operation holds this lock while it is in flight.  Fleet status
+	// must remain available during that wait, even before sessions are applied.
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	result := make(chan protocol.Response, 1)
+	go func() {
+		result <- control.Handle(context.Background(), request(cfg, "read_snapshot", 1, `{}`))
+	}()
+	select {
+	case response := <-result:
+		if response.Code != "sessions_not_applied" {
+			t.Fatalf("unexpected status response while mutation lock held: %#v", response)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("read_snapshot waited for a control-plane mutation")
+	}
+}
+
 func TestControlPlaneRunsSessionsIssuesSingleUseJITAndDeletesOwned(t *testing.T) {
 	root := t.TempDir()
 	cfg := RuntimeConfig{SchemaVersion: 1, ControllerInstanceID: "controller-1",

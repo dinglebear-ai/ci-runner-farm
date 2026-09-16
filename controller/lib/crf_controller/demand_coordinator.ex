@@ -195,10 +195,11 @@ defmodule CrfController.DemandCoordinator do
   defp do_reconcile(state, now_ms, now_unix_ms) do
     ctx = state.ctx
 
-    with {:ok, jit_states} <- ScaleSetClient.read_jit_state(ctx.scale_set_client),
+    with {:ok, snapshot} <- ScaleSetClient.read_snapshot(ctx.scale_set_client),
+         {:ok, jit_states} <- ScaleSetClient.read_jit_state(ctx.scale_set_client),
          {:ok, jit_blocked} <-
-           DemandWork.reconcile_jit_states(jit_states, ctx, now_ms, now_unix_ms),
-         {:ok, snapshot} <- ScaleSetClient.read_snapshot(ctx.scale_set_client),
+           DemandWork.reconcile_jit_states(jit_states, snapshot, ctx, now_ms, now_unix_ms),
+         :ok <- DemandWork.release_stale_assigned_offers(snapshot, jit_states, ctx, now_ms),
          {:ok, acquired_blocked} <-
            DemandWork.reconcile_acquired(snapshot, jit_states, ctx, now_ms, now_unix_ms),
          {:ok, reclaimed} <- DemandWork.reclaim_unassigned(snapshot, ctx, now_ms, now_unix_ms),

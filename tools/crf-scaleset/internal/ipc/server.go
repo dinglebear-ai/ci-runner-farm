@@ -178,9 +178,8 @@ func authorizedPeer(conn net.Conn, allowedUID uint32) bool {
 	}
 	uid := uint32(^uint32(0))
 	if err := raw.Control(func(fd uintptr) {
-		cred, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-		if e == nil {
-			uid = cred.Uid
+		if peer, ok := peerUID(fd); ok {
+			uid = peer
 		}
 	}); err != nil {
 		return false

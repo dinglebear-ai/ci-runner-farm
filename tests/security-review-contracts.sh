@@ -41,7 +41,7 @@ grep -Fq "'{\"storage-driver\":\"vfs\"}'" src/usr/local/emhttp/plugins/ci-runner
 grep -Fq "RUNNER_BASE=\"$base\"" build-plg.sh || crf_fail 'release digest gate is missing'
 grep -Fq 'https://github.com/dinglebear-ai/ci-runner-farm/releases/' ci-runner-farm.plg || crf_fail 'generated plugin release URLs do not use the authoritative repository'
 grep -Fq 'https://github.com/dinglebear-ai/ci-runner-farm' ci-runner-farm.plg || crf_fail 'generated plugin support URL does not use the authoritative repository'
-if rg -n 'github\.com/unraid/ci-runner-farm|raw\.githubusercontent\.com/unraid/ci-runner-farm|REPO=.*unraid/ci-runner-farm' \
+if grep -R -n -E 'github\.com/unraid/ci-runner-farm|raw\.githubusercontent\.com/unraid/ci-runner-farm|REPO=.*unraid/ci-runner-farm' \
   build-plg.sh README.md community-applications; then
   crf_fail 'active publication metadata still references the non-authoritative upstream'
 fi
