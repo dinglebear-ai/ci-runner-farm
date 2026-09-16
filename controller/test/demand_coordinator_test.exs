@@ -3,6 +3,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   alias CrfController.{
     DemandCoordinator,
+    DemandWork,
     NodeCommand,
     NodeMailbox,
     NodeRegistry,
@@ -37,6 +38,10 @@ defmodule CrfController.DemandCoordinatorTest do
       do: GenServer.call(server, {:set_pool_health, pool_id, healthy})
 
     def set_jit_states(server, states), do: GenServer.call(server, {:set_jit_states, states})
+
+    def set_unavailable_handles(server, handles),
+      do: GenServer.call(server, {:set_unavailable_handles, handles})
+
     def fail_retirement(server, enabled), do: GenServer.call(server, {:fail_retirement, enabled})
     def fail_next_snapshot(server), do: GenServer.call(server, :fail_next_snapshot)
 
@@ -53,6 +58,7 @@ defmodule CrfController.DemandCoordinatorTest do
          last_retire_payload: nil,
          last_confirm_payload: nil,
          last_leases: %{},
+         unavailable_handles: MapSet.new(),
          fail_retirement: false,
          fail_next_snapshot: false
        }}
@@ -70,9 +76,12 @@ defmodule CrfController.DemandCoordinatorTest do
     end
 
     def handle_call({:set_assigned_jobs, assigned_jobs}, _from, state) do
-      [pool] = state.snapshot.pools
-      pool = %{pool | assigned_jobs: assigned_jobs}
-      state = %{state | snapshot: %{state.snapshot | pools: [pool]}}
+      pools =
+        Enum.map(state.snapshot.pools, fn pool ->
+          if pool.pool_id == "build", do: %{pool | assigned_jobs: assigned_jobs}, else: pool
+        end)
+
+      state = %{state | snapshot: %{state.snapshot | pools: pools}}
       {:reply, :ok, state}
     end
 
@@ -95,6 +104,10 @@ defmodule CrfController.DemandCoordinatorTest do
         Enum.map(states, &Map.put_new(&1, :ownership_revision, state.snapshot.ownership_revision))
 
       {:reply, :ok, %{state | jit_states: states}}
+    end
+
+    def handle_call({:set_unavailable_handles, handles}, _from, state) do
+      {:reply, :ok, %{state | unavailable_handles: MapSet.new(handles)}}
     end
 
     def handle_call({:fail_retirement, enabled}, _from, state) when is_boolean(enabled) do
@@ -128,24 +141,12 @@ defmodule CrfController.DemandCoordinatorTest do
     def handle_call({:call, "issue_jit", payload}, _from, state) do
       pool_id = payload["pool_id"]
       handle = payload["work_handle"]
-      [pool] = state.snapshot.pools
-      {:ok, secret} = Secret.new("jit-config-#{handle}==")
 
-      jit = %{
-        pool_id: pool_id,
-        scale_set_id: pool.scale_set_id,
-        work_handle: handle,
-        state: "issued",
-        ownership_revision: state.snapshot.ownership_revision,
-        descriptor_available: true
-      }
-
-      jit_states =
-        [jit | state.jit_states]
-        |> Enum.uniq_by(&{&1.pool_id, &1.work_handle})
-
-      {:reply, {:ok, %{descriptor: secret, scale_set_id: pool.scale_set_id}},
-       %{state | issue_calls: state.issue_calls + 1, jit_states: jit_states}}
+      if MapSet.member?(state.unavailable_handles, handle) do
+        {:reply, {:error, {:scaleset_error, "work_handle_not_available"}}, state}
+      else
+        issue_jit(pool_id, handle, state)
+      end
     end
 
     def handle_call({:call, "retire_jit", payload}, _from, state) do
@@ -171,6 +172,27 @@ defmodule CrfController.DemandCoordinatorTest do
            last_confirm_payload: payload,
            jit_states: jit_states
        }}
+    end
+
+    defp issue_jit(pool_id, handle, state) do
+      [pool] = state.snapshot.pools
+      {:ok, secret} = Secret.new("jit-config-#{handle}==")
+
+      jit = %{
+        pool_id: pool_id,
+        scale_set_id: pool.scale_set_id,
+        work_handle: handle,
+        state: "issued",
+        ownership_revision: state.snapshot.ownership_revision,
+        descriptor_available: true
+      }
+
+      jit_states =
+        [jit | state.jit_states]
+        |> Enum.uniq_by(&{&1.pool_id, &1.work_handle})
+
+      {:reply, {:ok, %{descriptor: secret, scale_set_id: pool.scale_set_id}},
+       %{state | issue_calls: state.issue_calls + 1, jit_states: jit_states}}
     end
 
     defp retire_jit(payload, state) do
@@ -319,6 +341,184 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "idle pools reserve only one bootstrap lease", ctx do
+    unless ctx.disabled do
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.leases == %{"build" => 1}
+      assert result.offers == 1
+    end
+  end
+
+  test "assigned work suppresses unrelated bootstrap leases", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.add_pool(ctx.scale_set, %{
+          pool_id: "other",
+          scale_set_id: 75,
+          assigned_jobs: 0,
+          advertised_capacity: 0,
+          last_message_id: 0,
+          session_healthy: true,
+          acquired_handles: []
+        })
+
+      demand =
+        start_supervised!(
+          Supervisor.child_spec(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(2), %{policy(1) | id: "other"}],
+             scale_set_client: ctx.scale_set,
+             scheduler_client: ctx.scheduler,
+             node_registry: ctx.registry,
+             placement_ledger: ctx.placements,
+             offer_ledger: ctx.offers,
+             node_mailbox: ctx.mailbox,
+             placement_coordinator: ctx.coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 4},
+            id: :demand_priority_over_bootstrap
+          )
+        )
+
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
+
+      assert {:ok, result} = reconcile(demand, 100)
+      assert result.leases == %{"build" => 2, "other" => 0}
+      assert Enum.all?(OfferLedger.snapshot(ctx.offers, now_ms: 101), &(&1.pool_id == "build"))
+    end
+  end
+
+  test "assigned offers without acquired, JIT, or placement evidence release their capacity",
+       ctx do
+    unless ctx.disabled do
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.offers == 1
+      assert {:ok, assigned} = OfferLedger.assign_next(ctx.offers, "build", 901, now_ms: 101)
+
+      assert {:ok, second} = reconcile(ctx.demand, 200)
+      assert second.offers == 1
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+
+      assert [%{state: :offered, work_handle: nil}] =
+               OfferLedger.snapshot(ctx.offers, now_ms: 201)
+    end
+  end
+
+  test "assigned offers retain capacity while acquired evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 901)
+      [pool] = snapshot.pools
+      snapshot = %{snapshot | pools: [%{pool | acquired_handles: [901]}]}
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:ok, %{id: id, state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+      assert id == assigned.id
+    end
+  end
+
+  test "assigned offers retain capacity while JIT evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 902)
+      jit_states = [%{pool_id: "build", scale_set_id: 74, work_handle: 902}]
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, jit_states, work_ctx, 200)
+      assert {:ok, %{state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "assigned offers retain capacity while placement evidence exists", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 903)
+      {:ok, identity} = WorkIdentity.for_handle("build", 74, 903)
+
+      assert {:ok, _placement} =
+               PlacementLedger.begin_placement(ctx.placements, placement_attrs(identity, 7),
+                 now_ms: 150
+               )
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:ok, %{state: :assigned}} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "stale assigned offer cleanup uses persisted scale-set identity when pool disappears",
+       ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 904)
+      snapshot = %{snapshot | pools: []}
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "stale assigned offer cleanup enriches a nil legacy scale-set identity", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 905)
+      replace_offer(ctx.offers, assigned.id, &Map.put(&1, :scale_set_id, nil))
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "stale assigned offer cleanup safely handles a pre-upgrade offer shape", ctx do
+    unless ctx.disabled do
+      {snapshot, work_ctx, assigned} = assigned_offer(ctx, 906)
+      replace_offer(ctx.offers, assigned.id, &Map.delete(&1, :scale_set_id))
+
+      assert :ok = DemandWork.release_stale_assigned_offers(snapshot, [], work_ctx, 200)
+      assert {:error, :unknown_offer} = OfferLedger.get(ctx.offers, assigned.id)
+    end
+  end
+
+  test "an active pool does not reserve speculative capacity beyond assigned demand", ctx do
+    unless ctx.disabled do
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 1)
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.leases == %{"build" => 1}
+      assert result.offers == 1
+    end
+  end
+
+  test "existing service does not double count assigned demand", ctx do
+    unless ctx.disabled do
+      :sys.replace_state(ctx.demand, fn state ->
+        put_in(state.ctx.policies["build"].max_concurrency, 6)
+      end)
+
+      assert {:ok, _} =
+               NodeRegistry.register(
+                 ctx.registry,
+                 %{
+                   id: "spare",
+                   generation: 1,
+                   os: :linux,
+                   arch: :x86_64,
+                   execution_backends: [:native_process],
+                   capabilities: ["github-actions"],
+                   total: %{cpu_millis: 8_000, memory_bytes: 16 * @gib},
+                   available: %{cpu_millis: 8_000, memory_bytes: 16 * @gib}
+                 },
+                 now_ms: 1
+               )
+
+      :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 2)
+      assert {:ok, first} = reconcile(ctx.demand, 100)
+      assert first.leases == %{"build" => 2}
+
+      assert {:ok, warmed} = reconcile(ctx.demand, 200)
+      assert warmed.leases == %{"build" => 2}
+
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [101, 102], 2)
+      assert {:ok, second} = reconcile(ctx.demand, 300)
+      assert second.placements == 2
+      assert second.leases == %{"build" => 2}
+    end
+  end
+
   test "acquired handles cannot exceed the pool concurrency policy", ctx do
     unless ctx.disabled do
       :ok = FakeScaleSet.set_assigned_jobs(ctx.scale_set, 4)
@@ -333,6 +533,23 @@ defmodule CrfController.DemandCoordinatorTest do
       assert length(PlacementLedger.snapshot(ctx.placements)) == 2
       assert NodeMailbox.size(ctx.mailbox) == 2
       assert FakeScaleSet.state(ctx.scale_set).issue_calls == 2
+    end
+  end
+
+  test "stale acquired handles do not abort reconciliation or consume placement slots", ctx do
+    unless ctx.disabled do
+      :ok = FakeScaleSet.set_handles(ctx.scale_set, [101, 102, 103], 1)
+      :ok = FakeScaleSet.set_unavailable_handles(ctx.scale_set, [101, 102])
+
+      assert {:ok, result} = reconcile(ctx.demand, 200)
+      assert result.placements == 1
+      assert {:ok, expected} = WorkIdentity.for_handle("build", 74, 103)
+      expected_id = expected.placement_id
+
+      assert [%{id: ^expected_id, state: :commanded}] =
+               PlacementLedger.snapshot(ctx.placements)
+
+      assert Enum.all?(OfferLedger.snapshot(ctx.offers, now_ms: 201), &(&1.state == :offered))
     end
   end
 
@@ -408,6 +625,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "active deterministic placement is reconstructed without another JIT issuance", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 501)
 
       :ok =
@@ -483,6 +701,7 @@ defmodule CrfController.DemandCoordinatorTest do
       assert NodeMailbox.size(ctx.mailbox) == 0
       assert {:ok, still_active} = PlacementLedger.get(ctx.placements, identity.placement_id)
       assert still_active.state == :observed
+
       assert still_active.updated_at_ms == 100
     end
   end
@@ -523,6 +742,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "persisted commanded placement rebuilds a lost mailbox command exactly once", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 701)
 
       assert {:ok, _} =
@@ -554,6 +774,7 @@ defmodule CrfController.DemandCoordinatorTest do
 
   test "surviving runner adopts a newer node generation and drops stale mailbox command", ctx do
     unless ctx.disabled do
+      :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
       {:ok, identity} = WorkIdentity.for_handle("build", 74, 702)
 
       assert {:ok, placement} =
@@ -793,7 +1014,7 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "planning waits until every configured pool session is healthy", ctx do
+  test "an unhealthy pool does not block planning for healthy pools", ctx do
     unless ctx.disabled do
       :ok =
         FakeScaleSet.add_pool(ctx.scale_set, %{
@@ -826,13 +1047,13 @@ defmodule CrfController.DemandCoordinatorTest do
         )
 
       assert {:ok, waiting} = reconcile(demand, 100)
-      assert waiting.offers == 0
-      assert waiting.leases == %{"build" => 0, "other" => 0}
+      assert waiting.offers == 1
+      assert waiting.leases == %{"build" => 1, "other" => 0}
 
       :ok = FakeScaleSet.set_pool_health(ctx.scale_set, "other", true)
       assert {:ok, ready} = reconcile(demand, 200)
-      assert ready.offers == 1
-      assert ready.leases == %{"build" => 1, "other" => 0}
+      assert ready.offers == 2
+      assert ready.leases == %{"build" => 1, "other" => 1}
     end
   end
 
@@ -910,7 +1131,29 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
-  test "a busy runner retirement blocks only its pool and does not reset sessions", ctx do
+  test "an issued handle handed off by the sidecar remains live through runner startup",
+       ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.set_jit_states(ctx.scale_set, [
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 603,
+            state: "issued",
+            descriptor_available: true
+          }
+        ])
+
+      assert {:ok, result} = reconcile(ctx.demand, 100)
+      assert result.blocked_pools == []
+      assert result.leases == %{"build" => 1}
+      assert result.placements == 1
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 0
+    end
+  end
+
+  test "busy runner retries are deduplicated per handle without starving the pool", ctx do
     unless ctx.disabled do
       :ok = FakeScaleSet.fail_retirement(ctx.scale_set, true)
 
@@ -920,7 +1163,21 @@ defmodule CrfController.DemandCoordinatorTest do
             pool_id: "build",
             scale_set_id: 74,
             work_handle: 611,
+            state: "issued",
+            descriptor_available: false
+          },
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 611,
             state: "retirement_started",
+            descriptor_available: false
+          },
+          %{
+            pool_id: "build",
+            scale_set_id: 74,
+            work_handle: 612,
+            state: "issued",
             descriptor_available: false
           },
           %{
@@ -933,14 +1190,15 @@ defmodule CrfController.DemandCoordinatorTest do
         ])
 
       assert {:ok, first} = reconcile(ctx.demand, 100)
-      assert first.blocked_pools == ["build"]
-      assert first.leases == %{"build" => 0}
+      assert first.blocked_pools == []
+      assert first.leases == %{"build" => 1}
       assert CrfController.DemandCoordinator.status(ctx.demand).sessions_active
-      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 1
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 2
 
       assert {:ok, second} = reconcile(ctx.demand, 200)
-      assert second.blocked_pools == ["build"]
-      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 2
+      assert second.blocked_pools == []
+      assert second.leases == %{"build" => 1}
+      assert FakeScaleSet.state(ctx.scale_set).retire_calls == 4
     end
   end
 
@@ -985,6 +1243,20 @@ defmodule CrfController.DemandCoordinatorTest do
       now_unix_ms: @now_unix_ms + now_ms,
       timeout: 10_000
     )
+  end
+
+  defp assigned_offer(ctx, handle) do
+    assert {:ok, _result} = reconcile(ctx.demand, 100)
+    assert {:ok, assigned} = OfferLedger.assign_next(ctx.offers, "build", handle, now_ms: 101)
+    snapshot = FakeScaleSet.state(ctx.scale_set).snapshot
+    work_ctx = :sys.get_state(ctx.demand).ctx
+    {snapshot, work_ctx, assigned}
+  end
+
+  defp replace_offer(ledger, offer_id, fun) do
+    :sys.replace_state(ledger, fn state ->
+      %{state | offers: Map.update!(state.offers, offer_id, fun)}
+    end)
   end
 
   defp register_node(registry), do: register_node_generation(registry, 7)

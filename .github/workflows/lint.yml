@@ -140,49 +140,6 @@ jobs:
           CRF_RUN_REAL_DOCKER_ACCEPTANCE: '1'
         run: bash tests/real-docker-container-adapter.sh
 
-      - name: Set up QEMU for distributed runner image contracts
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-
-      - name: Set up Buildx for distributed runner image contracts
-        if: runner.os == 'Linux'
-        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
-
-      - name: Build distributed Linux runner image contract
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="crf-distributed-runner:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          arm_image="${image}-arm64"
-          trap 'docker image rm -f "$image" "$arm_image" >/dev/null 2>&1 || true' EXIT
-          docker buildx build --pull=false --platform linux/amd64 --load \
-            -f deployments/distributed/runner.Dockerfile \
-            -t "$image" deployments/distributed
-          docker run --rm --network none --read-only \
-            --entrypoint /usr/local/bin/crf-runner-image-contract "$image" |
-            jq -e '.compatible == true and (.capabilities | index("otp-28-compatible")) != null and (.capabilities | index("php-cli")) != null and (.runtimes.php | test("^[0-9]+\\.[0-9]+$")) and (.capabilities | index("python3")) != null and (.capabilities | index("archive-tools")) != null and (.capabilities | index("docker-cli")) != null and (.capabilities | index("github-cli")) != null and (.capabilities | index("node")) != null and (.runtimes.python | test("^[0-9]+\\.[0-9]+$"))'
-          docker run --rm --network none --read-only --entrypoint php "$image" \
-            -r 'exit(PHP_MAJOR_VERSION >= 8 ? 0 : 1);'
-          docker run --rm --network none --read-only --entrypoint python3 "$image" \
-            -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
-          docker run --rm --network none --read-only --entrypoint sh "$image" \
-            -c 'unzip -v >/dev/null && zip -v >/dev/null && zstd --version >/dev/null && wget --version >/dev/null && rsync --version >/dev/null && file --version >/dev/null && rg --version >/dev/null && docker --version >/dev/null && docker buildx version >/dev/null && docker compose version >/dev/null && gh --version >/dev/null && node --version >/dev/null'
-          test "$(docker run --rm --network none --entrypoint id "$image" -u)" = 0
-          docker buildx build --pull=false --platform linux/arm64 --load \
-            -f deployments/distributed/runner.Dockerfile \
-            -t "$arm_image" deployments/distributed
-          docker run --rm --platform linux/arm64 --network none --read-only \
-            --entrypoint /usr/local/bin/crf-runner-image-contract "$arm_image" |
-            jq -e '.compatible == true and .arch == "arm64" and (.capabilities | index("otp-28-compatible")) != null and (.capabilities | index("php-cli")) != null and (.runtimes.php | test("^[0-9]+\\.[0-9]+$")) and (.capabilities | index("python3")) != null and (.capabilities | index("archive-tools")) != null and (.capabilities | index("docker-cli")) != null and (.capabilities | index("github-cli")) != null and (.capabilities | index("node")) != null and (.runtimes.python | test("^[0-9]+\\.[0-9]+$"))'
-          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint php "$arm_image" \
-            -r 'exit(PHP_MAJOR_VERSION >= 8 ? 0 : 1);'
-          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint python3 "$arm_image" \
-            -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
-          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint sh "$arm_image" \
-            -c 'unzip -v >/dev/null && zip -v >/dev/null && zstd --version >/dev/null && wget --version >/dev/null && rsync --version >/dev/null && file --version >/dev/null && rg --version >/dev/null && docker --version >/dev/null && docker buildx version >/dev/null && docker compose version >/dev/null && gh --version >/dev/null && node --version >/dev/null'
-          test "$(docker run --rm --platform linux/arm64 --network none --entrypoint id "$arm_image" -u)" = 0
-
       - name: Native plugin payload
         if: runner.os == 'Linux'
         run: bash tests/native-plugin-payload.sh
@@ -444,3 +401,52 @@ jobs:
         shell: bash
         run: |
           scripts/verify-distributed-bundle.sh "$CRF_DISTRIBUTED_BUNDLE"
+
+  runner-image-contract:
+    name: Distributed runner image contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+
+      - name: Build distributed Linux runner image contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="crf-distributed-runner:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          arm_image="${image}-arm64"
+          trap 'docker image rm -f "$image" "$arm_image" >/dev/null 2>&1 || true' EXIT
+          docker buildx build --pull=false --platform linux/amd64 --load \
+            -f deployments/distributed/runner.Dockerfile \
+            -t "$image" deployments/distributed
+          docker run --rm --network none --read-only \
+            --entrypoint /usr/local/bin/crf-runner-image-contract "$image" |
+            jq -e '.compatible == true and (.capabilities | index("otp-28-compatible")) != null and (.capabilities | index("php-cli")) != null and (.runtimes.php | test("^[0-9]+\\.[0-9]+$")) and (.capabilities | index("python3")) != null and (.capabilities | index("archive-tools")) != null and (.capabilities | index("docker-cli")) != null and (.capabilities | index("github-cli")) != null and (.capabilities | index("node")) != null and (.runtimes.python | test("^[0-9]+\\.[0-9]+$"))'
+          docker run --rm --network none --read-only --entrypoint php "$image" \
+            -r 'exit(PHP_MAJOR_VERSION >= 8 ? 0 : 1);'
+          docker run --rm --network none --read-only --entrypoint python3 "$image" \
+            -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+          docker run --rm --network none --read-only --entrypoint sh "$image" \
+            -c 'unzip -v >/dev/null && zip -v >/dev/null && zstd --version >/dev/null && wget --version >/dev/null && rsync --version >/dev/null && file --version >/dev/null && rg --version >/dev/null && docker --version >/dev/null && docker buildx version >/dev/null && docker compose version >/dev/null && gh --version >/dev/null && node --version >/dev/null'
+          test "$(docker run --rm --network none --entrypoint id "$image" -u)" = 0
+          docker buildx build --pull=false --platform linux/arm64 --load \
+            -f deployments/distributed/runner.Dockerfile \
+            -t "$arm_image" deployments/distributed
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --entrypoint /usr/local/bin/crf-runner-image-contract "$arm_image" |
+            jq -e '.compatible == true and .arch == "arm64" and (.capabilities | index("otp-28-compatible")) != null and (.capabilities | index("php-cli")) != null and (.runtimes.php | test("^[0-9]+\\.[0-9]+$")) and (.capabilities | index("python3")) != null and (.capabilities | index("archive-tools")) != null and (.capabilities | index("docker-cli")) != null and (.capabilities | index("github-cli")) != null and (.capabilities | index("node")) != null and (.runtimes.python | test("^[0-9]+\\.[0-9]+$"))'
+          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint php "$arm_image" \
+            -r 'exit(PHP_MAJOR_VERSION >= 8 ? 0 : 1);'
+          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint python3 "$arm_image" \
+            -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+          docker run --rm --platform linux/arm64 --network none --read-only --entrypoint sh "$arm_image" \
+            -c 'unzip -v >/dev/null && zip -v >/dev/null && zstd --version >/dev/null && wget --version >/dev/null && rsync --version >/dev/null && file --version >/dev/null && rg --version >/dev/null && docker --version >/dev/null && docker buildx version >/dev/null && docker compose version >/dev/null && gh --version >/dev/null && node --version >/dev/null'
+          test "$(docker run --rm --platform linux/arm64 --network none --entrypoint id "$arm_image" -u)" = 0

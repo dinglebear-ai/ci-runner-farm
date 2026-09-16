@@ -35,26 +35,63 @@ defmodule CrfController.OfferPlanner do
     placements = PlacementLedger.snapshot(ctx.placement_ledger)
     offers = OfferLedger.snapshot(ctx.offer_ledger, now_ms: now_ms)
     health = Map.new(snapshot.pools, &{&1.pool_id, &1.session_healthy})
-    sessions_ready = Enum.all?(Map.keys(ctx.policies), &(Map.get(health, &1, false) == true))
+    assigned = Map.new(snapshot.pools, &{&1.pool_id, &1.assigned_jobs})
+    scale_sets = Map.new(snapshot.pools, &{&1.pool_id, &1.scale_set_id})
 
-    if not sessions_ready do
-      {:ok, planner}
-    else
-      plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms)
-    end
+    unhealthy =
+      ctx.policies
+      |> Map.keys()
+      |> Enum.reject(&(Map.get(health, &1, false) == true))
+      |> MapSet.new()
+
+    plan_ready_pools(
+      placements,
+      offers,
+      assigned,
+      scale_sets,
+      MapSet.union(blocked, unhealthy),
+      ctx,
+      planner,
+      now_ms
+    )
   end
 
-  defp plan_ready_pools(placements, offers, blocked, ctx, planner, now_ms) do
+  defp plan_ready_pools(placements, offers, assigned, scale_sets, blocked, ctx, planner, now_ms) do
+    # A bootstrap lease is only for discovering demand in an otherwise idle
+    # fleet. Once a pool has more GitHub-assigned jobs than live placements,
+    # speculative listeners for unrelated pools must yield the scheduler to
+    # that concrete work. Otherwise a small fleet can fill its memory budget
+    # with one idle JIT runner per pool while assigned jobs remain queued.
+    demand_waiting? =
+      Enum.any?(ctx.policies, fn {pool_id, _policy} ->
+        assigned_jobs = Map.get(assigned, pool_id, 0)
+
+        service =
+          Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
+
+        assigned_jobs > service
+      end)
+
     needs =
       Map.new(ctx.policies, fn {pool_id, policy} ->
         service = Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
         pool_offers = Enum.count(offers, &(&1.pool_id == pool_id))
 
+        # Keep one bootstrap lease so GitHub can reveal demand for an idle scale
+        # set. Once demand appears, match the jobs GitHub has assigned without
+        # adding speculative slots. Extra discovery slots can permanently hold
+        # scarce node resources after the assigned jobs are already running and
+        # starve another idle scale set of the bootstrap lease it needs to make
+        # its own queued work visible.
+        assigned_jobs = Map.get(assigned, pool_id, 0)
+        bootstrap = if demand_waiting?, do: 0, else: 1
+        target = min(policy.max_concurrency, max(assigned_jobs, bootstrap))
+
         need =
           if MapSet.member?(blocked, pool_id) do
             0
           else
-            max(policy.max_concurrency - service - pool_offers, 0)
+            max(target - service - pool_offers, 0)
           end
 
         {pool_id, need}
@@ -70,7 +107,7 @@ defmodule CrfController.OfferPlanner do
       with {:ok, schedule} <- Scheduler.schedule(requirements, scheduler_opts(ctx)) do
         by_work = Map.new(candidates, &{&1.requirement.work_id, &1})
 
-        case reserve_scheduled(schedule.placements, by_work, ctx, now_ms) do
+        case reserve_scheduled(schedule.placements, by_work, scale_sets, ctx, now_ms) do
           # An unplaceable candidate must not pin the fairness cursor forever.
           # Advance to the next pool so a later, feasible policy can advertise
           # capacity on the following tick.
@@ -102,7 +139,7 @@ defmodule CrfController.OfferPlanner do
     end)
   end
 
-  defp reserve_scheduled(placements, by_work, ctx, now_ms) do
+  defp reserve_scheduled(placements, by_work, scale_sets, ctx, now_ms) do
     Enum.reduce_while(placements, :ok, fn placement, :ok ->
       case Map.fetch(by_work, placement.work_id) do
         {:ok, candidate} ->
@@ -111,6 +148,7 @@ defmodule CrfController.OfferPlanner do
                  %{
                    id: candidate.offer_id,
                    pool_id: candidate.policy.id,
+                   scale_set_id: Map.get(scale_sets, candidate.policy.id),
                    node_id: placement.node_id,
                    node_generation: placement.node_generation,
                    resources: candidate.policy.resources,
