@@ -224,6 +224,8 @@ jq -e '
 ' "$manifest" >/dev/null
 grep -Fq 'actions-runner-win-x64-2.337.0.zip' "$windows_context"
 grep -Fq "RunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc'" "$windows_context"
+grep -Fq 'PowerShell-7.6.6-win-x64.zip' "$windows_context"
+grep -Fq "PowerShellSha256 = '02fe458be20493fbdf43f61ea20610b811ee6c738ab1676c61b9cfcd1a33c860'" "$windows_context"
 grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>' "$example"
 grep -Fq -- '-f deployments/distributed/runner.Dockerfile' "$workflow"
 grep -Fq -- '--entrypoint /usr/local/bin/crf-runner-image-contract' "$workflow"
