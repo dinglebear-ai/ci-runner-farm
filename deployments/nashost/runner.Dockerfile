@@ -1,22 +1,38 @@
-# ci-runner-farm runner image (starter). Edit this from the plugin UI
+# ci-runner-farm runner image. Edit this from the plugin UI
 # (Settings -> Utilities -> CI Runner Farm -> Runner image builder), then Build,
 # and point the IMAGE setting at the resulting tag.
+#
+# AUTHORITATIVE COPY: /boot/config/plugins/ci-runner-farm/Dockerfile on the
+# Unraid host. That is the file the plugin's image builder actually reads; this
+# repository copy is a mirror kept byte-identical to it. Editing only this file
+# changes nothing that runs. After changing either one, copy it to the other and
+# confirm both sha256 sums match, then rebuild through the plugin
+# (runner-farm.sh build-async <sha256>) so the candidate/promote flow and its
+# image-contract state stay consistent. A bare `docker build` will not work: the
+# build needs a Kache endpoint build-arg the plugin supplies.
 #
 # This is a minimal starting point: the stock self-hosted runner base plus a
 # docker-in-docker readiness wrapper. Add whatever your CI needs (language
 # runtimes, browsers, build tools) in the marked section below.
-# ubuntu 26.04 "resolute" (glibc 2.43), built LOCALLY from upstream's own
-# recipe (myoung34/docker-github-actions-runner Dockerfile.base + Dockerfile
-# with FROM swapped to ubuntu:26.04) because upstream ships no 26.04 tag.
-# Why 26.04: kache keys proc-macros/dylibs on the glibc version and devhost is
-# glibc 2.43 — on 24.04 (2.39) the runners and devhost were two disjoint cache
+# ubuntu 26.04 "resolute" (glibc 2.43). Built from the upstream recipe
+# (myoung34/docker-github-actions-runner Dockerfile.base + Dockerfile, FROM
+# swapped to ubuntu:26.04) because upstream ships no 26.04 tag.
+# Why 26.04: kache keys proc-macros/dylibs on the glibc version and this Unraid
+# host is glibc 2.43 - on 24.04 (2.39) runners and host were two disjoint cache
 # key populations in the shared remote (ADR-0023). Matching glibc merges them.
-# The pinned runner version inside the local image self-updates at runtime;
-# rebuild recipe: /tmp/gha-runner-src on nashost or re-clone
-# github.com/myoung34/docker-github-actions-runner and re-run the two builds.
 # 26.04 keeps the ubuntu-latest package universe (libwebkit2gtk-4.1-dev etc.
 # verified present for Tauri builds).
-FROM local/github-runner:ubuntu-resolute
+#
+# This base is pinned by digest to ghcr.io, NOT to a host-local image.
+# It was previously FROM local/github-runner:ubuntu-resolute, which existed only
+# on this host and was never in any registry: a docker system prune -a on
+# 2026-09-09 deleted it and no rebuild was possible without re-deriving the
+# recipe from scratch. Pulling from ghcr makes a prune survivable.
+# Rebuild recipe, if the registry copy is ever lost:
+#   /mnt/cache/runner/src/gha-runner-src   (see REBUILD.md there)
+#   flash mirror: /boot/config/plugins/ci-runner-farm/runner-base/
+#   tarball: /mnt/cache/runner/src/images/github-runner-ubuntu-resolute.tar.gz
+FROM ghcr.io/dinglebear-ai/github-runner:ubuntu-resolute@sha256:4fd6681cde3bc4ccbc62e5d91dcf87fa2c5d6d338c6f849b7fc1c76b1777501d
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,8 +51,23 @@ ENV CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 # so the sudoers file below is belt-and-braces over what the base already gives.
 # Do not delete it casually: /usr/local/bin/wait-docker.sh now depends on the
 # runner user being able to sudo, and degrades loudly if it cannot.
+# Erlang/OTP is built from source by mise (kerl) on the Elixir pools, so the
+# OTP build prerequisites belong here rather than in each workflow: without
+# libncurses-dev, erts/configure aborts with "No curses library functions
+# found" and every Elixir job fails in toolchain setup. m4 and autoconf are
+# kerl's other hard requirements. libncurses5-dev is deliberately absent: it
+# does not exist on this base (ubuntu 26.04) and naming it fails the build.
+# The libnss3 .. fonts-liberation group is the Chromium runtime set that
+# Playwright's browsers need. The browser binaries come from the bind-mounted
+# ms-playwright cache, but a binary alone dies at launch with "Target page,
+# context or browser has been closed" when these shared libraries are absent;
+# ldd on the cached chrome reported twenty of them missing. Hosted runner
+# images ship them, so no workflow installs them, so they belong here. Every
+# name was checked against this base with apt-cache before being added.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev cmake sudo php-cli ripgrep file clang lld mold \
+      libncurses-dev m4 autoconf ruby \
+      libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 libcups2t64 libdbus-1-3 libxkbcommon0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libgbm1 libdrm2 libcairo2 libpango-1.0-0 libasound2t64 libglib2.0-0t64 fonts-liberation \
  && rm -rf /var/lib/apt/lists/* \
  && printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner
