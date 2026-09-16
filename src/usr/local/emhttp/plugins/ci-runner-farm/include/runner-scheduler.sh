@@ -79,7 +79,7 @@ scheduler_plan() {
     [ "${needs[i]}" -ge 0 ] || needs[i]=0
     removals[i]=$((service - desired[i]))
     [ "${removals[i]}" -ge 0 ] || removals[i]=0
-    # REVIEW(crf-v3q.13.5, MUST-CHECK): The max-capacity header is total
+    # INVARIANT(crf-v3q.13.5): The max-capacity header is total
     # assigned work plus free resource-backed offers, never a per-pool
     # standalone host estimate. Service, pending, and offered slots are each
     # resource-backed; assigned demand is not additional capacity until one of

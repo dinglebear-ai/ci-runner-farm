@@ -94,7 +94,7 @@ if [ "${CRF_CREDENTIAL_KIND:-registration}" = jit ]; then
   }
   runner_credential=""
   unset runner_credential
-  # REVIEW(crf-v3q.13.1, MUST-CHECK): GitHub documents --jitconfig as an argv
+  # INVARIANT(crf-v3q.13.1): GitHub documents --jitconfig as an argv
   # value, but that leaves the credential visible in /proc for the listener's
   # lifetime. Materialize only the runner's three documented files from the
   # protected FIFO and start the already-configured listener with no secret in

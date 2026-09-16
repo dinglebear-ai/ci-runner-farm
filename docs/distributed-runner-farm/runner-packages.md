@@ -75,6 +75,6 @@ GNU long-name/long-link and PAX TAR metadata are handled internally by the Rust 
 
 ## Current example
 
-[runner-manifest.example.json](runner-manifest.example.json) captures the official `actions/runner v2.336.0` Linux x64/arm64 and Windows x64/arm64 packages. The sizes come from the official release assets and the SHA-256 values from the official release notes as verified on 2026-08-19.
+[runner-manifest.example.json](runner-manifest.example.json) captures the official `actions/runner v2.337.0` Linux x64/arm64 and Windows x64/arm64 packages. The sizes come from the official release assets and the SHA-256 values from the official release notes as verified on 2026-09-15.
 
 The example is documentation, not an implicit upgrade channel. Nodes use only the manifest path explicitly configured by the operator.

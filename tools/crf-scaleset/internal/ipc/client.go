@@ -42,7 +42,7 @@ func (c Client) Call(ctx context.Context, request protocol.Request) (protocol.Re
 	if err := conn.SetDeadline(deadline); err != nil {
 		return protocol.Response{}, err
 	}
-	// REVIEW(crf-v3q.13.11): Context cancellation must bound connected I/O,
+	// INVARIANT(crf-v3q.13.11): Context cancellation must bound connected I/O,
 	// not only the Unix-socket dial.
 	done := make(chan struct{})
 	defer close(done)

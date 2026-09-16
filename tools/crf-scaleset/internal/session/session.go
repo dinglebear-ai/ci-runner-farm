@@ -468,7 +468,7 @@ func (p *Poller) resetAmbiguousAcquire(ctx context.Context, scaleSetID int64,
 }
 
 func (p *Poller) append(entry journal.Entry) error {
-	// REVIEW(crf-v3q.13.13): Preserve journal ordering with a dedicated writer
+	// INVARIANT(crf-v3q.13.13): Preserve journal ordering with a dedicated writer
 	// lock, but never hold the shared poller-state lock across filesystem I/O
 	// or fsync. Independent pool polls can continue updating in-memory state.
 	p.journalMu.Lock()

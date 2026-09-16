@@ -19,6 +19,8 @@ rust_block="$(awk '/^# >>> ci-runner-farm toolchain: rust >>>/{f=1} f{print} /^#
 [ -n "$rust_block" ] || bad "Rust toolchain block is missing"
 
 need() { grep -Fq -- "$1" <<<"$rust_block" || bad "Rust block lacks: $1"; }
+need 'ARG RUST_TOOLCHAIN=1.97.1'
+need 'ARG RUSTUP_INIT_VERSION=1.28.2'
 need 'ARG SCCACHE_VERSION=0.16.0'
 need 'CARGO_HOME=/home/runner/.cargo'
 need 'RUSTC_WRAPPER=/usr/local/bin/sccache'
@@ -28,23 +30,23 @@ need 'SCCACHE_CACHE_SIZE=10G'
 need 'SCCACHE_IDLE_TIMEOUT=0'
 need 'SCCACHE_BASEDIRS=/_work'
 need 'build-essential clang lld cmake pkg-config libssl-dev'
+need '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c'
+need 'e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c'
+need 'static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/$rustup_target/rustup-init'
 need 'aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588'
 need 'f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784'
 need 'sha256sum -c -'
 need 'install -m 0755'
 
 if grep -Fq '.sha256' <<<"$rust_block"; then
-  bad "sccache checksum is fetched beside the binary instead of pinned in source"
+  bad "a checksum is fetched beside a binary instead of pinned in source"
 fi
-
-# A `curl ... | sh` pipeline reports the exit status of `sh`, not `curl`, so a failed
-# download feeds empty stdin to a shell that exits 0 and the image builds without
-# rustup. Require the download-then-execute form so the failure actually propagates.
-if grep -Eq 'curl[^|]*\|[[:space:]]*sh' <<<"$rust_block"; then
-  bad "rustup is installed via a curl-to-sh pipeline; download to a file, then execute it"
+if grep -Fq 'sh.rustup.rs' <<<"$rust_block" || grep -Eq 'curl[^|]*\|[[:space:]]*sh' <<<"$rust_block"; then
+  bad "rustup uses a mutable installer script instead of the pinned rustup-init binary"
 fi
-need '-o /tmp/rustup-init.sh'
-need 'sh /tmp/rustup-init.sh'
+need '-o /tmp/rustup-init'
+need 'echo "$rustup_sha256  /tmp/rustup-init" | sha256sum -c -'
+need '/tmp/rustup-init -y --no-modify-path --default-toolchain "$RUST_TOOLCHAIN"'
 
 for file in "$ENGINE" "$CFG" "$UI"; do
   if grep -Fq 'cargo-registry:/home/runner/.cargo/registry' "$file"; then

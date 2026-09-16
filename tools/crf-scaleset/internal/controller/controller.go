@@ -322,7 +322,7 @@ func (c *Control) sessionsMatch(records []ownership.Record, eligible bool) bool 
 }
 
 func (c *Control) stopSessions(ctx context.Context) error {
-	// REVIEW(crf-v3q.13.12): Canceling a supervisor is not completion. Join it
+	// INVARIANT(crf-v3q.13.12): Canceling a supervisor is not completion. Join it
 	// before closing its sessions or installing a successor so long polls from
 	// two generations can never overlap.
 	if c.cancel != nil {
@@ -745,7 +745,7 @@ func (c *Control) Handle(ctx context.Context, req protocol.Request) protocol.Res
 		if err := c.persistRetired(key, record); err != nil {
 			return failure(req, "jit_state_failed", err)
 		}
-		// REVIEW(crf-v3q.13.10): Compact the durable replay proof before
+		// INVARIANT(crf-v3q.13.10): Compact the durable replay proof before
 		// removing the issued-handle tombstone. A crash at either boundary
 		// leaves a conservative, replay-safe record instead of a reusable JIT.
 		if err := c.poller.RetireHandle(record.ScaleSetID, payload.WorkHandle); err != nil {
