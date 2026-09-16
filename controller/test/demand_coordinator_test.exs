@@ -1014,6 +1014,44 @@ defmodule CrfController.DemandCoordinatorTest do
     end
   end
 
+  test "unhealthy assigned work does not suppress healthy bootstrap leases", ctx do
+    unless ctx.disabled do
+      :ok =
+        FakeScaleSet.add_pool(ctx.scale_set, %{
+          pool_id: "other",
+          scale_set_id: 75,
+          assigned_jobs: 1,
+          advertised_capacity: 0,
+          last_message_id: 0,
+          session_healthy: false,
+          acquired_handles: []
+        })
+
+      demand =
+        start_supervised!(
+          Supervisor.child_spec(
+            {DemandCoordinator,
+             name: nil,
+             policies: [policy(2), %{policy(1) | id: "other"}],
+             scale_set_client: ctx.scale_set,
+             scheduler_client: ctx.scheduler,
+             node_registry: ctx.registry,
+             placement_ledger: ctx.placements,
+             offer_ledger: ctx.offers,
+             node_mailbox: ctx.mailbox,
+             placement_coordinator: ctx.coordinator,
+             placement_loss_grace_ms: 1_000,
+             max_new_offers_per_tick: 1},
+            id: :unhealthy_assigned_demand
+          )
+        )
+
+      assert {:ok, result} = reconcile(demand, 100)
+      assert result.offers == 1
+      assert result.leases == %{"build" => 1, "other" => 0}
+    end
+  end
+
   test "an unhealthy pool does not block planning for healthy pools", ctx do
     unless ctx.disabled do
       :ok =
