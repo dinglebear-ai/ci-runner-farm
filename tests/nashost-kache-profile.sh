@@ -12,11 +12,6 @@ grep -Fq '%s contains unsafe characters' "$VALIDATOR"
 grep -Fq 'valid authority and optional port from 1 through 65535' "$VALIDATOR"
 for dockerfile in "$FULL" "$OVERLAY"; do
   grep -Fq 'php-cli ripgrep file' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_TAG=v0.13.0' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0' "$dockerfile"
-  grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972' "$dockerfile"
-  grep -Fq '/opt/hostedtoolcache/kache/0.13.0/x64/kache' "$dockerfile"
-  grep -Fq 'ln -sfn /opt/hostedtoolcache/kache/0.13.0/x64/kache /usr/local/bin/kache' "$dockerfile"
   grep -Fq 'ENV KACHE_VERIFY_RESTORES=sampled' "$dockerfile"
   grep -Fq '"prefetch_enabled = false"' "$dockerfile"
   grep -Fq '"modified_input_guard = true"' "$dockerfile"
@@ -60,6 +55,32 @@ assert parsed['cache']['remote']['endpoint'] == 'https://cache.internal:9000'
 assert document.count('endpoint = ') == 1
 PY
 done
+
+# The authoritative full fleet image follows the live TOOTIE contract. Keep the
+# historical overlay fixture separate so it cannot silently drag production
+# back to an older Kache release.
+grep -Fq 'ARG KACHE_FLEET_TAG=v0.15.1' "$FULL"
+grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=21a6e50fff5eeab6a4c76a17af3878369d5d3cb57b38b85d7c8a5bcd8479d300' "$FULL"
+grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=9c91deeccd7434903af298bad6b5ea823af68e7e0304c58ccfa6e03332c398b5' "$FULL"
+grep -Fq '/opt/hostedtoolcache/kache/0.15.1/x64/kache' "$FULL"
+grep -Fq 'ln -sfn /opt/hostedtoolcache/kache/0.15.1/x64/kache /usr/local/bin/kache' "$FULL"
+
+grep -Fq 'ARG KACHE_FLEET_TAG=v0.13.0' "$OVERLAY"
+grep -Fq 'ARG KACHE_FLEET_ARCHIVE_SHA256=30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0' "$OVERLAY"
+grep -Fq 'ARG KACHE_FLEET_BINARY_SHA256=5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972' "$OVERLAY"
+grep -Fq '/opt/hostedtoolcache/kache/0.13.0/x64/kache' "$OVERLAY"
+grep -Fq 'ln -sfn /opt/hostedtoolcache/kache/0.13.0/x64/kache /usr/local/bin/kache' "$OVERLAY"
+
+# The full fleet image must use a checksum-pinned rustup-init binary. A mutable
+# curl-to-shell installer can report success after a failed download and leave
+# the supposedly Rust-ready image without its pinned toolchain.
+grep -Fq 'ARG RUSTUP_INIT_VERSION=1.28.2' "$FULL"
+grep -Fq 'ARG RUSTUP_INIT_X64_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c' "$FULL"
+grep -Fq 'static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/x86_64-unknown-linux-gnu/rustup-init' "$FULL"
+grep -Fq 'echo "$RUSTUP_INIT_X64_SHA256  /tmp/rustup-init" | sha256sum -c -' "$FULL"
+grep -Fq "/home/runner/.cargo/bin/rustc --version | grep -Eq '^rustc 1\\.97\\.1 '" "$FULL"
+! grep -Fq 'sh.rustup.rs' "$FULL"
+! grep -Eq 'curl[^|]*\|[[:space:]]*(sh|bash)' "$FULL"
 
 grep -Fq 'FROM ci-runner-farm-runner:s3-v8-kache-cc-20260804' "$OVERLAY"
 ! grep -Fq 'remote key cache populated' "$SUPERVISOR"
