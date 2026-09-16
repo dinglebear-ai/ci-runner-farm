@@ -75,10 +75,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fleet Kache release: one canonical tool-cache binary, checksum-pinned.
 # /usr/local/bin/kache is a symlink to the tool-cache entry so the container
 # supervisor and kache-action clients resolve the same inode and protocol epoch.
-ARG KACHE_FLEET_TAG=v0.13.0
+ARG KACHE_FLEET_TAG=v0.15.1
 ARG KACHE_FLEET_ARCHIVE=kache-x86_64-unknown-linux-musl.tar.gz
-ARG KACHE_FLEET_ARCHIVE_SHA256=30aeded4dc6e620c400aa3aaf7ab163dc95c703a0f3ddb4d0ba56c51f23f0bd0
-ARG KACHE_FLEET_BINARY_SHA256=5490686480adca08df1849d6dfba449e7e898e187135a452cfa6c6c40f9ff972
+ARG KACHE_FLEET_ARCHIVE_SHA256=21a6e50fff5eeab6a4c76a17af3878369d5d3cb57b38b85d7c8a5bcd8479d300
+ARG KACHE_FLEET_BINARY_SHA256=9c91deeccd7434903af298bad6b5ea823af68e7e0304c58ccfa6e03332c398b5
 RUN set -euo pipefail \
  && url="https://github.com/kunobi-ninja/kache/releases/download/${KACHE_FLEET_TAG}/${KACHE_FLEET_ARCHIVE}" \
  && tmp="$(mktemp -d)" \
@@ -86,10 +86,10 @@ RUN set -euo pipefail \
  && echo "${KACHE_FLEET_ARCHIVE_SHA256}  $tmp/${KACHE_FLEET_ARCHIVE}" | sha256sum -c - \
  && tar -xzf "$tmp/${KACHE_FLEET_ARCHIVE}" -C "$tmp" \
  && echo "${KACHE_FLEET_BINARY_SHA256}  $tmp/kache" | sha256sum -c - \
- && install -d -m 0755 /opt/hostedtoolcache/kache/0.13.0/x64 \
- && install -m 0755 "$tmp/kache" /opt/hostedtoolcache/kache/0.13.0/x64/kache \
- && : > /opt/hostedtoolcache/kache/0.13.0/x64.complete \
- && ln -sfn /opt/hostedtoolcache/kache/0.13.0/x64/kache /usr/local/bin/kache \
+ && install -d -m 0755 /opt/hostedtoolcache/kache/0.15.1/x64 \
+ && install -m 0755 "$tmp/kache" /opt/hostedtoolcache/kache/0.15.1/x64/kache \
+ && : > /opt/hostedtoolcache/kache/0.15.1/x64.complete \
+ && ln -sfn /opt/hostedtoolcache/kache/0.15.1/x64/kache /usr/local/bin/kache \
  && rm -rf "$tmp" \
  && /usr/local/bin/kache --version \
  && test "$(sha256sum /usr/local/bin/kache | awk '{print $1}')" = "$KACHE_FLEET_BINARY_SHA256"
@@ -97,11 +97,18 @@ RUN set -euo pipefail \
 ENV KACHE_VERIFY_RESTORES=sampled
 
 # Rust 1.97.1 (fleet standard) baked as the runner user: saves the per-job
-# toolchain download on fresh containers. dtolnay/rust-toolchain in jobs
-# no-ops when the requested toolchain is already installed.
-RUN gosu runner env HOME=/home/runner bash -c \
-      "curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal -c clippy -c rustfmt" \
- && ls /home/runner/.rustup/toolchains
+# toolchain download on fresh containers. Pin rustup-init itself so a mutable
+# installer script or truncated download cannot silently change the image.
+ARG RUSTUP_INIT_VERSION=1.28.2
+ARG RUSTUP_INIT_X64_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+RUN set -eu \
+ && curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "$RUSTUP_INIT_X64_SHA256  /tmp/rustup-init" | sha256sum -c - \
+ && chmod 0755 /tmp/rustup-init \
+ && gosu runner env HOME=/home/runner /tmp/rustup-init -y --default-toolchain 1.97.1 --profile minimal -c clippy -c rustfmt \
+ && rm -f /tmp/rustup-init \
+ && gosu runner env HOME=/home/runner /home/runner/.cargo/bin/rustc --version | grep -Eq '^rustc 1\.97\.1 '
 
 # Cache-mount destinations: pre-create as runner-owned, otherwise Docker's
 # bind-mount auto-creation leaves root-owned parents and rustup/kache/npm
