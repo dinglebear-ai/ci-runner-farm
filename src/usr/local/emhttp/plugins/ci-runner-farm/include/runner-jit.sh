@@ -9,7 +9,7 @@ fi
 # Execute one already-admitted scale-set work item. Demand, session ownership,
 # and backend transitions are deliberately outside this file.
 
-# REVIEW(crf-v3q.13.16, MUST-CHECK): ACK/acquire/JIT recovery must survive a
+# INVARIANT(crf-v3q.13.16): ACK/acquire/JIT recovery must survive a
 # host reboot. Keep PIDs, sockets, snapshots, and short leases in RUNDIR tmpfs,
 # but persist bounded operation state on the configured cache dataset.
 JIT_BOOTSTRAP_STATE_DIR="${JIT_BOOTSTRAP_STATE_DIR:-$CACHE_ROOT/state/jit}"
@@ -348,7 +348,7 @@ jit_cleanup_observed() {
     return 1
   fi
   jit_runner_data_remove "$runner_id" || return 1
-  # REVIEW(crf-v3q.13.10): The helper first compacts replay proof, then the
+  # INVARIANT(crf-v3q.13.10): The helper first compacts replay proof, then the
   # shell releases its resource reservation. Failure leaves deleting state for
   # a conservative retry and never permits an old work handle to be reissued.
   jit_retire_handle "$pool" "$handle" || return 1

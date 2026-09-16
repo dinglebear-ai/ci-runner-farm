@@ -286,7 +286,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			if result.SessionHealthy {
 				current[result.PoolID] = result
 			} else {
-				// REVIEW(crf-v3q.13.6, MUST-CHECK): A failed or wedged poll
+				// INVARIANT(crf-v3q.13.6): A failed or wedged poll
 				// must not turn old demand into fresh zero. Preserve the last
 				// authoritative counts/timestamps and only downgrade health.
 				previous := current[result.PoolID]

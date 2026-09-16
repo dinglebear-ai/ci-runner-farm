@@ -572,7 +572,7 @@ migration_classic_activate() {
     migration_classic_prove_ineligible || return 1
   fi
   rm -f "$MIGRATION_CLASSIC_QUIESCE_FILE"
-  # REVIEW(crf-v3q.13.19): cmd_start normally follows the effective backend.
+  # INVARIANT(crf-v3q.13.19): cmd_start normally follows the effective backend.
   # This dynamically scoped capability authorizes only the exact rollback FSM
   # state whose remote scale sets are ineligible and whose JIT work is drained.
   MIGRATION_CLASSIC_ACTIVATION=1 cmd_start
@@ -593,7 +593,7 @@ migration_classic_prove_effective() {
 }
 migration_jit_drained() {
   local state phase reservation snapshot_ok
-  # REVIEW(crf-v3q.13.17): Rollback needs proof across all three authorities:
+  # INVARIANT(crf-v3q.13.17): Rollback needs proof across all three authorities:
   # durable JIT/reservation state, the fresh GitHub session snapshot, and the
   # managed Docker inventory. Unknown or ambiguous state always blocks.
   for state in "$JIT_STATE_DIR"/*.state; do

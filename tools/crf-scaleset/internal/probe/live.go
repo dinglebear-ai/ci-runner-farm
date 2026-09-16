@@ -63,7 +63,7 @@ func RunLive(ctx context.Context, cfg LiveConfig, api crfgithub.ScaleSetAPI) (Re
 	if err != nil {
 		return Record{}, err
 	}
-	// REVIEW(crf-v3q.13.2, MUST-CHECK): RunnerGroupID is resolved from the
+	// INVARIANT(crf-v3q.13.2): RunnerGroupID is resolved from the
 	// GitHub REST runner-groups endpoint only after it proves selected
 	// repository visibility. Bind the Actions-service group to that exact
 	// REST-observed identity before making any remote mutation. The separate

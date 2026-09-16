@@ -309,7 +309,7 @@ scaleset_probe_config_write() {
   identity="$(scaleset_bound_identity)" || { err "could not resolve packaged identity"; return 1; }
   IFS='|' read -r plugin image dockerfile entrypoint owner installation host_id <<<"$identity"
   [ "$owner" = "$GH_OWNER" ] || return 1
-  # REVIEW(crf-v3q.13.2, MUST-CHECK): Resolve the production group through the
+  # INVARIANT(crf-v3q.13.2): Resolve the production group through the
   # GitHub REST policy surface immediately before the probe, prove selected
   # repository visibility, then bind that ID into the mode-0600 probe config.
   # Public-repository permission is an explicit GitHub policy for the selected
@@ -846,7 +846,7 @@ scaleset_prewarm_target() {
       !hash_equals($argv[2],$v["config_revision"])||(int)$v["expires"]<=time())exit(3);
     echo $v["target"];
   ' "$path" "$expected_revision" 2>/dev/null)" || {
-    # REVIEW(crf-v3q.13.8): Prewarm is temporary configuration-bound intent.
+    # INVARIANT(crf-v3q.13.8): Prewarm is temporary configuration-bound intent.
     # Invalid, expired, or old-revision records are removed atomically from
     # effective scheduling rather than silently surviving forever.
     rm -f "$path"
@@ -980,7 +980,7 @@ scaleset_autoscale_tick() {
   local lock="$RUNDIR/scaleset.tick.lock" wait_seconds="${SCALESET_TICK_LOCK_TIMEOUT_SECONDS:-30}" rc
   [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] && [ "$wait_seconds" -le 60 ] || return 1
   mkdir -p "$RUNDIR" || return 1
-  # REVIEW(crf-v3q.13.7): Daemon, UI, and migration ticks share sequence,
+  # INVARIANT(crf-v3q.13.7): Daemon, UI, and migration ticks share sequence,
   # scheduler cursor, offer leases, and plan publication. Serialize the full
   # snapshot-plan-commit transaction, not just individual file writes.
   exec 7>"$lock" || return 1

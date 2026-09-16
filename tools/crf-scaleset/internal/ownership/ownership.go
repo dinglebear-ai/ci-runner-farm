@@ -457,7 +457,7 @@ func (m *Manager) Reconcile(ctx context.Context, pools []Pool, eligible bool) ([
 			newIntent[pool.ID] = true
 		}
 		if record.ScaleSetID == 0 {
-			// REVIEW(crf-v3q.13.3, MUST-CHECK): A persisted ID-less intent
+			// INVARIANT(crf-v3q.13.3): A persisted ID-less intent
 			// proves only that a create may have been attempted. Predictable
 			// name/spec equality cannot prove ownership after response loss, so
 			// never adopt by name. Only an intent created in this in-memory
@@ -542,7 +542,7 @@ func (m *Manager) DeleteOwned(ctx context.Context) error {
 			kept = append(kept, record)
 			continue
 		}
-		// REVIEW(crf-v3q.13.4, MUST-CHECK): An owned numeric ID is necessary
+		// INVARIANT(crf-v3q.13.4): An owned numeric ID is necessary
 		// but not sufficient after operator/API drift. Re-read and verify the
 		// complete persisted identity before deletion; only the typed not-found
 		// sentinel is idempotent success.

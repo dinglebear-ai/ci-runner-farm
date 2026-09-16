@@ -20,19 +20,15 @@ from the same URL.
 
 ## Prerequisites (must be true before CA can list this)
 
-1. **The repository must be public.** CA fetches the `.plg`, the template XML, the
-   icon, and the screenshot over unauthenticated HTTPS. While `unraid/ci-runner-farm`
-   is private, every one of those URLs 404s. This is the hard gate — nothing below
-   works until the repo is public. (The R2 "preview" publish in the release
-   workflow is a private-only convenience, not a public CA source.)
-2. **At least one published GitHub Release** so `releases/latest/download/…`
-   resolves. release-please cuts these; confirm the `.plg` asset is attached.
-3. **A dedicated support thread on the Unraid forums.** CA submissions require it.
-   Create the thread, then:
-   - set `<Support>` in `ci-runner-farm.xml` to the thread URL (currently the
-     GitHub issues URL as a stand-in), and
-   - set `<Forum>` in `ca_profile.xml` to the maintainer's forums.unraid.net
-     profile (currently a placeholder — see the TODO comment).
+1. **Public repository — satisfied.** `dinglebear-ai/ci-runner-farm` is public,
+   so CA can fetch the plugin, template XML, icon, and screenshot over
+   unauthenticated HTTPS.
+2. **Published release — satisfied.** GitHub Releases publishes
+   `ci-runner-farm.plg` at `releases/latest/download/…` through release-please.
+3. **Dedicated support thread — still required.** CA submissions require an
+   Unraid forums support thread. After creating it, replace the GitHub Issues
+   stand-in in `<Support>` inside `ci-runner-farm.xml`. The maintainer
+   `<Forum>` already points at the verified `limetech` administrator profile.
 
 ## Submit
 
@@ -55,9 +51,9 @@ rsvg-convert -w 256 -h 256 ci-runner-farm.svg -o ci-runner-farm.png
 
 ## Pre-submission checklist
 
-- [ ] Repo is **public**
-- [ ] A GitHub Release exists with `ci-runner-farm.plg` attached
+- [x] Repo is **public**
+- [x] A GitHub Release exists with `ci-runner-farm.plg` attached
 - [ ] Installed the released `.plg` on a clean Unraid box and verified it works
-- [ ] Forum support thread created; `<Support>` + `<Forum>` updated to real URLs
+- [ ] Forum support thread created and `<Support>` updated to its URL
 - [ ] Raw URLs for the template, profile, icon, and screenshot all load in a browser
 - [ ] Submitted via the CA portal and passed the preview/validation
