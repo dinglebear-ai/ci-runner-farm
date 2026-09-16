@@ -20,20 +20,26 @@ RUN apt-get update \
  && chmod 0440 /etc/sudoers.d/runner
 
 # Docker and GitHub tooling ships from signed upstream repositories rather than
-# the Ubuntu archive. The daemon is installed but remains stopped by default;
-# only an explicitly privileged, START_DOCKER_SERVICE=true runner starts its
-# container-local daemon. No host Docker socket is mounted.
+# the Ubuntu archive. Pin the repository-key bytes too: TLS protects transport,
+# but without a digest a compromised endpoint can replace the trust root itself.
+# The daemon remains stopped by default; only an explicitly privileged,
+# START_DOCKER_SERVICE=true runner starts its container-local daemon. No host
+# Docker socket is mounted.
+ARG DOCKER_APT_KEY_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+ARG GHCLI_APT_KEY_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
 RUN set -eux; \
     install -m 0755 -d /etc/apt/keyrings; \
     arch="$(dpkg --print-architecture)"; \
     codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"; \
-    curl -fsSL --retry 3 https://download.docker.com/linux/ubuntu/gpg \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://download.docker.com/linux/ubuntu/gpg \
       -o /etc/apt/keyrings/docker.asc; \
+    echo "$DOCKER_APT_KEY_SHA256  /etc/apt/keyrings/docker.asc" | sha256sum -c -; \
     chmod a+r /etc/apt/keyrings/docker.asc; \
     echo "deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" \
       > /etc/apt/sources.list.d/docker.list; \
-    curl -fsSL --retry 3 https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli.gpg; \
+    echo "$GHCLI_APT_KEY_SHA256  /etc/apt/keyrings/githubcli.gpg" | sha256sum -c -; \
     chmod a+r /etc/apt/keyrings/githubcli.gpg; \
     echo "deb [arch=$arch signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list; \

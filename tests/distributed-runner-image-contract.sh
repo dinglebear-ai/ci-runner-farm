@@ -9,6 +9,21 @@ workflow="$root/.github/workflows/lint.yml"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+replace_text() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+old = sys.argv[2]
+new = sys.argv[3]
+text = path.read_text()
+if old not in text:
+    raise SystemExit(f"missing replacement text in {path}: {old}")
+path.write_text(text.replace(old, new))
+PY
+}
+
 mkdir -p "$tmp/bin"
 cat >"$tmp/os-release" <<'EOF'
 ID=ubuntu
@@ -54,12 +69,12 @@ if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu26 
   echo 'probe accepted a false ImageOS declaration' >&2
   exit 1
 fi
-sed -i 's/glibc 2.39/glibc 2.31/' "$tmp/bin/getconf"
+replace_text "$tmp/bin/getconf" 'glibc 2.39' 'glibc 2.31'
 if PATH="$tmp/bin:$PATH" CRF_OS_RELEASE_FILE="$tmp/os-release" ImageOS=ubuntu24 "$probe" >/dev/null 2>&1; then
   echo 'probe accepted glibc older than 2.34' >&2
   exit 1
 fi
-sed -i 's/glibc 2.31/glibc 2.39/' "$tmp/bin/getconf"
+replace_text "$tmp/bin/getconf" 'glibc 2.31' 'glibc 2.39'
 cat >"$tmp/bin/php" <<'EOF'
 #!/usr/bin/env bash
 exit 127
@@ -182,6 +197,10 @@ for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-rel
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
 grep -Fq 'usermod -aG docker runner' "$dockerfile"
+grep -Fq 'ARG DOCKER_APT_KEY_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570' "$dockerfile"
+grep -Fq 'ARG GHCLI_APT_KEY_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b' "$dockerfile"
+grep -Fq 'echo "$DOCKER_APT_KEY_SHA256  /etc/apt/keyrings/docker.asc" | sha256sum -c -' "$dockerfile"
+grep -Fq 'echo "$GHCLI_APT_KEY_SHA256  /etc/apt/keyrings/githubcli.gpg" | sha256sum -c -' "$dockerfile"
 grep -Fq "'{\"storage-driver\":\"vfs\"}'" "$dockerfile"
 grep -Fq 'openssh-client' "$dockerfile"
 grep -Fq '"python3"' "$probe"
