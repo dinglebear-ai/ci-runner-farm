@@ -27,6 +27,22 @@ defmodule CrfController.OperatorSnapshotTest do
     def handle_call(_request, _from, state), do: {:noreply, state}
   end
 
+  defmodule ExitingStatusServer do
+    use GenServer
+
+    def child_spec(opts) do
+      %{
+        id: __MODULE__,
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, nil)
+    def init(state), do: {:ok, state}
+    def handle_call(:status, _from, state), do: {:stop, :normal, state}
+  end
+
   test "returns a deterministic secret-free controller view" do
     {:ok, nodes} = start_supervised({NodeRegistry, name: nil})
     {:ok, offers} = start_supervised({OfferLedger, name: nil})
@@ -145,6 +161,22 @@ defmodule CrfController.OperatorSnapshotTest do
 
     assert snapshot.demand == nil
     assert System.monotonic_time(:millisecond) - started_at < 200
+  end
+
+  test "does not leak failed dependency results into the caller mailbox" do
+    for _ <- 1..25 do
+      {:ok, demand} = start_supervised(ExitingStatusServer)
+
+      snapshot =
+        OperatorSnapshot.snapshot(
+          %{nodes: nil, offers: nil, placements: nil, demand: demand, peers: nil, sidecar: nil},
+          call_timeout_ms: 20
+        )
+
+      assert snapshot.demand == nil
+    end
+
+    refute_receive {_result_ref, :failed}, 20
   end
 
   test "bounds every operator dependency read" do
