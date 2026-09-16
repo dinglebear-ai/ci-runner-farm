@@ -5,6 +5,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 probe="$root/deployments/distributed/runner-image-contract.sh"
 dockerfile="$root/deployments/distributed/runner.Dockerfile"
 example="$root/packaging/distributed/examples/node-env.example"
+manifest="$root/docs/distributed-runner-farm/runner-manifest.example.json"
+windows_context="$root/packaging/distributed/windows/Prepare-WindowsRunnerContext.ps1"
 workflow="$root/.github/workflows/lint.yml"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -197,6 +199,9 @@ for pkg in unzip zip zstd wget rsync file cmake pkg-config locales gnupg lsb-rel
   grep -Fq "$pkg" "$dockerfile" || { echo "runner image does not install $pkg" >&2; exit 1; }
 done
 grep -Fq 'usermod -aG docker runner' "$dockerfile"
+grep -Fq 'ARG ACTIONS_RUNNER_VERSION=2.337.0' "$dockerfile"
+grep -Fq 'ARG ACTIONS_RUNNER_X64_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613' "$dockerfile"
+grep -Fq 'ARG ACTIONS_RUNNER_ARM64_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393' "$dockerfile"
 grep -Fq 'ARG DOCKER_APT_KEY_SHA256=1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570' "$dockerfile"
 grep -Fq 'ARG GHCLI_APT_KEY_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b' "$dockerfile"
 grep -Fq 'echo "$DOCKER_APT_KEY_SHA256  /etc/apt/keyrings/docker.asc" | sha256sum -c -' "$dockerfile"
@@ -209,6 +214,16 @@ if grep -Eq '^USER[[:space:]]+runner' "$dockerfile"; then
   echo 'runner image must start as root so the injected entrypoint can prepare /actions-runner/_work' >&2
   exit 1
 fi
+jq -e '
+  .version == "2.337.0" and
+  (.artifacts | length == 4) and
+  (.artifacts[] | select(.os == "linux" and .arch == "x86_64") | .sha256 == "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613" and .size_bytes == 226430031) and
+  (.artifacts[] | select(.os == "linux" and .arch == "arm64") | .sha256 == "9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393" and .size_bytes == 139124737) and
+  (.artifacts[] | select(.os == "windows" and .arch == "x86_64") | .sha256 == "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc" and .size_bytes == 103528051) and
+  (.artifacts[] | select(.os == "windows" and .arch == "arm64") | .sha256 == "7ee1a72a0e0ad384ac7871ffc2356063a116e20d1db3ea41000eb49272cf0030" and .size_bytes == 94728895)
+' "$manifest" >/dev/null
+grep -Fq 'actions-runner-win-x64-2.337.0.zip' "$windows_context"
+grep -Fq "RunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc'" "$windows_context"
 grep -Fq 'CRF_RUNNER_IMAGE=ghcr.io/dinglebear-ai/ci-runner-farm-distributed@sha256:<published-image-digest>' "$example"
 grep -Fq -- '-f deployments/distributed/runner.Dockerfile' "$workflow"
 grep -Fq -- '--entrypoint /usr/local/bin/crf-runner-image-contract' "$workflow"
