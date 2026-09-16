@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name          "ci-runner-farm">
 <!ENTITY author        "Lime Technology">
-<!ENTITY version       "2026.09.16.0144.140-1.13.6">
-<!ENTITY pluginVersion "1.13.6">
-<!ENTITY releaseTag    "v1.13.6">
+<!ENTITY version       "2026.09.16.0427.143-1.13.7">
+<!ENTITY pluginVersion "1.13.7">
+<!ENTITY releaseTag    "v1.13.7">
 <!ENTITY pluginURL     "https://github.com/dinglebear-ai/ci-runner-farm/releases/latest/download/ci-runner-farm.plg">
-<!ENTITY packageName   "ci-runner-farm-2026.09.16.0144.140-1.13.6.tgz">
-<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.13.6/ci-runner-farm-2026.09.16.0144.140-1.13.6.tgz">
-<!ENTITY packageMD5    "783e98da56b5c08d62d1d7453acb3525">
+<!ENTITY packageName   "ci-runner-farm-2026.09.16.0427.143-1.13.7.tgz">
+<!ENTITY packageURL    "https://github.com/dinglebear-ai/ci-runner-farm/releases/download/v1.13.7/ci-runner-farm-2026.09.16.0427.143-1.13.7.tgz">
+<!ENTITY packageMD5    "511a95167040fe3748395b0c71017d93">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
 ]>
@@ -40,11 +40,11 @@ CFGDIR="/boot/config/plugins/ci-runner-farm"
 RUNDIR="/var/local/emhttp/ci-runner-farm"
 mkdir -p "$CFGDIR" "$PLGDIR" "$RUNDIR"
 # Sweep any older package versions off flash, keeping this build's package.
-find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.09.16.0144.140-1.13.6.tgz' -delete 2>/dev/null || true
+find "$CFGDIR" -maxdepth 1 -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.09.16.0427.143-1.13.7.tgz' -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
-tar -xzf "$CFGDIR/ci-runner-farm-2026.09.16.0144.140-1.13.6.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
+tar -xzf "$CFGDIR/ci-runner-farm-2026.09.16.0427.143-1.13.7.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
@@ -72,7 +72,14 @@ DF="$CFGDIR/Dockerfile"
 # added packages below it. Other custom FROM lines remain untouched.
 # BEGIN_RUNNER_BASE_MIGRATION
 if [ -f "$DF" ] && grep -Fxq 'FROM myoung34/github-runner:latest' "$DF"; then
-  sed -i 's|^FROM myoung34/github-runner:latest$|FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537|' "$DF"
+  BASE_MIGRATION_TMP=$(mktemp) || exit 1
+  if sed 's|^FROM myoung34/github-runner:latest$|FROM myoung34/github-runner@sha256:bc766ffbf9c8e6fd301d486a0aecbfbaa7920ab33cef05958a9eab62dd119537|' "$DF" > "$BASE_MIGRATION_TMP"; then
+    cat "$BASE_MIGRATION_TMP" > "$DF"
+    rm -f "$BASE_MIGRATION_TMP"
+  else
+    rm -f "$BASE_MIGRATION_TMP"
+    exit 1
+  fi
   echo "ci-runner-farm: pinned the saved stock runner base to the reviewed immutable digest (press Build to rebuild the runner image)."
 fi
 # END_RUNNER_BASE_MIGRATION
@@ -106,7 +113,7 @@ fi
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$RUNDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
-echo "| ci-runner-farm 2026.09.16.0144.140-1.13.6 installed.                         "
+echo "| ci-runner-farm 2026.09.16.0427.143-1.13.7 installed.                         "
 echo "| Settings > Utilities > CI Runner Farm                        "
 echo "| Set a GitHub PAT, then Start (or Validate without a token).  "
 echo "+=============================================================+"
