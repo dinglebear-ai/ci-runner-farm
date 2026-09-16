@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [1.13.6](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.5...v1.13.6) (2026-09-16)
+
+
+### Bug Fixes
+
+* **controller:** avoid operator snapshot mailbox leaks ([a5a4406](https://github.com/dinglebear-ai/ci-runner-farm/commit/a5a440672dd37f8549a6d9c22303364f78a88fe1))
+* **distributed:** ignore blocked pools for bootstrap suppression ([6860154](https://github.com/dinglebear-ai/ci-runner-farm/commit/686015400adabcc86c37b2f06c92c27c4af7cc73))
+* **distributed:** restore fair runner placement ([8bf7e6c](https://github.com/dinglebear-ai/ci-runner-farm/commit/8bf7e6cbe0c160849ff3838350d0cb434818b4c6))
+
 ## [1.13.5](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.4...v1.13.5) (2026-09-13)
 
 
