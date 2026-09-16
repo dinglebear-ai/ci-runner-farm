@@ -104,12 +104,37 @@ chmod 0600 "$RESERVATION_DIR/corrupt.state"
 resource_snapshot_refresh "$inventory"
 crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "corrupt reservation must fail CPU closed"
 crf_assert_eq 0 "$RESOURCE_MEMORY_ADMISSIBLE_BYTES" "corrupt reservation must fail memory closed"
+# Fail-closed is correct; indistinguishable-from-saturation is not. The corrupt
+# file must surface as its own reason instead of "CPU budget fully reserved".
+if resource_admit_one 1 1; then crf_fail "corrupt reservation admitted a runner"; fi
+crf_assert_eq reservation_state_unreadable "$RESOURCE_REASON" "corrupt reservation must name itself, not cpu_exhausted"
 rm -f "$RESERVATION_DIR/corrupt.state"
 
 printf 'unknown|running|healthy|0|0|hash|invalid||| |invalid-managed\n' > "$inventory"
 resource_snapshot_refresh "$inventory"
 crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "invalid managed runner must consume CPU conservatively"
 crf_assert_eq 0 "$RESOURCE_MEMORY_ADMISSIBLE_BYTES" "invalid managed runner must consume memory conservatively"
+if resource_admit_one 1 1; then crf_fail "unaccountable managed row admitted a runner"; fi
+crf_assert_eq inventory_row_unaccountable "$RESOURCE_REASON" "unaccountable managed row must name itself, not cpu_exhausted"
+
+# Regression: a row belonging to a backend this plugin does not govern must not
+# consume its budget. Before the field-12 bind in resource_inventory_totals, a
+# stopped distributed placement (NanoCpus=0, identity=invalid-managed) fell into
+# the unaccountable branch and was charged the ENTIRE budget, zeroing admissible
+# capacity and silently stopping all classic scale-up.
+printf 'ci-runner-dist-rust-abc123|exited|unhealthy|0|0|hash|invalid||| |invalid-managed|distributed\n' > "$inventory"
+resource_snapshot_refresh "$inventory"
+crf_assert_eq 0 "$RESOURCE_INVENTORY_CPU_MILLI" "distributed row must not consume classic CPU"
+crf_assert_eq 0 "$RESOURCE_INVENTORY_MEMORY_BYTES" "distributed row must not consume classic memory"
+if [ "$RESOURCE_CPU_ADMISSIBLE_MILLI" -le 0 ]; then
+  printf 'FAIL: distributed row pinned classic admission to zero (field-12 regression)\n' >&2
+  exit 1
+fi
+
+# A classic row with the same unaccountable shape MUST still fail closed.
+printf 'unknown|running|healthy|0|0|hash|invalid||| |invalid-managed|classic\n' > "$inventory"
+resource_snapshot_refresh "$inventory"
+crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "classic unaccountable row must still fail closed"
 
 RUNNER_POOLS='v2|tiny|ci-tiny||1|1|1|1|1|1g'
 POOL_SNAPSHOT_INPUT=""; POOL_CONFIG_REVISION=""; pool_snapshot_load
@@ -124,6 +149,12 @@ if resource_admit_one 1000 17179869184; then crf_fail "oversized memory claim ac
 crf_assert_eq memory_claim_exceeds_budget "$RESOURCE_REASON"
 if resource_admit_one 999999999999999999999 1; then crf_fail "overflowing CPU claim accepted"; fi
 crf_assert_eq invalid_claim "$RESOURCE_REASON"
+# Genuine saturation by valid runners must still report cpu_exhausted.
+printf 'ci-tiny-1|running|healthy|3000000000|1073741824|hash|tiny|org:acme|1|ci-tiny|valid\n' > "$task_tmp/full.tsv"
+resource_snapshot_refresh "$task_tmp/full.tsv"
+crf_assert_eq 0 "$RESOURCE_CPU_ADMISSIBLE_MILLI" "valid runners fill the tiny CPU budget"
+if resource_admit_one 1 1; then crf_fail "saturated budget admitted a runner"; fi
+crf_assert_eq cpu_exhausted "$RESOURCE_REASON" "genuine CPU saturation keeps its reason"
 ln -s "$inventory" "$task_tmp/inventory-link"
 if resource_inventory_totals "$task_tmp/inventory-link"; then crf_fail "symlink inventory was accepted"; fi
 
