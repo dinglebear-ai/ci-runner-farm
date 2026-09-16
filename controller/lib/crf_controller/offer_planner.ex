@@ -69,7 +69,7 @@ defmodule CrfController.OfferPlanner do
         service =
           Enum.count(placements, &(&1.pool_id == pool_id and not Placement.terminal?(&1)))
 
-        assigned_jobs > service
+        not MapSet.member?(blocked, pool_id) and assigned_jobs > service
       end)
 
     needs =
