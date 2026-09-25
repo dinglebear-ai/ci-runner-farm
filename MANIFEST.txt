@@ -1,0 +1,18 @@
+Workspace cleanup archive for dinglebear-ai/ci-runner-farm
+Date: 2026-09-25
+Default: main
+
+STALE_BRANCHES 5
+STALE	audit/prod-readiness-20260916	a359aa525dd3eb67909d4d2c95f644ce2016b4cb
+STALE	codex/open-pr-cleanup-20260915	4a9e446fef4fb3ae00bf1646afe72f02f18f46be
+STALE	fix/issue-117-nashost-rustup	8cfc774c8808d5ec8d42f62d121805ad2451557a
+STALE	fix/post-1.13.6-audit	c514fb95a1be866265debe93ba5a24856ba008be
+STALE	fix/prod-readiness-20260916	a359aa525dd3eb67909d4d2c95f644ce2016b4cb
+
+LOCAL_ONLY_BRANCHES 2
+LOCAL_ONLY	codex/open-pr-cleanup-20260915	4a9e446fef4fb3ae00bf1646afe72f02f18f46be
+LOCAL_ONLY	fix/issue-117-nashost-rustup	8cfc774c8808d5ec8d42f62d121805ad2451557a
+
+STALE_WORKTREES 0
+
+WIP_SNAPSHOTS 0

@@ -1,3 +1,0 @@
-# input	expected
-rust|3|2|5|1	rust|3|2|5|1
-rust|3|2|5|1;python|1|1|2|1	rust|3|2|5|1;python|1|1|2|1
