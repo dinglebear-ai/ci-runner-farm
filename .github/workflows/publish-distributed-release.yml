@@ -275,6 +275,13 @@ jobs:
         with:
           toolchain: 1.97.1
 
+      - name: Set up pinned credentialless Rust cache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
+        with:
+          version: '0.28.1'
+          github-cache: 'true'
+          max-size: '10GB'
+          pr-comment: 'false'
       - name: Install static adapter toolchain
         shell: bash
         run: |
