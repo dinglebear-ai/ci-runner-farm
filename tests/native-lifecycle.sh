@@ -61,6 +61,13 @@ managed_names() { return 0; }
 docker() { return 0; }
 cmd_native_unload_inventory > "$task_tmp/unload.json"
 php -r '$s=json_decode(file_get_contents($argv[1]),true);exit(($s["schema"]??"")==="native-unload-v1" && $s["containers"]===0 ? 0 : 1);' "$task_tmp/unload.json"
+# Native Fleet summaries reuse the classic cached readers without remote refresh.
+printf 'github %s 3\n' "$(date +%s)" > "$RUNDIR/queued.cache"
+printf 'github %s 8 2 1 0 11\n' "$(date +%s)" > "$RUNDIR/stats.cache"
+printf '%s 4096 1024\n' "$(date +%s)" > "$RUNDIR/cache-usage.cache"
+cmd_native_fleet_overview_json > "$task_tmp/overview.json"
+php -r '$s=json_decode(file_get_contents($argv[1]),true);exit(is_array($s["fleet"]["runners"]??null) && $s["queue"]["queued"]===3 && $s["stats"]["total"]===11 && $s["cache"]["pkg"]===1024 ? 0 : 1);' "$task_tmp/overview.json"
+[ ! -e "$task_tmp/unowned-refresh" ] || { echo 'native overview detached remote refresh' >&2; exit 1; }
 # Native cache clearing must finish its refresh inside the owned operation.
 crf_cache_mutation_idle() { return 0; }
 crf_safe_cache_root() { printf '%s\n' "$task_tmp/cache"; }

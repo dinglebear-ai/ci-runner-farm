@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// A two-MiB Dockerfile can require six JSON bytes per source byte. The root-only
+// socket retains eight slots and a twelve-second deadline; input remains bounded.
+const maxRequestBytes = (12 << 20) + (64 << 10)
+
 // Serve exposes a root-only local socket. No TCP listener or browser credentials.
 // Each connection carries one bounded request; concurrent connections are capped.
 func (s *Service) Serve(ctx context.Context, socket string) error {
@@ -56,10 +60,8 @@ func (s *Service) Serve(ctx context.Context, socket string) error {
 				if !rootPeer(c) {
 					return
 				}
-				decoder := json.NewDecoder(io.LimitReader(c, 1<<20))
-				decoder.DisallowUnknownFields()
-				var r Request
-				if decoder.Decode(&r) != nil {
+				r, decodeErr := decodeRequest(c)
+				if decodeErr != nil {
 					_ = json.NewEncoder(c).Encode(fail("invalid_request"))
 					return
 				}
@@ -70,6 +72,14 @@ func (s *Service) Serve(ctx context.Context, socket string) error {
 		}
 	}
 }
+func decodeRequest(reader io.Reader) (Request, error) {
+	var request Request
+	decoder := json.NewDecoder(io.LimitReader(reader, maxRequestBytes))
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&request)
+	return request, err
+}
+
 func rootPeer(c *net.UnixConn) bool {
 	raw, err := c.SyscallConn()
 	if err != nil {

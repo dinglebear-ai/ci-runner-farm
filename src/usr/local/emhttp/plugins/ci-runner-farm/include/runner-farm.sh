@@ -218,7 +218,7 @@ native_cache_binding_matches() {
   [ "${CRF_NATIVE_MODE:-0}" = 1 ] || return 0
   [ "${CRF_SOURCE_ONLY:-0}" != 1 ] || return 0
   case "${CRF_NATIVE_ACTION:-}" in
-    native-config-json|native-config-check|native-build-limits|native-standalone-preflight|native-unload-inventory|status-json|dashboard-json|recommendations-json|image-info-json|queued-json|stats-json|cache-usage-json|farm-log|logs-tail) return 0 ;;
+    native-config-json|native-config-check|native-build-limits|native-standalone-preflight|native-unload-inventory|fleet-overview-json|status-json|dashboard-json|recommendations-json|image-info-json|queued-json|stats-json|cache-usage-json|farm-log|logs-tail) return 0 ;;
   esac
   [ -n "${CRF_BOUND_CACHE_ROOT:-}" ] && [ "$CACHE_ROOT" = "$CRF_BOUND_CACHE_ROOT" ] \
     || { printf '%s\n' 'native cache binding differs; bind the original folder or save native settings before running effects' >&2; return 1; }
@@ -4199,7 +4199,22 @@ cmd_status_json() {
 # broadcast private repo/job metadata to the whole LAN. The widget only renders these
 # counts anyway. One batched inspect + the shared usage cache; triggers the same
 # background refresh as status-json so busy/idle stay fresh when only the tile is open.
+# Native overview reads the same caches as classic Fleet tiles. It never starts
+# background workers; the existing native scheduler owns refresh effects.
+cmd_native_fleet_overview_json() {
+  local fleet queue stats cache
+  fleet="$(cmd_status_json)" || return 1
+  queue="$(cmd_queued_json)" || return 1
+  stats="$(cmd_stats_json)" || return 1
+  cache="$(cmd_cache_usage_json)" || return 1
+  printf '{"fleet":%s,"queue":%s,"stats":%s,"cache":%s}\n' "$fleet" "$queue" "$stats" "$cache"
+}
+
 cmd_dashboard_json() {
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ] && [ "$DASHBOARD_WIDGET_ENABLE" != true ]; then
+    printf '{"enabled":false}\n'
+    return 0
+  fi
   local names up=0 busy=0 idle=0 c st ph usage uage nowu inspraw rthresh
   names="$(managed_names)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
   nowu=$(date +%s); uage=999
@@ -4703,6 +4718,7 @@ case "${1:-status}" in
   status-json)  cmd_status_json ;;
   recommendations-json) cmd_recommendations_json ;;
   dashboard-json) cmd_dashboard_json ;;
+  fleet-overview-json) cmd_native_fleet_overview_json ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
   queued-refresh) cmd_queued_refresh ;;

@@ -144,7 +144,7 @@ func (s *Service) Handle(r Request) Response {
 		return success(nil)
 	case "prepare-unload":
 		return s.prepareUnload()
-	case "settings", "admission-status", "dashboard-json", "status-json", "recommendations-json", "image-info-json", "queued-json", "stats-json", "cache-usage-json", "farm-log", "build-log", "runner-log", "get-dockerfile", "get-default-dockerfile":
+	case "settings", "settings-defaults", "credential-status", "toggle-toolchain", "admission-status", "dashboard-json", "fleet-overview-json", "status-json", "recommendations-json", "image-info-json", "queued-json", "stats-json", "cache-usage-json", "farm-log", "build-log", "runner-log", "get-dockerfile", "get-default-dockerfile":
 		return s.query(r)
 	case "complete-migration":
 		if !r.Confirm {
@@ -165,12 +165,18 @@ func (s *Service) Handle(r Request) Response {
 		return s.launch(r, func(ctx context.Context) (string, error) { return s.saveConfig(ctx, r.Values) })
 	case "set-credential":
 		return s.launch(r, func(ctx context.Context) (string, error) { return s.writeCredential(r) })
-	case "save-dockerfile":
+	case "save-dockerfile", "save-build-image":
 		return s.launch(r, func(ctx context.Context) (string, error) {
-			if len(r.Value) == 0 || len(r.Value) > 256<<10 {
+			if strings.TrimSpace(r.Value) == "" || strings.ContainsRune(r.Value, 0) || len(r.Value) > 2<<20 {
 				return "", errors.New("invalid_dockerfile")
 			}
-			return "Dockerfile saved; build separately.", atomicWrite(filepath.Join(s.config, "Dockerfile.github"), []byte(r.Value), 0600)
+			if err := atomicWrite(filepath.Join(s.config, "Dockerfile.github"), []byte(r.Value), 0600); err != nil {
+				return "", err
+			}
+			if r.Action == "save-build-image" {
+				return s.engine.Run(ctx, "build-image", nil, "")
+			}
+			return "Dockerfile saved; build separately.", nil
 		})
 	default:
 		action, args, err := ValidateOperation(r)
@@ -215,7 +221,7 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 	if r.Action == "scheduled-boot-autostart" {
 		budget = 25 * time.Minute
 	}
-	if r.Action == "build-image" {
+	if r.Action == "build-image" || r.Action == "save-build-image" {
 		budget = time.Hour
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, budget)
@@ -313,23 +319,16 @@ func (s *Service) query(r Request) Response {
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
 	if r.Action == "get-dockerfile" || r.Action == "get-default-dockerfile" {
-		root := s.config
-		if r.Action == "get-default-dockerfile" {
-			if e, ok := s.engine.(*Engine); ok {
-				root = e.Root
-			} else {
-				return fail("engine_unavailable")
-			}
-		}
-		name := "Dockerfile.github"
-		if r.Action == "get-default-dockerfile" {
-			name = "default.github.Dockerfile"
-		}
-		b, err := readBounded(filepath.Join(root, name), 256<<10)
-		if err != nil || len(b) > 256<<10 {
-			return fail("dockerfile_unavailable")
-		}
-		return success(string(b))
+		return s.queryDockerfile(r.Action)
+	}
+	if r.Action == "toggle-toolchain" {
+		return s.toggleToolchain(r)
+	}
+	if r.Action == "credential-status" {
+		return s.credentialStatus()
+	}
+	if r.Action == "settings-defaults" {
+		return s.queryDefaults(ctx)
 	}
 	if r.Action == "build-log" {
 		b, err := readBounded(filepath.Join(s.runtime, "native-operation.log"), 512<<10)
