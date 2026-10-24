@@ -232,6 +232,9 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 			job.Status = "failed"
 			job.Output += "\nFleet changed but startup preference could not be persisted; inspect before retrying."
 		}
+		if raw, readErr := readBounded(filepath.Join(s.runtime, "native-operation.log"), 512<<10); readErr == nil {
+			_ = atomicWrite(filepath.Join(s.runtime, "native-operation.log"), []byte(redactValues(s.redact(string(raw)), secrets)), 0600)
+		}
 		job.secrets = nil
 		s.history = append([]Job{*job}, s.history...)
 		if len(s.history) > 10 {
@@ -277,7 +280,11 @@ func (s *Service) query(r Request) Response {
 		if len(b) > 512<<10 {
 			b = b[len(b)-(512<<10):]
 		}
-		return success(s.redact(string(b)))
+		out := s.redact(string(b))
+		if s.active != nil {
+			out = redactValues(out, s.active.secrets)
+		}
+		return success(out)
 	}
 	action := r.Action
 	if action == "admission-status" {
