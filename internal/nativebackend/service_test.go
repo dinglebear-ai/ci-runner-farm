@@ -109,7 +109,7 @@ func TestCredentialWritesArePrivateAtomicAndNotReturned(t *testing.T) {
 	}
 }
 func TestFailedFleetObservationNeverAllowsUnload(t *testing.T) {
-	s := New(&fakeRunner{reply: `{"count":1,"runners":[{}]}`}, t.TempDir(), t.TempDir())
+	s := New(&fakeRunner{reply: `{"schema":"native-unload-v1","containers":1,"grants":0,"pending":0,"consumers":0}`}, t.TempDir(), t.TempDir())
 	defer s.Shutdown()
 	if r := s.Handle(Request{Action: "prepare-unload"}); r.OK || r.Error != "running_fleet_prevents_unload" {
 		t.Fatal("live fleet orphaned")
@@ -278,5 +278,32 @@ func TestSlowObservationRefusesBacklogAndQuiescesImmediately(t *testing.T) {
 	f.mu.Unlock()
 	if n != 1 {
 		t.Fatal("expired observation launched", n)
+	}
+}
+
+func TestUnloadRequiresCompleteStrictInventoryAndNoRetainedAllocations(t *testing.T) {
+	for _, reply := range []string{`{}`, `{"schema":"native-unload-v1","containers":0}`, `{"schema":"native-unload-v1","containers":0,"grants":1,"pending":0,"consumers":0}`, `{"schema":"native-unload-v1","containers":0,"grants":0,"pending":1,"consumers":0}`, `{"schema":"native-unload-v1","containers":0,"grants":0,"pending":0,"consumers":1}`} {
+		s := New(&fakeRunner{reply: reply}, t.TempDir(), t.TempDir())
+		if r := s.Handle(Request{Action: "prepare-unload"}); r.OK {
+			t.Fatal("incomplete or charged owner unloaded", reply)
+		}
+		s.Shutdown()
+	}
+	s := New(&fakeRunner{reply: `{"schema":"native-unload-v1","containers":0,"grants":0,"pending":0,"consumers":0}`}, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	if r := s.Handle(Request{Action: "prepare-unload"}); !r.OK {
+		t.Fatal("positively empty owner refused", r)
+	}
+}
+func TestRegistryCredentialPreservesOriginalControlAndSizeBounds(t *testing.T) {
+	s := New(&fakeRunner{}, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	for _, value := range []string{"tab\tvalue", "delete\x7fvalue", strings.Repeat("x", 8193)} {
+		if _, err := s.writeCredential(Request{Kind: "registry-token", Value: value}); err == nil {
+			t.Fatal("invalid registry credential accepted")
+		}
+	}
+	if _, err := s.writeCredential(Request{Kind: "registry-token", Value: " valid opaque password "}); err != nil {
+		t.Fatal(err)
 	}
 }

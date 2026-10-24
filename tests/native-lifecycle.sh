@@ -32,6 +32,18 @@ reconcile_start
 for file in autoscale.pid history.pid lifecycle.pid imageupdate.pid reconcile.pid; do
   [ ! -e "$RUNDIR/$file" ] || { echo "native worker detached: $file" >&2; exit 1; }
 done
+# Failed Docker enumeration must never turn into permission to unload.
+docker() { return 1; }
+if cmd_native_unload_inventory > "$task_tmp/unload.json"; then
+  echo 'native unload accepted unavailable Docker' >&2; exit 1
+fi
+managed_names() { return 1; }
+if cmd_status_json >/dev/null; then echo 'native status hid Docker failure' >&2; exit 1; fi
+if cmd_dashboard_json >/dev/null; then echo 'native dashboard hid Docker failure' >&2; exit 1; fi
+managed_names() { return 0; }
+docker() { return 0; }
+cmd_native_unload_inventory > "$task_tmp/unload.json"
+php -r '$s=json_decode(file_get_contents($argv[1]),true);exit(($s["schema"]??"")==="native-unload-v1" && $s["containers"]===0 ? 0 : 1);' "$task_tmp/unload.json"
 # Native cache clearing must finish its refresh inside the owned operation.
 crf_cache_mutation_idle() { return 0; }
 crf_safe_cache_root() { printf '%s\n' "$task_tmp/cache"; }

@@ -4002,8 +4002,41 @@ cmd_usage_refresh() {
   rm -f "$RUNDIR/usage.targets.tmp"
 }
 
+# Strict withdrawal proof for native ownership. Classic presentation snapshots
+# may tolerate partial data; teardown may not infer empty from missing data.
+cmd_native_unload_inventory() {
+  local names sides admission='' consumers=0
+  names="$(docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.ID}}')" || return 1
+  sides="$(docker ps -a --filter 'label=net.unraid.ci-runner-farm.sidecar=true' --format '{{.ID}}')" || return 1
+  if shared_capacity_enabled; then
+    admission="$(with_fleet_lock wait shared_capacity_call status)" || return 1
+    # A QA consumer can admit new effects after a read-only diagnostic lease
+    # ends. Without a cross-owner withdrawal protocol, never release its owner.
+    consumers="$(php -r '
+      $p=$argv[1];
+      if (is_link($p) || !is_file($p) || fileowner($p)!==0 || (fileperms($p)&0022) || filesize($p)>4194304) exit(1);
+      try { $c=json_decode(file_get_contents($p),true,512,JSON_THROW_ON_ERROR); }
+      catch (Throwable $error) { exit(1); }
+      if (!is_array($c) || (isset($c["consumers"]) && !is_array($c["consumers"]))) exit(1);
+      echo count($c["consumers"]??[]);
+    ' "${CRF_CAPACITY_ROOT:-$CFGDIR}/host-capacity.json")" || return 1
+  fi
+  php -r '
+    $containers=array_filter(explode("\n",$argv[1]."\n".$argv[2]),"strlen");
+    foreach ($containers as $id) if (!preg_match("/\A[0-9a-f]{12,64}\z/D",$id)) exit(1);
+    $grants=0; $pending=0;
+    if ($argv[3]!=="") {
+      try { $state=json_decode($argv[3],true,512,JSON_THROW_ON_ERROR); }
+      catch (Throwable $error) { exit(1); }
+      if (!is_array($state) || !isset($state["grants"],$state["pending"]) || !is_array($state["grants"]) || !is_array($state["pending"])) exit(1);
+      $grants=count($state["grants"]); $pending=count($state["pending"]);
+    }
+    echo json_encode(["schema"=>"native-unload-v1","containers"=>count(array_unique($containers)),"grants"=>$grants,"pending"=>$pending,"consumers"=>(int)$argv[4]],JSON_THROW_ON_ERROR)."\n";
+  ' "$names" "$sides" "$admission" "$consumers"
+}
+
 cmd_status_json() {
-  local names; names="$(managed_names)"
+  local names; names="$(managed_names)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
   # Per-runner cpu/mem/phase/job all come from a background-refreshed cache (see
   # cmd_usage_refresh) so this 5s-per-tab call makes just TWO docker calls total (the
   # `docker ps` in managed_names + one batched inspect for live state and resource
@@ -4032,10 +4065,12 @@ cmd_status_json() {
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
   local inspraw="" cur_gen stalec=0 side_names inspect_names
   cur_gen="$(crf_confgen)"
-  side_names="$(docker ps -a --filter 'label=net.unraid.ci-runner-farm.sidecar=true' --format '{{.Names}}' 2>/dev/null)"
+  side_names="$(docker ps -a --filter 'label=net.unraid.ci-runner-farm.sidecar=true' --format '{{.Names}}' 2>/dev/null)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
   inspect_names="$names $side_names"
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.provider"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}' $inspect_names 2>/dev/null)"
+  if [ -n "$names" ]; then
+    inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{index .Config.Labels "net.unraid.ci-runner-farm.confgen"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.provider"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.pool"}}' $inspect_names 2>/dev/null)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
+  fi
   local out="["; local first=1
   for c in $names; do
     [ -z "$c" ] && continue
@@ -4135,7 +4170,7 @@ cmd_status_json() {
 # background refresh as status-json so busy/idle stay fresh when only the tile is open.
 cmd_dashboard_json() {
   local names up=0 busy=0 idle=0 c st ph usage uage nowu inspraw rthresh
-  names="$(managed_names)"
+  names="$(managed_names)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
   nowu=$(date +%s); uage=999
   [ -f "$RUNDIR/usage.cache" ] && uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
   rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
@@ -4144,7 +4179,9 @@ cmd_dashboard_json() {
   fi
   usage="$([ -f "$RUNDIR/usage.cache" ] && cat "$RUNDIR/usage.cache" 2>/dev/null)"
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
-  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}' $names 2>/dev/null)"
+  if [ -n "$names" ]; then
+    inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}' $names 2>/dev/null)" || { [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 1; }
+  fi
   for c in $names; do
     [ -n "$c" ] || continue
     st="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|" | cut -d'|' -f2)"
@@ -4155,7 +4192,6 @@ cmd_dashboard_json() {
   done
   printf '{"count":%s,"up":%s,"busy":%s,"idle":%s}\n' "$(printf '%s\n' "$names" | grep -c .)" "$up" "$busy" "$idle"
 }
-
 cmd_logs() {
   local index="${1:-1}" count="${2:-100}" name snapshot id rc
   case "$index:$count" in *[!0-9:]*) return 1 ;; esac
@@ -4603,6 +4639,7 @@ case "${1:-status}" in
   native-image-drain-tick) with_fleet_lock wait imageupdate_rollover true ;;
   native-admission-status) with_fleet_lock wait shared_capacity_call status ;;
   native-build-limits) cmd_native_build_limits ;;
+  native-unload-inventory) cmd_native_unload_inventory ;;
   native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
   native-config-json) cmd_native_config_json ;;
   native-config-check) cmd_native_config_check ;;

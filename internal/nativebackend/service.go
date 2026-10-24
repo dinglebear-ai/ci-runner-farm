@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 type Request struct {
@@ -343,18 +344,24 @@ func (s *Service) prepareUnload() Response {
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
-	out, err := s.engine.Run(ctx, "status-json", nil, "")
+	out, err := s.engine.Run(ctx, "native-unload-inventory", nil, "")
 	if err != nil {
 		return fail("fleet_state_unavailable")
 	}
 	var state struct {
-		Count   int   `json:"count"`
-		Runners []any `json:"runners"`
+		Schema     string `json:"schema"`
+		Containers *int   `json:"containers"`
+		Grants     *int   `json:"grants"`
+		Pending    *int   `json:"pending"`
+		Consumers  *int   `json:"consumers"`
 	}
-	if json.Unmarshal([]byte(out), &state) != nil {
+	if json.Unmarshal([]byte(out), &state) != nil || state.Schema != "native-unload-v1" || state.Containers == nil || state.Grants == nil || state.Pending == nil || state.Consumers == nil || *state.Consumers < 0 || *state.Containers < 0 || *state.Grants < 0 || *state.Pending < 0 {
 		return fail("fleet_state_unavailable")
 	}
-	if state.Count != 0 || len(state.Runners) != 0 {
+	if *state.Consumers != 0 {
+		return fail("shared_consumers_require_fenced_handoff")
+	}
+	if *state.Containers != 0 || *state.Grants != 0 || *state.Pending != 0 {
 		return fail("running_fleet_prevents_unload")
 	}
 	return success(nil)
@@ -446,7 +453,7 @@ func (s *Service) writeCredential(r Request) (string, error) {
 		}
 		name = "token"
 	case "registry-token":
-		if len(r.Value) == 0 || len(r.Value) > 16384 || strings.ContainsAny(r.Value, "\x00\r\n") {
+		if len(r.Value) == 0 || len(r.Value) > 8192 || strings.IndexFunc(r.Value, func(r rune) bool { return r < 32 || r == unicode.MaxASCII }) >= 0 {
 			return "", errors.New("invalid_registry_token")
 		}
 		name = "registry-token"
