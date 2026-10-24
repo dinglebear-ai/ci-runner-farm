@@ -224,6 +224,11 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 	if r.Action == "build-image" || r.Action == "save-build-image" {
 		budget = time.Hour
 	}
+	if r.Action == "build-image" || r.Action == "save-build-image" {
+		if err := atomicWrite(filepath.Join(s.runtime, "native-build.log"), nil, 0600); err != nil {
+			return fail("build_log_unavailable")
+		}
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, budget)
 	secrets := s.secretValues()
 	job := &Job{ID: hex.EncodeToString(id), Action: r.Action, Status: "running", StartedAt: time.Now().UTC(), cancel: cancel, secrets: secrets}
@@ -281,9 +286,12 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 			job.Status = "failed"
 			job.Output += "\nFleet changed but startup preference could not be persisted; inspect before retrying."
 		}
-		if raw, readErr := readBounded(filepath.Join(s.runtime, "native-operation.log"), 512<<10); readErr == nil {
-			_ = atomicWrite(filepath.Join(s.runtime, "native-operation.log"), []byte(redactValues(s.redact(string(raw)), secrets)), 0600)
+		for _, name := range []string{"native-operation.log", "native-build.log"} {
+			if raw, readErr := readBounded(filepath.Join(s.runtime, name), 512<<10); readErr == nil {
+				_ = atomicWrite(filepath.Join(s.runtime, name), []byte(redactValues(s.redact(string(raw)), secrets)), 0600)
+			}
 		}
+
 		job.secrets = nil
 		s.history = append([]Job{*job}, s.history...)
 		if len(s.history) > 10 {
@@ -331,7 +339,7 @@ func (s *Service) query(r Request) Response {
 		return s.queryDefaults(ctx)
 	}
 	if r.Action == "build-log" {
-		b, err := readBounded(filepath.Join(s.runtime, "native-operation.log"), 512<<10)
+		b, err := readBounded(filepath.Join(s.runtime, "native-build.log"), 512<<10)
 		if err != nil {
 			return fail("build_log_unavailable")
 		}

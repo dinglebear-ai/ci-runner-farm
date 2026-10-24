@@ -61,9 +61,10 @@ func (e *Engine) Extract() error {
 }
 
 type tailBuffer struct {
-	data    []byte
-	limit   int
-	logPath string
+	data         []byte
+	limit        int
+	logPath      string
+	buildLogPath string
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
@@ -74,6 +75,9 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	}
 	if b.logPath != "" {
 		_ = atomicWrite(b.logPath, b.data, 0600)
+	}
+	if b.buildLogPath != "" {
+		_ = atomicWrite(b.buildLogPath, b.data, 0600)
 	}
 	return n, nil
 }
@@ -109,7 +113,7 @@ func (e *Engine) Run(ctx context.Context, action string, args []string, override
 		return err
 	}
 	cmd.WaitDelay = 2 * time.Second
-	out := &tailBuffer{limit: 512 << 10, logPath: filepath.Join(e.Runtime, "native-operation.log")}
+	out := engineOutput(e.Runtime, action)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	err = cmd.Run()
@@ -117,4 +121,12 @@ func (e *Engine) Run(ctx context.Context, action string, args []string, override
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	return string(out.data), err
+}
+
+func engineOutput(runtime, action string) *tailBuffer {
+	out := &tailBuffer{limit: 512 << 10, logPath: filepath.Join(runtime, "native-operation.log")}
+	if action == "build-image" {
+		out.buildLogPath = filepath.Join(runtime, "native-build.log")
+	}
+	return out
 }

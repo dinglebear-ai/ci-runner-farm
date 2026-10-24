@@ -242,14 +242,17 @@ func TestActiveProgressRedactsCredentialRemovedDuringOperation(t *testing.T) {
 	if strings.Contains(string(report), secret) || !strings.Contains(string(report), "REDACTED") {
 		t.Fatal("removed credential escaped active progress")
 	}
+	if err := os.WriteFile(filepath.Join(runtime, "native-build.log"), []byte("retained build "+secret), 0600); err != nil {
+		t.Fatal(err)
+	}
 	report, _ = json.Marshal(s.Handle(Request{Action: "build-log"}))
-	if strings.Contains(string(report), secret) {
+	if strings.Contains(string(report), secret) || !strings.Contains(string(report), "REDACTED") {
 		t.Fatal("removed credential escaped live build log")
 	}
 	close(f.block)
 	s.wg.Wait()
 	report, _ = json.Marshal(s.Handle(Request{Action: "build-log"}))
-	if strings.Contains(string(report), secret) {
+	if strings.Contains(string(report), secret) || !strings.Contains(string(report), "REDACTED") {
 		t.Fatal("removed credential escaped retained build log")
 	}
 }

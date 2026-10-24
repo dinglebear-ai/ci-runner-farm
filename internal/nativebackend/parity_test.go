@@ -226,3 +226,31 @@ func TestGitHubPATSaveAcceptsOrdinaryPasteWhitespaceLikeClassic(t *testing.T) {
 		t.Fatal("NUL token accepted")
 	}
 }
+
+func TestCompletedBuildLogSurvivesActualFleetQueriesAndOtherOperationProgress(t *testing.T) {
+	runtime := t.TempDir()
+	e := &Engine{Root: t.TempDir(), Config: t.TempDir(), Runtime: runtime, CapacityRoot: t.TempDir(), Executable: "/bin/false"}
+	if err := e.Extract(); err != nil {
+		t.Fatal(err)
+	}
+	progress := engineOutput(runtime, "build-image")
+	original := []byte("bounded build compiler output\n")
+	if _, err := progress.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := e.Run(t.Context(), "native-config-json", nil, ""); err != nil {
+		t.Fatal(out, err)
+	}
+	other := engineOutput(runtime, "usage-refresh")
+	other.Write([]byte("later scheduled progress"))
+	s := New(e, e.Config, runtime)
+	defer s.Shutdown()
+	r := s.Handle(Request{Action: "build-log"})
+	if !r.OK || r.Data != string(original) {
+		t.Fatal("later query/tick destroyed completed build evidence", r)
+	}
+	generic, _ := os.ReadFile(filepath.Join(runtime, "native-operation.log"))
+	if string(generic) != "later scheduled progress" {
+		t.Fatal("generic active progress stopped updating")
+	}
+}
