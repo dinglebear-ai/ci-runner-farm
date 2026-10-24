@@ -185,6 +185,18 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 	if s.active != nil {
 		return fail("backend_busy")
 	}
+	// Observe scheduling authority under the same gate as operator admission.
+	// A tick observed before Stop cannot execute after Stop has revoked intent.
+	if strings.HasPrefix(r.Action, "scheduled-") {
+		if _, err := os.Stat(filepath.Join(s.config, "native-fleet.enabled")); err != nil {
+			return fail("fleet_maintenance_disabled")
+		}
+	}
+	if r.Action == "stop" || r.Action == "restart" || (r.Action == "scale" && len(r.Args) == 1 && r.Args[0] == "0") {
+		if err := s.disableMaintenance(); err != nil {
+			return fail("maintenance_revocation_failed")
+		}
+	}
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return fail("random_unavailable")
@@ -264,6 +276,17 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 		s.active = nil
 	}()
 	return success(map[string]string{"jobId": job.ID})
+}
+
+func (s *Service) disableMaintenance() error {
+	path := filepath.Join(s.config, "native-fleet.enabled")
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return syncParent(path)
 }
 
 func (s *Service) query(r Request) Response {

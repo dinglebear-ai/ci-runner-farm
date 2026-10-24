@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ type fakeRunner struct {
 	block   chan struct{}
 	started chan struct{}
 	reply   string
+	failure error
 }
 
 func (f *fakeRunner) Run(ctx context.Context, action string, args []string, override string) (string, error) {
@@ -36,6 +38,9 @@ func (f *fakeRunner) Run(ctx context.Context, action string, args []string, over
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
+	}
+	if f.failure != nil {
+		return "", f.failure
 	}
 	if f.reply != "" {
 		return f.reply, nil
@@ -378,5 +383,72 @@ func TestStartupRestoresOnlyOnceAndNeverSchedulesRecurringFullStarts(t *testing.
 	}
 	if boots != 1 {
 		t.Fatal("startup restoration count", boots)
+	}
+}
+
+func TestFailedOrCancelledWithdrawalNeverRestoresMaintenance(t *testing.T) {
+	for _, action := range []string{"stop", "restart", "scale"} {
+		for _, cancelled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cancelled=%v", action, cancelled), func(t *testing.T) {
+				config := t.TempDir()
+				marker := filepath.Join(config, "native-fleet.enabled")
+				if err := os.WriteFile(marker, []byte("enabled\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				f := &fakeRunner{failure: errors.New("partial teardown failure")}
+				if cancelled {
+					f.failure = nil
+					f.block = make(chan struct{})
+					f.started = make(chan struct{}, 1)
+				}
+				s := New(f, config, t.TempDir())
+				defer s.Shutdown()
+				req := Request{Action: action, Confirm: true}
+				if action == "scale" {
+					req.Args = []string{"0"}
+				}
+				if r := s.Handle(req); !r.OK {
+					t.Fatal(r)
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("intent was not revoked before effects")
+				}
+				if cancelled {
+					<-f.started
+					if r := s.Handle(Request{Action: "cancel", Confirm: true}); !r.OK {
+						t.Fatal(r)
+					}
+				}
+				s.wg.Wait()
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("failed withdrawal restored intent")
+				}
+				r := s.launch(Request{Action: "scheduled-lifecycle-tick"}, func(context.Context) (string, error) { return "unexpected stale tick", nil })
+				if r.OK || r.Error != "fleet_maintenance_disabled" {
+					t.Fatal("stale scheduled work was admitted", r)
+				}
+			})
+		}
+	}
+}
+func TestWithdrawalDoesNotRunWhenDurableRevocationFails(t *testing.T) {
+	config := t.TempDir()
+	marker := filepath.Join(config, "native-fleet.enabled")
+	if err := os.Mkdir(marker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(marker, "retained"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{}
+	s := New(f, config, t.TempDir())
+	defer s.Shutdown()
+	if r := s.Handle(Request{Action: "stop", Confirm: true}); r.OK || r.Error != "maintenance_revocation_failed" {
+		t.Fatal(r)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 0 {
+		t.Fatal("stop ran without durable authority revocation")
 	}
 }
