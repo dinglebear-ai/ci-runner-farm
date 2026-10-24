@@ -71,3 +71,78 @@ func TestActivatedRecoveryNeverCreatesMissingLedger(t *testing.T) {
 		t.Fatal("retained fence recovery created replacement ledger")
 	}
 }
+
+func TestCompletedInitializationVerifiesMissingAndCorruptLedgerWithoutReplacement(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		root := t.TempDir()
+		path := filepath.Join(root, "ledger")
+		original := []byte("not a capacity ledger")
+		if corrupt {
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		config := &hostcapacity.Config{Mode: "active", Epoch: "0123456789abcdef0123456789abcdef", LedgerPath: path, Policy: sharedcapacity.Policy{Pools: map[string]sharedcapacity.Pool{"build": {Maximum: 2}}}}
+		identity, err := hostcapacity.StandaloneInitializationIdentity(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := &farmcapacity.Controller{Broker: sharedcapacity.Broker{Path: path}, Policy: config.Policy}
+		if err := verifyCompletedStandalone(config, controller, config.Epoch, identity); err == nil {
+			t.Fatal("missing/corrupt ledger verified")
+		}
+		got, err := os.ReadFile(path)
+		if corrupt {
+			if err != nil || string(got) != string(original) {
+				t.Fatal("corrupt ledger replaced", err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("missing ledger created", err)
+		}
+	}
+}
+func TestInitializationRetiresJournalWithoutReopeningLaterForeignFence(t *testing.T) {
+	root := t.TempDir()
+	epoch := "0123456789abcdef0123456789abcdef"
+	identity := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	closure := filepath.Join(root, "shared-capacity.closed")
+	journal := filepath.Join(root, "native-admission-init.json")
+	if err := os.WriteFile(closure, hostcapacity.StandaloneInitializationClosure(epoch, identity), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journal, []byte("original journal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireInitializationAt(root, epoch, identity, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("completed journal retained")
+	}
+	foreign := []byte("later shared ownership fence\n")
+	if err := os.WriteFile(closure, foreign, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, remove := range []bool{true, false} {
+		if err := retireInitializationAt(root, epoch, identity, remove); err == nil {
+			t.Fatal("later foreign fence reopened")
+		}
+		got, _ := os.ReadFile(closure)
+		if string(got) != string(foreign) {
+			t.Fatal("later fence changed")
+		}
+	}
+}
+func TestCompletedCrashWindowCanRetireJournalOnlyWhileAdmissionRemainsOpen(t *testing.T) {
+	root := t.TempDir()
+	journal := filepath.Join(root, "native-admission-init.json")
+	if err := os.WriteFile(journal, []byte("original journal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireInitializationAt(root, "epoch", "identity", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("completed crash journal retained")
+	}
+}

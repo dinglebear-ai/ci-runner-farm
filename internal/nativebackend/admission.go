@@ -190,16 +190,30 @@ func (s *Service) recoverAdmission(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = validateRecoveryOwner(&journal.Owner, current); err != nil {
+	return s.resumeAdmission(ctx, e, e.CapacityRoot, journal.Owner, current)
+}
+
+// The daemon's completed shortcut must use the read-only controller verifier;
+// it never substitutes an old journal for evidence that the ledger still exists.
+func (s *Service) resumeAdmission(ctx context.Context, engine Runner, capacityRoot string, owner hostcapacity.Config, current *hostcapacity.Config) (string, error) {
+	if err := validateRecoveryOwner(&owner, current); err != nil {
 		return "", err
 	}
-	closure := filepath.Join(e.CapacityRoot, "shared-capacity.closed")
-	if _, err = os.Lstat(closure); errors.Is(err, os.ErrNotExist) && current.Mode == "active" {
-		return "Admission initialization already completed; existing owner was preserved.", nil
+	closure := filepath.Join(capacityRoot, "shared-capacity.closed")
+	if _, err := os.Lstat(closure); errors.Is(err, os.ErrNotExist) && current.Mode == "active" {
+		identity, err := hostcapacity.StandaloneInitializationIdentity(&owner)
+		if err != nil {
+			return "", err
+		}
+		log, err := engine.Run(ctx, "native-verify-initialize", []string{owner.Epoch, identity}, "")
+		if err != nil {
+			return log, err
+		}
+		return "Existing initialization verified; completed journal retired.", nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	return s.finishAdmission(ctx, e, e.CapacityRoot, journal.Owner)
+	return s.finishAdmission(ctx, engine, capacityRoot, owner)
 }
 
 func validateRecoveryOwner(planned, current *hostcapacity.Config) error {
@@ -213,24 +227,22 @@ func validateRecoveryOwner(planned, current *hostcapacity.Config) error {
 
 func (s *Service) finishAdmission(ctx context.Context, engine Runner, capacityRoot string, owner hostcapacity.Config) (string, error) {
 	closure := filepath.Join(capacityRoot, "shared-capacity.closed")
-	if err := atomicWrite(closure, []byte("closed for native standalone initialization\n"), 0600); err != nil {
-		return "", err
-	}
-	action := "native-recover-initialize"
 	identity, err := hostcapacity.StandaloneInitializationIdentity(&owner)
 	if err != nil {
 		return "", err
 	}
+	marker := hostcapacity.StandaloneInitializationClosure(owner.Epoch, identity)
+	if err = publishExclusive(closure, marker); err != nil {
+		data, readErr := readProtectedInitializationClosure(closure)
+		if readErr != nil || string(data) != string(marker) {
+			return "", errors.New("initialization_closure_owned_by_another_workflow")
+		}
+	}
+	action := "native-recover-initialize"
 	args := []string{owner.Epoch, identity}
 	log, err := engine.Run(ctx, action, args, "")
 	if err != nil {
-		return log, fmt.Errorf("initialization incomplete; retained original epoch and closure; use Recover admission: %w", err)
-	}
-	if err = os.Remove(closure); err != nil {
-		return "", err
-	}
-	if err = syncParent(closure); err != nil {
-		return "", err
+		return log, fmt.Errorf("initialization completion unconfirmed; original owner preserved; inspect admission and closure state, then use Recover admission: %w", err)
 	}
 	return "Standalone Farm admission initialized using the original owner and controller.", nil
 }
@@ -287,4 +299,21 @@ func publishExclusive(path string, data []byte) error {
 		return err
 	}
 	return syncParent(path)
+}
+
+func readProtectedInitializationClosure(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 256 {
+		return nil, errors.New("unsafe_initialization_closure")
+	}
+	return io.ReadAll(io.LimitReader(f, 257))
 }

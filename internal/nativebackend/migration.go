@@ -66,7 +66,10 @@ func inspectClassicMigration(ctx context.Context, engine, boot, proc, config str
 			return result, errors.New("classic_worker_inventory_unavailable")
 		}
 		args := strings.Split(string(data), "\x00")
-		creator := len(args) > 0 && args[0] == engine
+		candidate := ""
+		if len(args) > 0 {
+			candidate = args[0]
+		}
 		if len(args) > 1 {
 			switch filepath.Base(args[0]) {
 			case "bash", "sh", "dash":
@@ -74,10 +77,18 @@ func inspectClassicMigration(ctx context.Context, engine, boot, proc, config str
 					if strings.HasPrefix(arg, "-") {
 						continue
 					}
-					creator = arg == engine
+					candidate = arg
 					break
 				}
 			}
+		}
+		creator := candidate == engine
+		if !creator && candidate != "" && !filepath.IsAbs(candidate) && filepath.Base(candidate) == filepath.Base(engine) {
+			cwd, cwdErr := os.Readlink(filepath.Join(proc, entry.Name(), "cwd"))
+			if cwdErr != nil {
+				return result, errors.New("classic_worker_cwd_unavailable")
+			}
+			creator = filepath.Clean(filepath.Join(cwd, candidate)) == engine
 		}
 		if creator {
 			result.Workers++

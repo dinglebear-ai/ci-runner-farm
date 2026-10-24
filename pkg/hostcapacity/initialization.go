@@ -26,3 +26,9 @@ func StandaloneInitializationIdentity(config *Config) (string, error) {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
 }
+
+// StandaloneInitializationClosure identifies the one initialization workflow
+// allowed to reopen its fence. Later handoff fences have different contents.
+func StandaloneInitializationClosure(epoch, identity string) []byte {
+	return []byte("native standalone initialization " + epoch + " " + identity + "\n")
+}

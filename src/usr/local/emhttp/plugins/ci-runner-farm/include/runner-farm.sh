@@ -4682,7 +4682,8 @@ case "${1:-status}" in
   native-build-limits) cmd_native_build_limits ;;
   native-standalone-preflight) cmd_native_standalone_preflight ;;
   native-unload-inventory) cmd_native_unload_inventory ;;
-  native-recover-initialize) with_fleet_lock wait shared_capacity_native_call recover-initialize "${2:-}" ;;
+  native-recover-initialize) with_fleet_lock wait shared_capacity_native_call recover-initialize "${2:-}" "${3:-}" ;;
+  native-verify-initialize) with_fleet_lock wait shared_capacity_native_call verify-initialize "${2:-}" "${3:-}" ;;
   native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
   native-config-json) cmd_native_config_json ;;
   native-config-check) cmd_native_config_check ;;

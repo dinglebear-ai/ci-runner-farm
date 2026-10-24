@@ -124,3 +124,23 @@ func TestMigrationCommitPinsRetainedConfigurationAndDoesNotCopyCredentials(t *te
 		t.Fatal("ledger changed")
 	}
 }
+
+func TestMigrationRejectsRelativeClassicWorkerAfterRuntimeRetired(t *testing.T) {
+	root := t.TempDir()
+	engine := filepath.Join(root, "classic", "runner-farm.sh")
+	proc := filepath.Join(root, "proc")
+	pid := filepath.Join(proc, "321")
+	if err := os.MkdirAll(pid, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(engine), filepath.Join(pid, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pid, "cmdline"), []byte("/bin/bash\x00./runner-farm.sh\x00watchdog"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := inspectClassicMigration(t.Context(), engine, filepath.Join(root, "absent.plg"), proc, filepath.Join(root, "absent.cfg"))
+	if err != nil || status.Ready || status.Workers != 1 {
+		t.Fatal("relative orphan escaped migration inventory", status, err)
+	}
+}

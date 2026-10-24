@@ -61,6 +61,12 @@ func Run(arguments []string, output io.Writer) (result error) {
 		ReceiptRoot: config.ReceiptRoot, Docker: farmcapacity.NativeDocker{},
 		RepairCache: farmcapacity.RepairNativeCache, Poisoned: farmcapacity.NativePoisoned,
 	}
+	if arguments[0] == "verify-initialize" {
+		if err := verifyCompletedStandalone(config, &controller, arguments[1], arguments[2]); err != nil {
+			return err
+		}
+		return retireInitialization(config, arguments[1], arguments[2], false)
+	}
 	if arguments[0] == "initialize" || arguments[0] == "recover-initialize" {
 		var err error
 		if arguments[0] == "recover-initialize" {
@@ -72,7 +78,12 @@ func Run(arguments []string, output io.Writer) (result error) {
 			return err
 		}
 		if config.Mode == "closed" {
-			return lease.Activate()
+			if err := lease.Activate(); err != nil {
+				return err
+			}
+		}
+		if arguments[0] == "recover-initialize" {
+			return retireInitialization(config, arguments[1], arguments[2], true)
 		}
 		return nil
 	}
@@ -96,7 +107,7 @@ func validArguments(arguments []string) bool {
 	if len(arguments) == 2 {
 		return arguments[0] == "demand-observe"
 	}
-	return len(arguments) == 3 && ((arguments[0] == "recover-initialize" && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
+	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
 }
 
 func verifyFleetLock() error {
