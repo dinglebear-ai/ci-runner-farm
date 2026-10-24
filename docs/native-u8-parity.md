@@ -37,7 +37,7 @@ closed for operator recovery. These are visible limitations, not acceptance.
 Native service restart preference is persisted only after an explicit backend
 start. The plugin-owned activation child restores it after capability admission;
 it cannot restart during unload. Fleet scheduling is separately enabled only
-by a successful explicit start/restart/scale. Existing Go controller tests and
+by a successful explicit start/restart/positive scale; stop or scale0 disables it. Startup restoration reuses the original bounded readiness workflow once per backend activation; ordinary maintenance never schedules recurring fullstart commands. Existing Go controller tests and
 shell/provider tests remain the source compatibility checks. New native tests
 cover request typing, jobs/busy/cancellation/unload, private credentials,
 redaction, engine projection and foreground worker/drain ownership. Browser

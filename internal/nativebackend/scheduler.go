@@ -16,6 +16,12 @@ import (
 func (s *Service) RunScheduler(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	s.runScheduler(ctx, ticker.C)
+}
+
+func (s *Service) runScheduler(ctx context.Context, ticks <-chan time.Time) {
+	_, initialErr := os.Stat(filepath.Join(s.config, "native-fleet.enabled"))
+	restorePending := initialErr == nil
 	next := map[string]time.Time{}
 	var config map[string]any
 	nextConfig := time.Time{}
@@ -23,17 +29,30 @@ func (s *Service) RunScheduler(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case now := <-ticks:
 			if _, err := os.Stat(filepath.Join(s.config, "ci-runner-farm.cfg")); err != nil {
 				continue
 			}
 			if _, err := os.Stat(filepath.Join(s.config, "native-fleet.enabled")); err != nil {
+				restorePending = false
 				continue
 			}
 			s.mu.Lock()
 			ready := s.accepting && s.active == nil
 			s.mu.Unlock()
 			if !ready {
+				continue
+			}
+			if restorePending {
+				// Reuse the original bounded boot/Docker readiness workflow once
+				// per backend activation. Recurring full starts would undo an
+				// operator's Scale0 and re-run explicit-start side effects.
+				result := s.launch(Request{Action: "scheduled-boot-autostart"}, func(jobctx context.Context) (string, error) {
+					return s.engine.Run(jobctx, "boot-autostart", nil, "")
+				})
+				if result.OK {
+					restorePending = false
+				}
 				continue
 			}
 			if now.After(nextConfig) {
@@ -48,14 +67,14 @@ func (s *Service) RunScheduler(ctx context.Context) {
 				}
 				nextConfig = now.Add(15 * time.Second)
 			}
-			intervals := map[string]time.Duration{"start": 60 * time.Second, "usage-refresh": 30 * time.Second, "lifecycle-tick": 30 * time.Second, "queued-refresh": 60 * time.Second, "stats-refresh": 5 * time.Minute, "cache-usage-refresh": 5 * time.Minute}
+			intervals := map[string]time.Duration{"usage-refresh": 30 * time.Second, "lifecycle-tick": 30 * time.Second, "queued-refresh": 60 * time.Second, "stats-refresh": 5 * time.Minute, "cache-usage-refresh": 5 * time.Minute}
 			if config["AUTOSCALE"] == "true" {
 				intervals["autoscale-tick"] = seconds(config["AUTOSCALE_INTERVAL"], 30)
 			}
 			if config["IMAGE_AUTOUPDATE"] == "true" {
 				intervals["imageupdate-tick"] = seconds(config["IMAGE_AUTOUPDATE_INTERVAL"], 1800)
 			}
-			actions := []string{"start", "autoscale-tick", "lifecycle-tick", "usage-refresh", "queued-refresh", "stats-refresh", "cache-usage-refresh", "imageupdate-tick"}
+			actions := []string{"autoscale-tick", "lifecycle-tick", "usage-refresh", "queued-refresh", "stats-refresh", "cache-usage-refresh", "imageupdate-tick"}
 			if _, err := os.Stat(filepath.Join(s.runtime, "native-reconcile.pending")); err == nil {
 				actions = append([]string{"reconcile-drain"}, actions...)
 				intervals["reconcile-drain"] = 15 * time.Second

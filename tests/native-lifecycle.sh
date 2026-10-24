@@ -32,6 +32,13 @@ reconcile_start
 for file in autoscale.pid history.pid lifecycle.pid imageupdate.pid reconcile.pid; do
   [ ! -e "$RUNDIR/$file" ] || { echo "native worker detached: $file" >&2; exit 1; }
 done
+# Native scheduler state is not a nonexistent classic PID daemon.
+: > "$CFGDIR/native-fleet.enabled"
+for function in autoscale_status lifecycle_status imageupdate_status; do
+  [ "$("$function")" = 'native scheduled' ]
+done
+rm "$CFGDIR/native-fleet.enabled"
+[ "$(autoscale_status)" = stopped ]
 # Failed Docker enumeration must never turn into permission to unload.
 docker() { return 1; }
 if cmd_native_unload_inventory > "$task_tmp/unload.json"; then

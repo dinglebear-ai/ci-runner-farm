@@ -1017,6 +1017,10 @@ autoscale_stop() {
   stop_worker_group "autoscale" "$AUTOSCALE_PID" '[r]unner-farm.sh autoscale-daemon'
 }
 autoscale_status() {
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    if [ -f "$CFGDIR/native-fleet.enabled" ]; then echo "native scheduled"; else echo "stopped"; fi
+    return 0
+  fi
   if [ -f "$AUTOSCALE_PID" ] && kill -0 "$(cat "$AUTOSCALE_PID" 2>/dev/null)" 2>/dev/null; then
     echo "running (pid $(cat "$AUTOSCALE_PID"))"
   else echo "stopped"; fi
@@ -1124,6 +1128,10 @@ lifecycle_stop() {
 }
 
 lifecycle_status() {
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    if [ -f "$CFGDIR/native-fleet.enabled" ]; then echo "native scheduled"; else echo "stopped"; fi
+    return 0
+  fi
   if [ -f "$LIFECYCLE_PID" ] && kill -0 "$(cat "$LIFECYCLE_PID" 2>/dev/null)" 2>/dev/null; then
     echo "running (pid $(cat "$LIFECYCLE_PID"))"
   else echo "stopped"; fi
@@ -1333,6 +1341,10 @@ imageupdate_stop() {
   stop_worker_group "image-update" "$IMAGEUPDATE_PID" '[r]unner-farm.sh imageupdate-daemon'
 }
 imageupdate_status() {
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    if [ -f "$CFGDIR/native-fleet.enabled" ]; then echo "native scheduled"; else echo "stopped"; fi
+    return 0
+  fi
   if [ -f "$IMAGEUPDATE_PID" ] && kill -0 "$(cat "$IMAGEUPDATE_PID" 2>/dev/null)" 2>/dev/null; then
     echo "running (pid $(cat "$IMAGEUPDATE_PID"))"
   else echo "stopped"; fi

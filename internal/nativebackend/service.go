@@ -190,6 +190,9 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 		return fail("random_unavailable")
 	}
 	budget := 15 * time.Minute
+	if r.Action == "scheduled-boot-autostart" {
+		budget = 25 * time.Minute
+	}
 	if r.Action == "build-image" {
 		budget = time.Hour
 	}
@@ -228,8 +231,17 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 		}
 		if err == nil && ctx.Err() == nil {
 			switch r.Action {
-			case "start", "restart", "scale":
+			case "start", "restart":
 				err = atomicWrite(filepath.Join(s.config, "native-fleet.enabled"), []byte("enabled\n"), 0600)
+			case "scale":
+				if len(r.Args) == 1 && r.Args[0] == "0" {
+					err = os.Remove(filepath.Join(s.config, "native-fleet.enabled"))
+					if errors.Is(err, os.ErrNotExist) {
+						err = nil
+					}
+				} else {
+					err = atomicWrite(filepath.Join(s.config, "native-fleet.enabled"), []byte("enabled\n"), 0600)
+				}
 			case "stop":
 				err = os.Remove(filepath.Join(s.config, "native-fleet.enabled"))
 				if errors.Is(err, os.ErrNotExist) {

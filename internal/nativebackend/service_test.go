@@ -307,3 +307,76 @@ func TestRegistryCredentialPreservesOriginalControlAndSizeBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestScaleZeroRemovesMaintenanceIntent(t *testing.T) {
+	config := t.TempDir()
+	s := New(&fakeRunner{}, config, t.TempDir())
+	defer s.Shutdown()
+	if !s.Handle(Request{Action: "scale", Args: []string{"2"}}).OK {
+		t.Fatal("scale refused")
+	}
+	s.wg.Wait()
+	if _, err := os.Stat(filepath.Join(config, "native-fleet.enabled")); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Handle(Request{Action: "scale", Args: []string{"0"}}).OK {
+		t.Fatal("scale0 refused")
+	}
+	s.wg.Wait()
+	if _, err := os.Stat(filepath.Join(config, "native-fleet.enabled")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("scale0 retained start authority")
+	}
+}
+
+type schedulerRunner struct{ *fakeRunner }
+
+func (f schedulerRunner) Run(ctx context.Context, action string, args []string, override string) (string, error) {
+	if action == "native-config-json" {
+		return `{}`, nil
+	}
+	return f.fakeRunner.Run(ctx, action, args, override)
+}
+
+func TestStartupRestoresOnlyOnceAndNeverSchedulesRecurringFullStarts(t *testing.T) {
+	config := t.TempDir()
+	f := &fakeRunner{started: make(chan struct{}, 1)}
+	s := New(schedulerRunner{f}, config, t.TempDir())
+	defer s.Shutdown()
+	for _, name := range []string{"ci-runner-farm.cfg", "native-fleet.enabled"} {
+		if err := os.WriteFile(filepath.Join(config, name), []byte("enabled\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ticks := make(chan time.Time)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.runScheduler(ctx, ticks) }()
+	base := time.Now()
+	for i := 0; i < 12; i++ {
+		ticks <- base.Add(time.Duration(i) * time.Minute)
+		select {
+		case <-f.started:
+		case <-time.After(time.Second):
+			t.Fatal("scheduler did not execute due operation")
+		}
+		s.wg.Wait()
+	}
+	cancel()
+	<-done
+	s.wg.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	boots := 0
+	for _, action := range f.calls {
+		if action == "boot-autostart" {
+			boots++
+		}
+		if action == "start" {
+			t.Fatal("recurring full start launched")
+		}
+	}
+	if boots != 1 {
+		t.Fatal("startup restoration count", boots)
+	}
+}
