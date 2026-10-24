@@ -210,3 +210,19 @@ func TestToolchainProjectionMatchesActualClassicAuthoring(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubPATSaveAcceptsOrdinaryPasteWhitespaceLikeClassic(t *testing.T) {
+	s := New(&fakeRunner{}, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	token := "ghp_abcdefghijklmnopqrstuvwxyz123456"
+	if _, err := s.writeCredential(Request{Kind: "github-token", Value: " \t" + token + "\r\n"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(s.config, "token"))
+	if err != nil || string(got) != token {
+		t.Fatal("pasted token normalization differs", err)
+	}
+	if _, err := s.writeCredential(Request{Kind: "github-token", Value: token + "\x00"}); err == nil {
+		t.Fatal("NUL token accepted")
+	}
+}

@@ -495,6 +495,7 @@ func (s *Service) writeCredential(r Request) (string, error) {
 	var name string
 	switch r.Kind {
 	case "github-token":
+		r.Value = strings.Trim(r.Value, " \t\r\n")
 		if !tokenPattern.MatchString(r.Value) {
 			return "", errors.New("invalid_github_token")
 		}
