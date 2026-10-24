@@ -248,3 +248,35 @@ func TestActiveProgressRedactsCredentialRemovedDuringOperation(t *testing.T) {
 		t.Fatal("removed credential escaped retained build log")
 	}
 }
+
+func TestSlowObservationRefusesBacklogAndQuiescesImmediately(t *testing.T) {
+	f := &fakeRunner{block: make(chan struct{}), started: make(chan struct{}, 1)}
+	s := New(f, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	done := make(chan Response, 1)
+	go func() { done <- s.Handle(Request{Action: "status-json"}) }()
+	<-f.started
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if r := s.Handle(Request{Action: "status-json"}); r.OK || r.Error != "backend_busy" {
+			t.Fatal("inspection was queued", r)
+		}
+	}
+	if r := s.Handle(Request{Action: "prepare-unload"}); r.OK || r.Error != "inspection_prevents_unload" {
+		t.Fatal("unload waited behind inspection", r)
+	}
+	if r := s.Handle(Request{Action: "start"}); r.OK || r.Error != "backend_quiesced" {
+		t.Fatal("quiescence did not close admission", r)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("busy admission blocked")
+	}
+	close(f.block)
+	<-done
+	f.mu.Lock()
+	n := len(f.calls)
+	f.mu.Unlock()
+	if n != 1 {
+		t.Fatal("expired observation launched", n)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +52,7 @@ type Service struct {
 	active          *Job
 	history         []Job
 	accepting       bool
+	quiescing       atomic.Bool
 	wg              sync.WaitGroup
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -137,6 +139,7 @@ func (s *Service) Handle(r Request) Response {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.accepting = true
+		s.quiescing.Store(false)
 		return success(nil)
 	case "prepare-unload":
 		return s.prepareUnload()
@@ -168,9 +171,14 @@ func (s *Service) Handle(r Request) Response {
 }
 
 func (s *Service) launch(r Request, run func(context.Context) (string, error)) Response {
-	s.mu.Lock()
+	if s.quiescing.Load() {
+		return fail("backend_quiesced")
+	}
+	if !s.mu.TryLock() {
+		return fail("backend_busy")
+	}
 	defer s.mu.Unlock()
-	if !s.accepting {
+	if !s.accepting || s.quiescing.Load() {
 		return fail("backend_quiesced")
 	}
 	if s.active != nil {
@@ -246,7 +254,12 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 }
 
 func (s *Service) query(r Request) Response {
-	s.mu.Lock()
+	if s.quiescing.Load() {
+		return fail("backend_quiesced")
+	}
+	if !s.mu.TryLock() {
+		return fail("backend_busy")
+	}
 	defer s.mu.Unlock()
 	if s.active != nil && r.Action != "build-log" {
 		return fail("backend_busy")
@@ -317,7 +330,12 @@ func (s *Service) query(r Request) Response {
 }
 
 func (s *Service) prepareUnload() Response {
-	s.mu.Lock()
+	// Close admission before acquiring observation ownership. Never wait behind
+	// an expired socket request and then launch its delayed inspection.
+	s.quiescing.Store(true)
+	if !s.mu.TryLock() {
+		return fail("inspection_prevents_unload")
+	}
 	defer s.mu.Unlock()
 	s.accepting = false
 	if s.active != nil {
