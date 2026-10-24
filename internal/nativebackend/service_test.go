@@ -206,3 +206,37 @@ func TestRealEmbeddedConfigurationReportDoesNotNeedDockerOrGitHub(t *testing.T) 
 		}
 	}
 }
+
+func TestActiveProgressRedactsCredentialRemovedDuringOperation(t *testing.T) {
+	f := &fakeRunner{block: make(chan struct{}), started: make(chan struct{}, 1)}
+	config, runtime := t.TempDir(), t.TempDir()
+	secret := "registry-private-test-secret"
+	if err := os.WriteFile(filepath.Join(config, "registry-token"), []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtime, "native-operation.log"), []byte("previous private output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(f, config, runtime)
+	defer s.Shutdown()
+	if !s.Handle(Request{Action: "start"}).OK {
+		t.Fatal("start rejected")
+	}
+	<-f.started
+	prior, _ := os.ReadFile(filepath.Join(runtime, "native-operation.log"))
+	if len(prior) != 0 {
+		t.Fatal("previous operation log leaked into new job")
+	}
+	if err := os.Remove(filepath.Join(config, "registry-token")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtime, "native-operation.log"), []byte("progress "+secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := json.Marshal(s.Handle(Request{Action: "job-status"}))
+	if strings.Contains(string(report), secret) || !strings.Contains(string(report), "REDACTED") {
+		t.Fatal("removed credential escaped active progress")
+	}
+	close(f.block)
+	s.wg.Wait()
+}

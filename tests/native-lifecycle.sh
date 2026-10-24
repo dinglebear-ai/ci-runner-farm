@@ -32,6 +32,14 @@ reconcile_start
 for file in autoscale.pid history.pid lifecycle.pid imageupdate.pid reconcile.pid; do
   [ ! -e "$RUNDIR/$file" ] || { echo "native worker detached: $file" >&2; exit 1; }
 done
+# Native cache clearing must finish its refresh inside the owned operation.
+crf_cache_mutation_idle() { return 0; }
+crf_safe_cache_root() { printf '%s\n' "$task_tmp/cache"; }
+cmd_cache_usage_refresh() { : > "$task_tmp/cache-refresh-owned"; }
+mkdir -p "$task_tmp/cache/npm"
+CACHE_PKG_DIRS=npm
+cmd_cache_clear_pkg >/dev/null
+[ -f "$task_tmp/cache-refresh-owned" ]
 # Busy drains yield immediately; native scheduling owns retries, including timeout.
 runner_busy() { return 0; }
 sleep() { echo 'native drain slept instead of yielding' >&2; exit 99; }

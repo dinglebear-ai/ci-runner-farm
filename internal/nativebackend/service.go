@@ -39,6 +39,7 @@ type Job struct {
 	StartedAt  time.Time  `json:"startedAt"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 	cancel     context.CancelFunc
+	secrets    []string
 }
 type Runner interface {
 	Run(context.Context, string, []string, string) (string, error)
@@ -116,7 +117,7 @@ func (s *Service) Handle(r Request) Response {
 		if s.active != nil {
 			copy := *s.active
 			if b, err := readBounded(filepath.Join(s.runtime, "native-operation.log"), 512<<10); err == nil {
-				copy.Output = tail(s.redact(string(b)), 32768)
+				copy.Output = tail(redactValues(s.redact(string(b)), s.active.secrets), 32768)
 			}
 			active = copy
 		}
@@ -185,7 +186,12 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, budget)
 	secrets := s.secretValues()
-	job := &Job{ID: hex.EncodeToString(id), Action: r.Action, Status: "running", StartedAt: time.Now().UTC(), cancel: cancel}
+	job := &Job{ID: hex.EncodeToString(id), Action: r.Action, Status: "running", StartedAt: time.Now().UTC(), cancel: cancel, secrets: secrets}
+	// Never expose a previous operation's raw progress as the new job.
+	if err := atomicWrite(filepath.Join(s.runtime, "native-operation.log"), nil, 0600); err != nil {
+		cancel()
+		return fail("operation_log_unavailable")
+	}
 	s.active = job
 	s.wg.Add(1)
 	go func() {
@@ -198,19 +204,14 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		job.Output = s.redact(out)
-		for _, secret := range secrets {
-			if len(secret) >= 4 {
-				job.Output = strings.ReplaceAll(job.Output, secret, "[REDACTED]")
-			}
-		}
+		job.Output = redactValues(s.redact(out), secrets)
 		now := time.Now().UTC()
 		job.Output = tail(job.Output, 32768)
 		job.FinishedAt = &now
 		job.Status = "passed"
 		if err != nil {
 			job.Status = "failed"
-			job.Output += "\nOperation failed: " + s.redact(err.Error()) + "; partial effects may remain."
+			job.Output += "\nOperation failed: " + redactValues(s.redact(err.Error()), secrets) + "; partial effects may remain."
 		}
 		if ctx.Err() != nil {
 			job.Status = "cancelled"
@@ -231,6 +232,7 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 			job.Status = "failed"
 			job.Output += "\nFleet changed but startup preference could not be persisted; inspect before retrying."
 		}
+		job.secrets = nil
 		s.history = append([]Job{*job}, s.history...)
 		if len(s.history) > 10 {
 			s.history = s.history[:10]
@@ -464,6 +466,15 @@ func atomicWrite(path string, b []byte, mode os.FileMode) error {
 		return err
 	}
 	return syncParent(path)
+}
+
+func redactValues(out string, values []string) string {
+	for _, secret := range values {
+		if len(secret) >= 4 {
+			out = strings.ReplaceAll(out, secret, "[REDACTED]")
+		}
+	}
+	return out
 }
 
 func (s *Service) secretValues() []string {

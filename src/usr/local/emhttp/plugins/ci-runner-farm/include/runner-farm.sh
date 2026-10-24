@@ -3566,7 +3566,11 @@ cmd_cache_clear_pkg() {
     if rm -rf "${root:?}/${d:?}/"* 2>/dev/null; then removed=$((removed+1)); else failed=$((failed+1)); fi
   done
   # The refresh outlives this command; it must not inherit the fleet lock.
-  ( exec 8>&-; "$0" cache-usage-refresh ) >/dev/null 2>&1 &
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    cmd_cache_usage_refresh
+  else
+    ( exec 8>&-; "$0" cache-usage-refresh ) >/dev/null 2>&1 &
+  fi
   if [ "$failed" -gt 0 ]; then
     log "cache clear: $failed dir(s) could not be removed under $root"
     echo "{\"ok\":false,\"error\":\"could not remove $failed dir(s)\",\"cleared\":$removed}"; return 1
