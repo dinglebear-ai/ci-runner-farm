@@ -32,6 +32,16 @@ reconcile_start
 for file in autoscale.pid history.pid lifecycle.pid imageupdate.pid reconcile.pid; do
   [ ! -e "$RUNDIR/$file" ] || { echo "native worker detached: $file" >&2; exit 1; }
 done
+# The shell must never mutate a cache outside the Core-held binding.
+CRF_SOURCE_ONLY=0 CRF_NATIVE_ACTION=start CRF_BOUND_CACHE_ROOT=/mnt/cache/claimed CACHE_ROOT=/mnt/cache/old
+if native_cache_binding_matches; then echo 'unclaimed native cache accepted' >&2; exit 1; fi
+CACHE_ROOT=/mnt/cache/claimed
+native_cache_binding_matches
+shared_capacity_enabled() { return 0; }
+if native_cache_binding_matches; then echo 'legacy shared ownership bypassed' >&2; exit 1; fi
+if cmd_native_standalone_preflight; then echo 'legacy shared owner replaced' >&2; exit 1; fi
+shared_capacity_enabled() { return 1; }
+CRF_SOURCE_ONLY=1
 # Native scheduler state is not a nonexistent classic PID daemon.
 : > "$CFGDIR/native-fleet.enabled"
 for function in autoscale_status lifecycle_status imageupdate_status; do

@@ -28,11 +28,30 @@ Tower or real GitHub registrations are part of local implementation.
 
 ## Local implementation status
 
-Native routes now exist for the rows above except fenced migration from an
-installed classic owner. The backend deliberately rejects that installation
-rather than silently running two controllers or replacing existing ownership.
-Fresh standalone initialization is explicit and preserves an incomplete owner
-closed for operator recovery. These are visible limitations, not acceptance.
+Native routes exist for the matrix above, including explicit supported-retirement
+migration and journaled standalone initialization recovery. Migration inspection
+is read-only and supervised; it rejects classic runtime, boot replay and orphan
+creators. The operator retires the old plugin through its existing Plugin
+Manager lifecycle (after jobs finish), binds the exact retained cache folder in
+Core, then completes the native handoff. Settings, credentials, ledger, receipts
+and existing ownership epoch stay in place. An existing Farm-owned shared policy
+is pinned exclusively while the handoff record commits. Legacy QA-owned shared
+admission must use its existing fenced ownership transfer; this UI replacement
+never creates a second budget or resets an owner.
+
+Initialization journals the original owner before atomic non-replacing policy
+publication. Recovery replays the original controller under fleet.lock and an
+exclusive policy lease, matching both epoch and complete normalized owner
+identity. It supports interruption before policy publication, during adoption,
+and after policy activation but before start closure removal. Existing grants,
+fences and receipts are retained by idempotent adoption. Unknown or pre-journal
+ownership requires operator review rather than an invented recovery identity.
+
+Native effects receive the exact Core-held cache binding. Both config save and
+mutable shell snapshots reject effects against another cache path. Selecting a
+dedicated existing folder preserves that folder; a pool-root selection receives
+a dedicated runner-farm leaf. These are local implementation claims, not live
+migration, Core lifecycle or appliance qualification.
 
 Native service restart preference is persisted only after an explicit backend
 start. The plugin-owned activation child restores it after capability admission;

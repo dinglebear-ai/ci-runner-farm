@@ -20,7 +20,7 @@ import (
 // Run requires the native parent's fleet lock for every owner mutation.
 func Run(arguments []string, output io.Writer) (result error) {
 	if len(arguments) == 1 && arguments[0] == "capabilities" {
-		return json.NewEncoder(output).Encode([]string{"fenced-start-memory-v6", "resident-memory-v7", "standalone-owner-init-v1", "pool-expansion-v1"})
+		return json.NewEncoder(output).Encode([]string{"fenced-start-memory-v6", "resident-memory-v7", "standalone-owner-init-v1", "standalone-owner-recovery-v1", "pool-expansion-v1"})
 	}
 	if len(arguments) == 1 && arguments[0] == "version" {
 		_, err := fmt.Fprintln(output, "ci-runner-capacity protocol 1")
@@ -47,7 +47,7 @@ func Run(arguments []string, output io.Writer) (result error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "expand-pools")
+	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "recover-initialize" || arguments[0] == "expand-pools")
 	if err != nil {
 		return err
 	}
@@ -61,11 +61,20 @@ func Run(arguments []string, output io.Writer) (result error) {
 		ReceiptRoot: config.ReceiptRoot, Docker: farmcapacity.NativeDocker{},
 		RepairCache: farmcapacity.RepairNativeCache, Poisoned: farmcapacity.NativePoisoned,
 	}
-	if arguments[0] == "initialize" {
-		if err := initializeStandalone(ctx, config, &controller); err != nil {
+	if arguments[0] == "initialize" || arguments[0] == "recover-initialize" {
+		var err error
+		if arguments[0] == "recover-initialize" {
+			err = recoverStandalone(ctx, config, &controller, arguments[1], arguments[2])
+		} else {
+			err = initializeStandalone(ctx, config, &controller)
+		}
+		if err != nil {
 			return err
 		}
-		return lease.Activate()
+		if config.Mode == "closed" {
+			return lease.Activate()
+		}
+		return nil
 	}
 	if arguments[0] == "status" {
 		diagnostics, err := controller.Broker.Diagnose(&controller.Policy)
@@ -87,7 +96,7 @@ func validArguments(arguments []string) bool {
 	if len(arguments) == 2 {
 		return arguments[0] == "demand-observe"
 	}
-	return len(arguments) == 3 && (arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
+	return len(arguments) == 3 && ((arguments[0] == "recover-initialize" && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
 }
 
 func verifyFleetLock() error {

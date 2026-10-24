@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/unraid/ci-runner-farm/internal/capacitycmd"
 	"github.com/unraid/ci-runner-farm/internal/nativebackend"
@@ -18,6 +20,23 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--migration-inspect" {
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(os.Stderr, "root required")
+			os.Exit(2)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		status, err := nativebackend.InspectClassicMigration(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "migration_inventory_unavailable")
+			os.Exit(1)
+		}
+		if json.NewEncoder(os.Stdout).Encode(status) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	// The embedded engine's capacity symlink runs the unchanged allocator command,
 	// including its root/same-file inherited FD8 and durable ownership checks.
 	if filepath.Base(os.Args[0]) == "ci-runner-capacity" {
@@ -35,17 +54,22 @@ func main() {
 	}
 	config := flag.String("config-dir", "", "Core HostStorage settings directory")
 	runtime := flag.String("runtime-dir", "", "Core NativeService runtime directory")
+	cache := flag.String("cache-root", "", "Core-owned persistent runner-cache binding")
 	flag.Parse()
-	if os.Geteuid() != 0 || *config == "" || *runtime == "" || flag.NArg() != 0 {
+	if os.Geteuid() != 0 || *config == "" || *runtime == "" || *cache == "" || flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "native_backend_requires_root_and_managed_paths")
 		os.Exit(2)
 	}
-	if err := run(*config, *runtime); err != nil {
+	if err := run(*config, *runtime, *cache); err != nil {
 		fmt.Fprintln(os.Stderr, "native_backend_failed:", err)
 		os.Exit(1)
 	}
 }
-func run(config, runtime string) error {
+func run(config, runtime, cache string) error {
+	resolved, err := filepath.EvalSymlinks(cache)
+	if err != nil || !filepath.IsAbs(cache) || filepath.Clean(cache) != cache || resolved != cache {
+		return errors.New("canonical_bound_cache_required")
+	}
 	if err := nativebackend.CheckDirectory(config, 0); err != nil {
 		return err
 	}
@@ -55,10 +79,14 @@ func run(config, runtime string) error {
 	if err := nativebackend.CheckDirectory(runtime, 0); err != nil {
 		return err
 	}
-	// Never silently take over an installed classic owner. Migration needs a
-	// separately reviewed explicit fence/handoff, not a second controller.
-	if _, err := os.Lstat("/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh"); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("classic_owner_requires_explicit_migration")
+	checkctx, cancelCheck := context.WithTimeout(context.Background(), 3*time.Second)
+	status, checkErr := nativebackend.InspectClassicMigration(checkctx)
+	cancelCheck()
+	if checkErr != nil {
+		return checkErr
+	}
+	if !status.Ready {
+		return errors.New("classic_owner_requires_supported_retirement")
 	}
 	engineRuntime := "/var/local/emhttp/ci-runner-farm"
 	if err := os.MkdirAll(engineRuntime, 0700); err != nil {
@@ -97,7 +125,7 @@ func run(config, runtime string) error {
 	if err != nil {
 		return err
 	}
-	engine := &nativebackend.Engine{Root: root, Config: config, Runtime: engineRuntime, CapacityRoot: filepath.Dir(hostcapacity.ConfigPath), Executable: executable}
+	engine := &nativebackend.Engine{Root: root, Config: config, Runtime: engineRuntime, CapacityRoot: filepath.Dir(hostcapacity.ConfigPath), Executable: executable, BoundCache: cache}
 	if err = engine.Extract(); err != nil {
 		return err
 	}

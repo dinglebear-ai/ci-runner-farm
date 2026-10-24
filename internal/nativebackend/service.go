@@ -146,6 +146,16 @@ func (s *Service) Handle(r Request) Response {
 		return s.prepareUnload()
 	case "settings", "admission-status", "dashboard-json", "status-json", "recommendations-json", "image-info-json", "queued-json", "stats-json", "cache-usage-json", "farm-log", "build-log", "runner-log", "get-dockerfile", "get-default-dockerfile":
 		return s.query(r)
+	case "complete-migration":
+		if !r.Confirm {
+			return fail("confirmation_required")
+		}
+		return s.launch(r, func(ctx context.Context) (string, error) { return s.completeMigration(ctx, r.Values) })
+	case "recover-admission":
+		if !r.Confirm {
+			return fail("confirmation_required")
+		}
+		return s.launch(r, func(ctx context.Context) (string, error) { return s.recoverAdmission(ctx) })
 	case "initialize-admission":
 		if !r.Confirm {
 			return fail("confirmation_required")
@@ -410,6 +420,9 @@ func (s *Service) Shutdown() {
 }
 
 func (s *Service) saveConfig(ctx context.Context, values map[string]string) (string, error) {
+	if e, ok := s.engine.(*Engine); ok && (e.BoundCache == "" || values["CACHE_ROOT"] != e.BoundCache) {
+		return "", errors.New("config_cache_must_match_core_binding")
+	}
 	out, err := s.engine.Run(ctx, "native-config-json", nil, "")
 	if err != nil {
 		return "", err

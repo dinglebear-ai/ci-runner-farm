@@ -211,7 +211,25 @@ load_cfg() {
   done < "$CFG"
 }
 
+# Native mutation effects must use the persistent location Core actually holds,
+# including after a mutable settings reload. Read-only setup may inspect a
+# retained configuration to explain an unmapped classic cache.
+native_cache_binding_matches() {
+  [ "${CRF_NATIVE_MODE:-0}" = 1 ] || return 0
+  [ "${CRF_SOURCE_ONLY:-0}" != 1 ] || return 0
+  case "${CRF_NATIVE_ACTION:-}" in
+    native-config-json|native-config-check|native-build-limits|native-standalone-preflight|native-unload-inventory|status-json|dashboard-json|recommendations-json|image-info-json|queued-json|stats-json|cache-usage-json|farm-log|logs-tail) return 0 ;;
+  esac
+  [ -n "${CRF_BOUND_CACHE_ROOT:-}" ] && [ "$CACHE_ROOT" = "$CRF_BOUND_CACHE_ROOT" ] \
+    || { printf '%s\n' 'native cache binding differs; bind the original folder or save native settings before running effects' >&2; return 1; }
+  if shared_capacity_enabled && ! shared_capacity_native_required; then
+    printf '%s\n' 'legacy QA admission requires the existing fenced Farm ownership handoff before native effects' >&2
+    return 1
+  fi
+}
+
 load_cfg
+native_cache_binding_matches || exit 1
 [ "$CI_PROVIDER" = "gitlab" ] || CI_PROVIDER="github"
 
 validate_runner_mode() {
@@ -273,6 +291,7 @@ reload_secret_files
 # repeatedly, not only through the one-time startup normalization above.
 reload_locked_snapshot() {
   load_cfg
+  native_cache_binding_matches || return 1
   [ "$CI_PROVIDER" = "gitlab" ] || CI_PROVIDER="github"
   reload_secret_files || { err "could not take a consistent credential/CA snapshot"; return 1; }
   if command -v pool_base_refresh >/dev/null 2>&1; then pool_base_refresh; fi
@@ -4617,6 +4636,16 @@ cmd_docker_stopping() {
 
 # Native callers reuse the exact engine config/parser and provider validators.
 # Values are data, never shell input; credentials are deliberately not emitted.
+cmd_native_standalone_preflight() {
+  if shared_capacity_enabled; then
+    err "existing shared ownership requires its existing fenced handoff, not standalone initialization"
+    return 1
+  fi
+  local marker
+  for marker in shared-capacity.closed shared-capacity.enabled shared-capacity.owner; do
+    [ ! -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/$marker" ] && [ ! -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/$marker" ] || return 1
+  done
+}
 cmd_native_config_json() {
   local key comma="" value
   printf '{'
@@ -4651,7 +4680,9 @@ case "${1:-status}" in
   native-image-drain-tick) with_fleet_lock wait imageupdate_rollover true ;;
   native-admission-status) with_fleet_lock wait shared_capacity_call status ;;
   native-build-limits) cmd_native_build_limits ;;
+  native-standalone-preflight) cmd_native_standalone_preflight ;;
   native-unload-inventory) cmd_native_unload_inventory ;;
+  native-recover-initialize) with_fleet_lock wait shared_capacity_native_call recover-initialize "${2:-}" ;;
   native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
   native-config-json) cmd_native_config_json ;;
   native-config-check) cmd_native_config_check ;;

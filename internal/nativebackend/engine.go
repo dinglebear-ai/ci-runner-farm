@@ -22,7 +22,7 @@ import (
 var engineArchive []byte
 
 // Engine retains the authored shell/provider/planner behavior; it is not another allocator.
-type Engine struct{ Root, Config, Runtime, CapacityRoot, Executable string }
+type Engine struct{ Root, Config, Runtime, CapacityRoot, Executable, BoundCache string }
 
 func (e *Engine) Extract() error {
 	r, err := gzip.NewReader(bytes.NewReader(engineArchive))
@@ -79,6 +79,9 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (e *Engine) Run(ctx context.Context, action string, args []string, override string) (string, error) {
+	if err := requireClassicRetired(ctx); err != nil {
+		return "", err
+	}
 	temporaryRoot := filepath.Join(e.Runtime, "native-tmp")
 	if err := os.MkdirAll(temporaryRoot, 0700); err != nil {
 		return "", err
@@ -90,7 +93,7 @@ func (e *Engine) Run(ctx context.Context, action string, args []string, override
 	defer os.RemoveAll(temporary)
 	argv := append([]string{filepath.Join(e.Root, "include/runner-farm.sh"), action}, args...)
 	cmd := exec.CommandContext(ctx, "/bin/bash", argv...)
-	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/nonexistent", "TMPDIR=" + temporary, "CRF_NATIVE_MODE=1", "CRF_CFGDIR=" + e.Config, "CRF_RUNDIR=" + e.Runtime, "CRF_CAPACITY_ROOT=" + e.CapacityRoot}
+	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/nonexistent", "TMPDIR=" + temporary, "CRF_NATIVE_MODE=1", "CRF_BOUND_CACHE_ROOT=" + e.BoundCache, "CRF_NATIVE_ACTION=" + action, "CRF_CFGDIR=" + e.Config, "CRF_RUNDIR=" + e.Runtime, "CRF_CAPACITY_ROOT=" + e.CapacityRoot}
 	if override != "" {
 		cmd.Env = append(cmd.Env, "CRF_CONFIG_FILE="+override)
 	}

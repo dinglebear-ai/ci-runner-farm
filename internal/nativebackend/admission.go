@@ -7,14 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
+	"golang.org/x/sys/unix"
 )
 
 // initializeAdmission only creates a fresh standalone owner. Existing policy,
@@ -25,8 +29,16 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 		return "", errors.New("admission_requires_native_engine")
 	}
 	path := hostcapacity.ConfigPath
+	if _, err := os.Lstat(filepath.Join(s.config, "native-admission-init.json")); err == nil {
+		return "", errors.New("native_initialization_exists_use_recovery")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		return "", errors.New("existing_admission_requires_explicit_handoff")
+	}
+	if _, err := e.Run(ctx, "native-standalone-preflight", nil, ""); err != nil {
+		return "", errors.New("existing_shared_owner_requires_fenced_handoff")
 	}
 	memory, err := strconv.ParseUint(values["memoryMiB"], 10, 64)
 	if err != nil || memory < 1024 {
@@ -66,6 +78,9 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 		return "", errors.New("config_unavailable")
 	}
 	cache := config["CACHE_ROOT"]
+	if e.BoundCache == "" || cache != e.BoundCache {
+		return "", errors.New("admission_cache_must_match_core_binding")
+	}
 	if !filepath.IsAbs(cache) || filepath.Clean(cache) != cache || cache == "/" {
 		return "", errors.New("bound_cache_required")
 	}
@@ -112,39 +127,164 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 	if err = CheckDirectory(e.CapacityRoot, 0); err != nil {
 		return "", err
 	}
-	// O_EXCL prevents replacement of concurrent or existing durable ownership.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	journal := admissionJournal{Schema: 1, Owner: owner}
+	journalBytes, err := json.Marshal(journal)
 	if err != nil {
 		return "", err
 	}
-	_, err = f.Write(bytes)
-	if err == nil {
-		err = f.Sync()
+	if err = publishExclusive(filepath.Join(s.config, "native-admission-init.json"), journalBytes); err != nil {
+		return "", fmt.Errorf("initialization journal exists or cannot be committed; use explicit recovery: %w", err)
 	}
-	closeErr := f.Close()
+	if err = publishExclusive(path, bytes); err != nil {
+		return "", err
+	}
+	return s.finishAdmission(ctx, e, e.CapacityRoot, owner)
+}
+
+type admissionJournal struct {
+	Schema int                 `json:"schema"`
+	Owner  hostcapacity.Config `json:"owner"`
+}
+
+// Recover only replays the exact native-owned initialization journal. It never
+// creates another epoch, relocates state or replaces an existing policy.
+func (s *Service) recoverAdmission(ctx context.Context) (string, error) {
+	e, ok := s.engine.(*Engine)
+	if !ok {
+		return "", errors.New("admission_requires_native_engine")
+	}
+	journal, err := readAdmissionJournal(filepath.Join(s.config, "native-admission-init.json"), 0)
 	if err != nil {
 		return "", err
 	}
-	if closeErr != nil {
-		return "", closeErr
-	}
-	if err = syncParent(path); err != nil {
-		return "", err
-	}
-	if err = atomicWrite(filepath.Join(e.CapacityRoot, "shared-capacity.closed"), []byte("closed for standalone initialization\n"), 0600); err != nil {
-		return "", err
-	}
-	log, err := e.Run(ctx, "native-initialize", nil, "")
+	host, err := os.Hostname()
 	if err != nil {
-		return log, fmt.Errorf("standalone initialization incomplete; preserve closed owner and retry through explicit recovery: %w", err)
-	}
-	// Existing controller initialization sets mode active; opening starts is the
-	// final explicit commit after its empty-inventory and ledger checks succeed.
-	if err = os.Remove(filepath.Join(e.CapacityRoot, "shared-capacity.closed")); err != nil {
 		return "", err
 	}
-	if err = syncParent(path); err != nil {
+	if journal.Schema != 1 || journal.Owner.Mode != "closed" || journal.Owner.Validate(host) != nil || len(journal.Owner.Consumers) != 0 || len(journal.Owner.Policy.Pools) != 1 || journal.Owner.PoolExpansion != nil {
+		return "", errors.New("invalid_native_initialization_journal")
+	}
+	if journal.Owner.TokenPath != filepath.Join(s.config, "token") || journal.Owner.LockPath != filepath.Join(e.CapacityRoot, "owner.lock") {
+		return "", errors.New("initialization_storage_binding_changed")
+	}
+	out, err := e.Run(ctx, "native-config-json", nil, "")
+	if err != nil {
 		return "", err
 	}
-	return "Standalone Farm admission initialized using the existing controller.", nil
+	var config map[string]string
+	if json.Unmarshal([]byte(out), &config) != nil || e.BoundCache == "" || config["CACHE_ROOT"] != e.BoundCache || journal.Owner.LedgerPath != filepath.Join(config["CACHE_ROOT"], "native-capacity", "ledger.db") || journal.Owner.ReceiptRoot != filepath.Join(config["CACHE_ROOT"], "native-capacity", "receipts") || journal.Owner.Organization != config["GH_OWNER"] {
+		return "", errors.New("initialization_settings_changed_restore_original_binding")
+	}
+	if _, err = os.Lstat(hostcapacity.ConfigPath); errors.Is(err, os.ErrNotExist) {
+		bytes, encodeErr := json.Marshal(journal.Owner)
+		if encodeErr != nil {
+			return "", encodeErr
+		}
+		if err = publishExclusive(hostcapacity.ConfigPath, bytes); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	current, err := hostcapacity.Load(hostcapacity.ConfigPath)
+	if err != nil {
+		return "", err
+	}
+	if err = validateRecoveryOwner(&journal.Owner, current); err != nil {
+		return "", err
+	}
+	closure := filepath.Join(e.CapacityRoot, "shared-capacity.closed")
+	if _, err = os.Lstat(closure); errors.Is(err, os.ErrNotExist) && current.Mode == "active" {
+		return "Admission initialization already completed; existing owner was preserved.", nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return s.finishAdmission(ctx, e, e.CapacityRoot, journal.Owner)
+}
+
+func validateRecoveryOwner(planned, current *hostcapacity.Config) error {
+	copy := *current
+	copy.Mode = "closed"
+	if (current.Mode != "closed" && current.Mode != "active") || !reflect.DeepEqual(planned, &copy) {
+		return errors.New("initialization_owner_changed_recovery_refused")
+	}
+	return nil
+}
+
+func (s *Service) finishAdmission(ctx context.Context, engine Runner, capacityRoot string, owner hostcapacity.Config) (string, error) {
+	closure := filepath.Join(capacityRoot, "shared-capacity.closed")
+	if err := atomicWrite(closure, []byte("closed for native standalone initialization\n"), 0600); err != nil {
+		return "", err
+	}
+	action := "native-recover-initialize"
+	identity, err := hostcapacity.StandaloneInitializationIdentity(&owner)
+	if err != nil {
+		return "", err
+	}
+	args := []string{owner.Epoch, identity}
+	log, err := engine.Run(ctx, action, args, "")
+	if err != nil {
+		return log, fmt.Errorf("initialization incomplete; retained original epoch and closure; use Recover admission: %w", err)
+	}
+	if err = os.Remove(closure); err != nil {
+		return "", err
+	}
+	if err = syncParent(closure); err != nil {
+		return "", err
+	}
+	return "Standalone Farm admission initialized using the original owner and controller.", nil
+}
+
+func readAdmissionJournal(path string, owner uint32) (admissionJournal, error) {
+	var journal admissionJournal
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return journal, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return journal, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != owner || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 65536 {
+		return journal, errors.New("unsafe_initialization_journal")
+	}
+	decoder := json.NewDecoder(io.LimitReader(f, 65537))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&journal); err != nil {
+		return journal, err
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return journal, errors.New("invalid_initialization_journal")
+	}
+	return journal, nil
+}
+
+// Rename a complete synced private file into place without replacing any existing
+// identity. A crash cannot leave a partly written owner or journal at its name.
+func publishExclusive(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".native-initialize-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err = f.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = unix.Renameat2(unix.AT_FDCWD, f.Name(), unix.AT_FDCWD, path, unix.RENAME_NOREPLACE); err != nil {
+		return err
+	}
+	return syncParent(path)
 }
