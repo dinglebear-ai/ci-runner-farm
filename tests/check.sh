@@ -30,6 +30,7 @@ done < <(find "$RUNTIME" -type f \( -name '*.php' -o -name '*.page' \) -print | 
 php tests/page-template-syntax.php "$RUNTIME"
 
 echo "== Contracts and package =="
+bash tests/native-lifecycle.sh
 bash tests/config-parity.sh
 bash tests/image-validation.sh
 bash tests/boot-log.sh

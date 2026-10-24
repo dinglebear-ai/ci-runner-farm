@@ -29,7 +29,7 @@ CFGDIR="${CRF_CFGDIR:-/boot/config/plugins/${PLUGIN}}"
 RUNDIR="${CRF_RUNDIR:-/var/local/emhttp/${PLUGIN}}"
 mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
 HOST_DOCKER_CONFIG="$RUNDIR/docker-auth"
-CFG="${CFGDIR}/${PLUGIN}.cfg"
+CFG="${CRF_CONFIG_FILE:-${CFGDIR}/${PLUGIN}.cfg}"
 TOKEN_FILE="${CFGDIR}/token"
 GITLAB_RUNNER_TOKEN_FILE="${CFGDIR}/gitlab-runner-token"
 GITLAB_API_TOKEN_FILE="${CFGDIR}/gitlab-api-token"
@@ -945,6 +945,7 @@ autoscale_daemon() {
 }
 
 autoscale_start() {
+  [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 0
   [ "$AUTOSCALE" = "true" ] || return 0
   autoscale_stop || return 1
   nohup "$0" autoscale-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
@@ -965,7 +966,9 @@ recommendation_history_daemon() {
     load_cfg
     [ "$CI_PROVIDER" = gitlab ] || CI_PROVIDER=github
     reload_secret_files
-    ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+    if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+      ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+    fi
     # Waiting on a background child lets Bash run TERM immediately. A foreground
     # sleep delays the trap beyond the native stop worker's two-second grace.
     sleep 30 &
@@ -976,6 +979,7 @@ recommendation_history_daemon() {
 }
 
 recommendation_history_start() {
+  [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 0
   recommendation_history_stop || return 1
   nohup "$0" history-daemon >>"${RUNDIR}/history.log" 2>&1 &
   ( umask 077; printf '%s\n' "$!" > "$HISTORY_PID" ) \
@@ -1104,6 +1108,7 @@ lifecycle_daemon() {
 }
 
 lifecycle_start() {
+  [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 0
   if [ -f "$LIFECYCLE_PID" ] && kill -0 "$(cat "$LIFECYCLE_PID" 2>/dev/null)" 2>/dev/null \
      && pgrep -f '[r]unner-farm.sh lifecycle-daemon' >/dev/null 2>&1; then
     return 0
@@ -1187,7 +1192,26 @@ drain_and_recreate() {
   # with_fleet_lock caller; we hand it back during each sleep and re-take it only to
   # mutate, so the operator's Stop/Scale/Recycle (and daemon ticks) aren't starved for
   # the whole drain — and Stop can actually abort a runaway rollover.
+  local native_started native_now native_defer
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    native_now="$(date +%s)"
+    native_defer="$(cat "$RUNDIR/native-drain.$c.defer" 2>/dev/null || true)"
+    case "$native_defer" in ''|*[!0-9]*) native_defer=0 ;; esac
+    [ "$native_now" -ge "$native_defer" ] || return 1
+  fi
   while runner_busy "$c"; do
+    if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+      native_started="$(cat "$RUNDIR/native-drain.$c.started" 2>/dev/null || true)"
+      case "$native_started" in ''|*[!0-9]*) native_started="$native_now"; ( umask 077; printf '%s\n' "$native_started" > "$RUNDIR/native-drain.$c.started" ) ;; esac
+      if [ "$limit" -gt 0 ] && [ "$((native_now - native_started))" -ge "$limit" ]; then
+        ( umask 077; printf '%s\n' "$((native_now + ${IMAGE_AUTOUPDATE_INTERVAL:-1800}))" > "$RUNDIR/native-drain.$c.defer" )
+        rm -f "$RUNDIR/native-drain.$c.started"
+        log "image-update: $c reached its drain timeout; retaining its job and retrying next image cycle"
+      fi
+      # Retain the original imageupdate.pending owner list. Core's daemon
+      # retries this foreground step without monopolizing the operation gate.
+      return 1
+    fi
     if [ "$limit" -gt 0 ] && [ "$waited" -ge "$limit" ]; then
       log "image-update: $c still busy after ${limit}s — leaving on old image this cycle"
       return 1
@@ -1200,6 +1224,7 @@ drain_and_recreate() {
     # snapshot that exists after the lock was reacquired.
     reload_locked_snapshot || return 1
   done
+  [ "${CRF_NATIVE_MODE:-0}" != 1 ] || rm -f "$RUNDIR/native-drain.$c.started" "$RUNDIR/native-drain.$c.defer"
   # Re-holding the lock here. If the runner vanished while we were unlocked (the
   # operator hit Stop/Recycle mid-drain), do NOT recreate it — never resurrect a
   # runner the operator just removed.
@@ -1297,6 +1322,7 @@ imageupdate_daemon() {
 }
 
 imageupdate_start() {
+  [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 0
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
   imageupdate_stop || return 1
   nohup "$0" imageupdate-daemon >>"${RUNDIR}/imageupdate.log" 2>&1 &
@@ -2470,6 +2496,12 @@ cmd_reconcile_drain() {
   local deadline announced=0 lost paused=0 stale=-1
   rm -f "$RUNDIR/reconcile.shrink"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
   deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    local native_started
+    native_started="$(cat "$RUNDIR/native-reconcile.started" 2>/dev/null || true)"
+    case "$native_started" in ''|*[!0-9]*) native_started="$(date +%s)" ;; esac
+    deadline=$(( native_started + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  fi
   while :; do
     load_cfg
     [ "$CI_PROVIDER" = gitlab ] || CI_PROVIDER=github
@@ -2495,6 +2527,7 @@ cmd_reconcile_drain() {
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), so only enforce
     # the deadline when it's positive — matching drain_and_recreate's `limit -gt 0` guard.
     [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $stale runner(s) still on the old config after the drain timeout (finishing jobs or wedged in startup) — they'll migrate on their next idle, or Restart the fleet to force it now"; break; }
+    [ "${CRF_NATIVE_MODE:-0}" != 1 ] || return 75
     sleep 15
   done
   lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
@@ -2558,6 +2591,10 @@ cmd_reconcile_network() {
 }
 
 reconcile_start() {
+  if [ "${CRF_NATIVE_MODE:-0}" = 1 ]; then
+    ( umask 077; : > "$RUNDIR/native-reconcile.pending"; date +%s > "$RUNDIR/native-reconcile.started" )
+    return $?
+  fi
   shared_capacity_require_starts_open || return 0
   shared_capacity_enabled && return 0
   reconcile_stop || return 1
@@ -3252,7 +3289,7 @@ cmd_image_info_json() {
   fi
   local df="$CFGDIR/Dockerfile.$CI_PROVIDER"
   [ "$CI_PROVIDER" = github ] && [ ! -f "$df" ] && [ -f "$CFGDIR/Dockerfile" ] && df="$CFGDIR/Dockerfile"
-  [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.$CI_PROVIDER.Dockerfile"
+  [ -f "$df" ] || df="$SCRIPT_DIR/../default.$CI_PROVIDER.Dockerfile"
   local base; base="$(grep -m1 '^FROM ' "$df" 2>/dev/null | awk '{print $2}')"
   local inuse=0 cid configured
   for c in $(managed_names); do
@@ -3494,7 +3531,9 @@ cmd_cache_usage_json() {
     age=$(( now - ${ts:-0} ))
   fi
   if [ "$age" -gt 300 ]; then
-    ( flock -n 9 || exit 0; "$0" cache-usage-refresh ) 9>"$RUNDIR/cache-usage.lock" >/dev/null 2>&1 &
+    if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+      ( flock -n 9 || exit 0; "$0" cache-usage-refresh ) 9>"$RUNDIR/cache-usage.lock" >/dev/null 2>&1 &
+    fi
   fi
   echo "{\"total\":${total:--1},\"pkg\":${pkg:-0},\"age\":$age}"
 }
@@ -3552,7 +3591,9 @@ cmd_stats_json() {
     [ "$cache_provider" = "$CI_PROVIDER" ] && age=$(( now - ${ts:-0} )) || { age=999999; ok=0; fail=0; cancel=0; other=0; total=-1; }
   fi
   if [ "$age" -gt 300 ]; then
-    ( flock -n 9 || exit 0; "$0" stats-refresh ) 9>"$RUNDIR/stats.lock" >/dev/null 2>&1 &
+    if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+      ( flock -n 9 || exit 0; "$0" stats-refresh ) 9>"$RUNDIR/stats.lock" >/dev/null 2>&1 &
+    fi
   fi
   echo "{\"provider\":\"$CI_PROVIDER\",\"ok\":${ok:-0},\"fail\":${fail:-0},\"cancel\":${cancel:-0},\"other\":${other:-0},\"total\":${total:--1},\"age\":$age}"
 }
@@ -3568,7 +3609,9 @@ cmd_queued_json() {
   # flock, not a plain lock file: the advisory lock is released by the kernel
   # even on SIGKILL/reboot, so a killed refresh can never wedge future refreshes.
   if [ "$age" -gt 60 ]; then
-    ( flock -n 9 || exit 0; "$0" queued-refresh ) 9>"$RUNDIR/queued.lock" >/dev/null 2>&1 &
+    if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+      ( flock -n 9 || exit 0; "$0" queued-refresh ) 9>"$RUNDIR/queued.lock" >/dev/null 2>&1 &
+    fi
   fi
   echo "{\"provider\":\"$CI_PROVIDER\",\"queued\":${count:--1},\"age\":$age}"
 }
@@ -3977,7 +4020,9 @@ cmd_status_json() {
   # half the background docker load.
   local rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
   if [ "$uage" -gt "$rthresh" ]; then
-    ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+    if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+      ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+    fi
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
@@ -4090,7 +4135,9 @@ cmd_dashboard_json() {
   nowu=$(date +%s); uage=999
   [ -f "$RUNDIR/usage.cache" ] && uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
   rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
-  [ "$uage" -gt "$rthresh" ] && ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+  if [ "${CRF_NATIVE_MODE:-0}" != 1 ]; then
+    [ "$uage" -gt "$rthresh" ] && ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+  fi
   usage="$([ -f "$RUNDIR/usage.cache" ] && cat "$RUNDIR/usage.cache" 2>/dev/null)"
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}' $names 2>/dev/null)"
@@ -4378,7 +4425,7 @@ cmd_build_image() {
   # Upgrade compatibility: an existing unsuffixed Dockerfile remains the GitHub
   # editor source until build-plg.sh migrates it to Dockerfile.github.
   [ "$CI_PROVIDER" = github ] && [ ! -f "$df" ] && [ -f "$CFGDIR/Dockerfile" ] && df="$CFGDIR/Dockerfile"
-  [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.$CI_PROVIDER.Dockerfile"
+  [ -f "$df" ] || df="$SCRIPT_DIR/../default.$CI_PROVIDER.Dockerfile"
   [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   tag="$(builtin_image)"
   local ctx; ctx="$(mktemp -d)"
@@ -4516,6 +4563,32 @@ cmd_docker_stopping() {
   ) 8>"$RUNDIR/fleet.lock"
 }
 
+# Native callers reuse the exact engine config/parser and provider validators.
+# Values are data, never shell input; credentials are deliberately not emitted.
+cmd_native_config_json() {
+  local key comma="" value
+  printf '{'
+  for key in $CFG_KEYS; do
+    case "$key" in GITLAB*|CI_PROVIDER) continue ;; esac
+    value="${!key}"
+    printf '%s"%s":"%s"' "$comma" "$key" "$(printf '%s' "$value" | json_escape)"
+    comma=,
+  done
+  printf '}\n'
+}
+cmd_native_config_check() {
+  [ "$CI_PROVIDER" = github ] || { err "native U8 supports GitHub Actions only"; return 1; }
+  validate_runner_mode || { err "$POOL_CONFIG_ERROR"; return 1; }
+  provider_validate_settings
+}
+cmd_native_build_limits() {
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" || return 1
+  pool_activate build || return 1
+  local memory cpus="$RUNNER_CPUS"
+  memory="$(shared_capacity_memory_mib "$RUNNER_MEMORY")" || return 1
+  printf '%s|%s|%s|%s\n' "$(pool_min build)" "$(pool_max build)" "$memory" "$cpus"
+}
+
 # Test harnesses may source the engine to exercise adapter functions with
 # mocked Docker/curl endpoints. Production execution never sets this flag.
 if [ "${CRF_SOURCE_ONLY:-0}" = 1 ]; then
@@ -4523,6 +4596,12 @@ if [ "${CRF_SOURCE_ONLY:-0}" = 1 ]; then
 fi
 
 case "${1:-status}" in
+  native-image-drain-tick) with_fleet_lock wait imageupdate_rollover true ;;
+  native-admission-status) with_fleet_lock wait shared_capacity_call status ;;
+  native-build-limits) cmd_native_build_limits ;;
+  native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
+  native-config-json) cmd_native_config_json ;;
+  native-config-check) cmd_native_config_check ;;
   admission-close) with_fleet_lock wait cmd_admission_close ;;
   shared-prepare) with_fleet_lock wait cmd_shared_prepare ;;
   shared-adopt) with_fleet_lock wait cmd_shared_adopt ;;

@@ -2,8 +2,8 @@
 # Native lifecycle bridge. Ansible installs this root-owned activation marker
 # only after the complete host inventory has been adopted by the shared broker.
 shared_capacity_native_required() {
-  [ -e "$CFGDIR/host-capacity.json" ] || [ -L "$CFGDIR/host-capacity.json" ] || \
-    [ -e "$CFGDIR/shared-capacity.owner" ] || [ -L "$CFGDIR/shared-capacity.owner" ]
+  [ -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/host-capacity.json" ] || [ -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/host-capacity.json" ] || \
+    [ -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.owner" ] || [ -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.owner" ]
 }
 
 shared_capacity_native_call() {
@@ -12,7 +12,7 @@ shared_capacity_native_call() {
 
 shared_capacity_enabled() {
   shared_capacity_native_required && return 0
-  [ -e "$CFGDIR/shared-capacity.enabled" ] || [ -L "$CFGDIR/shared-capacity.enabled" ] && return 0
+  [ -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.enabled" ] || [ -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.enabled" ] && return 0
   local status=0
   shared_capacity_config_required || status=$?
   # Only positively legacy metadata may bypass admission or fenced release.
@@ -65,7 +65,7 @@ shared_capacity_call() {
 # Closing starts preserves running workers while adoption inventories every owner.
 # Broken symlinks also close starts; an incomplete closure must fail closed.
 shared_capacity_require_starts_open() {
-  if [ -e "$CFGDIR/shared-capacity.closed" ] || [ -L "$CFGDIR/shared-capacity.closed" ]; then
+  if [ -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.closed" ] || [ -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.closed" ]; then
     err "runner starts are closed for shared capacity adoption"
     return 1
   fi
@@ -136,7 +136,7 @@ cmd_admission_close() {
   temporary="$(mktemp "$CFGDIR/.shared-capacity.closed.XXXXXX")" || return 1
   chmod 600 "$temporary" || { rm -f "$temporary"; return 1; }
   printf '%s\n' 'closed for shared capacity adoption' > "$temporary" || { rm -f "$temporary"; return 1; }
-  mv -f "$temporary" "$CFGDIR/shared-capacity.closed" || return 1
+  mv -f "$temporary" "${CRF_CAPACITY_ROOT:-$CFGDIR}/shared-capacity.closed" || return 1
   sync -f "$CFGDIR"
 }
 

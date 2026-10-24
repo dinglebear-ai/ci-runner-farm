@@ -238,3 +238,24 @@ func TestInvalidConfigurationIsRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateKeyUploadValidationUsesTheMinterParserWithoutRequests(t *testing.T) {
+	for _, pkcs8 := range []bool{false, true} {
+		h := newHarness(t, pkcs8)
+		bytes, err := os.ReadFile(h.minter.KeyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = ValidatePrivateKey(bytes); err != nil {
+			t.Fatal(err)
+		}
+		if h.server.mints.Load() != 0 {
+			t.Fatal("upload validation contacted GitHub")
+		}
+	}
+	for _, bytes := range [][]byte{nil, []byte("-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----"), make([]byte, maxKeyBytes+1)} {
+		if ValidatePrivateKey(bytes) == nil {
+			t.Fatal("invalid key upload accepted")
+		}
+	}
+}

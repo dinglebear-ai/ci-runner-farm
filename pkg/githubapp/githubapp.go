@@ -258,6 +258,20 @@ func readPrivateKey(path string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parsePrivateKey(data)
+}
+
+// ValidatePrivateKey validates upload bytes without publishing a credential or
+// contacting GitHub. It shares the minter's parser and bounded key policy.
+func ValidatePrivateKey(data []byte) error {
+	if len(data) == 0 || len(data) > maxKeyBytes {
+		return errors.New("github app: private key exceeds its bound")
+	}
+	_, err := parsePrivateKey(data)
+	return err
+}
+
+func parsePrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return nil, errors.New("github app: private key is not PEM")
