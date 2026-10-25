@@ -42,3 +42,17 @@ idle-state verification. A scheduler/browser request cannot supply these fields.
 Do not copy an old helper's acceptance to a newly built binary. Keep the canary
 pin cleared after its terminal release. Do not change or delete retained evidence
 to manufacture readiness; stale evidence is an actionable failed preflight.
+
+After the exact frozen helper's new kernel and full canary receipts are released,
+the root operator can request a deterministic proposed record without writing:
+
+```
+ci-runner-native --local-checks-qualification-review /protected/native-local-checks.json KERNEL_REQUEST_ID FULL_REQUEST_ID
+```
+
+The helper reads only its fixed protected policy, binding and derived evidence
+paths, validates every acceptance condition, and emits the proposed record on
+stdout. It refuses old-helper evidence. This computes the typed policy digest
+with the same code used by dispatch; do not substitute another JSON serializer.
+The command does not persist a record, flip intent, clear a canary, or reserve a
+worker. Root review and an exclusive journaled/CAS promotion remain separate.

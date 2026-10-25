@@ -21,6 +21,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 5 && os.Args[1] == "--local-checks-qualification-review" {
+		if localchecks.ReviewRuntimeQualification(os.Args[2], os.Args[3], os.Args[4], os.Stdout) != nil {
+			fmt.Fprintln(os.Stderr, "local_checks_qualification_review_refused")
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) == 3 && os.Args[1] == "--local-checks-readiness" {
 		if localchecks.WriteRuntimeReadiness(os.Args[2], os.Stdout) != nil {
 			os.Exit(1)
