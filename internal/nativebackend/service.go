@@ -70,6 +70,8 @@ func success(data any) Response { return Response{OK: true, Data: data} }
 var slotPattern = regexp.MustCompile(`^ci-runner(?:-[a-z][a-z0-9-]{0,23})?-[1-9][0-9]?$`)
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]{20,255}$`)
 var githubToken = regexp.MustCompile(`(?:github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9_]{10,})`)
+var cancelJobPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
 var numberPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
 // ValidateOperation is a closed typed command interface, never a shell command string.
@@ -167,15 +169,23 @@ func (s *Service) Handle(r Request) Response {
 			}
 			active = copy
 		}
-		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting})
+		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting, "cancelOperationIdentity": true, "localChecksV1Preparation": true})
 	case "cancel":
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if len(r.Args) > 1 || (len(r.Args) == 1 && !cancelJobPattern.MatchString(r.Args[0])) {
+			return fail("invalid_cancel_identity")
+		}
 		if s.active == nil {
 			return fail("no_active_job")
 		}
 		if !r.Confirm {
 			return fail("confirmation_required")
+		}
+		// Bind cancellation to the observed operation under the same gate that
+		// publishes/replaces active. Empty Args preserves existing native UI use.
+		if len(r.Args) == 1 && s.active.ID != r.Args[0] {
+			return fail("operation_identity_mismatch")
 		}
 		s.active.cancel()
 		return success(map[string]string{"status": "cancellation_requested", "warning": "Partial effects may remain; inspect results before retrying."})

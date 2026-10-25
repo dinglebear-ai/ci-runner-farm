@@ -455,3 +455,64 @@ func TestWithdrawalDoesNotRunWhenDurableRevocationFails(t *testing.T) {
 		t.Fatal("stop ran without durable authority revocation")
 	}
 }
+
+func TestCancelExpectedOperationIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		args          []string
+		expectedError string
+	}{
+		{"exact", []string{strings.Repeat("a", 32)}, ""},
+		{"stale", []string{strings.Repeat("b", 32)}, "operation_identity_mismatch"},
+		{"malformed", []string{"bad"}, "invalid_cancel_identity"},
+		{"multiple", []string{strings.Repeat("a", 32), strings.Repeat("b", 32)}, "invalid_cancel_identity"},
+		{"legacy", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s := New(&fakeRunner{}, t.TempDir(), t.TempDir())
+			defer s.Shutdown()
+			s.active = &Job{ID: strings.Repeat("a", 32), cancel: cancel}
+			got := s.Handle(Request{Action: "cancel", Confirm: true, Args: tc.args})
+			if tc.expectedError != "" {
+				if got.OK || got.Error != tc.expectedError {
+					t.Fatalf("got %+v", got)
+				}
+				if ctx.Err() != nil {
+					t.Fatal("foreign or invalid cancellation reached context")
+				}
+			} else if !got.OK || ctx.Err() == nil {
+				t.Fatalf("intended cancellation missing %+v", got)
+			}
+		})
+	}
+}
+func TestCancelStaleIdentityNeverCancelsReplacement(t *testing.T) {
+	s := New(&fakeRunner{}, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	oldID := strings.Repeat("a", 32)
+	newID := strings.Repeat("b", 32)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The replacement is visible before the stale cancellation obtains the gate.
+	s.mu.Lock()
+	s.active = &Job{ID: newID, cancel: cancel}
+	done := make(chan Response, 1)
+	go func() { done <- s.Handle(Request{Action: "cancel", Confirm: true, Args: []string{oldID}}) }()
+	s.mu.Unlock()
+	got := <-done
+	if got.OK || got.Error != "operation_identity_mismatch" || ctx.Err() != nil {
+		t.Fatalf("replacement cancelled: %+v", got)
+	}
+}
+
+func TestJobStatusAdvertisesAtomicIdentityCancellation(t *testing.T) {
+	s := New(&fakeRunner{}, t.TempDir(), t.TempDir())
+	defer s.Shutdown()
+	response := s.Handle(Request{Action: "job-status"})
+	data := response.Data.(map[string]any)
+	if data["cancelOperationIdentity"] != true || data["localChecksV1Preparation"] != true {
+		t.Fatal("coordinator cannot distinguish guarded from legacy cancel")
+	}
+}

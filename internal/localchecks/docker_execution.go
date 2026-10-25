@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,8 +34,28 @@ func dockerChecksCommand(ctx context.Context, id string, s Submission, environme
 			return nil, errors.New("local_checks_secret_environment_invalid")
 		}
 	}
-	const script = `IFS= read -r EX_STANDARDS_TOKEN || exit 70; export EX_STANDARDS_TOKEN; exec bash /workspace/source/core/scripts/local_ci_container.sh checks "$@"`
-	cmd := exec.CommandContext(ctx, "docker", "exec", "--interactive", "--workdir", "/workspace/source", id, "sh", "-c", script, "farm-checks", s.Commit, s.Base)
+	const script = `set -eu
+IFS= read -r EX_STANDARDS_TOKEN || exit 70
+export EX_STANDARDS_TOKEN
+unset CORE_LOCAL_CI_RESOURCE_CONTRACT CORE_LOCAL_CI_ADMITTED_CPUS CORE_LOCAL_CI_ADMITTED_MEMORY_BYTES
+if grep -Fqx '# local-ci-resource-contract: 1' /workspace/source/core/scripts/local_ci_container.sh; then
+  for helper in /workspace/source/core/scripts/local_ci_linux.sh /workspace/source/core/scripts/local_ci_resources.py; do
+    if ! grep -Fqx '# local-ci-resource-contract: 1' "$helper"; then
+      echo local_checks_core_resource_contract_incomplete >&2
+      exit 76
+    fi
+  done
+  bash /workspace/source/core/scripts/local_ci_container.sh setup "$@" || exit "$?"
+  export CORE_LOCAL_CI_RESOURCE_CONTRACT=1
+  export CORE_LOCAL_CI_ADMITTED_CPUS="$FARM_CHECKS_CPUS"
+  export CORE_LOCAL_CI_ADMITTED_MEMORY_BYTES="$FARM_CHECKS_MEMORY_BYTES"
+fi
+unset FARM_CHECKS_CPUS FARM_CHECKS_MEMORY_BYTES
+exec bash /workspace/source/core/scripts/local_ci_container.sh checks "$@"`
+	cmd := exec.CommandContext(ctx, "docker", "exec", "--interactive",
+		"--env", "FARM_CHECKS_CPUS="+strconv.FormatUint(uint64(s.CPUs), 10),
+		"--env", "FARM_CHECKS_MEMORY_BYTES="+strconv.FormatUint(s.MemoryMiB<<20, 10),
+		"--workdir", "/workspace/source", id, "sh", "-c", script, "farm-checks", s.Commit, s.Base)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=/nonexistent", "DOCKER_HOST=unix:///var/run/docker.sock"}
 	cmd.Stdin = strings.NewReader(token + "\n")
 	return cmd, nil

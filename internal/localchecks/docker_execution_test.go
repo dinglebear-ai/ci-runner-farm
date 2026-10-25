@@ -149,7 +149,7 @@ func TestDockerChecksShellTransportsExactSHAsAndCredentialViaStdin(t *testing.T)
 		t.Fatal(err)
 	}
 	script := original.Args[len(original.Args)-4]
-	script = strings.Replace(script, "exec bash /workspace/source/core/scripts/local_ci_container.sh", "exec "+strconv.Quote(fixture), 1)
+	script = strings.ReplaceAll(script, "/workspace/source/core/scripts/local_ci_container.sh", strconv.Quote(fixture))
 	command := exec.Command("/bin/sh", "-c", script, "farm-checks", s.Commit, s.Base)
 	command.Stdin = original.Stdin
 	command.Env = []string{"PATH=" + os.Getenv("PATH")}
@@ -157,5 +157,96 @@ func TestDockerChecksShellTransportsExactSHAsAndCredentialViaStdin(t *testing.T)
 	want := "<checks>\n<" + s.Commit + ">\n<" + s.Base + ">\n"
 	if err != nil || string(output) != want {
 		t.Fatalf("exact committed identities not preserved: %q %v", output, err)
+	}
+}
+
+func TestV1ChecksPreparesUsingAuthoredWrapperBeforeContractChecks(t *testing.T) {
+	for _, failSetup := range []bool{false, true} {
+		t.Run(strconv.FormatBool(failSetup), func(t *testing.T) {
+			s := submission()
+			original, err := dockerChecksCommand(context.Background(), strings.Repeat("d", 64), s, []string{"EX_STANDARDS_TOKEN=private-fixture-value"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			dir := filepath.Join(root, "core", "scripts")
+			if err = os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			entry := filepath.Join(dir, "local_ci_container.sh")
+			calls := filepath.Join(root, "calls")
+			body := "#!/bin/bash\n# local-ci-resource-contract: 1\n" +
+				"test \"$EX_STANDARDS_TOKEN\" = private-fixture-value || exit 71\n" +
+				"printf '%s:%s:%s:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" \"${CORE_LOCAL_CI_RESOURCE_CONTRACT-unset}\" \"${CORE_LOCAL_CI_ADMITTED_CPUS-unset}\" \"${CORE_LOCAL_CI_ADMITTED_MEMORY_BYTES-unset}\" >> \"$FIXTURE_CALLS\"\n" +
+				"if test \"$1\" = setup && test \"${FIXTURE_SETUP_FAIL-0}\" = 1; then exit 79; fi\n"
+			if err = os.WriteFile(entry, []byte(body), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"local_ci_linux.sh", "local_ci_resources.py"} {
+				if err = os.WriteFile(filepath.Join(dir, name), []byte("# local-ci-resource-contract: 1\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := original.Args[len(original.Args)-4]
+			script = strings.ReplaceAll(script, "/workspace/source", root)
+			cmd := exec.Command("/bin/sh", "-c", script, "farm-checks", s.Commit, s.Base)
+			cmd.Stdin = original.Stdin
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FIXTURE_CALLS=" + calls, "FARM_CHECKS_CPUS=" + strconv.Itoa(int(s.CPUs)), "FARM_CHECKS_MEMORY_BYTES=" + strconv.FormatUint(s.MemoryMiB<<20, 10), "CORE_LOCAL_CI_RESOURCE_CONTRACT=1", "CORE_LOCAL_CI_ADMITTED_CPUS=999", "CORE_LOCAL_CI_ADMITTED_MEMORY_BYTES=999"}
+			if failSetup {
+				cmd.Env = append(cmd.Env, "FIXTURE_SETUP_FAIL=1")
+			}
+			output, runErr := cmd.CombinedOutput()
+			if len(output) != 0 {
+				t.Fatalf("unexpected output %q", output)
+			}
+			data, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "setup:" + s.Commit + ":" + s.Base + ":unset:unset:unset\n"
+			if failSetup {
+				if runErr == nil || cmd.ProcessState.ExitCode() != 79 {
+					t.Fatalf("setup failure lost: %v", runErr)
+				}
+			} else {
+				if runErr != nil {
+					t.Fatal(runErr)
+				}
+				want += "checks:" + s.Commit + ":" + s.Base + ":1:" + strconv.Itoa(int(s.CPUs)) + ":" + strconv.FormatUint(s.MemoryMiB<<20, 10) + "\n"
+			}
+			if string(data) != want {
+				t.Fatalf("wrong authored preparation/checks order: %q", data)
+			}
+		})
+	}
+}
+
+func TestV1ChecksRefusesPartialResourceContractBeforeAnyWrapperCall(t *testing.T) {
+	s := submission()
+	original, err := dockerChecksCommand(context.Background(), strings.Repeat("d", 64), s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	scripts := filepath.Join(root, "core", "scripts")
+	if err = os.MkdirAll(scripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(scripts, "local_ci_container.sh")
+	if err = os.WriteFile(entry, []byte("#!/bin/bash\n# local-ci-resource-contract: 1\necho WRAPPER_MUST_NOT_RUN\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"local_ci_linux.sh", "local_ci_resources.py"} {
+		if err = os.WriteFile(filepath.Join(scripts, name), []byte("old helper\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := strings.ReplaceAll(original.Args[len(original.Args)-4], "/workspace/source", root)
+	cmd := exec.Command("/bin/sh", "-c", script, "farm-checks", s.Commit, s.Base)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	cmd.Stdin = original.Stdin
+	out, err := cmd.CombinedOutput()
+	if err == nil || cmd.ProcessState.ExitCode() != 76 || !strings.Contains(string(out), "local_checks_core_resource_contract_incomplete") || strings.Contains(string(out), "WRAPPER_MUST_NOT_RUN") {
+		t.Fatalf("partial source entered execution: %q %v", out, err)
 	}
 }
