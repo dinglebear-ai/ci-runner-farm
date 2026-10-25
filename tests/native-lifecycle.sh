@@ -97,4 +97,10 @@ set +e
 native_result=$?
 set -e
 [ "$native_result" = 75 ] || { echo "native reconcile returned $native_result" >&2; exit 1; }
+# The actual native adapter forwards repository identity into pool validation.
+CI_PROVIDER=github GH_SCOPE=repo GH_OWNER=dinglebear-ai GH_REPOS=dinglebear-ai/labby
+RUNNER_MODE=pools RUNNER_POOLS='v3|build|farm-smoke-steamy-20261025||1|1|1|0|2|12g|builtin'
+[ "$(cmd_native_build_limits)" = '1|1|12288|2' ] || { echo 'repository native limits rejected' >&2; exit 1; }
+GH_REPOS='dinglebear-ai/labby other/repo'
+if cmd_native_build_limits >/dev/null 2>&1; then echo 'multiple repository pools accepted' >&2; exit 1; fi
 echo 'native-lifecycle: PASS — polling and worker requests remain native-owner controlled'

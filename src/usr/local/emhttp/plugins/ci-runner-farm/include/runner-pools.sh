@@ -112,7 +112,7 @@ EOF
 }
 
 # Validate one complete immutable snapshot.
-# Usage: pool_config_validate <single|pools> <serialized records> <repo|org> [github|gitlab]
+# Usage: pool_config_validate <single|pools> <serialized records> <repo|org> [github|gitlab] [github-owner] [single-owner/repository]
 pool_config_validate() {
   local mode="${1:-}" raw="${2:-}" scope="${3:-}" provider="${4:-github}" rec normalized id routing image
   local count=0 sum_fixed=0 sum_max=0 ids=" " routings=" " oldifs
@@ -125,8 +125,16 @@ pool_config_validate() {
     *) pool_error "Runner mode must be single or pools."; return 1 ;;
   esac
   if [ "$provider" = github ] && [ "$scope" != org ]; then
-    pool_error "GitHub runner pools require Organization scope."
-    return 1
+    local owner="${5:-}" repository="${6:-}" name
+    name="${repository#*/}"
+    if [ "$scope" != repo ] || [ "${#owner}" -gt 39 ] ||
+       ! printf '%s' "$owner" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$' ||
+       [ "$repository" != "$owner/$name" ] || [ "${#name}" -gt 100 ] ||
+       [ "$name" = . ] || [ "$name" = .. ] ||
+       ! printf '%s' "$name" | grep -qE '^[A-Za-z0-9_.-]+$'; then
+      pool_error "GitHub repository pools require one canonical repository matching the owner."
+      return 1
+    fi
   fi
   [ -n "$raw" ] || { pool_error "Runner pools mode requires at least one pool."; return 1; }
   [ "${#raw}" -le "$POOL_CONFIG_MAX_BYTES" ] || { pool_error "Runner pool configuration is too large."; return 1; }
@@ -162,7 +170,7 @@ pool_config_validate() {
 pool_mode_enabled() { [ "${RUNNER_MODE:-single}" = pools ]; }
 
 pool_records() {
-  pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" "${CI_PROVIDER:-github}" || return 1
+  pool_config_validate "${RUNNER_MODE:-single}" "${RUNNER_POOLS:-}" "${GH_SCOPE:-repo}" "${CI_PROVIDER:-github}" "${GH_OWNER:-}" "${GH_REPOS:-}" || return 1
   if pool_mode_enabled; then
     printf '%s\n' "$POOL_RECORDS" | tr ';' '\n'
   else

@@ -7,7 +7,7 @@ existing installations keep their behavior.
 
 Named pools work with both providers. Each pool can use its own fixed capacity,
 labels or tags, CPU, memory, and runner/job image. GitHub pools require
-organization scope. GitLab pools require a pool-specific `glrt-` runner token
+organization scope or exactly one canonical repository matching the configured owner. GitLab pools require a pool-specific `glrt-` runner token
 whose GitLab runner configuration owns the matching tags. Pool edits take
 effect on Fleet Restart, so Settings Apply does not interrupt active jobs.
 

@@ -11,10 +11,10 @@ fail=0
 ok() { pass=$((pass+1)); }
 bad() { printf 'FAIL: %s\n' "$*" >&2; fail=$((fail+1)); }
 accept() {
-  if pool_config_validate "$1" "$2" "$3" "${4:-github}"; then ok; else bad "expected valid: $POOL_CONFIG_ERROR"; fi
+  if pool_config_validate "$1" "$2" "$3" "${4:-github}" "${5:-}" "${6:-}"; then ok; else bad "expected valid: $POOL_CONFIG_ERROR"; fi
 }
 reject() {
-  if pool_config_validate "$1" "$2" "$3" "${4:-github}"; then bad "expected rejection: $2"; else ok; fi
+  if pool_config_validate "$1" "$2" "$3" "${4:-github}" "${5:-}" "${6:-}"; then bad "expected rejection: $2"; else ok; fi
 }
 
 build='v3|build|ci-build|linux,x64|3|2|5|1|2|8g|ghcr.io/unraid/ci-runner-image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -26,6 +26,17 @@ accept pools "$valid" org
 [ "$POOL_RECORDS" = "$valid" ] && ok || bad 'valid records were not normalized'
 accept pools "$valid" repo gitlab
 accept pools 'v3|minimal|ci-minimal||1|0|1|0|inherit|inherit|builtin' org
+
+# Repository-scoped pools target one canonical repository, never an implicit org.
+accept pools "$valid" repo github dinglebear-ai dinglebear-ai/labby
+reject pools "$valid" repo github dinglebear-ai 'dinglebear-ai/labby other/repo'
+reject pools "$valid" repo github dinglebear-ai other/labby
+reject pools "$valid" repo github dinglebear-ai 'dinglebear-ai/labby/'
+reject pools "$valid" repo github dinglebear-ai 'dinglebear-ai/../labby'
+reject pools "$valid" repo github dinglebear-ai ' dinglebear-ai/labby'
+reject pools "$valid" repo github dinglebear-ai 'dinglebear-ai/..'
+reject pools "$valid" repo github '-bad' '-bad/labby'
+reject pools "$valid" repo github dinglebear-ai ''
 
 RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true
 [ "$(pool_routing_label qa-vm)" = qa-vm-client ] && ok || bad 'routing label mismatch'

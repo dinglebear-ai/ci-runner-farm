@@ -289,14 +289,14 @@ _(Runner layout)_:
   </select>
 
 :crf_runner_mode_plug:
-> Single fleet preserves the existing GitHub and GitLab behavior. Named pools let workflows select a purpose-built runner image by routing label. GitHub pools require organization scope. GitLab pools require one pool-specific runner authentication token per pool so routing tags remain distinct.
+> Single fleet preserves the existing GitHub and GitLab behavior. Named pools let workflows select a purpose-built runner image by routing label. GitHub pools require organization scope or exactly one canonical repository matching the configured owner. GitLab pools require one pool-specific runner authentication token per pool so routing tags remain distinct.
 :end
 
 _(Named pool records)_:
 : <input type="text" name="RUNNER_POOLS" id="crf-runner-pools" value="<?=crf_g($cfg,'RUNNER_POOLS','')?>" placeholder="v3|build|ci-build|linux,x64|3|0|3|0|inherit|inherit|builtin;v3|qa-vm|qa-vm-client|linux,x64|2|0|2|0|2|8g|ghcr.io/unraid/qa-vm-client:latest">
 
 :crf_runner_pools_plug:
-> Named-pool mode only. Enter semicolon-separated V3 records: <code>v3|id|routing-label|additional-labels|fixed|min|max|idle|cpus|memory|image</code>. The current classic-pool implementation uses <code>fixed</code>; min/max/idle are retained in the bounded contract for future per-pool autoscaling. Use <code>inherit</code> for global CPU or memory, <code>builtin</code> for the locally built image, or a full registry image reference. Pool mode requires GitHub organization scope and disables global autoscaling and global image auto-update. Add <code>kvm</code> to a GitHub pool's labels to pass through a group-writable host <code>/dev/kvm</code>; other pools do not receive it.
+> Named-pool mode only. Enter semicolon-separated V3 records: <code>v3|id|routing-label|additional-labels|fixed|min|max|idle|cpus|memory|image</code>. The current classic-pool implementation uses <code>fixed</code>; min/max/idle are retained in the bounded contract for future per-pool autoscaling. Use <code>inherit</code> for global CPU or memory, <code>builtin</code> for the locally built image, or a full registry image reference. Pool mode requires GitHub organization scope or one canonical owner/repository and disables global autoscaling and global image auto-update. Add <code>kvm</code> to a GitHub pool's labels to pass through a group-writable host <code>/dev/kvm</code>; other pools do not receive it.
 :end
 
 _(GitLab pool token)_:

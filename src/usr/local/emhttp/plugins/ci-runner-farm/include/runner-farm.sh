@@ -242,7 +242,7 @@ validate_runner_mode() {
     [ "$AUTOSCALE" = true ] && [ "$RUNNER_MODE" = pools ] && [ "$CI_PROVIDER" = github ] && shared_capacity_enabled \
       || { pool_error "Elastic pools require shared GitHub named-pool autoscaling."; return 1; }
   fi
-  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" || return 1
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" "$GH_OWNER" "$GH_REPOS" || return 1
   if pool_mode_enabled; then
     if [ "$AUTOSCALE" = true ] && ! shared_capacity_enabled; then
       pool_error "Named-pool autoscaling requires shared host capacity admission."; return 1
@@ -4174,7 +4174,7 @@ cmd_status_json() {
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
   local configured="$RUNNER_COUNT" pools='[]' rec pool pfirst=1 pcount labels pimage pjson='['
-  if pool_mode_enabled && pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER"; then
+  if pool_mode_enabled && pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" "$GH_OWNER" "$GH_REPOS"; then
     configured=0
     while IFS= read -r rec; do
       pool="$(printf '%s' "$rec" | cut -d'|' -f2)"; pcount="$(pool_fixed "$pool")"
@@ -4678,7 +4678,7 @@ cmd_native_config_check() {
   provider_validate_settings
 }
 cmd_native_build_limits() {
-  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" || return 1
+  pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" "$GH_OWNER" "$GH_REPOS" || return 1
   pool_activate build || return 1
   local memory cpus="$RUNNER_CPUS"
   memory="$(shared_capacity_memory_mib "$RUNNER_MEMORY")" || return 1
