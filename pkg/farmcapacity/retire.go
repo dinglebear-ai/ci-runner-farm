@@ -37,6 +37,14 @@ func (c *Controller) Retire(ctx context.Context, bind BindOwner) error {
 	slices.Sort(ids)
 	for _, id := range ids {
 		grant := snapshot.Grants[id]
+		if c.OtherBuildOwner != nil && c.OtherBuildOwner.OwnsGrant(grant) {
+			if err := c.OtherBuildOwner.ValidateGrant(ctx, grant); err != nil {
+				problems = append(problems, err)
+			} else {
+				problems = append(problems, c.OtherBuildOwner.RetireGrant(ctx, grant))
+			}
+			continue
+		}
 		name := strings.TrimPrefix(id, "build:")
 		owned, loadErr := c.load(name)
 		if loadErr != nil || owned.Fence != grant.Fence {

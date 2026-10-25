@@ -27,7 +27,7 @@ func (c *Controller) ReconcileIdle(ctx context.Context, name, id string, bind Bi
 	if owned.Maintenance || (owned.Withdrawal != nil && owned.Withdrawal.Phase != "") {
 		return ErrQueued
 	}
-	if err := c.configurationReconciliationAvailable(name); err != nil {
+	if err := c.configurationReconciliationAvailable(ctx, name); err != nil {
 		return err
 	}
 	item, err := c.observeNativeOwner(ctx, name, owned)
@@ -71,7 +71,7 @@ func (c *Controller) ReconcileIdle(ctx context.Context, name, id string, bind Bi
 
 // Avoid stacking replacements while a previous maintenance owner is still
 // charged, frozen, or waiting for an uncertain effect to settle.
-func (c *Controller) configurationReconciliationAvailable(target string) error {
+func (c *Controller) configurationReconciliationAvailable(ctx context.Context, target string) error {
 	snapshot, err := c.Broker.Status(&c.Policy)
 	if err != nil {
 		return err
@@ -79,6 +79,12 @@ func (c *Controller) configurationReconciliationAvailable(target string) error {
 	for id, grant := range snapshot.Grants {
 		if grant.Pool != buildPool {
 			continue
+		}
+		if c.OtherBuildOwner != nil && c.OtherBuildOwner.OwnsGrant(grant) {
+			if err := c.OtherBuildOwner.ValidateGrant(ctx, grant); err != nil {
+				return err
+			}
+			return ErrQueued
 		}
 		name := strings.TrimPrefix(id, "build:")
 		if name == target {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unraid/ci-runner-farm/internal/localchecks"
 	"github.com/unraid/ci-runner-farm/pkg/githubapp"
 	"io"
 	"os"
@@ -113,6 +114,27 @@ func ValidateOperation(r Request) (string, []string, error) {
 
 func (s *Service) Handle(r Request) Response {
 	switch r.Action {
+	case "local-checks-contract":
+		return success(localchecks.NativeWorkerContract())
+	case "local-checks":
+		if _, err := localchecks.DecodeNativeCommand(strings.NewReader(r.Value)); err != nil {
+			return fail("local_checks_native_command_invalid")
+		}
+		if len(r.Args) != 0 || r.Kind != "" || len(r.Values) > 1 {
+			return fail("local_checks_native_command_invalid")
+		}
+		for name := range r.Values {
+			if name != "dependencyCredential" {
+				return fail("local_checks_native_command_invalid")
+			}
+		}
+		engine, ok := s.engine.(*Engine)
+		if !ok {
+			return fail("local_checks_native_engine_required")
+		}
+		return s.launch(r, func(ctx context.Context) (string, error) {
+			return engine.RunLocalChecks(ctx, r.Value, r.Values["dependencyCredential"])
+		})
 	case "job-status":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -218,6 +240,9 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 		return fail("random_unavailable")
 	}
 	budget := 15 * time.Minute
+	if r.Action == "local-checks" {
+		budget = 24*time.Hour + time.Minute
+	}
 	if r.Action == "scheduled-boot-autostart" {
 		budget = 25 * time.Minute
 	}
@@ -231,6 +256,9 @@ func (s *Service) launch(r Request, run func(context.Context) (string, error)) R
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, budget)
 	secrets := s.secretValues()
+	if r.Action == "local-checks" && r.Values["dependencyCredential"] != "" {
+		secrets = append(secrets, r.Values["dependencyCredential"])
+	}
 	job := &Job{ID: hex.EncodeToString(id), Action: r.Action, Status: "running", StartedAt: time.Now().UTC(), cancel: cancel, secrets: secrets}
 	// Never expose a previous operation's raw progress as the new job.
 	if err := atomicWrite(filepath.Join(s.runtime, "native-operation.log"), nil, 0600); err != nil {

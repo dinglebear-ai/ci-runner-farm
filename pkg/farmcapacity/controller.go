@@ -77,12 +77,21 @@ type receipt struct {
 // Controller is called only while the native farm's fleet lock is held.
 // Receipts survive uncertain starts; neither grants nor receipts expire.
 type Controller struct {
-	Broker      sharedcapacity.Broker
-	Policy      sharedcapacity.Policy
-	ReceiptRoot string
-	Docker      Docker
-	RepairCache func(context.Context, string, string) error
-	Poisoned    func(string, string) (bool, error)
+	OtherBuildOwner BuildWorkloadOwner
+	Broker          sharedcapacity.Broker
+	Policy          sharedcapacity.Policy
+	ReceiptRoot     string
+	Docker          Docker
+	RepairCache     func(context.Context, string, string) error
+	Poisoned        func(string, string) (bool, error)
+}
+
+// BuildWorkloadOwner delegates another positively attested Farm-native role in
+// the same build pool. Unknown grants retain the existing refusal behavior.
+type BuildWorkloadOwner interface {
+	OwnsGrant(sharedcapacity.Grant) bool
+	ValidateGrant(context.Context, sharedcapacity.Grant) error
+	RetireGrant(context.Context, sharedcapacity.Grant) error
 }
 
 func (c *Controller) validate(container *Container, name string) error {

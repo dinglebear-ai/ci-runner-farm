@@ -14,12 +14,23 @@ import (
 	"time"
 
 	"github.com/unraid/ci-runner-farm/internal/capacitycmd"
+	"github.com/unraid/ci-runner-farm/internal/localchecks"
 	"github.com/unraid/ci-runner-farm/internal/nativebackend"
 	"github.com/unraid/ci-runner-farm/pkg/farmcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--local-checks" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := localchecks.RunProtected(ctx, os.Args[2], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "local_checks_native_operation_failed")
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) == 2 && os.Args[1] == "--migration-inspect" {
 		if os.Geteuid() != 0 {
 			fmt.Fprintln(os.Stderr, "root required")

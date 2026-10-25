@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 	"time"
 
+	"github.com/unraid/ci-runner-farm/internal/localchecks"
 	"github.com/unraid/ci-runner-farm/pkg/farmcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
@@ -57,7 +57,8 @@ func Run(arguments []string, output io.Writer) (result error) {
 		return expandPools(lease, arguments[1], arguments[2])
 	}
 	controller := farmcapacity.Controller{
-		Broker: sharedcapacity.Broker{Path: config.LedgerPath}, Policy: config.Policy,
+		OtherBuildOwner: localchecks.NewBuildRoleOwner(config),
+		Broker:          sharedcapacity.Broker{Path: config.LedgerPath}, Policy: config.Policy,
 		ReceiptRoot: config.ReceiptRoot, Docker: farmcapacity.NativeDocker{},
 		RepairCache: farmcapacity.RepairNativeCache, Poisoned: farmcapacity.NativePoisoned,
 	}
@@ -110,27 +111,11 @@ func validArguments(arguments []string) bool {
 	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
 }
 
-func verifyFleetLock() error {
-	file := os.NewFile(8, "native-farm-lock")
-	if file == nil {
-		return errors.New("native Farm fleet lock is required")
-	}
-	actual, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	wanted, err := os.Lstat("/var/local/emhttp/ci-runner-farm/fleet.lock")
-	if err != nil {
-		return err
-	}
-	if !actual.Mode().IsRegular() || !wanted.Mode().IsRegular() || !os.SameFile(actual, wanted) {
-		return errors.New("inherited native Farm lock differs")
-	}
-	if err := syscall.Flock(8, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("native Farm lifecycle is busy")
-	}
-	return nil
-}
+func verifyFleetLock() error { return hostcapacity.VerifyInheritedFleetLock() }
+
+// VerifyInheritedFleetLock lets another native Farm workload owner reuse the
+// exact inherited FD8 custody check without creating a competing host lock.
+func VerifyInheritedFleetLock() error { return verifyFleetLock() }
 
 func runAction(ctx context.Context, config *hostcapacity.Config, controller *farmcapacity.Controller, arguments []string, output io.Writer) error {
 	bind := nativeBinding(controller, config, true)
