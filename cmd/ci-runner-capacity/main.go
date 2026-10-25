@@ -14,6 +14,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "local-checks-readiness" || os.Args[1] == "local-checks-qualification-review") {
+		var err error
+		if os.Args[1] == "local-checks-readiness" {
+			err = capacitycmd.WriteClassicLocalChecksReadiness(os.Args[1:], os.Stdout)
+		} else {
+			err = capacitycmd.ReviewClassicLocalChecksQualification(os.Args[1:], os.Stdout)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "classic_local_checks_observation_refused")
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "local-checks" {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()

@@ -49,7 +49,10 @@ def farm_pack_projection(snapshot):
 def farm_bound_request(request):
     if os.geteuid()!=0 or request.get('host') not in ('steamy','tootie') or not re.fullmatch('[0-9a-f]{32}',request.get('job','')):
         raise ValueError('FARM_ROOT_JOB_IDENTITY_REQUIRED')
-    binding=farm_private_json(FARM_BINDING,8192)
+    transport=request.get('farm_transport','native')
+    if transport not in ('native','classic'):raise ValueError('FARM_EXPLICIT_TRANSPORT_REQUIRED')
+    binding_path=FARM_BINDING if transport=='native' else '/boot/config/plugins/ci-runner-farm/native-local-checks.json'
+    binding=farm_private_json(binding_path,8192)
     if binding.get('version')!=1 or binding.get('host')!=request['host']:
         raise ValueError('FARM_PROTECTED_BINDING_CHANGED')
     root=Path(binding['root'])
@@ -63,6 +66,7 @@ def farm_bound_request(request):
         owner=farm_private_json(root/request['job']/'coordinator-owner.json')
         if owner.get('version')!=1 or owner.get('host')!=request['host'] or owner.get('job')!=request['job']:
             raise ValueError('FARM_RETAINED_OWNER_MISMATCH')
+        if owner.get('transport','native')!=transport:raise ValueError('FARM_RETAINED_TRANSPORT_CHANGED')
         # Read-only evidence and the task's own cancel marker survive upgrades.
     elif (binding.get('runtimeQualified') is not True or binding.get('canarySubmissionSHA256')
           or binding.get('epoch')!=request.get('farm_epoch') or binding.get('image')!=request.get('farm_image')):
@@ -92,6 +96,9 @@ def farm_wait_operation(task, operation, timeout):
 
 
 def farm_submit_operation(task, command, timeout, token=None, allow_failed=False):
+    if globals().get('REQUEST',{}).get('farm_transport','native')=='classic':
+        from core_fleet_classic import submit_operation
+        return submit_operation(task,command,timeout,token,allow_failed)
     action=command['action']
     journal=task/('native-'+action+'-operation.json')
     # Exclusive intent before sending; an uncertain write is never replayed.
@@ -132,7 +139,9 @@ def farm_prepare_bound(request):
     descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
     try:os.fsync(descriptor)
     finally:os.close(descriptor)
-    farm_exclusive_json(task/'coordinator-owner.json',dict(version=1,host=request['host'],job=request['job'],epoch=binding['epoch'],image=binding['image'],receiptRoot=str(receipt_root)))
+    owner=dict(version=1,host=request['host'],job=request['job'],epoch=binding['epoch'],image=binding['image'],receiptRoot=str(receipt_root),transport=request.get('farm_transport','native'))
+    if owner['transport']=='classic':owner['installation']=readiness['farm_installation']
+    farm_exclusive_json(task/'coordinator-owner.json',owner)
     farm_exclusive_json(task/'coordinator-intent.json',snapshot)
     farm_exclusive_json(task/'intent.json',farm_pack_projection(snapshot))
     return dict(task=str(task),farm_epoch=binding['epoch'],farm_image=binding['image'],execution_mode='farm')
@@ -263,6 +272,9 @@ def farm_observe_result(task, request):
     submission,owner,receipt=farm_retained_worker(task,request)
     if receipt is None:return None
     if receipt.get('state')!='released':return None
+    if owner.get('transport','native')=='classic':
+        from core_fleet_classic import observe_release
+        observe_release(task,receipt)
     evidence=task/'evidence'/request['job']/'result.json'
     if not evidence.exists():
         # Positive native absence/release after explicit cancel, before checks.
@@ -283,6 +295,9 @@ def farm_mark_cancel(task, request):
 
 
 def farm_cancel_task(task, request, binding):
+    if request.get('farm_transport','native')=='classic':
+        from core_fleet_classic import cancel_task
+        return cancel_task(task)
     farm_mark_cancel(task,request)
     if farm_observe_result(task,request) is not None:
         return dict(cancellation_requested=True,delivery='already_terminal')
