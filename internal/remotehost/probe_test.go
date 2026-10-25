@@ -82,7 +82,7 @@ func TestFixedProbeReadsOnlyNativeDiscoveryAndReturnsClosedProjection(t *testing
 	if err = decoder.Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.FarmAvailable || result.Phase != "configured" || result.Protocol != "farm-local-checks-worker/v1" || !referenceDigest.MatchString(result.IdentitySHA256) {
+	if !result.FarmAvailable || result.Phase != "admission_available" || result.InstallationStatus != "unsupported" || result.RuntimeQualified || result.Protocol != "farm-local-checks-worker/v1" || !referenceDigest.MatchString(result.IdentitySHA256) {
 		t.Fatal(result)
 	}
 	if err = <-done; err != nil {

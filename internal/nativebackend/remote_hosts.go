@@ -17,7 +17,7 @@ func (s *Service) remoteHosts(r Request) Response {
 		return fail("remote_host_authenticated_actor_required")
 	}
 	for key := range r.Values {
-		if key != "actor" && !((r.Action == "remote-host-setup" || r.Action == "remote-host-setup-observe") && key == "proposal") && !((r.Action == "remote-package-stage" || r.Action == "remote-package-observe") && (key == "sha256" || (r.Action == "remote-package-observe" && key == "operationID"))) {
+		if key != "actor" && !(r.Action == "remote-host-readiness" && key == "proposalID") && !((r.Action == "remote-host-setup" || r.Action == "remote-host-setup-observe") && key == "proposal") && !((r.Action == "remote-package-stage" || r.Action == "remote-package-observe") && (key == "sha256" || (r.Action == "remote-package-observe" && key == "operationID"))) {
 			return fail("invalid_remote_host_request")
 		}
 	}
@@ -137,6 +137,11 @@ func (s *Service) remoteHosts(r Request) Response {
 				return "", errors.New("remote_host_connection_create_failed")
 			}
 			raw, err := json.Marshal(view)
+			return string(raw), err
+		})
+	case "remote-host-readiness":
+		return s.launch(r, func(ctx context.Context) (string, error) {
+			raw, err := remotehost.StatusForSetup(ctx, root, actor, r.Value, r.Values["proposalID"])
 			return string(raw), err
 		})
 	case "remote-host-status":

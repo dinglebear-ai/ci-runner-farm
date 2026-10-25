@@ -100,3 +100,42 @@ should first exercise native admission, storage binding, managed backend and
 read-only/defaults/image-edit controls without GitHub effects. Real runner
 provisioning then needs an explicitly selected disposable repository/scope,
 write-only credentials, a bounded runner/job budget and coordinated cleanup.
+
+## Observed remote onboarding state
+
+Remote discovery now distinguishes host admission from usable Farm readiness.
+`admission_available` means the existing ledger matches current host policy. It
+is not an installation, configuration or GitHub-runner acceptance receipt.
+Older `configured` discovery responses remain readable for compatibility only.
+
+The target's native plugin registers identity from its actual Core-compiled
+bundle. The backend separately hashes `/proc/self/exe`. Installed identity binds
+all regular-file bytes and executable bits, manifest, version and every declared
+helper; Core-generated root `release.json` is excluded to avoid self-reference.
+The compressed uploaded archive keeps its independent SHA-256. Matching an
+installed tree does not claim the compressed archive itself was observed after
+installation.
+
+After reviewing a pending setup proposal, the target operator separately saves
+settings and initializes admission through the existing controls. **Verify saved
+configuration** then compares the exact retained staged package and installed
+identity, selected saved settings, Core-bound cache, repository, active protected
+policy, one build pool with the requested resources, and current ledger policy.
+It writes an exclusive private applied receipt. It never saves configuration,
+installs a package, allocates a runner or starts a workload. Receipt status
+rechecks these facts; changed evidence is refused rather than overwritten.
+`settingsProjectionSHA256` covers only the explicitly verified settings subset.
+Unrelated settings are not certified or invalidation inputs.
+
+The source host can query that exact proposal ID through the existing pinned SSH
+transport. The response links its applied receipt to the current installed tree
+and target host, while returning independent runtime qualification. The native UI
+binds results to the submitted host reference, proposal and operation, clears stale
+observations on refresh or a new request, and displays unknown states without
+ready badges. Connection identity is asserted by the source's verified transport,
+not by a target-provided status string. GitHub readiness remains **Not verified**
+until the separate real runner lifecycle acceptance is completed.
+
+These source and fixture checks do not establish real remote-target onboarding,
+a successful full-suite run for every Core revision, GitHub registration/job
+acceptance, or four-host runtime qualification. Those are separate journeys.

@@ -222,6 +222,17 @@ func Load(root, actor, reference string) (Connection, error) {
 
 // Status performs one bounded fixed read; it never installs or changes a target.
 func Status(ctx context.Context, root, actor, reference string) (json.RawMessage, error) {
+	return statusForSetup(ctx, root, actor, reference, "")
+}
+
+func StatusForSetup(ctx context.Context, root, actor, reference, proposalID string) (json.RawMessage, error) {
+	if !referencePattern.MatchString(proposalID) {
+		return nil, errors.New("remote_setup_proposal_identity_required")
+	}
+	return statusForSetup(ctx, root, actor, reference, proposalID)
+}
+
+func statusForSetup(ctx context.Context, root, actor, reference, proposalID string) (json.RawMessage, error) {
 	connection, err := Load(root, actor, reference)
 	if err != nil {
 		return nil, err
@@ -236,15 +247,19 @@ func Status(ctx context.Context, root, actor, reference string) (json.RawMessage
 	var diagnostic limitedOutput
 	cmd.Stdout = &out
 	cmd.Stderr = &diagnostic
+	payload, _ := json.Marshal(map[string]string{"proposalID": proposalID})
+	cmd.Stdin = bytes.NewReader(payload)
 	if err = cmd.Run(); err != nil {
 		return nil, errors.New(statusFailureCode(fmt.Errorf("%w %s", err, diagnostic.String())))
 	}
 	var result Probe
 	decoder := json.NewDecoder(bytes.NewReader(out.Bytes()))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || !result.valid() {
+	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || !result.valid() || result.SetupProposalID != proposalID {
 		return nil, errors.New("remote_protocol_error")
 	}
+	result.ConnectionVerified = true
+	result.Reference = reference
 	return json.Marshal(result)
 }
 
@@ -351,28 +366,83 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 
 var referenceDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+// InstallationSummary is returned only from the target's compiled-bundle
+// receipt. It is not inferred from a responding socket or admission badge.
+type InstallationSummary struct {
+	Version        string `json:"version"`
+	TreeSHA256     string `json:"treeSHA256"`
+	ManifestSHA256 string `json:"manifestSHA256"`
+	BackendSHA256  string `json:"backendSHA256"`
+}
+
+func (i *InstallationSummary) valid() bool {
+	return i != nil && len(i.Version) <= 128 && regexp.MustCompile(`\A[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?\z`).MatchString(i.Version) && referenceDigest.MatchString(i.TreeSHA256) && referenceDigest.MatchString(i.ManifestSHA256) && referenceDigest.MatchString(i.BackendSHA256)
+}
+
+type AppliedConfigurationSummary struct {
+	Protocol                 string `json:"protocol"`
+	ProposalID               string `json:"proposalID"`
+	ProposalSHA256           string `json:"proposalSHA256"`
+	PackageSHA256            string `json:"packageSHA256"`
+	InstalledTreeSHA256      string `json:"installedTreeSHA256"`
+	Host                     string `json:"host"`
+	Epoch                    string `json:"epoch"`
+	PolicySHA256             string `json:"policySHA256"`
+	SettingsProjectionSHA256 string `json:"settingsProjectionSHA256"`
+	LedgerPolicyDigest       string `json:"ledgerPolicyDigest"`
+}
+
+func (a *AppliedConfigurationSummary) valid() bool {
+	if a == nil || a.Protocol != "farm-applied-setup/v1" || !referencePattern.MatchString(a.ProposalID) || !referencePattern.MatchString(a.Epoch) || !hostPattern.MatchString(a.Host) {
+		return false
+	}
+	for _, v := range []string{a.ProposalSHA256, a.PackageSHA256, a.InstalledTreeSHA256, a.PolicySHA256, a.SettingsProjectionSHA256, a.LedgerPolicyDigest} {
+		if !referenceDigest.MatchString(v) {
+			return false
+		}
+	}
+	return true
+}
+
 type Probe struct {
-	Schema         string `json:"schema"`
-	Hostname       string `json:"hostname"`
-	UnraidVersion  string `json:"unraidVersion"`
-	IdentitySHA256 string `json:"identitySHA256"`
-	FarmAvailable  bool   `json:"farmAvailable"`
-	Phase          string `json:"phase"`
-	Protocol       string `json:"protocol,omitempty"`
-	Active         bool   `json:"active"`
-	Grants         int    `json:"grants"`
+	ConnectionVerified         bool                         `json:"connectionVerified,omitempty"`
+	Reference                  string                       `json:"reference,omitempty"`
+	SetupProposalID            string                       `json:"setupProposalID,omitempty"`
+	ConfigurationStatus        string                       `json:"configurationStatus,omitempty"`
+	Configured                 bool                         `json:"configured,omitempty"`
+	AppliedConfiguration       *AppliedConfigurationSummary `json:"appliedConfiguration,omitempty"`
+	InstallationStatus         string                       `json:"installationStatus,omitempty"`
+	RuntimeQualificationStatus string                       `json:"runtimeQualificationStatus,omitempty"`
+	Installation               *InstallationSummary         `json:"installation,omitempty"`
+	RuntimeQualified           bool                         `json:"runtimeQualified,omitempty"`
+	Schema                     string                       `json:"schema"`
+	Hostname                   string                       `json:"hostname"`
+	UnraidVersion              string                       `json:"unraidVersion"`
+	IdentitySHA256             string                       `json:"identitySHA256"`
+	FarmAvailable              bool                         `json:"farmAvailable"`
+	Phase                      string                       `json:"phase"`
+	Protocol                   string                       `json:"protocol,omitempty"`
+	Active                     bool                         `json:"active"`
+	Grants                     int                          `json:"grants"`
 }
 
 const remoteProbeCommand = `python3 -c '
-import hashlib,json,pathlib,socket
+import hashlib,json,pathlib,socket,sys,re
+payload=json.loads(sys.stdin.buffer.read(513) or b"{}")
+if not isinstance(payload,dict) or set(payload)-{"proposalID"}:raise RuntimeError("invalid closed probe input")
+proposal=payload.get("proposalID","")
+if proposal and not re.fullmatch("[a-f0-9]{32}",proposal):raise RuntimeError("invalid proposal identity")
 p=pathlib.Path("/etc/unraid-version")
 v=next(x.split("=",1)[1].strip().strip(chr(34)) for x in p.read_text().splitlines() if x.startswith("version="))
 identity=hashlib.sha256(pathlib.Path("/etc/machine-id").read_bytes().strip()).hexdigest()
 r={"schema":"farm-remote-host/v1","hostname":socket.gethostname(),"unraidVersion":v,"identitySHA256":identity,"farmAvailable":False,"phase":"backend_unavailable","active":False,"grants":0}
+r["setupProposalID"]=proposal
 path="/run/unraid-core/plugin-data/ci-runner-farm/backend.sock"
-def query(action):
+def query(action,value=None):
  with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:
-  c.settimeout(2);c.connect(path);c.sendall((json.dumps({"action":action})+"\n").encode());raw=b""
+  c.settimeout(2);c.connect(path);request={"action":action}
+  if value is not None:request["value"]=value
+  c.sendall((json.dumps(request)+"\n").encode());raw=b""
   while b"\n" not in raw:
    block=c.recv(65536)
    if not block:raise RuntimeError("incomplete Farm response")
@@ -384,19 +454,75 @@ def query(action):
 if pathlib.Path(path).exists():
  contract=query("local-checks-contract");job=query("job-status");admission=query("admission-status")
  if contract.get("protocol")!="farm-local-checks-worker/v1":raise RuntimeError("Farm protocol mismatch")
- r.update(farmAvailable=True,protocol=contract["protocol"],active=job.get("active") is not None,grants=len(admission.get("grants") or []),phase="configured" if admission.get("policyMatches") else "admission_setup_required")
+ r.update(farmAvailable=True,protocol=contract["protocol"],active=job.get("active") is not None,grants=len(admission.get("grants") or []),phase="admission_available" if admission.get("policyMatches") else "admission_setup_required")
+ if job.get("installationIdentity"):
+  try:
+   installed=query("remote-installation-status")
+   if installed.get("protocol")!="farm-native-installation/v1":raise RuntimeError("installation protocol")
+   r["installation"]={key:installed[key] for key in ("version","treeSHA256","manifestSHA256","backendSHA256")}
+   r["installationStatus"]="observed"
+  except Exception:
+   r.pop("installation",None);r["installationStatus"]="unavailable"
+  if r.get("installation"):
+   try:
+    readiness=query("local-checks-readiness")
+    r["runtimeQualified"]=readiness.get("runtimeQualified") is True
+    r["runtimeQualificationStatus"]="qualified" if r["runtimeQualified"] else "unqualified"
+   except Exception:
+    r["runtimeQualificationStatus"]="unavailable"
+ else:
+  r["installationStatus"]="unsupported";r["runtimeQualificationStatus"]="unavailable"
+ if not job.get("appliedSetupVerification"):
+  r["configurationStatus"]="unsupported"
+ elif not proposal:
+  r["configurationStatus"]="proposal_required"
+ else:
+  try:
+   applied=query("remote-setup-applied-status",proposal)["evidence"]
+   r["appliedConfiguration"]={key:applied[key] for key in ("protocol","proposalID","proposalSHA256","packageSHA256","installedTreeSHA256","host","epoch","policySHA256","settingsProjectionSHA256","ledgerPolicyDigest")}
+   r["configured"]=True;r["configurationStatus"]="verified"
+  except Exception:
+   r["configurationStatus"]="unavailable"
  if r["active"] or r["grants"]:r["phase"]="busy"
 print(json.dumps(r))
 '`
 
 func (p Probe) valid() bool {
+	if p.SetupProposalID != "" && !referencePattern.MatchString(p.SetupProposalID) {
+		return false
+	}
+	if p.ConfigurationStatus != "" && p.ConfigurationStatus != "unsupported" && p.ConfigurationStatus != "proposal_required" && p.ConfigurationStatus != "verified" && p.ConfigurationStatus != "unavailable" {
+		return false
+	}
+	if (p.ConfigurationStatus == "verified") != p.Configured || (p.AppliedConfiguration != nil) != p.Configured {
+		return false
+	}
+	if p.Configured && (p.Installation == nil || !p.AppliedConfiguration.valid() || p.AppliedConfiguration.ProposalID != p.SetupProposalID || p.AppliedConfiguration.InstalledTreeSHA256 != p.Installation.TreeSHA256 || p.AppliedConfiguration.Host != p.Hostname) {
+		return false
+	}
+
+	if p.InstallationStatus != "" && p.InstallationStatus != "observed" && p.InstallationStatus != "unsupported" && p.InstallationStatus != "unavailable" {
+		return false
+	}
+	if p.RuntimeQualificationStatus != "" && p.RuntimeQualificationStatus != "qualified" && p.RuntimeQualificationStatus != "unqualified" && p.RuntimeQualificationStatus != "unavailable" {
+		return false
+	}
+	if (p.InstallationStatus == "observed") != (p.Installation != nil) && p.InstallationStatus != "" {
+		return false
+	}
+	if (p.RuntimeQualificationStatus == "qualified") != p.RuntimeQualified {
+		return false
+	}
+	if (p.Installation != nil && !p.Installation.valid()) || (p.RuntimeQualified && p.Installation == nil) {
+		return false
+	}
 	if p.Schema != "farm-remote-host/v1" || !strings.HasPrefix(p.UnraidVersion, "8.") || len(p.UnraidVersion) > 128 || !referenceDigest.MatchString(p.IdentitySHA256) || len(p.Hostname) > 253 || !hostPattern.MatchString(p.Hostname) || p.Grants < 0 || p.Grants > 4096 {
 		return false
 	}
 	if !p.FarmAvailable {
-		return p.Phase == "backend_unavailable" && p.Protocol == "" && !p.Active && p.Grants == 0
+		return p.Phase == "backend_unavailable" && p.Protocol == "" && !p.Active && p.Grants == 0 && p.Installation == nil && !p.RuntimeQualified
 	}
-	return p.Protocol == "farm-local-checks-worker/v1" && (p.Phase == "configured" || p.Phase == "admission_setup_required" || p.Phase == "busy")
+	return p.Protocol == "farm-local-checks-worker/v1" && (p.Phase == "configured" || p.Phase == "admission_available" || p.Phase == "admission_setup_required" || p.Phase == "busy")
 }
 
 func connectionInventoryLease(root, actor string) (func(), error) {

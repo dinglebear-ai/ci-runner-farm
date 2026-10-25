@@ -306,3 +306,23 @@ func TestListWaitsForCredentialPublicationUnderActorLease(t *testing.T) {
 		t.Fatal("reader lease did not finish")
 	}
 }
+
+func TestProbeSeparatesAdmissionFromObservedInstallationAndQualification(t *testing.T) {
+	p := Probe{Schema: "farm-remote-host/v1", Hostname: "target", UnraidVersion: "8.0.0", IdentitySHA256: strings.Repeat("a", 64), FarmAvailable: true, Phase: "admission_available", Protocol: "farm-local-checks-worker/v1"}
+	if !p.valid() {
+		t.Fatal("admission-only observation rejected")
+	}
+	p.RuntimeQualified = true
+	p.RuntimeQualificationStatus = "qualified"
+	if p.valid() {
+		t.Fatal("runtime advertised without actual installation observation")
+	}
+	p.Installation = &InstallationSummary{Version: "0.1.0-test", TreeSHA256: strings.Repeat("b", 64), ManifestSHA256: strings.Repeat("c", 64), BackendSHA256: strings.Repeat("d", 64)}
+	if !p.valid() {
+		t.Fatal("actual installed identity rejected")
+	}
+	p.Installation.BackendSHA256 = "foreign"
+	if p.valid() {
+		t.Fatal("invalid helper identity advertised")
+	}
+}

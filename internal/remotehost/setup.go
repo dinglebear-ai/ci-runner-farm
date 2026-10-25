@@ -38,6 +38,50 @@ func (p SetupProposal) Validate() error {
 	}
 	return nil
 }
+
+// InspectStagedSetupPackage reuses the same bounded immutable staged-artifact
+// validation for target proposal admission and explicit applied verification.
+func InspectStagedSetupPackage(stageRoot string, p SetupProposal) (PackageView, error) {
+	if err := p.Validate(); err != nil {
+		return PackageView{}, err
+	}
+	// Only a previously staged exact native Farm artifact may seed this proposal.
+	artifact := filepath.Join(stageRoot, p.StageOperationID, "ci-runner-farm.tgz")
+	if err := inspectPrivate(filepath.Dir(artifact), true); err != nil {
+		return PackageView{}, err
+	}
+	canonical, e := filepath.EvalSymlinks(artifact)
+	if e != nil || canonical != artifact {
+		return PackageView{}, errors.New("remote_setup_staged_package_invalid")
+	}
+	ai, e := os.Lstat(artifact)
+	if e != nil {
+		return PackageView{}, errors.New("remote_setup_staged_package_invalid")
+	}
+	st, ok := ai.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) || ai.Mode().Perm()&0077 != 0 {
+		return PackageView{}, errors.New("remote_setup_staged_package_invalid")
+	}
+	f, err := os.Open(artifact)
+	if err != nil {
+		return PackageView{}, errors.New("remote_setup_staged_package_unavailable")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageBytes {
+		return PackageView{}, errors.New("remote_setup_staged_package_invalid")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxPackageBytes+1))
+	if err != nil {
+		return PackageView{}, err
+	}
+	view, err := InspectPackage(raw)
+	if err != nil || view.SHA256 != p.PackageSHA256 {
+		return PackageView{}, errors.New("remote_setup_staged_package_changed")
+	}
+	return view, nil
+}
+
 func StoreSetupProposal(root, stageRoot string, p SetupProposal) error {
 	if err := p.Validate(); err != nil {
 		return err
@@ -45,39 +89,8 @@ func StoreSetupProposal(root, stageRoot string, p SetupProposal) error {
 	if err := inspectPrivate(root, true); err != nil {
 		return err
 	}
-	// Only a previously staged exact native Farm artifact may seed this proposal.
-	artifact := filepath.Join(stageRoot, p.StageOperationID, "ci-runner-farm.tgz")
-	if err := inspectPrivate(filepath.Dir(artifact), true); err != nil {
+	if _, err := InspectStagedSetupPackage(stageRoot, p); err != nil {
 		return err
-	}
-	canonical, e := filepath.EvalSymlinks(artifact)
-	if e != nil || canonical != artifact {
-		return errors.New("remote_setup_staged_package_invalid")
-	}
-	ai, e := os.Lstat(artifact)
-	if e != nil {
-		return errors.New("remote_setup_staged_package_invalid")
-	}
-	st, ok := ai.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uint32(os.Geteuid()) || ai.Mode().Perm()&0077 != 0 {
-		return errors.New("remote_setup_staged_package_invalid")
-	}
-	f, err := os.Open(artifact)
-	if err != nil {
-		return errors.New("remote_setup_staged_package_unavailable")
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageBytes {
-		return errors.New("remote_setup_staged_package_invalid")
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxPackageBytes+1))
-	if err != nil {
-		return err
-	}
-	view, err := InspectPackage(raw)
-	if err != nil || view.SHA256 != p.PackageSHA256 {
-		return errors.New("remote_setup_staged_package_changed")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

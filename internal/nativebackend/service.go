@@ -116,7 +116,11 @@ func ValidateOperation(r Request) (string, []string, error) {
 
 func (s *Service) Handle(r Request) Response {
 	switch r.Action {
-	case "remote-host-list", "remote-host-create", "remote-host-status", "remote-package-upload", "remote-package-list", "remote-package-stage", "remote-package-observe", "remote-host-setup", "remote-host-setup-observe":
+	case "remote-setup-verify-applied", "remote-setup-applied-status":
+		return s.remoteAppliedSetup(r)
+	case "remote-installation-register", "remote-installation-status":
+		return s.remoteInstallation(r)
+	case "remote-host-list", "remote-host-create", "remote-host-status", "remote-host-readiness", "remote-package-upload", "remote-package-list", "remote-package-stage", "remote-package-observe", "remote-host-setup", "remote-host-setup-observe":
 		return s.remoteHosts(r)
 	case "remote-setup-list", "remote-setup-propose":
 		return s.remoteSetup(r)
@@ -169,7 +173,7 @@ func (s *Service) Handle(r Request) Response {
 			}
 			active = copy
 		}
-		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting, "cancelOperationIdentity": true, "localChecksV1Preparation": true})
+		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting, "cancelOperationIdentity": true, "localChecksV1Preparation": true, "installationIdentity": true, "appliedSetupVerification": true})
 	case "cancel":
 		s.mu.Lock()
 		defer s.mu.Unlock()
