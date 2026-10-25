@@ -104,7 +104,7 @@ does not reuse the unrelated QA provisioning token or create a credential store.
 A reviewed root-owned mode-0600 `native-local-checks.json` beneath the native
 plugin's Core settings binding defines version=1, host, epoch, immutable image,
 private job root and `runtimeQualified`. That file is deliberately not generated
-or installed by this source change. Unqualified bindings are refused. The
+or installed by this source change. Unqualified bindings refuse ordinary checks. The
 published source contract still reports runtime qualification false. A separate
 bounded exact-image qualification must precede enabling real checks; merely
 setting a flag is not qualification evidence.
@@ -126,3 +126,31 @@ success, failure or cancellation before positively proven absence and fenced
 release. An uncertain stop retains the existing charge. Full Core acceptance,
 nested kernel-limit qualification and four-host coordinator activation remain
 separate from these local source/transport tests.
+
+
+## Qualification before enabling checks
+
+The closed `qualify` action is permitted with `runtimeQualified=false`; it cannot
+execute repository commands or accept credentials. It still verifies the actual
+committed two-pack snapshot, inherits the same fleet FD8 and policy epoch, and
+uses the same existing build-pool charge. Its request is bounded to at most two
+CPUs, 12 GiB memory, 180 seconds and 1–8 GiB requested scratch. Available bytes
+are checked before creation. This is a free-space preflight, not a filesystem
+quota or disk-isolation proof.
+
+The fixed existing image bootstrap starts only private dockerd. The packaged
+static helper reads actual cgroup-v2 CPU/memory/swap/PID limits and counts only
+process comm names to reject Runner.Listener. A scratch inner image contains
+only that same helper; it needs no registry pull or dependency credential. Its
+fixed read-only, non-root, no-network nested run proves 1 CPU, 64 MiB memory,
+zero swap and 64 PIDs. The outer probe must match the worker's exact charge.
+The proof records `scope=cgroup-isolation-only`, image/probe hashes, both actual
+limits, and `diskQuotaEnforced=false` before stopping/removing the worker and
+fenced release. It does not run Core tests, establish PR sign-off or promote the
+runtime-qualified flag.
+
+`cancel` and `complete` remain available for an existing owned request while the
+binding is unqualified. An uncertain stop retains its charge and can be retried
+only through that same owner and identity. Unsupported qualifier/stop drivers
+are refused before creation. Unknown creation effects still require explicit
+owner recovery rather than replay with a new request ID.

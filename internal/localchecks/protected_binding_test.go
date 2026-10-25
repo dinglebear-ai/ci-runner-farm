@@ -65,3 +65,15 @@ func TestOwnedWorkerDirectoryCannotFollowSymlinkOrUseSharedDirectory(t *testing.
 		t.Fatal("shared task root accepted")
 	}
 }
+
+func protectedFixtureBinding(t *testing.T, qualified bool) string {
+	t.Helper()
+	root := t.TempDir()
+	path := filepath.Join(root, "native-local-checks.json")
+	b := ProtectedBinding{Version: 1, Epoch: strings.Repeat("a", 32), Host: "worker", Image: "sha256:" + strings.Repeat("b", 64), Root: filepath.Join(root, "jobs"), RuntimeQualified: qualified}
+	raw, _ := json.Marshal(b)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

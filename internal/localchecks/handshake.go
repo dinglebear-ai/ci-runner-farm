@@ -53,7 +53,7 @@ func DecodeNativeCommand(reader io.Reader) (NativeCommand, error) {
 		return command, errors.New("local_checks_native_command_invalid")
 	}
 	switch command.Action {
-	case "create-admit":
+	case "create-admit", "qualify":
 		if command.Submission == nil || command.Submission.Validate() != nil || command.RequestID != "" || command.ContainerID != "" {
 			return command, errors.New("local_checks_native_command_invalid")
 		}
@@ -61,7 +61,7 @@ func DecodeNativeCommand(reader io.Reader) (NativeCommand, error) {
 		if command.Submission == nil || command.Submission.Validate() != nil || command.RequestID != "" || !immutableContainerID.MatchString(command.ContainerID) {
 			return command, errors.New("local_checks_native_command_invalid")
 		}
-	case "execute", "complete":
+	case "execute", "complete", "cancel":
 		if command.Submission != nil || command.ContainerID != "" || !identifier.MatchString(command.RequestID) {
 			return command, errors.New("local_checks_native_command_invalid")
 		}
@@ -93,7 +93,7 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 	driver := DockerNativeDriver{Image: configuration.Image, SourceRoot: filepath.Join(configuration.SnapshotRoot, "repo"), DockerRoot: configuration.DockerRoot}
 	err := WithNativeWorker(ctx, configuration.ConfigPath, configuration.Epoch, driver, func(worker NativeJob) error {
 		switch command.Action {
-		case "create-admit", "admit-start":
+		case "create-admit", "admit-start", "qualify":
 			if command.Submission == nil {
 				return errors.New("local_checks_native_command_invalid")
 			}
@@ -102,7 +102,18 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 				return err
 			}
 			var operationErr error
-			if command.Action == "create-admit" {
+			if command.Action == "qualify" {
+				if err := validateQualificationSubmission(s); err != nil {
+					return err
+				}
+				if err := availableScratch(configuration.SnapshotRoot, s.ScratchMiB); err != nil {
+					return err
+				}
+				if err := preparePrivateDockerRoot(configuration.SnapshotRoot, configuration.DockerRoot, 0); err != nil {
+					return err
+				}
+				receipt, operationErr = worker.Qualify(ctx, s)
+			} else if command.Action == "create-admit" {
 				if err := preparePrivateDockerRoot(configuration.SnapshotRoot, configuration.DockerRoot, 0); err != nil {
 					return err
 				}
@@ -117,6 +128,8 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 				receipt, _ = native.load(command.RequestID)
 			}
 			return operationErr
+		case "cancel":
+			return worker.Cancel(ctx, command.RequestID)
 		case "complete":
 			return worker.Complete(ctx, command.RequestID)
 		default:

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
@@ -31,15 +32,18 @@ type NativeDriver interface {
 	Remove(context.Context, string) error
 }
 type NativeReceipt struct {
-	Worker      WorkerBinding `json:"worker"`
-	Version     int           `json:"version"`
-	Epoch       string        `json:"epoch"`
-	Request     Submission    `json:"request"`
-	ContainerID string        `json:"containerID"`
-	Fence       string        `json:"fence,omitempty"`
-	State       string        `json:"state"`
+	Worker        WorkerBinding       `json:"worker"`
+	Version       int                 `json:"version"`
+	Epoch         string              `json:"epoch"`
+	Request       Submission          `json:"request"`
+	ContainerID   string              `json:"containerID"`
+	Fence         string              `json:"fence,omitempty"`
+	State         string              `json:"state"`
+	Qualification *QualificationProof `json:"qualification,omitempty"`
 }
 type NativeJob interface {
+	Cancel(context.Context, string) error
+	Qualify(context.Context, Submission) (NativeReceipt, error)
 	AdmitStart(context.Context, Submission, string) (NativeReceipt, error)
 	CreateAndAdmit(context.Context, Submission) (NativeReceipt, error)
 	ExecuteChecks(context.Context, string, string, string, []string) (Result, error)
@@ -325,4 +329,37 @@ func (w *nativeWorker) CreateAndAdmit(ctx context.Context, s Submission) (Native
 		return r, err
 	}
 	return w.AdmitStart(ctx, s, id)
+}
+
+// Cancel is the closed owner recovery path after a terminal qualification or
+// execution attempt. It never enables new checks or creates another identity.
+func (w *nativeWorker) Cancel(ctx context.Context, requestID string) error {
+	r, err := w.load(requestID)
+	if err != nil {
+		return err
+	}
+	if r.State == "released" {
+		return nil
+	}
+	if r.State == "creating" {
+		return errors.New("local_checks_native_creation_recovery_required")
+	}
+	stopper, ok := w.driver.(interface {
+		Stop(context.Context, string) error
+	})
+	if !ok {
+		return errors.New("local_checks_native_stop_required")
+	}
+	bounded, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_, err = w.driver.Inspect(bounded, r.ContainerID)
+	if err != nil && !errors.Is(err, ErrNativeContainerMissing) {
+		return err
+	}
+	if err == nil {
+		if err = stopper.Stop(bounded, r.ContainerID); err != nil {
+			return err
+		}
+	}
+	return w.Complete(bounded, requestID)
 }

@@ -15,7 +15,7 @@ import (
 
 // ProtectedBinding is an operator-reviewed qualification of one immutable
 // worker image and private root. Network requests cannot supply or override it.
-// No real installation creates this file until exact-image isolation acceptance.
+// Qualification-only bindings cannot authorize ordinary checks before acceptance.
 type ProtectedBinding struct {
 	Version          int    `json:"version"`
 	Epoch            string `json:"epoch"`
@@ -28,7 +28,7 @@ type ProtectedBinding struct {
 func LoadProtectedBinding(path string) (ProtectedBinding, error) {
 	return loadProtectedBinding(path, 0)
 }
-func loadProtectedBinding(path string, owner uint32) (ProtectedBinding, error) {
+func loadProtectedBinding(path string, owner uint32, qualificationOnly ...bool) (ProtectedBinding, error) {
 	var b ProtectedBinding
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil || !filepath.IsAbs(path) || canonical != path {
@@ -53,7 +53,7 @@ func loadProtectedBinding(path string, owner uint32) (ProtectedBinding, error) {
 	if decoder.Decode(&b) != nil || decoder.Decode(new(any)) != io.EOF {
 		return b, errors.New("local_checks_protected_binding_invalid")
 	}
-	if b.Version != 1 || !nativeEpoch.MatchString(b.Epoch) || !identifier.MatchString(b.Host) || !filepath.IsAbs(b.Root) || filepath.Clean(b.Root) != b.Root || b.Root == "/" || !b.RuntimeQualified {
+	if b.Version != 1 || !nativeEpoch.MatchString(b.Epoch) || !identifier.MatchString(b.Host) || !filepath.IsAbs(b.Root) || filepath.Clean(b.Root) != b.Root || b.Root == "/" || (!b.RuntimeQualified && !(len(qualificationOnly) == 1 && qualificationOnly[0])) {
 		return b, errors.New("local_checks_runtime_not_qualified")
 	}
 	if err := (WorkerBinding{Image: b.Image, SourceRoot: filepath.Join(b.Root, "source"), DockerRoot: filepath.Join(b.Root, "docker")}).Validate(); err != nil {
@@ -73,7 +73,7 @@ func RunProtected(ctx context.Context, bindingPath string, input io.Reader, outp
 	if err != nil {
 		return err
 	}
-	binding, err := LoadProtectedBinding(bindingPath)
+	binding, err := loadProtectedBinding(bindingPath, 0, command.Action == "qualify" || command.Action == "complete" || command.Action == "cancel")
 	if err != nil {
 		return err
 	}
