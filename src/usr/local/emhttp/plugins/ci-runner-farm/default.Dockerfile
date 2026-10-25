@@ -51,7 +51,17 @@ RUN printf '%s\n' \
   '  if [ -z "$group_name" ]; then group_name=host-kvm; groupadd -g "$KVM_GID" "$group_name"; fi' \
   '  usermod -aG "$group_name" runner' \
   'fi' \
-  'if [ "${START_DOCKER_SERVICE:-false}" = true ]; then /usr/local/bin/unraid-cgroup-bootstrap.sh; fi' \
+  'if [ "${START_DOCKER_SERVICE:-false}" = true ]; then' \
+  '  fail() { printf "[unraid-runner] %s\\n" "$*" >&2; exit 1; }' \
+  '  [ "$(id -u)" -eq 0 ] || fail "DinD startup requires root before dropping privileges"' \
+  '  [ -x /usr/bin/update-alternatives ] || fail "container alternatives tool is missing"' \
+  '  for tool in iptables ip6tables; do' \
+  '    [ -x "/usr/sbin/${tool}-nft" ] || fail "container nft alternative is missing: $tool"' \
+  '    /usr/bin/update-alternatives --set "$tool" "/usr/sbin/${tool}-nft" || fail "container nft selection failed: $tool"' \
+  '    "/usr/sbin/$tool" --version | grep -q "(nf_tables)" || fail "container nft backend verification failed: $tool"' \
+  '  done' \
+  '  /usr/local/bin/unraid-cgroup-bootstrap.sh' \
+  'fi' \
   'exec /entrypoint.sh "$@"' \
   > /usr/local/bin/unraid-runner-entrypoint.sh \
  && chmod +x /usr/local/bin/unraid-runner-entrypoint.sh \
@@ -78,12 +88,17 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
 # cold daemon.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# supervise dockerd: it can die under the services: workload (nested overlay)' \
-  '( while true; do docker info >/dev/null 2>&1 || { rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1; }; sleep 3; done ) &' \
-  '# wait for first readiness before the runner accepts jobs' \
-  'for i in $(seq 1 90); do docker info >/dev/null 2>&1 && break; sleep 1; done' \
-  'docker info >/dev/null 2>&1 || { echo "Docker did not become ready" >&2; exit 1; }' \
-  'exec "$@"' \
+  'set -Eeuo pipefail' \
+  '[ "$#" -gt 0 ] || { echo "Runner command is missing" >&2; exit 1; }' \
+  'command -v timeout >/dev/null || { echo "Docker readiness timeout tool is missing" >&2; exit 1; }' \
+  '# Readiness only: the root entrypoint owns daemon startup, never this listener user.' \
+  '# Twenty attempts, each at most two seconds plus one-second kill grace and backoff.' \
+  'for ((attempt=0; attempt<20; attempt++)); do' \
+  '  if timeout --kill-after=1s 2s docker info >/dev/null 2>&1; then exec "$@"; fi' \
+  '  sleep 1' \
+  'done' \
+  'echo "Docker did not become ready within the startup budget" >&2' \
+  'exit 1' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh
 

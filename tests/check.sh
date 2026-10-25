@@ -62,6 +62,7 @@ php tests/build-demand.php
 bash tests/shared-host-budget.sh
 bash tests/numeric-config.sh
 bash tests/safe-paths.sh
+python3 tests/test-runner-image-startup.py
 bash tests/provider-contract.sh
 bash tests/exec-csrf.sh
 bash tests/secret-write.sh
