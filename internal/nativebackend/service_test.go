@@ -512,7 +512,7 @@ func TestJobStatusAdvertisesAtomicIdentityCancellation(t *testing.T) {
 	defer s.Shutdown()
 	response := s.Handle(Request{Action: "job-status"})
 	data := response.Data.(map[string]any)
-	if data["cancelOperationIdentity"] != true || data["localChecksV1Preparation"] != true {
+	if data["cancelOperationIdentity"] != true || data["localChecksV1Preparation"] != true || data["localChecksObservedCurrent"] != true {
 		t.Fatal("coordinator cannot distinguish guarded from legacy cancel")
 	}
 }

@@ -41,7 +41,7 @@ def farm_exclusive_json(path, value):
 
 
 def farm_pack_projection(snapshot):
-    if set(snapshot)-{'commit','base','merge_base','files','resource_contract'}:
+    if set(snapshot)-{'commit','base','merge_base','files','resource_contract','observed_resource_contract'}:
         raise ValueError('UNRECOGNIZED_FLEET_SNAPSHOT_FIELD')
     return {key:snapshot[key] for key in ('commit','base','merge_base','files')}
 
@@ -122,7 +122,7 @@ def farm_prepare_bound(request):
     if readiness['farm_epoch']!=binding['epoch'] or readiness['farm_image']!=binding['image']:
         raise ValueError('FARM_ADMISSION_CHANGED')
     snapshot=request['snapshot']
-    if not validate_resource_contract(snapshot):raise ValueError('FARM_V1_SOURCE_REQUIRED')
+    if not validate_execution_contract(snapshot):raise ValueError('FARM_EXPLICIT_SOURCE_CONTRACT_REQUIRED')
     root=Path(bound['parent']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
     policy=farm_private_json(FARM_POLICY)
     if policy.get('host')!=request['host'] or policy.get('epoch')!=binding['epoch'] or policy.get('mode')!='active':raise ValueError('FARM_POLICY_OWNER_CHANGED')
@@ -166,13 +166,20 @@ def farm_collect_result(task, request, snapshot, released):
     try:
         verify_resource_source(task/'repo',snapshot)
         result['source_unchanged']=True
-        rows=read_resource_receipts(evidence/'checks.log')
-        resources=check_resource_receipts(rows,snapshot,dict(request,platform='linux/amd64'))
-        stages=read_resource_receipts(evidence/'checks.log',prefix=b'CORE_RESOURCE_STAGE_V1 ',limit=1)
-        expected=dict(version=1,stage='units_started',commit=submission['commit'],base=submission['base'])
-        if stages not in ([],[expected]) or (native['status']=='passed' and stages!=[expected]):
-            raise ValueError('FARM_FULL_CHECKS_STAGE_MISSING_OR_CHANGED')
-        result.update(resource_contract=resources,workload_started=bool(stages),phase='checks' if stages else 'checks_preparation')
+        if snapshot.get('observed_resource_contract') is not None:
+            rows=read_resource_receipts(evidence/'checks.log',prefix=b'CORE_OBSERVED_RESOURCE_V1 ',limit=1)
+            log_path=evidence/'checks.log'
+            if log_path.stat().st_size>16*1024**2:raise ValueError('OBSERVED_CORE_LOG_BOUND')
+            resources=check_observed_receipts(rows,snapshot,request,log_path.read_text(errors='replace'),native.get('exitCode'))
+            result.update(resource_contract=resources,workload_started=True,phase='checks')
+        else:
+            rows=read_resource_receipts(evidence/'checks.log')
+            resources=check_resource_receipts(rows,snapshot,dict(request,platform='linux/amd64'))
+            stages=read_resource_receipts(evidence/'checks.log',prefix=b'CORE_RESOURCE_STAGE_V1 ',limit=1)
+            expected=dict(version=1,stage='units_started',commit=submission['commit'],base=submission['base'])
+            if stages not in ([],[expected]) or (native['status']=='passed' and stages!=[expected]):
+                raise ValueError('FARM_FULL_CHECKS_STAGE_MISSING_OR_CHANGED')
+            result.update(resource_contract=resources,workload_started=bool(stages),phase='checks' if stages else 'checks_preparation')
     except (ValueError,OSError) as exc:
         result['resource_contract']=dict(status='unverified',error=str(exc)[:300])
         if result['status']=='passed':result['status']='failed'
@@ -183,7 +190,7 @@ def farm_collect_result(task, request, snapshot, released):
 def farm_run_bound(request):
     bound,binding=farm_bound_request(request);task=Path(bound['parent'])/request['job']
     snapshot=farm_private_json(task/'coordinator-intent.json')
-    if snapshot!=request['snapshot'] or not validate_resource_contract(snapshot):raise ValueError('FARM_COORDINATOR_INTENT_MISMATCH')
+    if snapshot!=request['snapshot'] or not validate_execution_contract(snapshot):raise ValueError('FARM_COORDINATOR_INTENT_MISMATCH')
     verify_resource_source(task/'repo',snapshot)
     submission=request['submission']
     manifest=farm_pack_projection(snapshot)

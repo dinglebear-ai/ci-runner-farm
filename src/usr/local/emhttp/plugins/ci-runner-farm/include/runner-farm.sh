@@ -2415,7 +2415,14 @@ provision_preflight() {
 # deadlock the daemons. Runs the command in a subshell that holds fd 8 for its duration.
 with_fleet_lock() {
   local mode="$1"; shift
-  if [ "$mode" = try ]; then
+  if [ "$mode" = exec ]; then
+    # Preserve the main process identity through the protected helper exec.
+    # Snapshot refresh and lock custody remain identical to the wait owner.
+    exec 8>"$RUNDIR/fleet.lock" || return 1
+    flock -w 20 8 || { err "fleet busy (another lifecycle operation is running) — try again"; return 1; }
+    reload_locked_snapshot || return 1
+    exec "$@"
+  elif [ "$mode" = try ]; then
     ( flock -n 8 || exit 0; reload_locked_snapshot || exit 1; "$@" ) 8>"$RUNDIR/fleet.lock"
   else
     ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; reload_locked_snapshot || exit 1; "$@" ) 8>"$RUNDIR/fleet.lock"
@@ -2425,7 +2432,7 @@ with_fleet_lock() {
 # stdin is decoded by the capacity binary. No caller-selected binding/path.
 cmd_classic_local_checks() {
   [ "$#" -eq 0 ] || { err "local-checks accepts protected stdin only"; return 1; }
-  with_fleet_lock wait shared_capacity_native_call local-checks
+  with_fleet_lock exec "$SCRIPT_DIR/../bin/ci-runner-capacity" local-checks
 }
 cmd_restart() { cmd_stop || return 1; reload_locked_snapshot || return 1; cmd_start; }
 

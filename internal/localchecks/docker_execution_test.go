@@ -142,22 +142,28 @@ func TestDockerChecksShellTransportsExactSHAsAndCredentialViaStdin(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := filepath.Join(t.TempDir(), "checks")
-	// Read the credential only in the fixture process environment and never print it.
-	body := "#!/bin/sh\ntest \"$EX_STANDARDS_TOKEN\" = fixture-private-transport || exit 71\nprintf '<%s>\\n' \"$@\"\n"
-	if err = os.WriteFile(fixture, []byte(body), 0700); err != nil {
+	fixtureDir := t.TempDir()
+	fixture := filepath.Join(fixtureDir, "checks")
+	if err = os.WriteFile(fixture, []byte("#!/bin/sh\n# unsupported fixture uses observed adapter transport\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	python := filepath.Join(fixtureDir, "python3")
+	body := "#!/bin/sh\ntest \"$EX_STANDARDS_TOKEN\" = fixture-private-transport || exit 71\ntest \"$1\" = -c || exit 72\nprintf '%s' \"$2\" | sha256sum | cut -d ' ' -f 1\nshift 2\nprintf '<%s>\\n' \"$@\"\n"
+	if err = os.WriteFile(python, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	script := original.Args[len(original.Args)-4]
 	script = strings.ReplaceAll(script, "/workspace/source/core/scripts/local_ci_container.sh", strconv.Quote(fixture))
 	command := exec.Command("/bin/sh", "-c", script, "farm-checks", s.Commit, s.Base)
 	command.Stdin = original.Stdin
-	command.Env = []string{"PATH=" + os.Getenv("PATH")}
+	command.Env = []string{"PATH=" + fixtureDir + ":" + os.Getenv("PATH"), "FARM_CHECKS_CPUS=" + strconv.FormatUint(uint64(s.CPUs), 10), "FARM_CHECKS_MEMORY_BYTES=" + strconv.FormatUint(s.MemoryMiB<<20, 10), "FARM_CHECKS_TIMEOUT=" + strconv.FormatUint(uint64(s.TimeoutSeconds), 10)}
 	output, err := command.CombinedOutput()
-	want := "<checks>\n<" + s.Commit + ">\n<" + s.Base + ">\n"
+	sum := sha256.Sum256([]byte(observedCurrentCore))
+	want := hex.EncodeToString(sum[:]) + "\n<" + s.Commit + ">\n<" + s.Base + ">\n<" + strconv.FormatUint(uint64(s.CPUs), 10) + ">\n<" + strconv.FormatUint(s.MemoryMiB<<20, 10) + ">\n<" + strconv.FormatUint(uint64(s.TimeoutSeconds), 10) + ">\n"
 	if err != nil || string(output) != want {
-		t.Fatalf("exact committed identities not preserved: %q %v", output, err)
+		t.Fatalf("exact observed program/commits/budgets not preserved: %q %v", output, err)
 	}
+
 }
 
 func TestV1ChecksPreparesUsingAuthoredWrapperBeforeContractChecks(t *testing.T) {

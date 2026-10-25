@@ -173,7 +173,7 @@ func (s *Service) Handle(r Request) Response {
 			}
 			active = copy
 		}
-		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting, "cancelOperationIdentity": true, "localChecksV1Preparation": true, "installationIdentity": true, "appliedSetupVerification": true})
+		return success(map[string]any{"active": active, "history": append([]Job(nil), s.history...), "accepting": s.accepting, "cancelOperationIdentity": true, "localChecksV1Preparation": true, "localChecksObservedCurrent": true, "installationIdentity": true, "appliedSetupVerification": true})
 	case "cancel":
 		s.mu.Lock()
 		defer s.mu.Unlock()
