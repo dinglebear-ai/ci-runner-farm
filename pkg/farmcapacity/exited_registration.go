@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"io"
 	"os/exec"
 	"path"
@@ -29,7 +30,14 @@ type diagnosticIdentity struct {
 // Legacy ephemeral runners remove .runner after completion. Recover their
 // public registration from the exact exited container's native runner settings.
 // Live, unknown, ambiguous and foreign owners never use this recovery path.
-func exitedRegistration(ctx context.Context, id, organization, name string) (runnerID int64, runnerName string, returnErr error) {
+func exitedRegistration(ctx context.Context, id, organization, name string, targets ...hostcapacity.RegistrationTarget) (runnerID int64, runnerName string, returnErr error) {
+	target := hostcapacity.RegistrationTarget{Scope: "org", Owner: organization}
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	if target.Validate() != nil || target.Owner != organization {
+		return 0, "", errors.New("invalid exited registration target")
+	}
 	if !idPattern.MatchString(id) || (!namePattern.MatchString(name) && !legacyNamePattern.MatchString(name)) {
 		return 0, "", errors.New("invalid exited native owner identity")
 	}
@@ -55,13 +63,16 @@ func exitedRegistration(ctx context.Context, id, organization, name string) (run
 	if readErr != nil || drainErr != nil || closeErr != nil || bounded.N <= 0 || waitErr != nil {
 		return 0, "", errors.New("native registration diagnostics are unproved")
 	}
+	if (target.Scope == "repo" && item.RegistrationTarget == nil) || (item.RegistrationTarget != nil && *item.RegistrationTarget != target) {
+		return 0, "", errors.New("exited registration target changed")
+	}
 	// Host renames must not change the identity of an existing immutable owner.
 	expected := item.RegistrationName
 	prefix, matched := strings.CutSuffix(expected, "-"+name)
 	if !matched || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`).MatchString(prefix) {
 		return 0, "", errors.New("exited native registration name is not bound to its owned slot")
 	}
-	if identity.AgentID <= 0 || identity.AgentName != expected || strings.TrimSuffix(identity.GitHubURL, "/") != "https://github.com/"+organization {
+	if identity.AgentID <= 0 || identity.AgentName != expected || strings.TrimSuffix(identity.GitHubURL, "/") != target.URL() {
 		return 0, "", errors.New("exited native registration differs from its owned slot and organization")
 	}
 	return identity.AgentID, identity.AgentName, nil

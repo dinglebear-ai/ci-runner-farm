@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
 )
 
@@ -34,6 +35,7 @@ var (
 
 // Container is an immutable Docker identity and its enforced resource limits.
 type Container struct {
+	RegistrationTarget   *hostcapacity.RegistrationTarget
 	ID                   string
 	Name                 string
 	Managed              bool
@@ -61,6 +63,7 @@ type Docker interface {
 }
 
 type receipt struct {
+	RegistrationTarget  *hostcapacity.RegistrationTarget `json:"registrationTarget,omitempty"`
 	Start               *sharedcapacity.StartReservation `json:"start,omitempty"`
 	ID                  string                           `json:"containerId"`
 	DockerRoot          string                           `json:"dockerRoot,omitempty"`
@@ -77,13 +80,15 @@ type receipt struct {
 // Controller is called only while the native farm's fleet lock is held.
 // Receipts survive uncertain starts; neither grants nor receipts expire.
 type Controller struct {
-	OtherBuildOwner BuildWorkloadOwner
-	Broker          sharedcapacity.Broker
-	Policy          sharedcapacity.Policy
-	ReceiptRoot     string
-	Docker          Docker
-	RepairCache     func(context.Context, string, string) error
-	Poisoned        func(string, string) (bool, error)
+	BeforeStart        func(context.Context) error
+	RegistrationPolicy *hostcapacity.Config
+	OtherBuildOwner    BuildWorkloadOwner
+	Broker             sharedcapacity.Broker
+	Policy             sharedcapacity.Policy
+	ReceiptRoot        string
+	Docker             Docker
+	RepairCache        func(context.Context, string, string) error
+	Poisoned           func(string, string) (bool, error)
 }
 
 // BuildWorkloadOwner delegates another positively attested Farm-native role in
@@ -113,6 +118,11 @@ func (c *Controller) validate(container *Container, name string) error {
 // Start admits an already-created, inert native farm container before starting
 // its immutable ID. An uncertain start retains the exact receipt and grant.
 func (c *Controller) Start(ctx context.Context, name, id string) error {
+	if c.BeforeStart != nil {
+		if err := c.BeforeStart(ctx); err != nil {
+			return err
+		}
+	}
 	container, err := c.Docker.Inspect(ctx, id)
 	if err != nil {
 		return err
@@ -376,9 +386,23 @@ func (c *Controller) prepareStartReceipt(ctx context.Context, name string, conta
 			return nil, errors.New("running or charged build requires owner adoption")
 		}
 		owned = &receipt{ID: container.ID}
+		if c.RegistrationPolicy != nil {
+			target := container.RegistrationTarget
+			if target == nil && c.RegistrationPolicy.EffectiveRegistrationScope() == "org" {
+				target = &hostcapacity.RegistrationTarget{Scope: "org", Owner: c.RegistrationPolicy.Organization}
+			}
+			if target == nil || !c.RegistrationPolicy.AllowsRegistration(*target) {
+				return nil, errors.New("registration target is not allowed by protected policy")
+			}
+			copy := *target
+			owned.RegistrationTarget = &copy
+		}
 		if saveErr := c.save(name, owned); saveErr != nil {
 			return nil, saveErr
 		}
+	}
+	if owned.RegistrationTarget != nil && ((owned.RegistrationTarget.Scope == "repo" && container.RegistrationTarget == nil) || (container.RegistrationTarget != nil && *owned.RegistrationTarget != *container.RegistrationTarget)) {
+		return nil, errors.New("retained registration target changed")
 	}
 	if charged && owned.Fence != "" && owned.Fence != grant.Fence {
 		return nil, sharedcapacity.ErrFenceMismatch

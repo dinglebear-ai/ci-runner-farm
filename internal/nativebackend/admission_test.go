@@ -212,3 +212,27 @@ func TestActualEmbeddedRecoveryForwardsEpochAndIdentity(t *testing.T) {
 		t.Fatalf("actual shell bridge dropped arguments: %q", got)
 	}
 }
+func TestInterruptedRepositoryInitializationCannotReportSharedActivationAsReady(t *testing.T) {
+	root := t.TempDir()
+	owner := hostcapacity.Config{Epoch: strings.Repeat("a", 32), Mode: "closed", RegistrationScope: "repo", RegistrationRepositories: []string{"test-org/first"}, Policy: sharedcapacity.Policy{Pools: map[string]sharedcapacity.Pool{"build": {Maximum: 2}}}}
+	current := owner
+	current.Mode = "active"
+	current.RegistrationScope = ""
+	current.RegistrationRepositories = nil
+	calls := 0
+	runner := recoveryRunner{call: func(action string, args []string) (string, error) {
+		calls++
+		if action != "native-verify-initialize" {
+			t.Fatal("shared activation was replayed", action)
+		}
+		return "verified", nil
+	}}
+	service := New(runner, t.TempDir(), root)
+	defer service.Shutdown()
+	if _, err := service.resumeAdmission(t.Context(), runner, root, owner, &current); err == nil || !strings.Contains(err.Error(), "registration_policy_review_required") {
+		t.Fatal("repository ready without private final-active binding", err)
+	}
+	if calls != 1 {
+		t.Fatal("unexpected repeated controller operation")
+	}
+}

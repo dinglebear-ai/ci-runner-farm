@@ -12,15 +12,19 @@ import (
 
 func nativeBinding(controller *farmcapacity.Controller, config *hostcapacity.Config, publish bool) farmcapacity.BindOwner {
 	return func(ctx context.Context, name, id string, runnerID int64, runnerName string) (farmcapacity.OwnerBinding, error) {
+		target, targetErr := controller.RegistrationTarget(ctx, name, id)
+		if targetErr != nil {
+			return farmcapacity.OwnerBinding{}, targetErr
+		}
 		if runnerID == 0 && runnerName != "" {
-			owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerName: runnerName, Organization: config.Organization, TokenPath: config.TokenPath, Unregistered: true}
+			owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerName: runnerName, Organization: config.Organization, RegistrationTarget: target, TokenPath: config.TokenPath, Unregistered: true}
 			return farmcapacity.OwnerBinding{Owner: owner, RunnerName: runnerName}, nil
 		}
 		if runnerID == 0 {
 			var identityErr error
-			runnerID, runnerName, identityErr = farmcapacity.Registration(ctx, id, config.Organization, name)
+			runnerID, runnerName, identityErr = farmcapacity.RegistrationForTarget(ctx, id, *target, name)
 			if identityErr != nil {
-				owner, recoveryErr := farmcapacity.BindUnregistered(ctx, id, name, config.Organization, config.TokenPath)
+				owner, recoveryErr := farmcapacity.BindUnregistered(ctx, id, name, config.Organization, config.TokenPath, *target)
 				if recoveryErr != nil {
 					return farmcapacity.OwnerBinding{}, errors.Join(identityErr, recoveryErr)
 				}
@@ -33,16 +37,20 @@ func nativeBinding(controller *farmcapacity.Controller, config *hostcapacity.Con
 				return farmcapacity.OwnerBinding{}, err
 			}
 		}
-		owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerID: runnerID, RunnerName: runnerName, Organization: config.Organization, TokenPath: config.TokenPath}
+		owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerID: runnerID, RunnerName: runnerName, Organization: config.Organization, RegistrationTarget: target, TokenPath: config.TokenPath}
 		return farmcapacity.OwnerBinding{Owner: owner, RunnerID: runnerID, RunnerName: runnerName}, nil
 	}
 }
 
 func recordRegistration(ctx context.Context, controller *farmcapacity.Controller, config *hostcapacity.Config, name, id string) error {
+	target, err := controller.RegistrationTarget(ctx, name, id)
+	if err != nil {
+		return err
+	}
 	attempt, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	for {
-		runnerID, runnerName, err := farmcapacity.Registration(attempt, id, config.Organization, name)
+		runnerID, runnerName, err := farmcapacity.RegistrationForTarget(attempt, id, *target, name)
 		if err == nil {
 			return recordAndPublish(ctx, controller, config, name, id, runnerID, runnerName)
 		}
@@ -57,10 +65,14 @@ func recordRegistration(ctx context.Context, controller *farmcapacity.Controller
 }
 
 func recordAndPublish(ctx context.Context, controller *farmcapacity.Controller, config *hostcapacity.Config, name, id string, runnerID int64, runnerName string) error {
+	target, targetErr := controller.RegistrationTarget(ctx, name, id)
+	if targetErr != nil {
+		return targetErr
+	}
 	if err := controller.RecordRegistration(name, id, runnerID, runnerName); err != nil {
 		return err
 	}
-	owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerID: runnerID, RunnerName: runnerName, Organization: config.Organization, TokenPath: config.TokenPath}
+	owner := &farmcapacity.FrozenOwner{ID: id, Name: name, RunnerID: runnerID, RunnerName: runnerName, Organization: config.Organization, RegistrationTarget: target, TokenPath: config.TokenPath}
 	if err := controller.PublishRouting(ctx, owner); err != nil {
 		return err
 	}

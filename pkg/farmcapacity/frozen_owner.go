@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,15 +21,16 @@ import (
 
 // FrozenOwner is restricted to one immutable native build and its registration.
 type FrozenOwner struct {
-	ID           string
-	Name         string
-	RunnerID     int64
-	RunnerName   string
-	Organization string
-	Legacy       bool
-	Unregistered bool
-	TokenPath    string
-	client       *http.Client
+	RegistrationTarget *hostcapacity.RegistrationTarget `json:"registrationTarget,omitempty"`
+	ID                 string
+	Name               string
+	RunnerID           int64
+	RunnerName         string
+	Organization       string
+	Legacy             bool
+	Unregistered       bool
+	TokenPath          string
+	client             *http.Client
 }
 
 // Registration reads only public agent identity, never runner credentials.
@@ -46,14 +47,21 @@ func LegacyRegistration(ctx context.Context, id, organization, name string) (run
 	return registration(ctx, id, organization, name, true)
 }
 
-func registration(ctx context.Context, id, organization, name string, legacy bool) (runnerID int64, runnerName string, returnErr error) {
+func registration(ctx context.Context, id, organization, name string, legacy bool, targets ...hostcapacity.RegistrationTarget) (runnerID int64, runnerName string, returnErr error) {
+	target := hostcapacity.RegistrationTarget{Scope: "org", Owner: organization}
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	if target.Validate() != nil || target.Owner != organization {
+		return 0, "", errors.New("invalid registration scope target")
+	}
 	if !idPattern.MatchString(id) || (!namePattern.MatchString(name) && (!legacy || !legacyNamePattern.MatchString(name))) {
 		return 0, "", errors.New("invalid native build identity")
 	}
 	const identityScript = `for file in .runner /home/runner/.runner /home/runner/actions-runner/.runner /actions-runner/.runner /runner/.runner; do if [ -f "$file" ]; then cat "$file"; exit; fi; done; exit 1`
 	data, err := exec.CommandContext(ctx, "docker", "exec", id, "sh", "-c", identityScript).Output()
 	if err != nil {
-		return exitedRegistration(ctx, id, organization, name)
+		return exitedRegistration(ctx, id, organization, name, target)
 	}
 	// GitHub's runner writes UTF-8 BOM-prefixed identity files. Match the
 	// existing QA listener parser without relaxing the identity checks below.
@@ -70,11 +78,14 @@ func registration(ctx context.Context, id, organization, name string, legacy boo
 	if err != nil || item.ID != id || item.Name != name || !item.Managed || item.Provider != githubProvider || item.Role != runnerRole || (!ownedBuildPool(item.Pool, item.Name) && (!legacy || !ownedLegacyBuild(item))) {
 		return 0, "", errors.New("native agent owner identity differs")
 	}
+	if (target.Scope == "repo" && item.RegistrationTarget == nil) || (item.RegistrationTarget != nil && *item.RegistrationTarget != target) {
+		return 0, "", errors.New("registration container target differs")
+	}
 	expectedName := item.RegistrationName
 	if !registrationNameMatches(name, expectedName, legacy) {
 		return 0, "", errors.New("native registration name does not match the owned slot")
 	}
-	if identity.AgentID <= 0 || identity.AgentName != expectedName || strings.TrimSuffix(identity.GitHubURL, "/") != "https://github.com/"+organization {
+	if identity.AgentID <= 0 || identity.AgentName != expectedName || strings.TrimSuffix(identity.GitHubURL, "/") != target.URL() {
 		return 0, "", errors.New("native agent does not match the configured organization and owned slot")
 	}
 	return identity.AgentID, identity.AgentName, nil
@@ -87,6 +98,11 @@ func (o *FrozenOwner) container(ctx context.Context) (*Container, error) {
 	}
 	if item.ID != o.ID || item.Name != o.Name || !item.Managed || item.Provider != githubProvider || item.Role != runnerRole || (!ownedBuildPool(item.Pool, item.Name) && (!o.Legacy || !ownedLegacyBuild(item))) {
 		return nil, errors.New("frozen native owner identity differs")
+	}
+	if o.RegistrationTarget != nil {
+		if o.RegistrationTarget.Validate() != nil || o.RegistrationTarget.Owner != o.Organization || (o.RegistrationTarget.Scope == "repo" && item.RegistrationTarget == nil) || (item.RegistrationTarget != nil && *item.RegistrationTarget != *o.RegistrationTarget) {
+			return nil, errors.New("frozen registration target changed")
+		}
 	}
 	return item, nil
 }
@@ -415,6 +431,9 @@ func (o *FrozenOwner) docker(ctx context.Context, action string, arguments ...st
 }
 
 func (o *FrozenOwner) request(ctx context.Context, method string, result *remoteRunner) error {
+	if result == nil {
+		return o.requestEndpoint(ctx, method, "", nil)
+	}
 	return o.requestEndpoint(ctx, method, "", result)
 }
 
@@ -427,7 +446,11 @@ func (o *FrozenOwner) requestEndpoint(ctx context.Context, method, suffix string
 	if token == "" || strings.ContainsAny(token, "\r\n") {
 		return errors.New("native farm credential is invalid")
 	}
-	endpoint := "https://api.github.com/orgs/" + url.PathEscape(o.Organization) + "/actions/runners/" + strconv.FormatInt(o.RunnerID, 10) + suffix
+	base, err := o.registrationAPI()
+	if err != nil {
+		return err
+	}
+	endpoint := base + "/" + strconv.FormatInt(o.RunnerID, 10) + suffix
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, http.NoBody)
 	if err != nil {
 		return err
@@ -465,7 +488,11 @@ func (o *FrozenOwner) requestEndpoint(ctx context.Context, method, suffix string
 }
 
 func (o *FrozenOwner) verifyScopeAccess(ctx context.Context, client *http.Client, token string) error {
-	endpoint := "https://api.github.com/orgs/" + url.PathEscape(o.Organization) + "/actions/runners?per_page=1"
+	base, err := o.registrationAPI()
+	if err != nil {
+		return err
+	}
+	endpoint := base + "?per_page=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return err

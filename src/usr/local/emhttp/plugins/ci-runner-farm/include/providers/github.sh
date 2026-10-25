@@ -665,6 +665,11 @@ github_registry_credentials() {
 github_build_args() {
   local idx="$1"
   local name="${2:-${NAME_PREFIX}-${idx}}" role="${CRF_CONTAINER_ROLE:-runner}" host_service_ip image kvm_gid=''
+  if shared_capacity_native_required; then
+    local registration_target="$GH_OWNER"
+    if [ "$GH_SCOPE" = repo ]; then registration_target="$(github_repo_for_index "$idx")"; fi
+    shared_capacity_native_call validate-registration "$GH_SCOPE" "$registration_target" || { err "registration scope differs from protected Farm policy"; return 1; }
+  fi
   crf_user_share_mount_config_problem || return 1
   crf_shared_cache_mount || return 1
   local pnpm_store_dest='' cache_spec cache_dest

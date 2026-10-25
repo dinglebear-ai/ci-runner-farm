@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/unraid/ci-runner-farm/internal/localchecks"
@@ -47,20 +48,37 @@ func Run(arguments []string, output io.Writer) (result error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "recover-initialize" || arguments[0] == "expand-pools")
+	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "recover-initialize" || arguments[0] == "expand-pools" || arguments[0] == "registration-policy-update")
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, lease.Close()) }()
 	config := lease.Config
+	if arguments[0] == "registration-policy-update" {
+		return updateRegistration(ctx, lease, arguments[1], arguments[2], os.Stdin, output)
+	}
 	if arguments[0] == "expand-pools" {
 		return expandPools(lease, arguments[1], arguments[2])
 	}
 	controller := farmcapacity.Controller{
-		OtherBuildOwner: localchecks.NewBuildRoleOwner(config),
-		Broker:          sharedcapacity.Broker{Path: config.LedgerPath}, Policy: config.Policy,
+		OtherBuildOwner:    localchecks.NewBuildRoleOwner(config),
+		RegistrationPolicy: config,
+		Broker:             sharedcapacity.Broker{Path: config.LedgerPath}, Policy: config.Policy,
 		ReceiptRoot: config.ReceiptRoot, Docker: farmcapacity.NativeDocker{},
 		RepairCache: farmcapacity.RepairNativeCache, Poisoned: farmcapacity.NativePoisoned,
+	}
+	loadRegistration := func(context.Context) error {
+		raw, err := os.ReadFile(hostcapacity.ConfigPath)
+		if err != nil {
+			return err
+		}
+		return farmcapacity.LoadRegistrationAuthority(farmcapacity.RegistrationPolicyPath, config, raw)
+	}
+	controller.BeforeStart = loadRegistration
+	if arguments[0] == "validate-registration" {
+		if err := loadRegistration(ctx); err != nil {
+			return err
+		}
 	}
 	if arguments[0] == "verify-initialize" {
 		if err := verifyCompletedStandalone(config, &controller, arguments[1], arguments[2]); err != nil {
@@ -108,7 +126,7 @@ func validArguments(arguments []string) bool {
 	if len(arguments) == 2 {
 		return arguments[0] == "demand-observe"
 	}
-	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
+	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "registration-policy-update" || arguments[0] == "validate-registration" || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
 }
 
 func verifyFleetLock() error { return hostcapacity.VerifyInheritedFleetLock() }
@@ -120,6 +138,23 @@ func VerifyInheritedFleetLock() error { return verifyFleetLock() }
 func runAction(ctx context.Context, config *hostcapacity.Config, controller *farmcapacity.Controller, arguments []string, output io.Writer) error {
 	bind := nativeBinding(controller, config, true)
 	switch arguments[0] {
+	case "validate-registration":
+		target := hostcapacity.RegistrationTarget{Scope: arguments[1], Owner: config.Organization}
+		if target.Scope == "org" {
+			if arguments[2] != config.Organization {
+				return errors.New("registration owner changed")
+			}
+		} else {
+			owner, repository, ok := strings.Cut(arguments[2], "/")
+			if !ok {
+				return errors.New("invalid repository registration")
+			}
+			target.Owner, target.Repository = owner, repository
+		}
+		if !config.AllowsRegistration(target) {
+			return errors.New("registration target is outside protected policy")
+		}
+		return nil
 	case "start":
 		if err := controller.Start(ctx, arguments[1], arguments[2]); err != nil {
 			return err

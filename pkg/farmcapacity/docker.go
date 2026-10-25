@@ -99,6 +99,10 @@ func (NativeDocker) Inspect(ctx context.Context, identity string) (*Container, e
 			registrationNameSeen = true
 		}
 	}
+	target, targetErr := registrationEnvironment(item.Config.Env)
+	if targetErr != nil {
+		return nil, targetErr
+	}
 	labels := item.Config.Labels
 	const prefix = "net.unraid.ci-runner-farm."
 	issuedAt, parseErr := strconv.ParseInt(labels[prefix+"registration-issued"], 10, 64)
@@ -119,9 +123,10 @@ func (NativeDocker) Inspect(ctx context.Context, identity string) (*Container, e
 	running := nativeFlag(item.State.Running)
 	paused := nativeFlag(item.State.Paused)
 	return &Container{
-		Terminated:       terminatedNative(item.State.Status, item.State.PID, item.State.Running, item.State.Paused, item.State.Restarting, item.HostConfig.RestartPolicy.Name),
-		RegistrationName: registrationName,
-		DockerRoot:       root, ID: item.ID, Name: strings.TrimPrefix(item.Name, "/"), Managed: labels[prefix+"managed"] == "true",
+		Terminated:         terminatedNative(item.State.Status, item.State.PID, item.State.Running, item.State.Paused, item.State.Restarting, item.HostConfig.RestartPolicy.Name),
+		RegistrationName:   registrationName,
+		RegistrationTarget: target,
+		DockerRoot:         root, ID: item.ID, Name: strings.TrimPrefix(item.Name, "/"), Managed: labels[prefix+"managed"] == "true",
 		Provider: labels[prefix+"provider"], Role: labels[prefix+"role"], Pool: labels[prefix+"pool"],
 		MemoryBytes: item.HostConfig.Memory, NanoCPUs: item.HostConfig.NanoCPUs, Running: running, Paused: paused, Exited: !running && !paused && item.State.Status == nativeExitedStatus && item.State.PID != nil && *item.State.PID == 0, NeverStarted: !running && !paused && neverStarted(item.State.Status, item.State.PID, item.State.StartedAt), RegistrationIssuedAt: issuedAt, RoutingLabels: routing, RoutingGated: gated,
 	}, nil

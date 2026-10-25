@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -40,6 +39,9 @@ func (c *Controller) PublishRouting(ctx context.Context, owner *FrozenOwner) err
 	if err != nil {
 		return err
 	}
+	if owned.RegistrationTarget != nil && (owner.RegistrationTarget == nil || *owned.RegistrationTarget != *owner.RegistrationTarget) {
+		return errors.New("routing registration target differs from retained owner")
+	}
 	if owned.ID != owner.ID || owned.Withdrawal == nil || owned.Withdrawal.RunnerID != owner.RunnerID || owned.Withdrawal.RunnerName != owner.RunnerName {
 		return errors.New("routing requires the durable exact registration")
 	}
@@ -57,6 +59,9 @@ func (c *Controller) PublishRouting(ctx context.Context, owner *FrozenOwner) err
 	item, err := c.Docker.Inspect(ctx, owner.ID)
 	if err != nil {
 		return err
+	}
+	if owner.RegistrationTarget != nil && ((owner.RegistrationTarget.Scope == "repo" && item.RegistrationTarget == nil) || (item.RegistrationTarget != nil && *item.RegistrationTarget != *owner.RegistrationTarget)) {
+		return errors.New("routing registration container target changed")
 	}
 	if err := c.validate(item, owner.Name); err != nil {
 		return err
@@ -155,7 +160,11 @@ func (o *FrozenOwner) replaceRouting(ctx context.Context, labels []string) error
 	if err != nil {
 		return err
 	}
-	endpoint := "https://api.github.com/orgs/" + url.PathEscape(o.Organization) + "/actions/runners/" + strconv.FormatInt(o.RunnerID, 10) + "/labels"
+	base, err := o.registrationAPI()
+	if err != nil {
+		return err
+	}
+	endpoint := base + "/" + strconv.FormatInt(o.RunnerID, 10) + "/labels"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return err

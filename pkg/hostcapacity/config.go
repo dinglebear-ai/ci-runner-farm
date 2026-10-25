@@ -28,19 +28,21 @@ type Consumer struct {
 // Config is root-owned operator policy, independent of any consumer's settings.
 // Epoch binds participants to one explicit ownership handoff.
 type Config struct {
-	Schema           int                   `json:"schema"`
-	Host             string                `json:"host"`
-	Epoch            string                `json:"epoch"`
-	Organization     string                `json:"organization"`
-	LedgerPath       string                `json:"ledgerPath"`
-	ReceiptRoot      string                `json:"receiptRoot"`
-	TokenPath        string                `json:"tokenPath"`
-	LockPath         string                `json:"lockPath"`
-	Mode             string                `json:"mode"`
-	Policy           sharedcapacity.Policy `json:"policy"`
-	PoolExpansion    *PoolExpansion        `json:"poolExpansion,omitempty"`
-	Consumers        map[string]Consumer   `json:"consumers,omitempty"`
-	ScanRepositories []string              `json:"scanRepositories,omitempty"`
+	Schema                   int                   `json:"schema"`
+	Host                     string                `json:"host"`
+	Epoch                    string                `json:"epoch"`
+	RegistrationScope        string                `json:"-"`
+	RegistrationRepositories []string              `json:"-"`
+	Organization             string                `json:"organization"`
+	LedgerPath               string                `json:"ledgerPath"`
+	ReceiptRoot              string                `json:"receiptRoot"`
+	TokenPath                string                `json:"tokenPath"`
+	LockPath                 string                `json:"lockPath"`
+	Mode                     string                `json:"mode"`
+	Policy                   sharedcapacity.Policy `json:"policy"`
+	PoolExpansion            *PoolExpansion        `json:"poolExpansion,omitempty"`
+	Consumers                map[string]Consumer   `json:"consumers,omitempty"`
+	ScanRepositories         []string              `json:"scanRepositories,omitempty"`
 }
 
 var epochPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -62,6 +64,9 @@ func (c *Config) Validate(host string) error {
 	}
 	if (c.Mode != "active" && c.Mode != "closed") || c.Schema != 1 || c.Host == "" || c.Host != host || !epochPattern.MatchString(c.Epoch) || !organizationPattern.MatchString(c.Organization) {
 		return errors.New("farm host capacity identity is invalid")
+	}
+	if err := c.ValidateRegistrationPolicy(); err != nil {
+		return err
 	}
 	for _, path := range []string{c.LedgerPath, c.ReceiptRoot, c.TokenPath, c.LockPath} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {

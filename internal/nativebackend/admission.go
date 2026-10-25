@@ -114,6 +114,9 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 		return "", errors.New("native_build_limits_incompatible_with_controller")
 	}
 	owner := hostcapacity.Config{Schema: 1, Host: host, Epoch: hex.EncodeToString(epoch), Organization: config["GH_OWNER"], LedgerPath: filepath.Join(root, "ledger.db"), ReceiptRoot: filepath.Join(root, "receipts"), TokenPath: filepath.Join(s.config, "token"), LockPath: filepath.Join(e.CapacityRoot, "owner.lock"), Mode: "closed", Policy: sharedcapacity.Policy{Budget: sharedcapacity.Resources{MemoryMiB: memory, VCPUs: uint32(cpus)}, AgingSeconds: 300, Pools: map[string]sharedcapacity.Pool{"build": {Cost: sharedcapacity.Resources{MemoryMiB: defaultMemory, VCPUs: defaultCPUs}, MaxCost: sharedcapacity.Resources{MemoryMiB: memory, VCPUs: uint32(cpus)}, Minimum: floor, Maximum: maximum, Priority: 3}}}}
+	if err = bindRegistrationSettings(&owner, config); err != nil {
+		return "", err
+	}
 	if err = owner.Validate(host); err != nil {
 		return "", err
 	}
@@ -127,7 +130,7 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 	if err = CheckDirectory(e.CapacityRoot, 0); err != nil {
 		return "", err
 	}
-	journal := admissionJournal{Schema: 1, Owner: owner}
+	journal := admissionJournal{Schema: 1, Owner: owner, RegistrationScope: owner.EffectiveRegistrationScope(), RegistrationRepositories: owner.RegistrationRepositories}
 	journalBytes, err := json.Marshal(journal)
 	if err != nil {
 		return "", err
@@ -142,8 +145,10 @@ func (s *Service) initializeAdmission(ctx context.Context, values map[string]str
 }
 
 type admissionJournal struct {
-	Schema int                 `json:"schema"`
-	Owner  hostcapacity.Config `json:"owner"`
+	RegistrationScope        string              `json:"registrationScope,omitempty"`
+	RegistrationRepositories []string            `json:"registrationRepositories,omitempty"`
+	Schema                   int                 `json:"schema"`
+	Owner                    hostcapacity.Config `json:"owner"`
 }
 
 // Recover only replays the exact native-owned initialization journal. It never
@@ -175,6 +180,14 @@ func (s *Service) recoverAdmission(ctx context.Context) (string, error) {
 	if json.Unmarshal([]byte(out), &config) != nil || e.BoundCache == "" || config["CACHE_ROOT"] != e.BoundCache || journal.Owner.LedgerPath != filepath.Join(config["CACHE_ROOT"], "native-capacity", "ledger.db") || journal.Owner.ReceiptRoot != filepath.Join(config["CACHE_ROOT"], "native-capacity", "receipts") || journal.Owner.Organization != config["GH_OWNER"] {
 		return "", errors.New("initialization_settings_changed_restore_original_binding")
 	}
+	expectedScope := journal.Owner
+	plannedScope := journal.RegistrationScope
+	if plannedScope == "" {
+		plannedScope = "org"
+	}
+	if bindRegistrationSettings(&expectedScope, config) != nil || expectedScope.EffectiveRegistrationScope() != plannedScope || !reflect.DeepEqual(expectedScope.RegistrationRepositories, journal.RegistrationRepositories) {
+		return "", errors.New("initialization_registration_scope_changed")
+	}
 	if _, err = os.Lstat(hostcapacity.ConfigPath); errors.Is(err, os.ErrNotExist) {
 		bytes, encodeErr := json.Marshal(journal.Owner)
 		if encodeErr != nil {
@@ -190,6 +203,8 @@ func (s *Service) recoverAdmission(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	journal.Owner.RegistrationScope = expectedScope.RegistrationScope
+	journal.Owner.RegistrationRepositories = expectedScope.RegistrationRepositories
 	return s.resumeAdmission(ctx, e, e.CapacityRoot, journal.Owner, current)
 }
 
@@ -209,6 +224,9 @@ func (s *Service) resumeAdmission(ctx context.Context, engine Runner, capacityRo
 		if err != nil {
 			return log, err
 		}
+		if err := s.finishRegistrationInitialization(ctx, owner); err != nil {
+			return "", err
+		}
 		return "Existing initialization verified; completed journal retired.", nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -218,8 +236,13 @@ func (s *Service) resumeAdmission(ctx context.Context, engine Runner, capacityRo
 
 func validateRecoveryOwner(planned, current *hostcapacity.Config) error {
 	copy := *current
+	plannedCopy := *planned
+	plannedCopy.RegistrationScope = ""
+	plannedCopy.RegistrationRepositories = nil
+	copy.RegistrationScope = ""
+	copy.RegistrationRepositories = nil
 	copy.Mode = "closed"
-	if (current.Mode != "closed" && current.Mode != "active") || !reflect.DeepEqual(planned, &copy) {
+	if (current.Mode != "closed" && current.Mode != "active") || !reflect.DeepEqual(&plannedCopy, &copy) {
 		return errors.New("initialization_owner_changed_recovery_refused")
 	}
 	return nil
@@ -243,6 +266,9 @@ func (s *Service) finishAdmission(ctx context.Context, engine Runner, capacityRo
 	log, err := engine.Run(ctx, action, args, "")
 	if err != nil {
 		return log, fmt.Errorf("initialization completion unconfirmed; original owner preserved; inspect admission and closure state, then use Recover admission: %w", err)
+	}
+	if err := s.finishRegistrationInitialization(ctx, owner); err != nil {
+		return "", err
 	}
 	return "Standalone Farm admission initialized using the original owner and controller.", nil
 }
@@ -316,4 +342,36 @@ func readProtectedInitializationClosure(path string) ([]byte, error) {
 		return nil, errors.New("unsafe_initialization_closure")
 	}
 	return io.ReadAll(io.LimitReader(f, 257))
+}
+
+func bindRegistrationSettings(owner *hostcapacity.Config, settings map[string]string) error {
+	owner.RegistrationScope = settings["GH_SCOPE"]
+	if owner.RegistrationScope == "" {
+		owner.RegistrationScope = "org"
+	}
+	owner.RegistrationRepositories = nil
+	if owner.RegistrationScope == "repo" {
+		owner.RegistrationRepositories = strings.Fields(settings["GH_REPOS"])
+	}
+	return owner.ValidateRegistrationPolicy()
+}
+
+func (s *Service) finishRegistrationInitialization(ctx context.Context, owner hostcapacity.Config) error {
+	if owner.EffectiveRegistrationScope() == "repo" {
+		proposal := s.registrationPolicyProposal()
+		if !proposal.OK {
+			return errors.New("repository_registration_policy_review_required_after_shared_activation")
+		}
+		var materials map[string]any
+		if json.Unmarshal([]byte(proposal.Data.(string)), &materials) != nil {
+			return errors.New("repository_registration_policy_proposal_invalid")
+		}
+		if materials["changed"] == true {
+			_, err := s.updateRegistrationPolicy(ctx, map[string]string{"expectedPolicySHA256": materials["expectedPolicySHA256"].(string), "expectedSettingsSHA256": materials["expectedSettingsSHA256"].(string), "expectedRegistrationPolicySHA256": materials["expectedRegistrationPolicySHA256"].(string)})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

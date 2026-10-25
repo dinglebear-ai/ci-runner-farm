@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/unraid/ci-runner-farm/internal/remotehost"
+	"github.com/unraid/ci-runner-farm/pkg/farmcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
 )
@@ -49,7 +50,7 @@ func verifyAppliedSetup(p remotehost.SetupProposal, artifact remotehost.PackageV
 	if p.Validate() != nil || !installed.valid() || artifact.SHA256 != p.PackageSHA256 || artifact.Version != installed.Version || artifact.TreeSHA256 != installed.TreeSHA256 || artifact.ManifestSHA256 != installed.ManifestSHA256 || artifact.BackendSHA256 != installed.BackendSHA256 {
 		return zero, refuse
 	}
-	if policy == nil || policy.Validate(host) != nil || policy.Mode != "active" || policy.Organization != p.Owner || len(policy.ScanRepositories) != 1 || policy.ScanRepositories[0] != p.Owner+"/"+p.Repository || policy.PoolExpansion != nil {
+	if policy == nil || policy.Validate(host) != nil || policy.Mode != "active" || policy.Organization != p.Owner || policy.EffectiveRegistrationScope() != "repo" || len(policy.RegistrationRepositories) != 1 || policy.RegistrationRepositories[0] != p.Owner+"/"+p.Repository || len(policy.ScanRepositories) != 1 || policy.ScanRepositories[0] != p.Owner+"/"+p.Repository || policy.PoolExpansion != nil {
 		return zero, refuse
 	}
 	expected := map[string]string{"CI_PROVIDER": "github", "GH_SCOPE": "repo", "RUNNER_MODE": "single", "GH_OWNER": p.Owner, "GH_REPOS": p.Owner + "/" + p.Repository, "RUNNER_COUNT": "1", "CACHE_ROOT": boundCache}
@@ -129,6 +130,10 @@ func (s *Service) remoteAppliedSetup(r Request) Response {
 	policy, err := hostcapacity.Load(hostcapacity.ConfigPath)
 	if err != nil {
 		return fail("remote_setup_policy_unavailable")
+	}
+	sharedRaw, readErr := readRegistrationPolicyEvidence(hostcapacity.ConfigPath, 0)
+	if readErr != nil || farmcapacity.LoadRegistrationAuthority(farmcapacity.RegistrationPolicyPath, policy, sharedRaw) != nil {
+		return fail("remote_setup_registration_policy_unavailable")
 	}
 	raw, err = engine.Run(ctx, "native-admission-status", nil, "")
 	if err != nil {

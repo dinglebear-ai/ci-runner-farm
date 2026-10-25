@@ -3,8 +3,12 @@ package localchecks
 import (
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/unraid/ci-runner-farm/pkg/farmcapacity"
 	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
@@ -80,4 +84,56 @@ func (o *BuildRoleOwner) RetireGrant(ctx context.Context, g sharedcapacity.Grant
 		return err
 	}
 	return w.Complete(ctx, r.Request.RequestID)
+}
+
+// VerifyReleasedIntents is called only while the existing FD8/policy lease is
+// held. Empty broker counts do not retire an uncertain owner intent.
+func (o *BuildRoleOwner) VerifyReleasedIntents(ctx context.Context) error {
+	root := filepath.Join(o.configuration.ReceiptRoot, "local-checks")
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(fd), root)
+	defer directory.Close()
+	info, err := directory.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0077 != 0 {
+		return errors.New("local_checks_private_intent_root_required")
+	}
+	entries, err := directory.ReadDir(4097)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if len(entries) > 4096 {
+		return errors.New("local_checks_intent_inventory_bound")
+	}
+	w := &nativeWorker{epoch: o.configuration.Epoch, root: root}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			return errors.New("local_checks_unknown_owner_intent")
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		r, err := w.load(id)
+		if err != nil {
+			return err
+		}
+		if r.State != "released" || r.Worker.Validate() != nil {
+			return errors.New("local_checks_unreleased_owner_intent")
+		}
+		var driver NativeDriver = DockerNativeDriver{Image: r.Worker.Image, SourceRoot: r.Worker.SourceRoot, DockerRoot: r.Worker.DockerRoot}
+		if o.driver != nil {
+			driver = o.driver(r.Worker)
+		}
+		if _, err = driver.Inspect(ctx, r.ContainerID); !errors.Is(err, ErrNativeContainerMissing) {
+			return errors.New("local_checks_released_owner_absence_unproved")
+		}
+	}
+	return nil
 }

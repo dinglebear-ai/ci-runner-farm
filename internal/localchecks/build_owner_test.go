@@ -52,3 +52,33 @@ func TestRegisteredBuildRolePreservesBusyJobsAndRetiresOnlyStoppedOwner(t *testi
 		t.Fatal(final, err)
 	}
 }
+
+func TestScopeUpdateIdleProofRejectsUnreleasedIntentAndRequiresAbsence(t *testing.T) {
+	w, d, s := nativeFixture(t)
+	if _, err := w.AdmitStart(t.Context(), s, d.container.ID); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(w.root)
+	target := filepath.Join(root, "local-checks")
+	if err := os.Rename(w.root, target); err != nil {
+		t.Fatal(err)
+	}
+	w.root = target
+	owner := NewBuildRoleOwner(&hostcapacity.Config{Epoch: w.epoch, ReceiptRoot: root})
+	owner.driver = func(WorkerBinding) NativeDriver { return d }
+	if err := owner.VerifyReleasedIntents(t.Context()); err == nil {
+		t.Fatal("active owner intent accepted despite possible empty ledger")
+	}
+	d.container.Running = false
+	d.container.Stopped = true
+	if err := w.Complete(t.Context(), s.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.VerifyReleasedIntents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	d.missing = false
+	if err := owner.VerifyReleasedIntents(t.Context()); err == nil {
+		t.Fatal("released receipt alone proved absence")
+	}
+}

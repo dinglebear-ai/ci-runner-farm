@@ -213,6 +213,15 @@ func (s *Service) Handle(r Request) Response {
 			return fail("confirmation_required")
 		}
 		return s.launch(r, func(ctx context.Context) (string, error) { return s.recoverAdmission(ctx) })
+	case "registration-policy-proposal":
+		return s.registrationPolicyProposal()
+	case "registration-policy-status":
+		return s.observeRegistrationPolicy(r.Value)
+	case "update-registration-policy":
+		if !r.Confirm {
+			return fail("confirmation_required")
+		}
+		return s.launch(r, func(ctx context.Context) (string, error) { return s.updateRegistrationPolicy(ctx, r.Values) })
 	case "initialize-admission":
 		if !r.Confirm {
 			return fail("confirmation_required")

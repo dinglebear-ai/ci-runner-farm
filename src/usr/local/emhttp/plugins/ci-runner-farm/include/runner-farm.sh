@@ -4674,6 +4674,9 @@ cmd_native_standalone_preflight() {
     [ ! -e "${CRF_CAPACITY_ROOT:-$CFGDIR}/$marker" ] && [ ! -L "${CRF_CAPACITY_ROOT:-$CFGDIR}/$marker" ] || return 1
   done
 }
+cmd_native_registration_policy_update() {
+  cmd_native_config_json | shared_capacity_native_call registration-policy-update "$1" "$2"
+}
 cmd_native_config_json() {
   local key comma="" value
   printf '{'
@@ -4714,6 +4717,7 @@ case "${1:-status}" in
   native-recover-initialize) with_fleet_lock wait shared_capacity_native_call recover-initialize "${2:-}" "${3:-}" ;;
   native-verify-initialize) with_fleet_lock wait shared_capacity_native_call verify-initialize "${2:-}" "${3:-}" ;;
   native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
+  native-registration-policy-update) with_fleet_lock wait cmd_native_registration_policy_update "${2:-}" "${3:-}" ;;
   native-config-json) cmd_native_config_json ;;
   native-config-check) cmd_native_config_check ;;
   admission-close) with_fleet_lock wait cmd_admission_close ;;

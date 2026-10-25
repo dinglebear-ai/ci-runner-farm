@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unraid/ci-runner-farm/pkg/hostcapacity"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -16,11 +16,18 @@ import (
 
 // BindUnregistered recovers only a positively exited, routing-gated native
 // owner. Absence of local diagnostics alone never authorizes removal.
-func BindUnregistered(ctx context.Context, id, name, organization, tokenPath string) (*FrozenOwner, error) {
+func BindUnregistered(ctx context.Context, id, name, organization, tokenPath string, targets ...hostcapacity.RegistrationTarget) (*FrozenOwner, error) {
 	if !idPattern.MatchString(id) || !namePattern.MatchString(name) {
 		return nil, errors.New("invalid unregistered native identity")
 	}
 	owner := &FrozenOwner{ID: id, Name: name, Organization: organization, TokenPath: tokenPath, Unregistered: true}
+	if len(targets) > 0 {
+		target := targets[0]
+		if target.Validate() != nil || target.Owner != organization {
+			return nil, errors.New("invalid unregistered target")
+		}
+		owner.RegistrationTarget = &target
+	}
 	item, err := owner.container(ctx)
 	if err != nil {
 		return nil, err
@@ -72,7 +79,11 @@ func (o *FrozenOwner) unregisteredGone(ctx context.Context) (bool, error) {
 	total := -1
 	seen := map[int64]bool{}
 	for page := 1; page <= 100; page++ {
-		endpoint := fmt.Sprintf("https://api.github.com/orgs/%s/actions/runners?per_page=100&page=%d", url.PathEscape(o.Organization), page)
+		base, scopeErr := o.registrationAPI()
+		if scopeErr != nil {
+			return false, scopeErr
+		}
+		endpoint := fmt.Sprintf("%s?per_page=100&page=%d", base, page)
 		req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 		if requestErr != nil {
 			return false, requestErr
