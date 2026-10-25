@@ -65,7 +65,7 @@ func TestDaemonShellPreservesExactFixedDockerdArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := workerDaemonArguments()
-	args[1] = strings.Replace(args[1], "/usr/local/bin/unraid-cgroup-bootstrap.sh", ":", 1)
+	args[1] = "set -Eeuo pipefail;" + strings.SplitN(args[1], "/usr/local/bin/unraid-cgroup-bootstrap.sh;", 2)[1]
 	args[1] = strings.Replace(args[1], "exec dockerd", "exec "+strconv.Quote(fixture), 1)
 	out, err := exec.Command("/bin/bash", args...).CombinedOutput()
 	var want strings.Builder
@@ -74,5 +74,54 @@ func TestDaemonShellPreservesExactFixedDockerdArguments(t *testing.T) {
 	}
 	if err != nil || string(out) != want.String() {
 		t.Fatalf("daemon argument transport changed: %q %v", out, err)
+	}
+}
+
+func TestDaemonSelectsNftInsideWorkerBeforeDockerd(t *testing.T) {
+	args := workerDaemonArguments()
+	for _, required := range []string{"/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft", "update-alternatives --set iptables /usr/sbin/iptables-nft", "update-alternatives --set ip6tables /usr/sbin/ip6tables-nft"} {
+		if !strings.Contains(args[1], required) {
+			t.Fatalf("missing worker-local nft selection: %s", required)
+		}
+	}
+	if strings.Index(args[1], "update-alternatives --set") > strings.Index(args[1], "exec dockerd") {
+		t.Fatal("nft selected after daemon")
+	}
+}
+
+func TestDaemonNftSelectionExecutesAndRefusesFailures(t *testing.T) {
+	for _, failure := range []string{"", "alternatives", "version"} {
+		t.Run(failure, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(name, body string) string {
+				p := filepath.Join(root, name)
+				if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0700); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}
+			log := filepath.Join(root, "calls")
+			write("update-alternatives", "printf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$FAILURE\" != alternatives ]\n")
+			nft := write("nft", "if [ \"$FAILURE\" = version ]; then echo 'iptables (legacy)'; else echo 'iptables (nf_tables)'; fi\n")
+			bootstrap := write("bootstrap", "echo bootstrap >> \"$CALLS\"\n")
+			daemon := write("dockerd", "echo daemon >> \"$CALLS\"\n")
+			args := workerDaemonArguments()
+			for _, path := range []string{"/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft", "/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
+				args[1] = strings.ReplaceAll(args[1], path, nft)
+			}
+			args[1] = strings.ReplaceAll(args[1], "/usr/local/bin/unraid-cgroup-bootstrap.sh", bootstrap)
+			args[1] = strings.ReplaceAll(args[1], "exec dockerd", "exec "+daemon)
+			cmd := exec.Command("/bin/bash", args...)
+			cmd.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "CALLS="+log, "FAILURE="+failure)
+			out, err := cmd.CombinedOutput()
+			data, _ := os.ReadFile(log)
+			if failure == "" {
+				if err != nil || !strings.HasSuffix(string(data), "bootstrap\ndaemon\n") {
+					t.Fatalf("%s %s %v", out, data, err)
+				}
+			} else if err == nil || strings.Contains(string(data), "bootstrap") || strings.Contains(string(data), "daemon") {
+				t.Fatalf("failed nft setup reached daemon: %s %v", data, err)
+			}
+		})
 	}
 }

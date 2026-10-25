@@ -46,5 +46,5 @@ func (d DockerNativeDriver) Create(ctx context.Context, s Submission) (string, e
 }
 
 func workerDaemonArguments() []string {
-	return []string{"-c", `set -Eeuo pipefail; /usr/local/bin/unraid-cgroup-bootstrap.sh; exec dockerd "$@"`, "farm-local-checks-daemon", "--host=unix:///var/run/docker.sock", "--data-root=/var/lib/docker", "--exec-root=/run/farm-docker", "--pidfile=/run/farm-docker.pid"}
+	return []string{"-c", `set -Eeuo pipefail; test -x /usr/sbin/iptables-nft; test -x /usr/sbin/ip6tables-nft; update-alternatives --set iptables /usr/sbin/iptables-nft; update-alternatives --set ip6tables /usr/sbin/ip6tables-nft; /usr/sbin/iptables --version | grep -q nf_tables; /usr/sbin/ip6tables --version | grep -q nf_tables; /usr/local/bin/unraid-cgroup-bootstrap.sh; exec dockerd "$@"`, "farm-local-checks-daemon", "--host=unix:///var/run/docker.sock", "--data-root=/var/lib/docker", "--exec-root=/run/farm-docker", "--pidfile=/run/farm-docker.pid"}
 }
