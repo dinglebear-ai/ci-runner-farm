@@ -17,7 +17,7 @@ func (s *Service) remoteHosts(r Request) Response {
 		return fail("remote_host_authenticated_actor_required")
 	}
 	for key := range r.Values {
-		if key != "actor" && !((r.Action == "remote-package-stage" || r.Action == "remote-package-observe") && (key == "sha256" || (r.Action == "remote-package-observe" && key == "operationID"))) {
+		if key != "actor" && !((r.Action == "remote-host-setup" || r.Action == "remote-host-setup-observe") && key == "proposal") && !((r.Action == "remote-package-stage" || r.Action == "remote-package-observe") && (key == "sha256" || (r.Action == "remote-package-observe" && key == "operationID"))) {
 			return fail("invalid_remote_host_request")
 		}
 	}
@@ -91,6 +91,28 @@ func (s *Service) remoteHosts(r Request) Response {
 			}
 			encoded, err := json.Marshal(receipt)
 			return string(encoded), err
+		})
+
+	case "remote-host-setup", "remote-host-setup-observe":
+		var p remotehost.SetupProposal
+		decoder := json.NewDecoder(bytes.NewBufferString(r.Values["proposal"]))
+		decoder.DisallowUnknownFields()
+		if len(r.Values["proposal"]) > 8192 || decoder.Decode(&p) != nil || decoder.Decode(new(any)) != io.EOF {
+			return fail("invalid_remote_setup_proposal")
+		}
+		return s.launch(r, func(ctx context.Context) (string, error) {
+			observe := r.Action == "remote-host-setup-observe"
+			if !observe {
+				s.mu.Lock()
+				p.OperationID = s.active.ID
+				s.mu.Unlock()
+			}
+			result, err := remotehost.ProposeSetup(ctx, root, actor, r.Value, p, observe)
+			if err != nil {
+				return "", err
+			}
+			raw, err := json.Marshal(result)
+			return string(raw), err
 		})
 
 	case "remote-host-list":

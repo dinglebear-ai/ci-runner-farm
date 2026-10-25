@@ -25,6 +25,7 @@ type ProtectedBinding struct {
 	Image                  string `json:"image"`
 	Root                   string `json:"root"`
 	RuntimeQualified       bool   `json:"runtimeQualified"`
+	QualificationSHA256    string `json:"qualificationSHA256,omitempty"`
 	CanarySubmissionSHA256 string `json:"canarySubmissionSHA256,omitempty"`
 }
 
@@ -82,6 +83,11 @@ func RunProtected(ctx context.Context, bindingPath string, input io.Reader, outp
 	}
 	if !binding.RuntimeQualified && command.Action != "qualify" && command.Action != "complete" && command.Action != "cancel" && (binding.CanarySubmissionSHA256 == "" || (command.Action != "create-admit" && command.Action != "execute")) {
 		return errors.New("local_checks_runtime_not_qualified")
+	}
+	if binding.RuntimeQualified && command.Action != "cancel" && command.Action != "complete" && command.Action != "qualify" {
+		if err := VerifyRuntimeQualification(bindingPath, binding); err != nil {
+			return err
+		}
 	}
 	if binding.Epoch != command.Epoch {
 		return errors.New("local_checks_native_owner_changed")

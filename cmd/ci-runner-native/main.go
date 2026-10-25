@@ -21,6 +21,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--local-checks-readiness" {
+		if localchecks.WriteRuntimeReadiness(os.Args[2], os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) == 2 && os.Args[1] == "--local-checks-probe" {
 		if err := localchecks.WriteKernelProbe(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "local_checks_kernel_probe_failed")

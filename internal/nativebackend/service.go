@@ -114,8 +114,27 @@ func ValidateOperation(r Request) (string, []string, error) {
 
 func (s *Service) Handle(r Request) Response {
 	switch r.Action {
-	case "remote-host-list", "remote-host-create", "remote-host-status", "remote-package-upload", "remote-package-list", "remote-package-stage", "remote-package-observe":
+	case "remote-host-list", "remote-host-create", "remote-host-status", "remote-package-upload", "remote-package-list", "remote-package-stage", "remote-package-observe", "remote-host-setup", "remote-host-setup-observe":
 		return s.remoteHosts(r)
+	case "remote-setup-list", "remote-setup-propose":
+		return s.remoteSetup(r)
+	case "local-checks-readiness":
+		if r.Value != "" || r.Kind != "" || len(r.Args) != 0 || len(r.Values) != 0 {
+			return fail("invalid_local_checks_readiness_request")
+		}
+		engine, ok := s.engine.(*Engine)
+		if !ok {
+			return fail("local_checks_readiness_unavailable")
+		}
+		raw, err := engine.LocalChecksReadiness(context.Background())
+		if err != nil {
+			return fail("local_checks_readiness_unavailable")
+		}
+		var view map[string]any
+		if json.Unmarshal([]byte(raw), &view) != nil {
+			return fail("local_checks_readiness_unavailable")
+		}
+		return success(view)
 	case "local-checks-contract":
 		return success(localchecks.NativeWorkerContract())
 	case "local-checks":

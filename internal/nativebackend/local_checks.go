@@ -69,3 +69,16 @@ func (e *Engine) RunLocalChecks(ctx context.Context, request string, dependency 
 	err = command.Run()
 	return string(out.data), err
 }
+
+func (e *Engine) LocalChecksReadiness(ctx context.Context) (string, error) {
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(bounded, e.Executable, "--local-checks-readiness", filepath.Join(e.Config, "native-local-checks.json"))
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=/nonexistent"}
+	var out tailBuffer
+	out.limit = 32768
+	command.Stdout = &out
+	command.Stderr = io.Discard
+	err := command.Run()
+	return string(out.data), err
+}
