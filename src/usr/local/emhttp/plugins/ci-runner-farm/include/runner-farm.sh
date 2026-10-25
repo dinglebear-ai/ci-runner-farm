@@ -2421,6 +2421,12 @@ with_fleet_lock() {
     ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; reload_locked_snapshot || exit 1; "$@" ) 8>"$RUNDIR/fleet.lock"
   fi
 }
+# Closed classic transport: the existing fleet owner supplies FD8; protected
+# stdin is decoded by the capacity binary. No caller-selected binding/path.
+cmd_classic_local_checks() {
+  [ "$#" -eq 0 ] || { err "local-checks accepts protected stdin only"; return 1; }
+  with_fleet_lock wait shared_capacity_native_call local-checks
+}
 cmd_restart() { cmd_stop || return 1; reload_locked_snapshot || return 1; cmd_start; }
 
 # Operator convenience: (re)start the shared image cache + regenerate the runner DinD
@@ -4692,6 +4698,7 @@ if [ "${CRF_SOURCE_ONLY:-0}" = 1 ]; then
 fi
 
 case "${1:-status}" in
+  local-checks) shift; cmd_classic_local_checks "$@" ;;
   native-image-drain-tick) with_fleet_lock wait imageupdate_rollover true ;;
   native-admission-status) with_fleet_lock wait shared_capacity_call status ;;
   native-build-limits) cmd_native_build_limits ;;
