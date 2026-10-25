@@ -114,6 +114,8 @@ func ValidateOperation(r Request) (string, []string, error) {
 
 func (s *Service) Handle(r Request) Response {
 	switch r.Action {
+	case "remote-host-list", "remote-host-create", "remote-host-status", "remote-package-upload", "remote-package-list", "remote-package-stage", "remote-package-observe":
+		return s.remoteHosts(r)
 	case "local-checks-contract":
 		return success(localchecks.NativeWorkerContract())
 	case "local-checks":

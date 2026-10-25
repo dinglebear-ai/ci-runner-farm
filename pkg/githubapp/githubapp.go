@@ -154,7 +154,14 @@ func (m *Minter) fresh() bool {
 }
 
 func (m *Minter) lock(ctx context.Context) (func(), error) {
-	file, err := os.OpenFile(m.TokenPath+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	return AcquireCredentialLease(ctx, m.TokenPath)
+}
+
+// AcquireCredentialLease reuses token refresh's bounded cross-process flock for
+// protected credential inventories. The caller owns/protects the parent path;
+// it does not create a policy, capacity grant, scheduler or credential request.
+func AcquireCredentialLease(ctx context.Context, credentialPath string) (func(), error) {
+	file, err := os.OpenFile(credentialPath+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("github app: open token lock: %w", err)
 	}
