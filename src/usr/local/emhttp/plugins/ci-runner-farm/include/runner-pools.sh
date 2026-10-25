@@ -127,6 +127,12 @@ pool_config_validate() {
   if [ "$provider" = github ] && [ "$scope" != org ]; then
     local owner="${5:-}" repository="${6:-}" name
     name="${repository#*/}"
+    case "$owner" in
+      *[!A-Za-z0-9-]*) pool_error "GitHub repository owner contains unsupported characters."; return 1 ;;
+    esac
+    case "$repository" in
+      *[!A-Za-z0-9_./-]*) pool_error "GitHub repository contains unsupported characters."; return 1 ;;
+    esac
     if [ "$scope" != repo ] || [ "${#owner}" -gt 39 ] ||
        ! printf '%s' "$owner" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$' ||
        [ "$repository" != "$owner/$name" ] || [ "${#name}" -gt 100 ] ||

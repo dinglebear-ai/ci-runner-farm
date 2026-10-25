@@ -37,6 +37,10 @@ reject pools "$valid" repo github dinglebear-ai ' dinglebear-ai/labby'
 reject pools "$valid" repo github dinglebear-ai 'dinglebear-ai/..'
 reject pools "$valid" repo github '-bad' '-bad/labby'
 reject pools "$valid" repo github dinglebear-ai ''
+reject pools "$valid" repo github $'dinglebear-ai\nother' $'dinglebear-ai\nother/labby'
+reject pools "$valid" repo github dinglebear-ai $'dinglebear-ai/labby\nother'
+reject pools "$valid" repo github dinglebear-ai $'dinglebear-ai/labby\r'
+reject pools "$valid" repo github dinglebear-ai $'dinglebear-ai/labby\t'
 
 RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true
 [ "$(pool_routing_label qa-vm)" = qa-vm-client ] && ok || bad 'routing label mismatch'
