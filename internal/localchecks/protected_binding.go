@@ -2,6 +2,8 @@ package localchecks
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,12 +19,13 @@ import (
 // worker image and private root. Network requests cannot supply or override it.
 // Qualification-only bindings cannot authorize ordinary checks before acceptance.
 type ProtectedBinding struct {
-	Version          int    `json:"version"`
-	Epoch            string `json:"epoch"`
-	Host             string `json:"host"`
-	Image            string `json:"image"`
-	Root             string `json:"root"`
-	RuntimeQualified bool   `json:"runtimeQualified"`
+	Version                int    `json:"version"`
+	Epoch                  string `json:"epoch"`
+	Host                   string `json:"host"`
+	Image                  string `json:"image"`
+	Root                   string `json:"root"`
+	RuntimeQualified       bool   `json:"runtimeQualified"`
+	CanarySubmissionSHA256 string `json:"canarySubmissionSHA256,omitempty"`
 }
 
 func LoadProtectedBinding(path string) (ProtectedBinding, error) {
@@ -53,7 +56,7 @@ func loadProtectedBinding(path string, owner uint32, qualificationOnly ...bool) 
 	if decoder.Decode(&b) != nil || decoder.Decode(new(any)) != io.EOF {
 		return b, errors.New("local_checks_protected_binding_invalid")
 	}
-	if b.Version != 1 || !nativeEpoch.MatchString(b.Epoch) || !identifier.MatchString(b.Host) || !filepath.IsAbs(b.Root) || filepath.Clean(b.Root) != b.Root || b.Root == "/" || (!b.RuntimeQualified && !(len(qualificationOnly) == 1 && qualificationOnly[0])) {
+	if (b.CanarySubmissionSHA256 != "" && !bundleID.MatchString(b.CanarySubmissionSHA256)) || b.Version != 1 || !nativeEpoch.MatchString(b.Epoch) || !identifier.MatchString(b.Host) || !filepath.IsAbs(b.Root) || filepath.Clean(b.Root) != b.Root || b.Root == "/" || (!b.RuntimeQualified && !(len(qualificationOnly) == 1 && qualificationOnly[0])) {
 		return b, errors.New("local_checks_runtime_not_qualified")
 	}
 	if err := (WorkerBinding{Image: b.Image, SourceRoot: filepath.Join(b.Root, "source"), DockerRoot: filepath.Join(b.Root, "docker")}).Validate(); err != nil {
@@ -73,9 +76,12 @@ func RunProtected(ctx context.Context, bindingPath string, input io.Reader, outp
 	if err != nil {
 		return err
 	}
-	binding, err := loadProtectedBinding(bindingPath, 0, command.Action == "qualify" || command.Action == "complete" || command.Action == "cancel")
+	binding, err := loadProtectedBinding(bindingPath, 0, true)
 	if err != nil {
 		return err
+	}
+	if !binding.RuntimeQualified && command.Action != "qualify" && command.Action != "complete" && command.Action != "cancel" && (binding.CanarySubmissionSHA256 == "" || (command.Action != "create-admit" && command.Action != "execute")) {
+		return errors.New("local_checks_runtime_not_qualified")
 	}
 	if binding.Epoch != command.Epoch {
 		return errors.New("local_checks_native_owner_changed")
@@ -86,6 +92,9 @@ func RunProtected(ctx context.Context, bindingPath string, input io.Reader, outp
 	}
 	root := filepath.Join(binding.Root, requestID)
 	configuration := NativeConfiguration{ConfigPath: hostcapacity.ConfigPath, Epoch: binding.Epoch, Image: binding.Image, Host: binding.Host, SnapshotRoot: root, DockerRoot: filepath.Join(root, "docker"), EvidenceRoot: filepath.Join(root, "evidence")}
+	if !binding.RuntimeQualified && binding.CanarySubmissionSHA256 != "" {
+		configuration.CanarySubmissionSHA256 = binding.CanarySubmissionSHA256
+	}
 	if dependency != "" {
 		configuration.SecretEnvironment = []string{"EX_STANDARDS_TOKEN=" + dependency}
 	}
@@ -129,4 +138,20 @@ func preparePrivateDockerRoot(root, path string, owner uint32) error {
 		return errors.New("local_checks_private_worker_directory_required")
 	}
 	return privateOwnedDirectory(path, owner)
+}
+
+// submissionDigest pins the full closed typed submission, including all budgets.
+func submissionDigest(s Submission) string {
+	raw, _ := json.Marshal(s)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+func (b ProtectedBinding) authorizeCanary(action string, s Submission) error {
+	if b.RuntimeQualified {
+		return nil
+	}
+	if (action != "create-admit" && action != "execute") || !bundleID.MatchString(b.CanarySubmissionSHA256) || s.Validate() != nil || submissionDigest(s) != b.CanarySubmissionSHA256 {
+		return errors.New("local_checks_canary_submission_mismatch")
+	}
+	return nil
 }

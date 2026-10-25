@@ -75,6 +75,7 @@ func DecodeNativeCommand(reader io.Reader) (NativeCommand, error) {
 // not by coordinator requests. No caller-selected path/daemon/image is accepted.
 type NativeConfiguration struct {
 	ConfigPath, Epoch, Image, SnapshotRoot, DockerRoot, Host, EvidenceRoot string
+	CanarySubmissionSHA256                                                 string
 	SecretEnvironment                                                      []string // In-memory delivery from the protected credential owner only.
 }
 
@@ -98,6 +99,11 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 				return errors.New("local_checks_native_command_invalid")
 			}
 			s := *command.Submission
+			if configuration.CanarySubmissionSHA256 != "" && command.Action != "qualify" {
+				if err := (ProtectedBinding{CanarySubmissionSHA256: configuration.CanarySubmissionSHA256}).authorizeCanary(command.Action, s); err != nil {
+					return err
+				}
+			}
 			if err := verifyNativeSnapshot(ctx, configuration, s); err != nil {
 				return err
 			}
@@ -123,6 +129,19 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 			}
 			return operationErr
 		case "execute":
+			if configuration.CanarySubmissionSHA256 != "" {
+				native, ok := worker.(*nativeWorker)
+				if !ok {
+					return errors.New("local_checks_canary_receipt_required")
+				}
+				current, err := native.load(command.RequestID)
+				if err != nil {
+					return err
+				}
+				if err := (ProtectedBinding{CanarySubmissionSHA256: configuration.CanarySubmissionSHA256}).authorizeCanary(command.Action, current.Request); err != nil {
+					return err
+				}
+			}
 			_, operationErr := worker.ExecuteChecks(ctx, command.RequestID, configuration.Host, configuration.EvidenceRoot, configuration.SecretEnvironment)
 			if native, ok := worker.(*nativeWorker); ok {
 				receipt, _ = native.load(command.RequestID)

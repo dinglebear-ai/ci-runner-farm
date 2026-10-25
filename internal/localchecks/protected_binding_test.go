@@ -77,3 +77,33 @@ func protectedFixtureBinding(t *testing.T, qualified bool) string {
 	}
 	return path
 }
+
+func TestProtectedCanaryPinsCompleteSubmissionWithoutGeneralQualification(t *testing.T) {
+	s := submission()
+	b := ProtectedBinding{CanarySubmissionSHA256: submissionDigest(s)}
+	for _, action := range []string{"create-admit", "execute"} {
+		if err := b.authorizeCanary(action, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mutations := []func(*Submission){func(x *Submission) { x.RequestID += "x" }, func(x *Submission) { x.Commit = strings.Repeat("f", 40) }, func(x *Submission) { x.Base = strings.Repeat("e", 40) }, func(x *Submission) { x.BundleSHA256 = strings.Repeat("d", 64) }, func(x *Submission) { x.CPUs++ }, func(x *Submission) { x.MemoryMiB++ }, func(x *Submission) { x.TimeoutSeconds++ }, func(x *Submission) { x.ScratchMiB++ }}
+	for i, mutate := range mutations {
+		x := s
+		mutate(&x)
+		if b.authorizeCanary("execute", x) == nil {
+			t.Fatalf("mutation %d accepted", i)
+		}
+	}
+	if b.authorizeCanary("admit-start", s) == nil {
+		t.Fatal("canary accepted external admission")
+	}
+	if (ProtectedBinding{}).authorizeCanary("execute", s) == nil {
+		t.Fatal("false without pin accepted")
+	}
+	if (ProtectedBinding{RuntimeQualified: true}).authorizeCanary("execute", s) != nil {
+		t.Fatal("qualified behavior changed")
+	}
+	if NativeWorkerContract().RuntimeQualified {
+		t.Fatal("canary advertised general readiness")
+	}
+}
