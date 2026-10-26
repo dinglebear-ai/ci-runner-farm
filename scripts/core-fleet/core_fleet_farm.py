@@ -280,6 +280,14 @@ def farm_observe_result(task, request):
         observe_release(task,receipt)
     evidence=task/'evidence'/request['job']/'result.json'
     if not evidence.exists():
+        if receipt.get('creationAbsent') is True:
+            # A terminal creation with positive release is an infrastructure
+            # refusal, not an executed test verdict or permission to retry.
+            result=dict(native_started=True,status='blocked',exit_code=None,host=request['host'],
+                        commit=submission['commit'],base=submission['base'],task=str(task),
+                        workload_started=False,phase='worker-creation',
+                        reason='worker_creation_aborted_without_workload',farm_receipt=receipt)
+            farm_exclusive_json(cached,result);return result
         # Positive native absence/release after explicit cancel, before checks.
         if not (task/'cancel').exists():return None
         snapshot=farm_private_json(task/'coordinator-intent.json')
