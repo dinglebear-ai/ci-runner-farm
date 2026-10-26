@@ -25,12 +25,17 @@ type KernelLimits struct {
 	CPUPeriod       uint64 `json:"cpuPeriod"`
 	MemoryBytes     uint64 `json:"memoryBytes"`
 	SwapBytes       uint64 `json:"swapBytes"`
+	SwapMode        string `json:"swapMode,omitempty"`
 	PIDs            uint64 `json:"pids"`
 	Domain          bool   `json:"domain"`
 	RunnerProcesses int    `json:"runnerProcesses"`
 }
 
 func readKernelLimits(root string) (KernelLimits, error) {
+	return readKernelLimitsWithProc(root, "/proc")
+}
+
+func readKernelLimitsWithProc(root, proc string) (KernelLimits, error) {
 	var proof KernelLimits
 	read := func(name string) (string, error) {
 		raw, err := os.ReadFile(filepath.Join(root, name))
@@ -55,7 +60,7 @@ func readKernelLimits(root string) (KernelLimits, error) {
 	if err != nil || proof.CPUPeriod == 0 || proof.CPUPeriod > 1000000000 {
 		return proof, errors.New("local_checks_kernel_limits_invalid")
 	}
-	for name, target := range map[string]*uint64{"memory.max": &proof.MemoryBytes, "memory.swap.max": &proof.SwapBytes, "pids.max": &proof.PIDs} {
+	for name, target := range map[string]*uint64{"memory.max": &proof.MemoryBytes, "pids.max": &proof.PIDs} {
 		value, err := read(name)
 		if err != nil {
 			return proof, err
@@ -65,6 +70,20 @@ func readKernelLimits(root string) (KernelLimits, error) {
 			return proof, errors.New("local_checks_kernel_limits_unbounded")
 		}
 	}
+	swap, swapErr := os.ReadFile(filepath.Join(root, "memory.swap.max"))
+	if swapErr == nil && len(swap) <= 4096 && strings.TrimSpace(string(swap)) != "max" {
+		proof.SwapBytes, err = strconv.ParseUint(strings.TrimSpace(string(swap)), 10, 64)
+		if err != nil {
+			return proof, errors.New("local_checks_kernel_limits_invalid")
+		}
+	} else if (swapErr == nil && len(swap) <= 4096 && strings.TrimSpace(string(swap)) == "max") || errors.Is(swapErr, os.ErrNotExist) {
+		if err := verifyHostNoSwap(proc); err != nil {
+			return proof, err
+		}
+		proof.SwapMode = "host-no-swap"
+	} else {
+		return proof, errors.New("local_checks_kernel_limits_unavailable")
+	}
 	kind, err := read("cgroup.type")
 	if err != nil {
 		return proof, err
@@ -73,8 +92,52 @@ func readKernelLimits(root string) (KernelLimits, error) {
 	return proof, nil
 }
 func (p KernelLimits) Verify(memoryMiB uint64, cpus uint32, pids uint64) error {
-	if !p.Domain || p.CPUPeriod == 0 || p.CPUPeriod > 1000000000 || p.CPUQuota != p.CPUPeriod*uint64(cpus) || p.MemoryBytes != memoryMiB<<20 || p.SwapBytes != 0 || p.PIDs != pids || p.RunnerProcesses != 0 {
+	if (p.SwapMode != "" && p.SwapMode != "host-no-swap") || !p.Domain || p.CPUPeriod == 0 || p.CPUPeriod > 1000000000 || p.CPUQuota != p.CPUPeriod*uint64(cpus) || p.MemoryBytes != memoryMiB<<20 || p.SwapBytes != 0 || p.PIDs != pids || p.RunnerProcesses != 0 {
 		return errors.New("local_checks_actual_kernel_limits_differ")
+	}
+	return nil
+}
+
+// No configured host swap is a distinct observed runtime condition, never a
+// fabricated cgroup limit. Both independent kernel views must agree. Readiness
+// rechecks this condition before every subsequent general dispatch.
+func verifyHostNoSwap(proc string) error {
+	invalid := errors.New("local_checks_host_no_swap_unproven")
+	read := func(name string) ([]byte, error) {
+		f, err := os.Open(filepath.Join(proc, name))
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		b, err := io.ReadAll(io.LimitReader(f, 16385))
+		if err != nil || len(b) > 16384 {
+			return nil, invalid
+		}
+		return b, nil
+	}
+	swaps, err := read("swaps")
+	if err != nil {
+		return invalid
+	}
+	rows := strings.Split(strings.TrimSpace(string(swaps)), "\n")
+	if len(rows) != 1 || strings.Join(strings.Fields(rows[0]), " ") != "Filename Type Size Used Priority" {
+		return invalid
+	}
+	memory, err := read("meminfo")
+	if err != nil {
+		return invalid
+	}
+	count := 0
+	for _, line := range strings.Split(string(memory), "\n") {
+		if strings.HasPrefix(line, "SwapTotal:") {
+			count++
+			if strings.Join(strings.Fields(line), " ") != "SwapTotal: 0 kB" {
+				return invalid
+			}
+		}
+	}
+	if count != 1 {
+		return invalid
 	}
 	return nil
 }

@@ -56,3 +56,16 @@ stdout. It refuses old-helper evidence. This computes the typed policy digest
 with the same code used by dispatch; do not substitute another JSON serializer.
 The command does not persist a record, flip intent, clear a canary, or reserve a
 worker. Root review and an exclusive journaled/CAS promotion remain separate.
+
+### Hosts without configured swap
+
+The kernel probe distinguishes an enforced numeric zero `memory.swap.max` from
+`swapMode: host-no-swap`. The latter is permitted only when the swap limit is
+absent or explicitly `max`, `/proc/swaps` contains only its exact header, and
+`/proc/meminfo` contains exactly one zero `SwapTotal` reading. Malformed,
+unreadable, oversized or contradictory observations fail closed. CPU, memory,
+PID and process checks remain unchanged. This records observed swap absence;
+it does not claim a per-container swap limit was enforced. General readiness
+and dispatch recheck host swap absence when the retained kernel proof uses
+this mode; configuring swap invalidates that admission condition. No boot
+setting or swap device is created by qualification.

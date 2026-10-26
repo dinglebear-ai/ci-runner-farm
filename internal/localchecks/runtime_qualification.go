@@ -89,6 +89,11 @@ func VerifyRuntimeQualification(bindingPath string, b ProtectedBinding) error {
 	if err = readQualificationJSON(filepath.Join(b.Root, record.FullRequestID, "evidence", record.FullRequestID, "result.json"), record.FullResultSHA256, &result); err != nil {
 		return err
 	}
+	if kernel.Qualification != nil && (kernel.Qualification.Outer.SwapMode == "host-no-swap" || kernel.Qualification.Nested.SwapMode == "host-no-swap") {
+		if err := verifyHostNoSwap("/proc"); err != nil {
+			return err
+		}
+	}
 	return validateRuntimeQualification(record, b, materials.HelperSHA256, materials.PolicySHA256, materials.MachineIDSHA256, materials.KernelRelease, kernel, full, result)
 }
 

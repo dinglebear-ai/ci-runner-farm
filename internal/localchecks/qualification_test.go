@@ -134,3 +134,50 @@ func TestFailedQualificationCleanupCanRetryThroughSameOwnerWithoutEnablingChecks
 		t.Fatal("terminal grant retained")
 	}
 }
+
+func TestU7NoSwapRequiresBothLiveKernelObservations(t *testing.T) {
+	root, proc := t.TempDir(), t.TempDir()
+	for name, value := range map[string]string{"cpu.max": "200000 100000", "memory.max": "12884901888", "memory.swap.max": "max", "pids.max": "4096", "cgroup.type": "domain"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(proc, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("swaps", "Filename\tType\tSize\tUsed\tPriority\n")
+	write("meminfo", "MemTotal: 1000000 kB\nSwapTotal: 0 kB\n")
+	p, err := readKernelLimitsWithProc(root, proc)
+	if err != nil || p.SwapMode != "host-no-swap" || p.Verify(12288, 2, 4096) != nil {
+		t.Fatal(p, err)
+	}
+	if err := os.Remove(filepath.Join(root, "memory.swap.max")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readKernelLimitsWithProc(root, proc); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct{ swaps, meminfo string }{
+		{"Filename Type Size Used Priority\n/dev/sda partition 100 0 -2\n", "SwapTotal: 0 kB\n"},
+		{"Filename Type Size Used Priority\n", "SwapTotal: 1024 kB\n"},
+		{"", "SwapTotal: 0 kB\n"},
+		{"Filename Type Size Used Priority\n", "SwapTotal: 0 kB\nSwapTotal: 0 kB\n"},
+	} {
+		write("swaps", sample.swaps)
+		write("meminfo", sample.meminfo)
+		if _, err := readKernelLimitsWithProc(root, proc); err == nil {
+			t.Fatal("unproven no-swap accepted")
+		}
+	}
+	write("swaps", "Filename Type Size Used Priority\n")
+	write("meminfo", "SwapTotal: 0 kB\n")
+	if err := os.WriteFile(filepath.Join(root, "memory.swap.max"), []byte("garbage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readKernelLimitsWithProc(root, proc); err == nil {
+		t.Fatal("malformed limit treated as absent")
+	}
+}
