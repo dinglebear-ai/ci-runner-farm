@@ -32,16 +32,17 @@ type NativeDriver interface {
 	Remove(context.Context, string) error
 }
 type NativeReceipt struct {
-	Worker          WorkerBinding       `json:"worker"`
-	Version         int                 `json:"version"`
-	Epoch           string              `json:"epoch"`
-	Request         Submission          `json:"request"`
-	ContainerID     string              `json:"containerID"`
-	Fence           string              `json:"fence,omitempty"`
-	State           string              `json:"state"`
-	CreationFailure string              `json:"creationFailure,omitempty"`
-	Qualification   *QualificationProof `json:"qualification,omitempty"`
-	CreationAbsent  bool                `json:"creationAbsent,omitempty"`
+	Worker          WorkerBinding                    `json:"worker"`
+	Version         int                              `json:"version"`
+	Epoch           string                           `json:"epoch"`
+	Request         Submission                       `json:"request"`
+	ContainerID     string                           `json:"containerID"`
+	Start           *sharedcapacity.StartReservation `json:"start,omitempty"`
+	Fence           string                           `json:"fence,omitempty"`
+	State           string                           `json:"state"`
+	CreationFailure string                           `json:"creationFailure,omitempty"`
+	Qualification   *QualificationProof              `json:"qualification,omitempty"`
+	CreationAbsent  bool                             `json:"creationAbsent,omitempty"`
 }
 type NativeJob interface {
 	Cancel(context.Context, string) error
@@ -131,6 +132,20 @@ func (w *nativeWorker) AdmitStart(ctx context.Context, s Submission, id string) 
 		return receipt, errors.New("local_checks_native_grant_missing")
 	}
 	receipt.Fence = decision.Grant.Fence
+	if w.policy.SharedMemoryHeadroom {
+		start, err := w.broker.ReserveStart(&w.policy, w.request(s).ID, receipt.Fence)
+		if err != nil {
+			receipt.State = "queued"
+			if saveErr := w.save(receipt); saveErr != nil {
+				return receipt, errors.Join(err, saveErr)
+			}
+			if errors.Is(err, sharedcapacity.ErrMemoryHeadroom) {
+				return receipt, ErrNativeQueued
+			}
+			return receipt, err
+		}
+		receipt.Start = &start
+	}
 	receipt.State = "starting"
 	if err = w.save(receipt); err != nil {
 		return receipt, err
@@ -147,16 +162,45 @@ func (w *nativeWorker) AdmitStart(ctx context.Context, s Submission, id string) 
 		return receipt, errors.New("local_checks_native_start_uncertain")
 	}
 	receipt.State = "running"
-	return receipt, w.save(receipt)
+	if err := w.save(receipt); err != nil {
+		return receipt, err
+	}
+	if w.policy.SharedMemoryHeadroom {
+		err := w.broker.ConfirmStarted(&w.policy, w.request(s).ID, *receipt.Start, func(grant sharedcapacity.Grant) error {
+			saved, err := w.load(s.RequestID)
+			if err != nil {
+				return err
+			}
+			if saved.State != "running" || saved.Fence != grant.Fence || saved.ContainerID != id || saved.Request != s || saved.Start == nil || *saved.Start != *receipt.Start {
+				return errors.New("local_checks_native_start_receipt_mismatch")
+			}
+			current, err := w.driver.Inspect(ctx, id)
+			if err != nil {
+				return err
+			}
+			if !current.Running || current.Stopped || !w.matches(current, s, id) {
+				return errors.New("local_checks_native_start_owner_mismatch")
+			}
+			return ctx.Err()
+		})
+		if err != nil {
+			receipt.State = "uncertain"
+			return receipt, errors.Join(err, w.save(receipt))
+		}
+	}
+	return receipt, nil
 }
 func (w *nativeWorker) request(s Submission) sharedcapacity.Request {
 	return sharedcapacity.Request{ID: "local-checks:" + s.RequestID, Pool: "build", Resources: sharedcapacity.Resources{MemoryMiB: s.MemoryMiB, VCPUs: s.CPUs}}
 }
 func (w *nativeWorker) verify(c NativeContainer, s Submission, id string) error {
-	if !c.Managed || c.ID != id || c.Role != "local-checks" || c.RequestID != s.RequestID || c.SourceDigest != s.BundleSHA256 || c.CPUs != s.CPUs || c.MemoryMiB != s.MemoryMiB || !c.PrivateCgroup || !c.InnerDocker || c.HostDockerSocket || c.Running || !c.Stopped {
+	if !w.matches(c, s, id) || c.Running || !c.Stopped {
 		return errors.New("local_checks_native_container_not_admissible")
 	}
 	return nil
+}
+func (w *nativeWorker) matches(c NativeContainer, s Submission, id string) bool {
+	return c.Managed && c.ID == id && c.Role == "local-checks" && c.RequestID == s.RequestID && c.SourceDigest == s.BundleSHA256 && c.CPUs == s.CPUs && c.MemoryMiB == s.MemoryMiB && c.PrivateCgroup && c.InnerDocker && !c.HostDockerSocket
 }
 func (w *nativeWorker) Complete(ctx context.Context, requestID string) error {
 	r, err := w.load(requestID)

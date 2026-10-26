@@ -65,6 +65,9 @@ type tailBuffer struct {
 	limit        int
 	logPath      string
 	buildLogPath string
+	lastFlush    time.Time
+	now          func() time.Time
+	persist      func(string, []byte) error
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
@@ -73,13 +76,36 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	if len(b.data) > b.limit {
 		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
 	}
-	if b.logPath != "" {
-		_ = atomicWrite(b.logPath, b.data, 0600)
+	now := time.Now()
+	if b.now != nil {
+		now = b.now()
 	}
-	if b.buildLogPath != "" {
-		_ = atomicWrite(b.buildLogPath, b.data, 0600)
+	if b.lastFlush.IsZero() || now.Sub(b.lastFlush) >= 250*time.Millisecond {
+		if err := b.Flush(); err != nil {
+			return n, err
+		}
 	}
 	return n, nil
+}
+
+// Flush commits the final bounded tail even when the command failed or was cancelled.
+func (b *tailBuffer) Flush() error {
+	persist := b.persist
+	if persist == nil {
+		persist = func(path string, data []byte) error { return atomicWrite(path, data, 0600) }
+	}
+	var result error
+	for _, path := range []string{b.logPath, b.buildLogPath} {
+		if path != "" {
+			result = errors.Join(result, persist(path, b.data))
+		}
+	}
+	if b.now != nil {
+		b.lastFlush = b.now()
+	} else {
+		b.lastFlush = time.Now()
+	}
+	return result
 }
 
 func (e *Engine) Run(ctx context.Context, action string, args []string, override string) (string, error) {
@@ -117,6 +143,7 @@ func (e *Engine) Run(ctx context.Context, action string, args []string, override
 	cmd.Stdout = out
 	cmd.Stderr = out
 	err = cmd.Run()
+	err = errors.Join(err, out.Flush())
 	if ctx.Err() != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}

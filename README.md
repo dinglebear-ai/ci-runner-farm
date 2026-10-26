@@ -64,7 +64,8 @@ fixed capacity, resource limits, and either the built-in image or a registry
 image. Containers are named `ci-runner-<pool>-<index>` and carry the pool as a
 provider-neutral ownership label.
 
-GitHub pools require organization scope. Their routing and additional labels
+GitHub pools support organization scope, or repository scope with exactly one
+canonical `owner/repository` matching the configured owner. Their routing and additional labels
 are passed to the GitHub runner directly. GitLab pools require a separate
 runner configuration and modern `glrt-` authentication token per pool; create
 that runner in GitLab with tags matching the pool's labels, then save the token

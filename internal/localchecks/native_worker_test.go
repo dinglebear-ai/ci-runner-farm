@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unraid/ci-runner-farm/pkg/sharedcapacity"
 )
@@ -14,6 +15,8 @@ type nativeFixtureDriver struct {
 	container       NativeContainer
 	starts, removes int
 	startError      error
+	inspectCalls    int
+	inspectHook     func(*nativeFixtureDriver)
 	missing         bool
 }
 
@@ -22,6 +25,10 @@ func (d *nativeFixtureDriver) Binding() WorkerBinding {
 }
 
 func (d *nativeFixtureDriver) Inspect(context.Context, string) (NativeContainer, error) {
+	d.inspectCalls++
+	if d.inspectHook != nil {
+		d.inspectHook(d)
+	}
 	if d.missing {
 		return NativeContainer{}, ErrNativeContainerMissing
 	}
@@ -33,6 +40,7 @@ func (d *nativeFixtureDriver) Start(context.Context, string) error {
 		return d.startError
 	}
 	d.container.Running = true
+	d.container.Stopped = false
 	return nil
 }
 func (d *nativeFixtureDriver) Remove(context.Context, string) error {
@@ -145,5 +153,95 @@ func TestNativeLocalChecksRefusesWrongRoleOrUnchargedLimits(t *testing.T) {
 				t.Fatal("unqualified worker charged", err)
 			}
 		})
+	}
+}
+
+func residentFixture(t *testing.T) (*nativeWorker, *nativeFixtureDriver, Submission) {
+	w, d, s := nativeFixture(t)
+	w.policy.SharedMemoryHeadroom = true
+	pool := w.policy.Pools["build"]
+	pool.Maximum = 2
+	w.policy.Pools["build"] = pool
+	w.policy.CPUAdmission = sharedcapacity.CPUAdmissionSoft
+	w.policy.BuildMemoryOvercommit = &sharedcapacity.BuildMemoryOvercommit{AdditionalMiB: 16384, MinimumAvailableMiB: 1024}
+	w.broker = sharedcapacity.Broker{Path: filepath.Join(t.TempDir(), "resident.bolt"), ObserveMemory: func() (sharedcapacity.MemoryObservation, error) {
+		return sharedcapacity.MemoryObservation{AvailableMiB: 65536, ObservedAt: time.Now()}, nil
+	}}
+	if err := w.broker.Initialize(&w.policy, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return w, d, s
+}
+func TestNativeResidentStartConfirmsOnlyExactDurableRunningOwner(t *testing.T) {
+	w, d, s := residentFixture(t)
+	r, err := w.AdmitStart(context.Background(), s, d.container.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := w.broker.Status(&w.policy)
+	start := snapshot.Starts[w.request(s).ID]
+	if err != nil || !start.Started || start.MemoryMiB != 0 {
+		t.Fatal("running worker retains shadow RAM", start, err)
+	}
+	w.broker.ObserveMemory = func() (sharedcapacity.MemoryObservation, error) {
+		return sharedcapacity.MemoryObservation{AvailableMiB: 1024 + s.MemoryMiB, ObservedAt: time.Now()}, nil
+	}
+	follower := s
+	follower.RequestID = "fitting-follower"
+	decision, err := w.broker.Admit(&w.policy, w.request(follower))
+	if err != nil || !decision.Admitted {
+		t.Fatal("confirmed worker double-charged RAM", decision, err)
+	}
+	saved, err := w.load(s.RequestID)
+	if err != nil || saved.State != "running" || saved.Fence != r.Fence {
+		t.Fatal(saved, err)
+	}
+}
+func TestNativeResidentStartRechecksMemoryBeforeDockerDispatch(t *testing.T) {
+	w, d, s := residentFixture(t)
+	samples := 0
+	w.broker.ObserveMemory = func() (sharedcapacity.MemoryObservation, error) {
+		samples++
+		available := uint64(65536)
+		if samples > 1 {
+			available = 0
+		}
+		return sharedcapacity.MemoryObservation{AvailableMiB: available, ObservedAt: time.Now()}, nil
+	}
+	_, err := w.AdmitStart(context.Background(), s, d.container.ID)
+	if !errors.Is(err, ErrNativeQueued) || d.starts != 0 {
+		t.Fatal("dispatched without fresh RAM", err, d.starts, samples)
+	}
+	snapshot, _ := w.broker.Status(&w.policy)
+	if len(snapshot.Grants) != 1 || snapshot.Starts[w.request(s).ID].MemoryMiB != s.MemoryMiB {
+		t.Fatal("lost retained charge", snapshot)
+	}
+}
+func TestNativeResidentUncertainStartKeepsShadowCharge(t *testing.T) {
+	w, d, s := residentFixture(t)
+	d.startError = errors.New("unknown start")
+	_, err := w.AdmitStart(context.Background(), s, d.container.ID)
+	snapshot, _ := w.broker.Status(&w.policy)
+	start := snapshot.Starts[w.request(s).ID]
+	if err == nil || start.Started || start.MemoryMiB != s.MemoryMiB {
+		t.Fatal(start, err)
+	}
+}
+
+func TestNativeResidentConfirmationFailureRetainsExactShadowCharge(t *testing.T) {
+	w, d, s := residentFixture(t)
+	d.inspectHook = func(d *nativeFixtureDriver) {
+		if d.inspectCalls == 3 {
+			d.container.SourceDigest = "wrong"
+		}
+	}
+	r, err := w.AdmitStart(context.Background(), s, d.container.ID)
+	snapshot, _ := w.broker.Status(&w.policy)
+	start := snapshot.Starts[w.request(s).ID]
+	if err == nil || r.State != "uncertain" || start.Started || start.MemoryMiB != s.MemoryMiB || r.Start == nil || r.Start.Nonce != start.Nonce {
+		t.Fatal("uncertain proof released shadow charge", r, start, err)
+	}
+	if _, err := w.AdmitStart(context.Background(), s, d.container.ID); err == nil || d.starts != 1 {
+		t.Fatal("replayed uncertain start", err)
 	}
 }

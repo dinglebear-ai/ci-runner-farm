@@ -1,8 +1,9 @@
 # Native local-checks worker bridge
 
-This is a source protocol/integration checkpoint. It is not installed or
-operational on an appliance. `NativeWorkerContract().runtimeQualified` remains
-false. Existing four-host coordinator and queue files are unchanged.
+This document describes the implemented source protocol and its effects. It
+makes no assertion that a particular appliance has installed or qualified this
+revision. Read the selected host's live readiness and exact artifact receipts;
+`NativeWorkerContract().runtimeQualified` alone is not deployment acceptance.
 
 ## Reused source owners
 
@@ -53,33 +54,28 @@ Protocol: `farm-local-checks-worker/v1`; role: `local-checks`.
 - `HandleNativeCommand` verifies the current two-pack manifest/checksums and
   reconstructed checkout before entering the typed admission path.
 
-## Remaining owner integration before activation
+## Implemented ownership and activation gates
 
-1. Register this role with native Farm lifecycle inventory. Existing GitHub
-   reconciliation/retirement currently treats every build-pool grant as a
-   GitHub slot. It must delegate only positively attested local-checks receipts
-   to their owner, and keep refusing unknown owners. It must not simply ignore
-   unknown grants or reset the ledger. Unload/retirement must preserve active
-   local jobs and their exact grants.
-2. Add Farm-owned creation of the inert dedicated worker and its private DinD
-   store using the reviewed image/bootstrap contract. The coordinator must not
-   create a privileged worker by bypassing native ownership/journaling.
-3. Add execution transport into that already charged worker, with the existing
-   fixed Core entrypoint and protected credential injection. All nested Docker
-   work must remain inside the worker's private daemon and charged cgroup.
-4. Expose the typed handler through the existing native backend/helper and
-   protected bindings; package, independently review and qualify that exact
-   artifact before advertising runtime readiness.
-5. Change the external coordinator in four small places: probe the native
-   contract on Farm hosts; hand over its existing canonical pack manifest;
-   delegate prepare/admit/execute/cancel to the native role; commit terminal
-   evidence and call completion before releasing its queue reservation. A
-   retained native queue/uncertain operation is not a no-effect `busy` refusal
-   and must not be blindly retried on another host.
+The existing owners implement native lifecycle inventory, journaled inert worker
+creation and private DinD storage, execution in the charged worker, protected
+credential transport, and helper/backend dispatch. `HandleNativeCommand` exposes
+`admit-start`, `create-admit`, `qualify`, `execute`, `complete` and `cancel`.
+The external coordinator keeps its queue/transfer ownership and delegates those
+operations; no second scheduler is introduced.
 
-Until these gates pass, the four-host dispatcher's host-Docker path must not be
-presented as Farm-integrated execution, and these source tests must not be
-presented as a full Core local sign-off or four-host deployment.
+Before advertising runtime readiness on a host:
+
+1. Package and independently review the exact helper/source revision and worker
+   image, then run the normal host qualification controls.
+2. Verify the installed coordinator's supported route, canonical pack transfer,
+   and exact source/artifact identity against that qualified host.
+3. Retain original operation and workload evidence through cleanup; verify owner
+   settlement before releasing the external queue reservation. A retained queue
+   or uncertain operation is not a no-effect busy refusal and must not be
+   blindly retried on another host.
+
+These are deployment/consumer acceptance gates, not a list of missing source
+features. Source tests do not establish full Core sign-off or fleet acceptance.
 
 ## Native helper and bounded process transport
 

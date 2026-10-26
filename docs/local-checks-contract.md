@@ -1,15 +1,22 @@
 # Local Core checks boundary
 
-`internal/localchecks` implements the first client/coordinator/worker contract
-for complete Core checks on a selected compatible host. It is not wired to a
-network listener, the native plugin UI, or a durable queue yet. No host discovery,
-SSH connection, container start, sign-off publication or credential handling is
-performed by this package.
+`internal/localchecks` implements the closed client/coordinator/worker contract
+for complete Core checks on a selected compatible host. The external coordinator
+owns discovery, its durable queue and screened Git pack transfer. Farm owns
+admission, inert worker creation, execution and cleanup on Farm hosts through
+`HandleNativeCommand` and the existing native backend/helper.
 
-The existing coordinator owns its durable queue, host configuration and screened
-Git bundle transfer. Farm's existing host-capacity owner remains authoritative
-for CPU/memory grants and workload release on Farm hosts. These owners must be
-adapted to the contract; a capacity observation is not a reservation.
+These calls have effects: they can create/start a dedicated privileged DinD
+worker, execute the fixed Core entrypoint, transport the protected dependency
+credential through stdin, stop/remove the worker, and settle its fenced grant.
+The closed request never chooses commands, credential values, host paths or a
+Docker daemon. Work remains inside the admitted worker's private daemon/cgroup.
+No sign-off publication or independent durable queue is implemented here.
+
+Source implementation is distinct from installation and runtime qualification.
+Use the selected host's readiness contract and exact helper/image/epoch receipts
+in [native qualification](native-local-checks-qualification.md); a capacity
+observation or source test is not a reservation or appliance acceptance.
 
 ## Submission
 
