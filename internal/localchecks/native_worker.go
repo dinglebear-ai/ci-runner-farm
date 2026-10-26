@@ -32,14 +32,16 @@ type NativeDriver interface {
 	Remove(context.Context, string) error
 }
 type NativeReceipt struct {
-	Worker        WorkerBinding       `json:"worker"`
-	Version       int                 `json:"version"`
-	Epoch         string              `json:"epoch"`
-	Request       Submission          `json:"request"`
-	ContainerID   string              `json:"containerID"`
-	Fence         string              `json:"fence,omitempty"`
-	State         string              `json:"state"`
-	Qualification *QualificationProof `json:"qualification,omitempty"`
+	Worker          WorkerBinding       `json:"worker"`
+	Version         int                 `json:"version"`
+	Epoch           string              `json:"epoch"`
+	Request         Submission          `json:"request"`
+	ContainerID     string              `json:"containerID"`
+	Fence           string              `json:"fence,omitempty"`
+	State           string              `json:"state"`
+	CreationFailure string              `json:"creationFailure,omitempty"`
+	Qualification   *QualificationProof `json:"qualification,omitempty"`
+	CreationAbsent  bool                `json:"creationAbsent,omitempty"`
 }
 type NativeJob interface {
 	Cancel(context.Context, string) error
@@ -244,7 +246,10 @@ func (w *nativeWorker) load(id string) (NativeReceipt, error) {
 	if err != nil {
 		return result, err
 	}
-	if err = json.Unmarshal(data, &result); err != nil || result.Version != 1 || result.Epoch != w.epoch || result.Request.Validate() != nil || result.Request.RequestID != id || (!immutableContainerID.MatchString(result.ContainerID) && !(result.State == "creating" && result.ContainerID == "")) {
+	if err = json.Unmarshal(data, &result); err != nil || result.Version != 1 || result.Epoch != w.epoch || result.Request.Validate() != nil || result.Request.RequestID != id || (!immutableContainerID.MatchString(result.ContainerID) && !((result.State == "creating" || result.State == "released" && result.CreationAbsent) && result.ContainerID == "")) {
+		return result, errors.New("local_checks_native_receipt_invalid")
+	}
+	if result.CreationAbsent && (result.State != "released" || result.ContainerID != "" || result.Fence != "") {
 		return result, errors.New("local_checks_native_receipt_invalid")
 	}
 	switch result.State {
@@ -318,7 +323,13 @@ func (w *nativeWorker) CreateAndAdmit(ctx context.Context, s Submission) (Native
 	}
 	id, err := creator.Create(ctx, s)
 	if err != nil {
-		return r, err
+		var failure dockerOperationFailure
+		if errors.As(err, &failure) {
+			r.CreationFailure = failure.code
+		} else {
+			r.CreationFailure = "operation_failed"
+		}
+		return r, errors.Join(err, w.save(r))
 	}
 	if !immutableContainerID.MatchString(id) {
 		return r, ErrNativeCreateUncertain
@@ -342,7 +353,7 @@ func (w *nativeWorker) Cancel(ctx context.Context, requestID string) error {
 		return nil
 	}
 	if r.State == "creating" {
-		return errors.New("local_checks_native_creation_recovery_required")
+		return w.recoverAbsentCreation(ctx, r)
 	}
 	stopper, ok := w.driver.(interface {
 		Stop(context.Context, string) error
@@ -362,4 +373,34 @@ func (w *nativeWorker) Cancel(ctx context.Context, requestID string) error {
 		}
 	}
 	return w.Complete(bounded, requestID)
+}
+
+// recoverAbsentCreation settles only an original creation with no Docker object
+// and no capacity effect. It never adopts, removes, starts or recreates a worker.
+// The protected entrypoint holds both fleet and policy locks throughout.
+func (w *nativeWorker) recoverAbsentCreation(ctx context.Context, r NativeReceipt) error {
+	driver, ok := w.driver.(interface {
+		Binding() WorkerBinding
+		ProveCreationAbsent(context.Context, Submission) error
+	})
+	if !ok || r.ContainerID != "" || r.Fence != "" || driver.Binding() != r.Worker {
+		return errors.New("local_checks_native_creation_recovery_required")
+	}
+	snapshot, err := w.broker.Status(&w.policy)
+	if err != nil {
+		return err
+	}
+	id := w.request(r.Request).ID
+	if _, present := snapshot.Grants[id]; present {
+		return errors.New("local_checks_native_creation_capacity_present")
+	}
+	if _, present := snapshot.Pending[id]; present {
+		return errors.New("local_checks_native_creation_capacity_present")
+	}
+	if err = driver.ProveCreationAbsent(ctx, r.Request); err != nil {
+		return err
+	}
+	r.State = "released"
+	r.CreationAbsent = true
+	return w.save(r)
 }

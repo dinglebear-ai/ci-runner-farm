@@ -148,7 +148,11 @@ func HandleNativeCommand(ctx context.Context, configuration NativeConfiguration,
 			}
 			return operationErr
 		case "cancel":
-			return worker.Cancel(ctx, command.RequestID)
+			operationErr := worker.Cancel(ctx, command.RequestID)
+			if native, ok := worker.(*nativeWorker); ok {
+				receipt, _ = native.load(command.RequestID)
+			}
+			return operationErr
 		case "complete":
 			return worker.Complete(ctx, command.RequestID)
 		default:

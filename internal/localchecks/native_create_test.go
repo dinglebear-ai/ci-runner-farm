@@ -33,7 +33,7 @@ func TestNativeCreationJournalsBeforeEffectAndRefusesUncertainReplay(t *testing.
 			w.driver = creator
 			r, err := w.CreateAndAdmit(context.Background(), s)
 			if fail {
-				if !errors.Is(err, ErrNativeCreateUncertain) || r.State != "creating" {
+				if !errors.Is(err, ErrNativeCreateUncertain) || r.State != "creating" || r.CreationFailure != "operation_failed" {
 					t.Fatal(r, err)
 				}
 			} else if err != nil || r.State != "running" {

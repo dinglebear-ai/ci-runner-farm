@@ -86,3 +86,12 @@ projections, included in its activation hash inventory. A transport observation
 failure cannot trigger native/classic failover. The coordinator keeps its
 original execution owner through cancellation and settlement; it never retries
 an uncertain phase or releases a grant based on process exit alone.
+
+An owner can settle an interrupted `creating` receipt through the existing
+protected `cancel` command. The helper holds the fleet and policy locks, requires
+an exact worker binding and no grant or pending request, and proves that the
+original worker name is absent on the same responsive Docker daemon. It then
+records `released` with `creationAbsent: true`. A matching object or uncertain
+observation leaves the receipt unchanged. This does not recreate a worker or
+produce a successful checks result. Creation failures retain only a fixed
+`creationFailure` classification; raw Docker diagnostics are not persisted.

@@ -125,3 +125,17 @@ func TestDaemonNftSelectionExecutesAndRefusesFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestDockerCreationFailureRetainsSafeClassificationWithoutRawStderr(t *testing.T) {
+	root := t.TempDir()
+	docker := filepath.Join(root, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\necho 'Error response from daemon: No such image: SECRET/private' >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root)
+	d := DockerNativeDriver{Image: "sha256:" + strings.Repeat("e", 64), SourceRoot: "/source", DockerRoot: "/docker"}
+	_, err := d.Create(context.Background(), submission())
+	if !errors.Is(err, ErrNativeCreateUncertain) || !strings.Contains(err.Error(), "image_missing") || strings.Contains(err.Error(), "SECRET") {
+		t.Fatal(err)
+	}
+}

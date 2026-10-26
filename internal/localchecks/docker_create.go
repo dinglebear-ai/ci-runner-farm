@@ -36,6 +36,10 @@ func (d DockerNativeDriver) Create(ctx context.Context, s Submission) (string, e
 	args = append(args, workerDaemonArguments()...)
 	output, err := d.command(ctx, args...)
 	if err != nil {
+		var failure dockerOperationFailure
+		if errors.As(err, &failure) {
+			return "", errors.Join(ErrNativeCreateUncertain, failure)
+		}
 		return "", ErrNativeCreateUncertain
 	}
 	id := strings.TrimSpace(string(output))
@@ -47,4 +51,27 @@ func (d DockerNativeDriver) Create(ctx context.Context, s Submission) (string, e
 
 func workerDaemonArguments() []string {
 	return []string{"-c", `set -Eeuo pipefail; test -x /usr/sbin/iptables-nft; test -x /usr/sbin/ip6tables-nft; update-alternatives --set iptables /usr/sbin/iptables-nft; update-alternatives --set ip6tables /usr/sbin/ip6tables-nft; /usr/sbin/iptables --version | grep -q nf_tables; /usr/sbin/ip6tables --version | grep -q nf_tables; /usr/local/bin/unraid-cgroup-bootstrap.sh; exec dockerd "$@"`, "farm-local-checks-daemon", "--host=unix:///var/run/docker.sock", "--data-root=/var/lib/docker", "--exec-root=/run/farm-docker", "--pidfile=/run/farm-docker.pid"}
+}
+
+// ProveCreationAbsent uses the original deterministic name under the existing
+// fleet lock. A daemon error, replacement daemon, or any matching object keeps
+// the creation intent unsettled, including a stopped or foreign object.
+func (d DockerNativeDriver) ProveCreationAbsent(ctx context.Context, s Submission) error {
+	if s.Validate() != nil || d.Binding().Validate() != nil {
+		return errors.New("local_checks_driver_configuration_invalid")
+	}
+	before, err := d.command(ctx, "info", "--format", "{{.ID}}")
+	identity := strings.TrimSpace(string(before))
+	if err != nil || identity == "" {
+		return errors.New("local_checks_creation_absence_unproven")
+	}
+	ids, err := d.command(ctx, "container", "ls", "--all", "--quiet", "--no-trunc", "--filter", "name=^/farm-local-checks-"+s.RequestID+"$")
+	if err != nil || strings.TrimSpace(string(ids)) != "" {
+		return errors.New("local_checks_creation_absence_unproven")
+	}
+	after, err := d.command(ctx, "info", "--format", "{{.ID}}")
+	if err != nil || strings.TrimSpace(string(after)) != identity {
+		return errors.New("local_checks_creation_absence_unproven")
+	}
+	return nil
 }

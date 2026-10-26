@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,9 +50,14 @@ func (d DockerNativeDriver) command(ctx context.Context, args ...string) ([]byte
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=/nonexistent", "DOCKER_HOST=unix:///var/run/docker.sock"}
 	var output boundedOutput
 	cmd.Stdout = &output
-	cmd.Stderr = io.Discard
+	var diagnostic dockerDiagnostic
+	cmd.Stderr = &diagnostic
 	if err := cmd.Run(); err != nil {
-		return nil, errors.New("local_checks_docker_operation_failed")
+		code := classifyDockerDiagnostic(diagnostic.data)
+		if bounded.Err() != nil {
+			code = "deadline"
+		}
+		return nil, dockerOperationFailure{code: code}
 	}
 	return output.Bytes(), nil
 }
@@ -177,4 +181,39 @@ func (d DockerNativeDriver) waitReady(ctx context.Context, id string) error {
 		}
 	}
 	return errors.New("local_checks_native_docker_readiness_unproven")
+}
+
+// Only fixed classifications cross the Docker boundary. Raw daemon messages can
+// contain host paths or credentials and are never returned or persisted.
+type dockerOperationFailure struct{ code string }
+
+func (e dockerOperationFailure) Error() string { return "local_checks_docker_" + e.code }
+
+type dockerDiagnostic struct{ data []byte }
+
+func (d *dockerDiagnostic) Write(p []byte) (int, error) {
+	count := len(p)
+	if available := 8192 - len(d.data); available > 0 {
+		if len(p) > available {
+			p = p[:available]
+		}
+		d.data = append(d.data, p...)
+	}
+	return count, nil
+}
+func classifyDockerDiagnostic(data []byte) string {
+	text := strings.ToLower(string(data))
+	for _, item := range []struct{ match, code string }{
+		{"no such image", "image_missing"},
+		{"invalid mount config", "mount_invalid"},
+		{"permission denied", "permission_denied"},
+		{"is already in use", "name_conflict"},
+		{"cannot connect to the docker daemon", "daemon_unavailable"},
+		{"no space left on device", "storage_full"},
+	} {
+		if strings.Contains(text, item.match) {
+			return item.code
+		}
+	}
+	return "operation_failed"
 }
