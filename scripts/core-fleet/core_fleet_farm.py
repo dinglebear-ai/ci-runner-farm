@@ -261,7 +261,10 @@ def farm_retained_worker(task, request):
     receipt=farm_private_json(receipt_path)
     if (receipt.get('version')!=1 or receipt.get('epoch')!=owner['epoch'] or receipt.get('request')!=submission
         or receipt.get('worker',{}).get('sourceRoot')!=str(task/'repo') or receipt.get('worker',{}).get('dockerRoot')!=str(task/'docker')
-        or receipt.get('worker',{}).get('image')!=owner['image'] or not re.fullmatch('[0-9a-f]{64}',receipt.get('containerID',''))):
+        or receipt.get('worker',{}).get('image')!=owner['image']
+        or not (re.fullmatch('[0-9a-f]{64}',receipt.get('containerID',''))
+                or receipt.get('state')=='released' and receipt.get('creationAbsent') is True
+                and receipt.get('containerID')=='' and not receipt.get('fence'))):
         raise ValueError('FARM_RETAINED_RECEIPT_OWNER_MISMATCH')
     return submission,owner,receipt
 
