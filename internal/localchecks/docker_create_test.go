@@ -139,3 +139,34 @@ func TestDockerCreationFailureRetainsSafeClassificationWithoutRawStderr(t *testi
 		t.Fatal(err)
 	}
 }
+
+func TestPinnedImageAvailabilityRequiresExactDockerImageIdentity(t *testing.T) {
+	for _, mode := range []string{"present", "missing", "wrong-image", "invalid-binding"} {
+		t.Run(mode, func(t *testing.T) {
+			d := DockerNativeDriver{Image: "sha256:" + strings.Repeat("e", 64)}
+			if mode == "invalid-binding" {
+				d.Image = "mutable:latest"
+			}
+			calls := 0
+			d.run = func(_ context.Context, args ...string) ([]byte, error) {
+				calls++
+				if !reflect.DeepEqual(args, []string{"image", "inspect", "--format", "{{.Id}}", d.Image}) {
+					t.Fatal(args)
+				}
+				if mode == "missing" {
+					return nil, errors.New("missing")
+				}
+				if mode == "wrong-image" {
+					return []byte("sha256:" + strings.Repeat("a", 64)), nil
+				}
+				return []byte(d.Image + "\n"), nil
+			}
+			if d.ImageAvailable(context.Background()) != (mode == "present") {
+				t.Fatal(mode)
+			}
+			if mode == "invalid-binding" && calls != 0 {
+				t.Fatal("mutable image inspected")
+			}
+		})
+	}
+}

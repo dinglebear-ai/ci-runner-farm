@@ -2,6 +2,7 @@ package localchecks
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -146,7 +147,7 @@ func privateQualificationEvidence(path string, out any, owner uint32) (string, e
 }
 
 // WriteRuntimeReadiness is read-only dynamic admission evidence. It does not
-// mint acceptance, promote a binding, reserve capacity, or contact Docker.
+// mint acceptance, promote a binding, reserve capacity, or pull an image.
 func WriteRuntimeReadiness(bindingPath string, output io.Writer) error {
 	if os.Geteuid() != 0 {
 		return errors.New("local_checks_native_root_required")
@@ -159,6 +160,11 @@ func WriteRuntimeReadiness(bindingPath string, output io.Writer) error {
 	reason := "qualification_missing_or_changed"
 	if qualified {
 		reason = "reviewed_materials_match"
+		driver := DockerNativeDriver{Image: binding.Image}
+		if !driver.ImageAvailable(context.Background()) {
+			qualified = false
+			reason = "pinned_worker_image_unavailable"
+		}
 	}
 	return json.NewEncoder(output).Encode(map[string]any{"protocol": NativeProtocol, "runtimeQualified": qualified, "reason": reason, "host": binding.Host, "epoch": binding.Epoch, "image": binding.Image})
 }

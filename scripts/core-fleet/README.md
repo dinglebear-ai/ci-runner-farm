@@ -95,3 +95,7 @@ records `released` with `creationAbsent: true`. A matching object or uncertain
 observation leaves the receipt unchanged. This does not recreate a worker or
 produce a successful checks result. Creation failures retain only a fixed
 `creationFailure` classification; raw Docker diagnostics are not persisted.
+
+Runtime readiness also checks that Docker still has the exact pinned worker
+image. A matching qualification record alone cannot admit jobs after that image
+is removed. This check never pulls an image or starts a container.

@@ -217,3 +217,12 @@ func classifyDockerDiagnostic(data []byte) string {
 	}
 	return "operation_failed"
 }
+
+// ImageAvailable checks the immutable local image without pulling or creating.
+func (d DockerNativeDriver) ImageAvailable(ctx context.Context) bool {
+	if !strings.HasPrefix(d.Image, "sha256:") || !bundleID.MatchString(strings.TrimPrefix(d.Image, "sha256:")) {
+		return false
+	}
+	raw, err := d.command(ctx, "image", "inspect", "--format", "{{.Id}}", d.Image)
+	return err == nil && strings.TrimSpace(string(raw)) == d.Image
+}
