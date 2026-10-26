@@ -15,7 +15,7 @@ import uuid
 import fcntl
 
 from classic_transport import (CAPACITY, WRAPPER, canonical, exclusive,
-                               file_digest, private_read, protected_operation)
+                               file_digest, private_read, protected_operation, creation_absence)
 
 
 def read_capabilities():
@@ -161,5 +161,5 @@ def observe_release(task, receipt):
             result=subprocess.run(['docker','ps','--all','--no-trunc','--filter','id='+identity,'--format','{{.ID}}'],capture_output=True,timeout=10,
                                   env={'PATH':os.environ.get('PATH',''),'HOME':'/nonexistent','DOCKER_HOST':'unix:///var/run/docker.sock'})
             return result.returncode==0 and result.stdout==b''
-        return op.recover(receipt,absent)
+        return op.recover(receipt,absent,creation_absence)
     raise ValueError('CLASSIC_RETAINED_OPERATION_MISSING_INSPECT_NO_REPLAY')

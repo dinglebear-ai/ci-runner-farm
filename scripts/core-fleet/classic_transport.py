@@ -223,15 +223,22 @@ class Operation:
             elif process is None and owner is not None:
                 owner.close()
 
-    def recover(self, receipt, prove_absence):
+    def recover(self, receipt, prove_absence, prove_creation_absence=None):
         self.bound_intent()
         if (not isinstance(receipt,dict) or not isinstance(receipt.get('request'),dict) or type(receipt.get('version')) is not int or receipt.get('version')!=1 or receipt.get('epoch')!=self.command['epoch']
             or receipt.get('state')!='released' or receipt.get('request',{}).get('requestID')!=self.request
             or receipt.get('worker')!={'image':self.image,'sourceRoot':str(self.task/'repo'),'dockerRoot':str(self.task/'docker')}
-            or not isinstance(receipt.get('containerID'),str) or not HEX64.fullmatch(receipt['containerID'])):
+            or not isinstance(receipt.get('containerID'),str)):
             raise ValueError('CLASSIC_RELEASE_NOT_PROVEN')
         if 'submission' in self.command and receipt['request']!=self.command['submission']:
             raise ValueError('CLASSIC_RELEASE_NOT_PROVEN')
+        if receipt.get('creationAbsent') is True:
+            if (receipt['containerID']!='' or receipt.get('fence') or prove_creation_absence is None
+                or self.command['action'] not in ('create-admit','qualify') or self.status().get('state')!='terminal'):
+                raise ValueError('CLASSIC_RELEASE_NOT_PROVEN')
+            if prove_creation_absence(self.request) is not True:raise ValueError('CLASSIC_CONTAINER_ABSENCE_NOT_PROVEN')
+            return {'operationID':self.operation_id,'state':'released_observed','creationAbsent':True,'containerID':'','replayAllowed':False,'workloadSuccessProven':False}
+        if receipt.get('creationAbsent') is not None or not HEX64.fullmatch(receipt['containerID']):raise ValueError('CLASSIC_RELEASE_NOT_PROVEN')
         if prove_absence(receipt['containerID']) is not True:raise ValueError('CLASSIC_CONTAINER_ABSENCE_NOT_PROVEN')
         # Do not rewrite an uncertain intent/result or manufacture test success.
         return {'operationID':self.operation_id,'state':'released_observed','containerID':receipt['containerID'],'replayAllowed':False,'workloadSuccessProven':False}
@@ -253,6 +260,21 @@ def operation_from_binding(operation_id, command, pins, timeout, cleanup_timeout
     return Operation(Path(root)/request,operation_id,command,WRAPPER,CAPACITY,pins,binding.get('image'),timeout,cleanup_timeout)
 
 
+def creation_absence(request_id):
+    if not isinstance(request_id,str) or not HEX32.fullmatch(request_id):return False
+    environment={'PATH':os.environ.get('PATH',''),'HOME':'/nonexistent','DOCKER_HOST':'unix:///var/run/docker.sock'}
+    def read(args):
+        return subprocess.run(['docker']+args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10,env=environment)
+    try:
+        before=read(['info','--format','{{.ID}}'])
+        if before.returncode or not before.stdout.strip():return False
+        names=read(['container','ls','--all','--quiet','--no-trunc','--filter','name=^/farm-local-checks-'+request_id+'$'])
+        if names.returncode or names.stdout.strip():return False
+        after=read(['info','--format','{{.ID}}'])
+        return after.returncode==0 and after.stdout.strip()==before.stdout.strip()
+    except (OSError,subprocess.SubprocessError):return False
+
+
 def observe_release(operation):
     policy=private_read(POLICY)
     root=policy.get('receiptRoot')
@@ -264,7 +286,7 @@ def observe_release(operation):
     def absent(identity):
         result=subprocess.run(['docker','ps','--all','--no-trunc','--filter','id='+identity,'--format','{{.ID}}'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10,env={'PATH':os.environ.get('PATH',''),'HOME':'/nonexistent','DOCKER_HOST':'unix:///var/run/docker.sock'})
         return result.returncode==0 and result.stdout==b''
-    return operation.recover(receipt,absent)
+    return operation.recover(receipt,absent,creation_absence)
 
 
 def handle_request(request, dependency=b''):

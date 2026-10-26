@@ -64,6 +64,28 @@ func main(){if len(os.Args)!=2||os.Args[1]!="local-checks"{os.Exit(9)};if _,e:=o
   changed=copy.deepcopy(receipt);changed['request']['cpus']=3
   with self.assertRaisesRegex(ValueError,'CLASSIC_RELEASE_NOT_PROVEN'):op.recover(changed,lambda _:True)
   with self.assertRaisesRegex(ValueError,'CLASSIC_CONTAINER_ABSENCE_NOT_PROVEN'):op.recover(receipt,lambda _:False)
+ def test_absent_creation_recovery_requires_original_terminal_and_separate_positive_proof(self):
+  op=self.operation();exclusive(op.intent_path,op.intent)
+  receipt=self.release(op);receipt.update(containerID='',creationAbsent=True)
+  proof=lambda request: request==op.request
+  with self.assertRaisesRegex(ValueError,'CLASSIC_RELEASE_NOT_PROVEN'):op.recover(receipt,lambda _:True,proof)
+  exclusive(op.result_path,dict(operationID=op.operation_id,intentSHA256=op.digest,state='terminal',exitCode=1))
+  result=op.recover(receipt,lambda _:self.fail('empty container id inspected'),proof)
+  self.assertTrue(result['creationAbsent']);self.assertFalse(result['workloadSuccessProven'])
+  with self.assertRaisesRegex(ValueError,'CLASSIC_CONTAINER_ABSENCE_NOT_PROVEN'):op.recover(receipt,lambda _:True,lambda _:False)
+  with self.assertRaisesRegex(ValueError,'CLASSIC_RELEASE_NOT_PROVEN'):op.recover(receipt,lambda _:True)
+  for key,value in [('creationAbsent',1),('fence','foreign'),('containerID','3'*64)]:
+   changed=copy.deepcopy(receipt);changed[key]=value
+   with self.assertRaisesRegex(ValueError,'CLASSIC_RELEASE_NOT_PROVEN'):op.recover(changed,lambda _:True,proof)
+ def test_creation_absence_requires_same_responsive_daemon_and_exact_name(self):
+  from classic_transport import creation_absence
+  for mode in ('absent','present','offline','changed'):
+   daemon=subprocess.CompletedProcess([],0,b'daemon-id\n',b'')
+   names=subprocess.CompletedProcess([],0,b'3'*64 if mode=='present' else b'',b'')
+   final=subprocess.CompletedProcess([],1 if mode=='offline' else 0,b'other' if mode=='changed' else b'daemon-id\n',b'')
+   with patch('classic_transport.subprocess.run',side_effect=[daemon,names,final]) as run:
+    self.assertEqual(creation_absence('a'*32),mode=='absent')
+    self.assertEqual(run.call_args_list[1].args[0],['docker','container','ls','--all','--quiet','--no-trunc','--filter','name=^/farm-local-checks-'+'a'*32+'$'])
  def test_protected_binding_composes_exact_task_pins_and_epoch(self):
   op=self.operation();binding=self.root/'binding.json';exclusive(binding,{'version':1,'epoch':op.command['epoch'],'root':str(self.root),'image':op.image})
   with patch('classic_transport.BINDING',binding),patch('classic_transport.WRAPPER',op.wrapper),patch('classic_transport.CAPACITY',self.binary):
