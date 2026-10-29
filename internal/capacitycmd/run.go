@@ -21,7 +21,7 @@ import (
 // Run requires the native parent's fleet lock for every owner mutation.
 func Run(arguments []string, output io.Writer) (result error) {
 	if len(arguments) == 1 && arguments[0] == "capabilities" {
-		return json.NewEncoder(output).Encode([]string{"fenced-start-memory-v6", "resident-memory-v7", "standalone-owner-init-v1", "standalone-owner-recovery-v1", "pool-expansion-v1"})
+		return json.NewEncoder(output).Encode([]string{"fenced-start-memory-v6", "resident-memory-v7", "standalone-owner-init-v1", "standalone-owner-recovery-v1", "pool-expansion-v1", "empty-owner-qa-attachment-v1"})
 	}
 	if len(arguments) == 1 && arguments[0] == "version" {
 		_, err := fmt.Fprintln(output, "ci-runner-capacity protocol 1")
@@ -48,7 +48,7 @@ func Run(arguments []string, output io.Writer) (result error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "recover-initialize" || arguments[0] == "expand-pools" || arguments[0] == "registration-policy-update")
+	lease, err := hostcapacity.Acquire(ctx, hostcapacity.ConfigPath, arguments[0] == "initialize" || arguments[0] == "recover-initialize" || arguments[0] == "expand-pools" || arguments[0] == "registration-policy-update" || arguments[0] == "attach-qa")
 	if err != nil {
 		return err
 	}
@@ -75,6 +75,12 @@ func Run(arguments []string, output io.Writer) (result error) {
 		return farmcapacity.LoadRegistrationAuthority(farmcapacity.RegistrationPolicyPath, config, raw)
 	}
 	controller.BeforeStart = loadRegistration
+	if arguments[0] == "attach-qa" {
+		return attachQA(ctx, lease, arguments[1], arguments[2], &controller)
+	}
+	if config.QAAttachment != nil && arguments[0] != "status" {
+		return errors.New("pending QA attachment must recover before any other owner command")
+	}
 	if arguments[0] == "validate-registration" {
 		if err := loadRegistration(ctx); err != nil {
 			return err
@@ -126,7 +132,7 @@ func validArguments(arguments []string) bool {
 	if len(arguments) == 2 {
 		return arguments[0] == "demand-observe"
 	}
-	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "registration-policy-update" || arguments[0] == "validate-registration" || arguments[0] == "expand-pools" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
+	return len(arguments) == 3 && (((arguments[0] == "recover-initialize" || arguments[0] == "verify-initialize") && len(arguments[1]) == 32 && len(arguments[2]) == 64) || arguments[0] == "registration-policy-update" || arguments[0] == "validate-registration" || arguments[0] == "expand-pools" || arguments[0] == "attach-qa" || arguments[0] == "start" || arguments[0] == "prepare-release" || arguments[0] == "release" || arguments[0] == "refresh-queued" || arguments[0] == "reconcile-idle" || arguments[0] == "demand-apply" || arguments[0] == "demand-warm")
 }
 
 func verifyFleetLock() error { return hostcapacity.VerifyInheritedFleetLock() }

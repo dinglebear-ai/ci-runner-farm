@@ -41,6 +41,7 @@ type Config struct {
 	Mode                     string                `json:"mode"`
 	Policy                   sharedcapacity.Policy `json:"policy"`
 	PoolExpansion            *PoolExpansion        `json:"poolExpansion,omitempty"`
+	QAAttachment             *QAAttachment         `json:"qaAttachment,omitempty"`
 	Consumers                map[string]Consumer   `json:"consumers,omitempty"`
 	ScanRepositories         []string              `json:"scanRepositories,omitempty"`
 }
@@ -51,6 +52,14 @@ var repositoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}
 
 // Validate rejects incomplete ownership, unbounded budgets and class ambiguity.
 func (c *Config) Validate(host string) error {
+	if c.QAAttachment != nil {
+		if c.PoolExpansion != nil || c.Mode != "closed" {
+			return errors.New("QA attachment must remain exclusively closed")
+		}
+		if err := c.QAAttachment.validatePending(c); err != nil {
+			return err
+		}
+	}
 	if c.PoolExpansion != nil {
 		if c.Mode != "closed" {
 			return errors.New("pool expansion must remain closed")

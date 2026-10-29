@@ -4717,6 +4717,7 @@ case "${1:-status}" in
   native-recover-initialize) with_fleet_lock wait shared_capacity_native_call recover-initialize "${2:-}" "${3:-}" ;;
   native-verify-initialize) with_fleet_lock wait shared_capacity_native_call verify-initialize "${2:-}" "${3:-}" ;;
   native-initialize) with_fleet_lock wait shared_capacity_native_call initialize ;;
+  native-attach-qa) with_fleet_lock wait shared_capacity_native_call attach-qa "${2:-}" "${3:-}" ;;
   native-registration-policy-update) with_fleet_lock wait cmd_native_registration_policy_update "${2:-}" "${3:-}" ;;
   native-config-json) cmd_native_config_json ;;
   native-config-check) cmd_native_config_check ;;

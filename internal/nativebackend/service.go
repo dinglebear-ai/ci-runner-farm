@@ -80,6 +80,11 @@ func ValidateOperation(r Request) (string, []string, error) {
 		return "", nil, errors.New("invalid_arguments")
 	}
 	switch r.Action {
+	case "attach-qa":
+		if !r.Confirm || len(r.Args) != 2 || !cancelJobPattern.MatchString(r.Args[0]) || !filepath.IsAbs(r.Args[1]) || filepath.Clean(r.Args[1]) != r.Args[1] {
+			return "", nil, errors.New("invalid_attachment_or_confirmation")
+		}
+		return "native-attach-qa", r.Args, nil
 	case "start", "stop", "restart", "validate", "build-image", "reconcile-config", "reconcile-network", "prune-cache", "cache-clear-pkg", "credential-clear-github-token", "credential-clear-registry-token":
 		if len(r.Args) != 0 {
 			return "", nil, errors.New("invalid_arguments")
