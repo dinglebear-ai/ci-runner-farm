@@ -51,7 +51,7 @@ TEST_ROOT="$tmp"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 snippet="$tmp/functions.sh"
-for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_local_base_images_available build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_farm_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
+for fn in json_string validate_settings_config count_pool_desired_drift pool_autoscale_tick pool_effective_target build_candidate_tag_valid build_local_base_images_available build_context_needs_kache_supervisor build_context_needs_endpoint_validator build_context_copy_companion build_context_copy_kache_supervisor build_candidate_state_load kache_endpoint_load restore_previous_build_alias promote_image_locked with_image_build_lock redact_build_endpoint build_image_locked cmd_promote_image cmd_build_async cmd_build_status cmd_history_log cmd_farm_log cmd_build_image queued_snapshot_unavailable cmd_queued_json cmd_cancel_run; do
   sed -n "/^${fn}()/,/^}/p" "$engine" >> "$snippet"
 done
 # shellcheck disable=SC1090
@@ -133,6 +133,7 @@ docker(){
       ;;
     build:-t)
       printf '%s\n' "$@" > "$docker_args"
+      printf '%s\n' "${KACHE_REMOTE_ENDPOINT:-}" > "$TEST_ROOT/docker.endpoint"
       local context="${!#}"
       [ ! -e "$context/unrelated-secret" ] || return 32
       cp "$context/Dockerfile" "$docker_capture"
@@ -150,7 +151,9 @@ cmp -s "$CFGDIR/Dockerfile" "$docker_capture" || crf_fail 'build did not receive
 cmp -s "$CFGDIR/kache-supervise.sh" "$supervisor_capture" || crf_fail 'Nashost build context omitted or changed kache-supervise.sh'
 cmp -s "$CFGDIR/endpoint-validation.sh" "$validator_capture" || crf_fail 'Nashost build context omitted or changed endpoint-validation.sh'
 grep -Fxq -- '--build-arg' "$docker_args" || crf_fail 'Nashost candidate build omitted its Kache build argument'
-grep -Fxq "KACHE_REMOTE_ENDPOINT=$kache_endpoint" "$docker_args" || crf_fail 'Nashost candidate build lost the persisted Kache endpoint'
+grep -Fxq KACHE_REMOTE_ENDPOINT "$docker_args" || crf_fail 'candidate build omitted endpoint environment argument'
+grep -Fxq "$kache_endpoint" "$TEST_ROOT/docker.endpoint" || crf_fail 'candidate build lost persisted endpoint environment'
+! grep -Fq "$kache_endpoint" "$docker_args" || crf_fail 'endpoint leaked through Docker argv'
 if grep -Fq "$kache_endpoint" "$engine_log" "$TEST_ROOT/error" 2>/dev/null; then
   crf_fail 'candidate build exposed the private Kache endpoint through engine logging'
 fi
@@ -237,9 +240,9 @@ chmod 0600 "$snapshot_df" "$snapshot_companion" "$snapshot_validator" "$snapshot
 printf '%s\n' "$live_endpoint" >"$KACHE_ENDPOINT_FILE"
 chmod 0600 "$KACHE_ENDPOINT_FILE"
 cmd_build_image "$snapshot_df" || crf_fail 'production snapshot build rejected valid Nashost inputs'
-grep -Fxq "KACHE_REMOTE_ENDPOINT=$snapshot_endpoint" "$docker_args" ||
+grep -Fxq "$snapshot_endpoint" "$TEST_ROOT/docker.endpoint" ||
   crf_fail 'production snapshot build reread the live Kache endpoint'
-if grep -Fxq "KACHE_REMOTE_ENDPOINT=$live_endpoint" "$docker_args"; then
+if grep -Fxq "$live_endpoint" "$TEST_ROOT/docker.endpoint"; then
   crf_fail 'production snapshot build passed the changed live endpoint to Docker'
 fi
 build_candidate_state_load || crf_fail 'production snapshot build lost candidate metadata'

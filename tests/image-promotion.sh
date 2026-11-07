@@ -40,6 +40,7 @@ case "${1:-}" in
   build)
     [ "${2:-}" = -t ] || exit 1
     printf 'sha256:%064d\n' 0 | tr '0' 'a' > "$(image_path "$3")"
+    cp "$(image_path "$3")" "$(image_path "$(cat "$(image_path "$3")")")"
     ;;
   image)
     [ "${2:-}" = inspect ] || exit 1
