@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [1.13.8](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.7...v1.13.8) (2026-11-07)
+
+
+### Bug Fixes
+
+* **image:** harden candidate build and promotion safety ([#121](https://github.com/dinglebear-ai/ci-runner-farm/issues/121)) ([ccad554](https://github.com/dinglebear-ai/ci-runner-farm/commit/ccad554099f16999ed4cff287ade9d67eeff75dc))
+
 ## [1.13.7](https://github.com/dinglebear-ai/ci-runner-farm/compare/v1.13.6...v1.13.7) (2026-09-16)
 
 
