@@ -5006,6 +5006,7 @@ kache_endpoint_load() {
     return 1
   fi
   [[ "$endpoint" =~ ^https?:// ]] || return 1
+  case "$endpoint" in *\?*|*\#*|*%*|*@*) return 1 ;; esac
   case "$endpoint" in
     *192.0.2.*|*198.51.100.*|*203.0.113.*) return 1 ;;
     *\"*|*\'*|*\\*|*[[:space:]]*) return 1 ;;
@@ -5106,8 +5107,22 @@ build_candidate_state_load() {
     resource_positive_uint_valid "$BUILD_CANDIDATE_BUILT_AT" 9999999999
 }
 
-cmd_promote_image() {
-  local candidate="${1:-}" expected_id="${2:-}" actual tmp now
+restore_previous_build_alias() {
+  local previous_id="$1" expected_id="$2" actual
+  actual="$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" || return 1
+  [ "$actual" = "$expected_id" ] || return 1
+  if [ -n "$previous_id" ]; then
+    docker tag "$previous_id" "$BUILTIN_IMAGE" || return 1
+    [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" = "$previous_id" ]
+  else
+    # Candidate retains the image; remove only the new production alias.
+    docker image rm --no-prune "$BUILTIN_IMAGE" >/dev/null || return 1
+    ! docker image inspect "$BUILTIN_IMAGE" >/dev/null 2>&1
+  fi
+}
+
+promote_image_locked() {
+  local candidate="${1:-}" expected_id="${2:-}" actual tmp now previous_id
   build_candidate_tag_valid "$candidate" || { err "valid immutable candidate tag required"; return 2; }
   [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "expected candidate image id required"; return 2; }
   build_candidate_state_load || { err "no verified build candidate metadata is available"; return 1; }
@@ -5118,20 +5133,37 @@ cmd_promote_image() {
     err "candidate image is unavailable"; return 1;
   }
   [ "$actual" = "$expected_id" ] || { err "candidate image id changed; refusing promotion"; return 1; }
-  docker tag "$candidate" "$BUILTIN_IMAGE" || { err "could not promote candidate"; return 1; }
-  [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" = "$expected_id" ] || {
-    err "production tag verification failed"; return 1;
+  previous_id="$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" || previous_id=""
+  [ -z "$previous_id" ] || [[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    err "could not verify previous production image"; return 1;
   }
-  now="$(date +%s)"; tmp="$PROMOTED_IMAGE_FILE.tmp.$$"
+  [ ! -L "$PROMOTED_IMAGE_FILE" ] && { [ ! -e "$PROMOTED_IMAGE_FILE" ] || [ -f "$PROMOTED_IMAGE_FILE" ]; } || {
+    err "promotion receipt destination must be a regular file"; return 1;
+  }
+  # Stage the complete private receipt before changing the production alias.
+  now="$(date +%s)"
+  tmp="$(mktemp "$CFGDIR/.promoted-image.XXXXXX")" || return 1
   ( umask 077; printf 'schema=2\ncandidate_tag=%s\nimage_id=%s\ndockerfile_sha=%s\ncontext_sha=%s\npromoted_at=%s\n' \
-      "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$BUILD_CANDIDATE_CONTEXT_SHA" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
-  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$PROMOTED_IMAGE_FILE" || { rm -f "$tmp"; return 1; }
+      "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$BUILD_CANDIDATE_CONTEXT_SHA" "$now" > "$tmp" ) &&
+    chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! docker tag "$expected_id" "$BUILTIN_IMAGE"; then
+    rm -f "$tmp"; err "could not promote candidate"; return 1
+  fi
+  if [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" != "$expected_id" ] ||
+      ! mv -T "$tmp" "$PROMOTED_IMAGE_FILE"; then
+    if restore_previous_build_alias "$previous_id" "$expected_id"; then
+      err "promotion publication failed; previous production alias restored"
+    else
+      err "promotion publication AND rollback failed; production alias requires operator recovery"
+    fi
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$BUILD_CANDIDATE_FILE"
   printf '{"ok":true,"candidate_tag":"%s","image_id":"%s","production_tag":"%s"}\n'     "$(printf '%s' "$candidate" | json_escape)" "$expected_id" "$(printf '%s' "$BUILTIN_IMAGE" | json_escape)"
 }
 
-cmd_build_image() {
+build_image_locked() {
   # Build into a unique candidate tag. The production BUILTIN_IMAGE tag is changed
   # only by cmd_promote_image after exact metadata and image-id verification.
   local df="${1:-$CFGDIR/Dockerfile}"
@@ -5142,6 +5174,10 @@ cmd_build_image() {
     [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
     [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   fi
+  [ ! -L "$BUILD_CANDIDATE_FILE" ] && { [ ! -e "$BUILD_CANDIDATE_FILE" ] || [ -f "$BUILD_CANDIDATE_FILE" ]; } || {
+    err "candidate receipt destination must be a regular file"; return 1;
+  }
+  local KACHE_REMOTE_ENDPOINT=""
   local ctx companion_source validator_source endpoint_source endpoint_digest df_sha supervisor_sha validator_sha context_sha candidate_repo candidate_tag image_id now tmp rc
   local -a build_args=()
   ctx="$(mktemp -d)" || return 1
@@ -5176,7 +5212,7 @@ cmd_build_image() {
       err "custom Dockerfile requires a valid mode-0600 Kache endpoint file at $KACHE_ENDPOINT_FILE"
       return 1
     }
-    build_args=(--build-arg "KACHE_REMOTE_ENDPOINT=$KACHE_REMOTE_ENDPOINT")
+    build_args=(--build-arg KACHE_REMOTE_ENDPOINT)
   fi
   df_sha="$(sha256sum "$ctx/Dockerfile" | awk '{print $1}')"
   supervisor_sha=""
@@ -5202,18 +5238,46 @@ cmd_build_image() {
     return 1
   fi
   log "building immutable candidate '$candidate_tag' from $df"
-  docker build -t "$candidate_tag" "${build_args[@]}" "$ctx"; rc=$?
+  export KACHE_REMOTE_ENDPOINT
+  if (set -o pipefail; docker build -t "$candidate_tag" "${build_args[@]}" "$ctx" 2>&1 | redact_build_endpoint); then rc=0; else rc=$?; fi
   rm -rf "$ctx"
   if [ "$rc" -ne 0 ]; then err "build failed (rc=$rc)"; return "$rc"; fi
   image_id="$(docker image inspect "$candidate_tag" --format '{{.Id}}' 2>/dev/null)"
   [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "candidate image id verification failed"; return 1; }
-  tmp="$BUILD_CANDIDATE_FILE.tmp.$$"
+  tmp="$(mktemp "$CFGDIR/.build-candidate.XXXXXX")" || return 1
   ( umask 077; printf 'schema=2\ndockerfile_sha=%s\ncontext_sha=%s\ncandidate_tag=%s\nimage_id=%s\nbuilt_at=%s\n' \
       "$df_sha" "$context_sha" "$candidate_tag" "$image_id" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$BUILD_CANDIDATE_FILE" || { rm -f "$tmp"; return 1; }
+  mv -T "$tmp" "$BUILD_CANDIDATE_FILE" || { rm -f "$tmp"; return 1; }
   log "candidate verified: $candidate_tag ($image_id)"
   log "promotion required: $0 promote-image '$candidate_tag' '$image_id'"
+}
+
+# Docker may echo expanded RUN instructions. Do not publish the private endpoint.
+redact_build_endpoint() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -n "${KACHE_REMOTE_ENDPOINT:-}" ]; then
+      line="${line//"$KACHE_REMOTE_ENDPOINT"/[REDACTED]}"
+    fi
+    printf '%s\n' "$line"
+  done
+}
+
+# Serialize direct builds, async builds and promotions without restarting runners.
+with_image_build_lock() (
+  mkdir -p "$RUNDIR" || return 1
+  exec 7> "$RUNDIR/image-candidate.lock" || return 1
+  flock -n 7 || { err "an image build or promotion is already running"; return 1; }
+  "$@"
+)
+
+cmd_build_image() {
+  with_image_build_lock build_image_locked "$@"
+}
+
+cmd_promote_image() {
+  with_image_build_lock promote_image_locked "$@"
 }
 
 # Called from the plugin install step (which ALSO re-runs on every boot via
