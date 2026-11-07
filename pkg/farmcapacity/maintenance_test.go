@@ -3,6 +3,7 @@ package farmcapacity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -139,6 +140,40 @@ func TestNativeCacheRejectsUnsafeRootsBeforeEffects(t *testing.T) {
 	for _, root := range []string{"", "/", "/mnt/data/docker/another-owner", "/mnt/data/docker/../ci-runner-build-1", "relative/docker/ci-runner-build-1"} {
 		if repairErr := RepairNativeCache(context.Background(), "ci-runner-build-1", root); repairErr == nil {
 			t.Fatal("unsafe root accepted", root)
+		}
+	}
+}
+
+func TestNativeCacheWriterRequiresExplicitReadOnlyEvidence(t *testing.T) {
+	root := "/mnt/artifacts/runner/docker/ci-runner-build-large-1"
+	for _, source := range []string{root, root + "/buildkit", "/mnt", "/"} {
+		for _, state := range []struct {
+			name, value string
+			blocked     bool
+		}{
+			{"writable", ",\"RW\":true", true},
+			{"readonly", ",\"RW\":false", false},
+			{"missing", "", true},
+			{"null", ",\"RW\":null", true},
+		} {
+			t.Run(source+"/"+state.name, func(t *testing.T) {
+				var mount nativeCacheMount
+				if err := json.Unmarshal([]byte("{\"Source\":\""+source+"\""+state.value+"}"), &mount); err != nil {
+					t.Fatal(err)
+				}
+				if got := cacheMountCanWrite(root, mount); got != state.blocked {
+					t.Fatalf("writer=%v want %v", got, state.blocked)
+				}
+			})
+		}
+	}
+	var mount nativeCacheMount
+	if err := json.Unmarshal([]byte(`{"Source":"/mnt","RW":"false"}`), &mount); err == nil {
+		t.Fatal("malformed writeability accepted")
+	}
+	for _, source := range []string{"/unrelated", root + "-other", ""} {
+		if cacheMountCanWrite(root, nativeCacheMount{Source: source}) {
+			t.Fatal("unrelated mount blocked", source)
 		}
 	}
 }

@@ -39,15 +39,19 @@ func RepairNativeCache(ctx context.Context, name, root string) error {
 		if inspectErr != nil {
 			return errors.New("cannot inspect cache writers")
 		}
-		var mounts []struct {
-			Source string `json:"Source"`
-		}
+		var mounts []nativeCacheMount
 		if decodeErr := json.Unmarshal(mountData, &mounts); decodeErr != nil {
 			return decodeErr
 		}
 		for _, mount := range mounts {
-			if overlapsCache(root, mount.Source) {
+			if !overlapsCache(root, mount.Source) {
+				continue
+			}
+			if cacheMountCanWrite(root, mount) {
 				return errors.New("native cache remains mounted by a container")
+			}
+			if err := proveReadOnlyCacheObserver(ctx, id, root, mount); err != nil {
+				return err
 			}
 		}
 	}
@@ -69,6 +73,17 @@ func RepairNativeCache(ctx context.Context, name, root string) error {
 		}
 	}
 	return os.RemoveAll(filepath.Join(root, "buildkit"))
+}
+
+// Missing writeability evidence is unknown, not proof of a read-only observer.
+type nativeCacheMount struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          *bool  `json:"RW"`
+}
+
+func cacheMountCanWrite(root string, mount nativeCacheMount) bool {
+	return overlapsCache(root, mount.Source) && (mount.RW == nil || *mount.RW)
 }
 
 func overlapsCache(root, source string) bool {
