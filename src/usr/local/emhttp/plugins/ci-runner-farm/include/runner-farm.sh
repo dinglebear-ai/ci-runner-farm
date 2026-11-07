@@ -24,6 +24,9 @@ set -uo pipefail
 
 PLUGIN="ci-runner-farm"
 CFGDIR="${CRF_CFGDIR:-/boot/config/plugins/${PLUGIN}}"
+BUILD_CANDIDATE_FILE="$CFGDIR/build-candidate.state"
+PROMOTED_IMAGE_FILE="$CFGDIR/promoted-image.state"
+KACHE_ENDPOINT_FILE="$CFGDIR/kache-endpoint"
 # Ephemeral runtime caches/locks live on tmpfs, not the USB flash (they are
 # rewritten every 60-300s while a settings tab is open — a flash-wear antipattern).
 RUNDIR="${CRF_RUNDIR:-/var/local/emhttp/${PLUGIN}}"
@@ -4488,7 +4491,7 @@ cmd_build_async() {
 # live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
 # from the __BUILD_RC__ sentinel only once the build is no longer running.
 cmd_build_status() {
-  local log="$RUNDIR/build.log" txt running rc n disp
+  local log="$RUNDIR/build.log" txt running rc n disp candidate_ready=false
   txt="$([ -f "$log" ] && tail -n 120 "$log" | redact_log_stream)"
   if pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1; then running=true; else running=false; fi
   rc=null
@@ -4496,8 +4499,9 @@ cmd_build_status() {
     n="$(printf '%s' "$txt" | grep -oE '__BUILD_RC__=[0-9]+' | tail -1 | grep -oE '[0-9]+')"
     [ -n "$n" ] && rc="$n"
   fi
+  if [ "$rc" = 0 ] && [ "$CI_PROVIDER" = github ] && build_candidate_state_load; then candidate_ready=true; fi
   disp="$(printf '%s' "$txt" | grep -v '__BUILD_RC__=')"
-  printf '{"ok":true,"running":%s,"rc":%s,"log":%s}\n' "$running" "$rc" "$(printf '%s' "$disp" | json_string)"
+  printf '{"ok":true,"running":%s,"rc":%s,"candidate_ready":%s,"provider":"%s","log":%s}\n' "$running" "$rc" "$candidate_ready" "$CI_PROVIDER" "$(printf '%s' "$disp" | json_string)"
 }
 
 # {ok,log} — live farm activity for the Fleet log idle state: daemon logs on
@@ -4517,7 +4521,7 @@ cmd_farm_log() {
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
 }
 
-cmd_build_image() {
+build_legacy_provider_image() {
   # Build the runner image from the editable Dockerfile. Uses a CLEAN temp
   # context (only the Dockerfile) so the token/config never enter the build.
   local df="$CFGDIR/Dockerfile.$CI_PROVIDER" tag
@@ -4538,6 +4542,285 @@ cmd_build_image() {
     err "build failed (rc=$rc)"
   fi
   return $rc
+}
+
+
+build_candidate_tag_valid() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+:candidate-[0-9a-f]{12}-[0-9]{10}-[0-9]+$ ]]
+}
+
+# A literal local/... FROM is an operator-managed, host-local prerequisite.
+# Fail before invoking BuildKit: otherwise it treats the missing name as a
+# Docker Hub reference and emits a misleading pull/authentication failure.
+build_local_base_images_available() {
+  local dockerfile="$1" image
+  while IFS= read -r image; do
+    [ -z "$image" ] || docker image inspect "$image" >/dev/null 2>&1 || {
+      err "local base image '$image' is unavailable; build or restore it on this host before rebuilding the runner image"
+      return 1
+    }
+  done < <(awk '
+    toupper($1) == "FROM" {
+      image = $2
+      if (image ~ /^--platform=/) image = $3
+      if (image ~ /^local\//) print image
+    }
+  ' "$dockerfile")
+}
+
+# The plugin image builder intentionally creates a minimal context. Nashost's
+# supported deployment recipes need a small allowlisted set of companions; do
+# not copy the Dockerfile's
+# directory wholesale (it can live on persistent flash beside credentials).
+build_context_needs_kache_supervisor() {
+  grep -Eq '^[[:space:]]*COPY[[:space:]]+kache-supervise\.sh[[:space:]]+/usr/local/bin/kache-supervise\.sh[[:space:]]*$' "$1"
+}
+
+build_context_copy_kache_supervisor() {
+  build_context_copy_companion "$@"
+}
+
+build_context_needs_endpoint_validator() {
+  grep -Eq '^[[:space:]]*COPY[[:space:]]+endpoint-validation\.sh[[:space:]]+/usr/local/libexec/ci-runner-farm/endpoint-validation\.sh[[:space:]]*$' "$1"
+}
+
+build_context_copy_companion() {
+  local source="$1" destination="$2" size
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  size="$(stat -c %s "$source" 2>/dev/null)" || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le 1048576 ] || return 1
+  cp "$source" "$destination" && chmod 0600 "$destination"
+}
+
+# Load the private endpoint used only by deployment-specific Dockerfiles that
+# explicitly declare ARG KACHE_REMOTE_ENDPOINT. Keep it outside the ordinary
+# settings/config surfaces so status JSON and build logs never serialize it.
+kache_endpoint_load() {
+  local endpoint_file="${1:-$KACHE_ENDPOINT_FILE}" endpoint authority host port size
+  KACHE_REMOTE_ENDPOINT=""
+  [ -f "$endpoint_file" ] && [ ! -L "$endpoint_file" ] || return 1
+  [ "$(stat -c %a "$endpoint_file" 2>/dev/null)" = 600 ] || return 1
+  size="$(stat -c %s "$endpoint_file" 2>/dev/null)" || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le 2048 ] || return 1
+  endpoint="$(cat "$endpoint_file" 2>/dev/null)" || return 1
+  # Command substitution removes trailing newlines. Accept exactly the endpoint
+  # bytes with one optional final newline, never extra records or hidden data.
+  if [ "$size" -eq "${#endpoint}" ]; then
+    cmp -s "$endpoint_file" <(printf '%s' "$endpoint") || return 1
+  elif [ "$size" -eq "$(( ${#endpoint} + 1 ))" ]; then
+    cmp -s "$endpoint_file" <(printf '%s\n' "$endpoint") || return 1
+  else
+    return 1
+  fi
+  [[ "$endpoint" =~ ^https?:// ]] || return 1
+  case "$endpoint" in *\?*|*\#*|*%*|*@*) return 1 ;; esac
+  case "$endpoint" in
+    *192.0.2.*|*198.51.100.*|*203.0.113.*) return 1 ;;
+    *\"*|*\'*|*\\*|*[[:space:]]*) return 1 ;;
+  esac
+  [ -z "$(printf '%s' "$endpoint" | LC_ALL=C tr -d ' -~')" ] || return 1
+  authority="${endpoint#*://}"
+  authority="${authority%%/*}"
+  case "$authority" in
+    ''|*@*|*:*:*) return 1 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -le 65535 ] || return 1
+      ;;
+    *) host="$authority" ;;
+  esac
+  case "$host" in
+    ''|.*|*..*|*.|-*|*-.*|*.-*|*[!A-Za-z0-9.-]*) return 1 ;;
+  esac
+  KACHE_REMOTE_ENDPOINT="$endpoint"
+}
+
+build_candidate_state_load() {
+  BUILD_CANDIDATE_TAG=""; BUILD_CANDIDATE_IMAGE_ID=""; BUILD_CANDIDATE_DOCKERFILE_SHA=""; BUILD_CANDIDATE_CONTEXT_SHA=""; BUILD_CANDIDATE_BUILT_AT=""
+  [ -f "$BUILD_CANDIDATE_FILE" ] && [ ! -L "$BUILD_CANDIDATE_FILE" ] || return 1
+  [ "$(stat -c %a "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 600 ] || return 1
+  [ "$(stat -c %s "$BUILD_CANDIDATE_FILE" 2>/dev/null || echo 4097)" -le 4096 ] || return 1
+  local key
+  for key in schema dockerfile_sha context_sha candidate_tag image_id built_at; do
+    [ "$(grep -c "^${key}=" "$BUILD_CANDIDATE_FILE" 2>/dev/null)" = 1 ] || return 1
+  done
+  [ "$(sed -n 's/^schema=//p' "$BUILD_CANDIDATE_FILE")" = 2 ] || return 1
+  BUILD_CANDIDATE_DOCKERFILE_SHA="$(sed -n 's/^dockerfile_sha=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_CONTEXT_SHA="$(sed -n 's/^context_sha=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_TAG="$(sed -n 's/^candidate_tag=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_IMAGE_ID="$(sed -n 's/^image_id=//p' "$BUILD_CANDIDATE_FILE")"
+  BUILD_CANDIDATE_BUILT_AT="$(sed -n 's/^built_at=//p' "$BUILD_CANDIDATE_FILE")"
+  [[ "$BUILD_CANDIDATE_DOCKERFILE_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$BUILD_CANDIDATE_CONTEXT_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    build_candidate_tag_valid "$BUILD_CANDIDATE_TAG" &&
+    [[ "$BUILD_CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+    [[ "$BUILD_CANDIDATE_BUILT_AT" =~ ^[0-9]{10}$ ]]
+}
+
+restore_previous_build_alias() {
+  local previous_id="$1" expected_id="$2" actual
+  actual="$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" || return 1
+  [ "$actual" = "$expected_id" ] || return 1
+  if [ -n "$previous_id" ]; then
+    docker tag "$previous_id" "$BUILTIN_IMAGE" || return 1
+    [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" = "$previous_id" ]
+  else
+    # Candidate retains the image; remove only the new production alias.
+    docker image rm --no-prune "$BUILTIN_IMAGE" >/dev/null || return 1
+    ! docker image inspect "$BUILTIN_IMAGE" >/dev/null 2>&1
+  fi
+}
+
+promote_image_locked() {
+  [ "$CI_PROVIDER" = github ] || { err "candidate promotion supports GitHub only"; return 1; }
+  local candidate="${1:-}" expected_id="${2:-}" actual tmp now previous_id
+  build_candidate_tag_valid "$candidate" || { err "valid immutable candidate tag required"; return 2; }
+  [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "expected candidate image id required"; return 2; }
+  build_candidate_state_load || { err "no verified build candidate metadata is available"; return 1; }
+  [ "$candidate" = "$BUILD_CANDIDATE_TAG" ] && [ "$expected_id" = "$BUILD_CANDIDATE_IMAGE_ID" ] || {
+    err "candidate does not match the saved build metadata"; return 1;
+  }
+  actual="$(docker image inspect "$candidate" --format '{{.Id}}' 2>/dev/null)" || {
+    err "candidate image is unavailable"; return 1;
+  }
+  [ "$actual" = "$expected_id" ] || { err "candidate image id changed; refusing promotion"; return 1; }
+  previous_id="$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" || previous_id=""
+  [ -z "$previous_id" ] || [[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    err "could not verify previous production image"; return 1;
+  }
+  [ ! -L "$PROMOTED_IMAGE_FILE" ] && { [ ! -e "$PROMOTED_IMAGE_FILE" ] || [ -f "$PROMOTED_IMAGE_FILE" ]; } || {
+    err "promotion receipt destination must be a regular file"; return 1;
+  }
+  # Stage the complete private receipt before changing the production alias.
+  now="$(date +%s)"
+  tmp="$(mktemp "$CFGDIR/.promoted-image.XXXXXX")" || return 1
+  ( umask 077; printf 'schema=2\ncandidate_tag=%s\nimage_id=%s\ndockerfile_sha=%s\ncontext_sha=%s\npromoted_at=%s\n' \
+      "$candidate" "$expected_id" "$BUILD_CANDIDATE_DOCKERFILE_SHA" "$BUILD_CANDIDATE_CONTEXT_SHA" "$now" > "$tmp" ) &&
+    chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! docker tag "$expected_id" "$BUILTIN_IMAGE"; then
+    rm -f "$tmp"; err "could not promote candidate"; return 1
+  fi
+  if [ "$(docker image inspect "$BUILTIN_IMAGE" --format '{{.Id}}' 2>/dev/null)" != "$expected_id" ] ||
+      ! mv -T "$tmp" "$PROMOTED_IMAGE_FILE"; then
+    if restore_previous_build_alias "$previous_id" "$expected_id"; then
+      err "promotion publication failed; previous production alias restored"
+    else
+      err "promotion publication AND rollback failed; production alias requires operator recovery"
+    fi
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$BUILD_CANDIDATE_FILE"
+  printf '{"ok":true,"candidate_tag":"%s","image_id":"%s","production_tag":"%s"}\n'     "$(printf '%s' "$candidate" | json_escape)" "$expected_id" "$(printf '%s' "$BUILTIN_IMAGE" | json_escape)"
+}
+
+# Docker may echo expanded RUN instructions. Do not publish the private endpoint.
+redact_build_endpoint() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -n "${KACHE_REMOTE_ENDPOINT:-}" ]; then
+      line="${line//"$KACHE_REMOTE_ENDPOINT"/[REDACTED]}"
+    fi
+    printf '%s\n' "$line"
+  done
+}
+
+build_github_candidate() {
+  # Build into a unique candidate tag. The production BUILTIN_IMAGE tag is changed
+  # only by cmd_promote_image after exact metadata and image-id verification.
+  local df="$CFGDIR/Dockerfile.github"
+  [ -f "$df" ] || df="$CFGDIR/Dockerfile"
+  [ -f "$df" ] || df="$SCRIPT_DIR/../default.github.Dockerfile"
+  [ -f "$df" ] && [ ! -L "$df" ] || { err "no safe Dockerfile found"; return 1; }
+  local KACHE_REMOTE_ENDPOINT=""
+  local ctx companion_source validator_source endpoint_source endpoint_digest df_sha supervisor_sha validator_sha context_sha candidate_repo candidate_tag image_id now tmp rc
+  local -a build_args=()
+  ctx="$(mktemp -d)" || return 1
+  cp "$df" "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
+  build_local_base_images_available "$ctx/Dockerfile" || { rm -rf "$ctx"; return 1; }
+  if build_context_needs_kache_supervisor "$ctx/Dockerfile"; then
+    companion_source="${df%/*}/kache-supervise.sh"
+    build_context_copy_kache_supervisor "$companion_source" "$ctx/kache-supervise.sh" || {
+      rm -rf "$ctx"
+      err "Dockerfile requires a safe kache-supervise.sh companion"
+      return 1
+    }
+  fi
+  if build_context_needs_endpoint_validator "$ctx/Dockerfile"; then
+    validator_source="${df%/*}/endpoint-validation.sh"
+    build_context_copy_companion "$validator_source" "$ctx/endpoint-validation.sh" || {
+      rm -rf "$ctx"
+      err "Dockerfile requires a safe endpoint-validation.sh companion"
+      return 1
+    }
+  fi
+  if grep -Eq '^[[:space:]]*ARG[[:space:]]+KACHE_REMOTE_ENDPOINT([[:space:]]|=|$)' "$ctx/Dockerfile"; then
+    endpoint_source="$KACHE_ENDPOINT_FILE"
+    kache_endpoint_load "$endpoint_source" || {
+      rm -rf "$ctx"
+      err "custom Dockerfile requires a valid mode-0600 Kache endpoint file at $KACHE_ENDPOINT_FILE"
+      return 1
+    }
+    build_args=(--build-arg KACHE_REMOTE_ENDPOINT)
+  fi
+  df_sha="$(sha256sum "$ctx/Dockerfile" | awk '{print $1}')"
+  supervisor_sha=""
+  [ ! -f "$ctx/kache-supervise.sh" ] || supervisor_sha="$(sha256sum "$ctx/kache-supervise.sh" | awk '{print $1}')"
+  validator_sha=""
+  [ ! -f "$ctx/endpoint-validation.sh" ] || validator_sha="$(sha256sum "$ctx/endpoint-validation.sh" | awk '{print $1}')"
+  endpoint_digest=""
+  [ -z "${KACHE_REMOTE_ENDPOINT:-}" ] || endpoint_digest="$(printf 'ci-runner-farm:kache-endpoint:v1\n%s' "$KACHE_REMOTE_ENDPOINT" | sha256sum | awk '{print $1}')"
+  context_sha="$({
+    printf 'ci-runner-farm:build-input:v3\n'
+    printf 'dockerfile=%s\n' "$df_sha"
+    [ -z "$supervisor_sha" ] || printf 'kache_supervisor=%s\n' "$supervisor_sha"
+    [ -z "$validator_sha" ] || printf 'endpoint_validator=%s\n' "$validator_sha"
+    [ -z "$endpoint_digest" ] || printf 'kache_endpoint=%s\n' "$endpoint_digest"
+  } | sha256sum | awk '{print $1}')"
+  candidate_repo="${BUILTIN_IMAGE%:*}"
+  now="$(date +%s)"
+  candidate_tag="${candidate_repo}:candidate-${context_sha:0:12}-${now}-$$"
+  build_candidate_tag_valid "$candidate_tag" || { rm -rf "$ctx"; err "could not derive safe candidate tag"; return 1; }
+  if docker image inspect "$candidate_tag" >/dev/null 2>&1; then
+    rm -rf "$ctx"
+    err "candidate tag already exists"
+    return 1
+  fi
+  log "building immutable candidate '$candidate_tag' from $df"
+  export KACHE_REMOTE_ENDPOINT
+  if (set -o pipefail; docker build -t "$candidate_tag" "${build_args[@]}" "$ctx" 2>&1 | redact_build_endpoint); then rc=0; else rc=$?; fi
+  rm -rf "$ctx"
+  if [ "$rc" -ne 0 ]; then err "build failed (rc=$rc)"; return "$rc"; fi
+  image_id="$(docker image inspect "$candidate_tag" --format '{{.Id}}' 2>/dev/null)"
+  [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { err "candidate image id verification failed"; return 1; }
+  tmp="$(mktemp "$CFGDIR/.build-candidate.XXXXXX")" || return 1
+  ( umask 077; printf 'schema=2\ndockerfile_sha=%s\ncontext_sha=%s\ncandidate_tag=%s\nimage_id=%s\nbuilt_at=%s\n' \
+      "$df_sha" "$context_sha" "$candidate_tag" "$image_id" "$now" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -T "$tmp" "$BUILD_CANDIDATE_FILE" || { rm -f "$tmp"; return 1; }
+  log "candidate verified: $candidate_tag ($image_id)"
+  log "promotion required: $0 promote-image '$candidate_tag' '$image_id'"
+}
+
+# Serialize direct builds, async builds and promotions without restarting runners.
+with_image_build_lock() (
+  mkdir -p "$RUNDIR" || return 1
+  exec 7> "$RUNDIR/image-candidate.lock" || return 1
+  flock -n 7 || { err "an image build or promotion is already running"; return 1; }
+  "$@"
+)
+
+cmd_build_image() {
+  if [ "$CI_PROVIDER" = github ]; then
+    with_image_build_lock build_github_candidate
+  else
+    with_image_build_lock build_legacy_provider_image
+  fi
+}
+
+cmd_promote_image() {
+  with_image_build_lock promote_image_locked "$@"
 }
 
 # Called from the plugin install step (which ALSO re-runs on every boot via
@@ -4756,6 +5039,7 @@ case "${1:-status}" in
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         with_fleet_lock wait cmd_validate ;;
   build-image)      cmd_build_image ;;
+  promote-image)    with_fleet_lock wait cmd_promote_image "${2:-}" "${3:-}" ;;
   build-async)      cmd_build_async ;;
   build-status)     cmd_build_status ;;
   farm-log)         cmd_farm_log ;;

@@ -33,6 +33,7 @@ echo "== Contracts and package =="
 bash tests/native-lifecycle.sh
 bash tests/config-parity.sh
 bash tests/image-validation.sh
+bash tests/image-build-candidate.sh
 bash tests/boot-log.sh
 bash tests/editorconfig.sh
 bash tests/runner-pools.sh
