@@ -90,11 +90,14 @@ v3|id|routing-label|additional-labels|fixed|min|max|idle|cpus|memory|image
 ```
 
 Records are separated by semicolons. `cpus` and `memory` may be `inherit`;
-`image` may be `builtin` or a full registry reference. The current classic-pool
-implementation uses `fixed` capacity and deliberately rejects global autoscale
-and global image auto-update in pool mode. `min`, `max`, and `idle` are retained
-in the versioned contract so adding per-pool autoscaling later does not require
-reformatting every pool. Saving pool changes does not interrupt jobs; use Fleet
+`image` may be `builtin` or a full registry reference. With autoscaling off,
+each pool runs `fixed` runners. With autoscaling on, each pool scales on its own:
+Start launches `min` runners, and the autoscaler keeps `idle` warm runners
+between `min` and `max`. The global step, idle grace, and interval apply to every
+pool; the global minimum, maximum, and buffer are ignored. Pools grow from idle
+slots only, because the queue count covers the whole fleet. The sum of pool
+`max` values is capped at 64; choose maxima the host's CPU and memory can hold.
+Global image auto-update stays disabled in pool mode. Saving pool changes does not interrupt jobs; use Fleet
 **Restart** when ready to apply exact membership, images, and limits.
 
 ### Job-weight recommendations

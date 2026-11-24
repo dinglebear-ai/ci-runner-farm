@@ -304,7 +304,7 @@ gitlab_scale_down_eligible() { [ "$(runner_state "$1")" = idle ]; }
 gitlab_autoscale_counts() {
   local c phase names
   cur=0; busy=0; idle=0
-  names="$(owned_managed_names)" || return 1
+  names="$(scale_names)" || return 1
   for c in $names; do
     [ -n "$c" ] || continue; cur=$((cur+1)); phase="$(runner_state "$c")" || return 1
     case "$phase" in busy) busy=$((busy+1)) ;; idle) idle=$((idle+1)) ;; esac

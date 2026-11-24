@@ -216,9 +216,6 @@ load_cfg
 validate_runner_mode() {
   pool_config_validate "$RUNNER_MODE" "$RUNNER_POOLS" "$GH_SCOPE" "$CI_PROVIDER" "$GH_OWNER" "$GH_REPOS" || return 1
   if pool_mode_enabled; then
-    if [ "$AUTOSCALE" = true ]; then
-      pool_error "Named-pool autoscaling is not supported; disable autoscale for named pools."; return 1
-    fi
     [ "$IMAGE_AUTOUPDATE" != true ] || { pool_error "Runner pools require explicit image updates per pool; disable global image auto-update."; return 1; }
   fi
 }
@@ -531,9 +528,22 @@ owned_managed_names() {
   printf '%s\n' "$names"
 }
 
-current_count() {
+# Slots the scaler counts and may remove. The autoscale pool loop sets
+# CRF_SCALE_POOL so only the active pool's slots are counted; every other
+# caller sees the whole fleet.
+scale_names() {
   local names
   names="$(owned_managed_names)" || return 1
+  if [ -n "${CRF_SCALE_POOL:-}" ]; then
+    printf '%s\n' "$names" | grep -E "^${NAME_PREFIX}-[0-9]+\$" || true
+  else
+    printf '%s\n' "$names"
+  fi
+}
+
+current_count() {
+  local names
+  names="$(scale_names)" || return 1
   printf '%s\n' "$names" | awk 'NF { n++ } END { print n+0 }'
 }
 
@@ -545,7 +555,7 @@ runner_state() {
 runner_busy() { [ "$(runner_state "$1")" = busy ]; }
 busy_count() {
   local b=0 c names
-  names="$(managed_names)" || return 1
+  names="$(scale_names)" || return 1
   for c in $names; do [ -n "$c" ] && runner_busy "$c" && b=$((b+1)); done
   echo "$b"
 }
@@ -589,7 +599,7 @@ autoscale_floor() { local f="$AUTOSCALE_MIN"; [ "$f" -gt "$AUTOSCALE_MAX" ] && f
 scale_down_idle() {
   local want="$1" removed=0 c floor provider failed=0 names snapshot id role index gen count
   floor="$(autoscale_floor)"
-  names="$(managed_names)" || return 1
+  names="$(scale_names)" || return 1
   for c in $(printf '%s\n' "$names" | sort -rV); do
     [ "$removed" -ge "$want" ] && break
     count="$(current_count)" || return 1
@@ -803,16 +813,9 @@ autoscale_queue_depth() {
   printf '%s\n' "$count"
 }
 
-# one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
-autoscale_tick() {
-  [ "$AUTOSCALE" = "true" ] || return 0
-  crf_storage_pressure_cleanup
-  # Named pools are fixed-size; validation rejects autoscale for them.
-  if pool_mode_enabled; then
-    validate_runner_mode || return 1
-    return 0
-  fi
-  reap_dead_runners || return 1  # drop dead containers first so idle accounting is real
+# One scaling decision for the active fleet or pool: keep AUTOSCALE_MIN_IDLE
+# warm runners within [MIN,MAX]. Returns 3 after growing to the floor.
+autoscale_scale_step() {
   local cur=0 busy=0 idle=0 statef over target queue_target qdepth
   # GitHub retains its original cur-busy semantics; GitLab counts only explicit
   # idle managers so disconnected/starting slots are not phantom headroom.
@@ -821,12 +824,14 @@ autoscale_tick() {
   case "$cur:$busy:$idle" in
     *[!0-9:]*) err "autoscale: provider returned invalid fleet counts"; return 1 ;;
   esac
-  qdepth="$(autoscale_queue_depth)"
+  # The queue count covers the whole fleet, so pools scale on idle slots only.
+  qdepth=-1
+  [ -n "${CRF_SCALE_POOL:-}" ] || qdepth="$(autoscale_queue_depth)"
   case "$qdepth" in
     -1|[0-9]|[1-9][0-9]*) ;;
     *) qdepth=-1 ;;
   esac
-  statef="${RUNDIR}/autoscale.state"; over=0
+  statef="${RUNDIR}/autoscale.state${CRF_SCALE_POOL:+.$CRF_SCALE_POOL}"; over=0
   [ -f "$statef" ] && over=$(cat "$statef" 2>/dev/null || echo 0)
   # over feeds $(( over + 1 )) below, which evaluates whatever the file held; a
   # truncated or tampered state file restarts the anti-flap counter instead.
@@ -842,7 +847,7 @@ autoscale_tick() {
   if [ "$cur" -lt "$floor" ]; then
     log "autoscale: count $cur < floor $floor -> grow to $floor"
     cmd_scale "$floor" >/dev/null; echo 0 > "$statef"
-    return 0
+    return 3
   fi
 
   if [ "$idle" -lt "$AUTOSCALE_MIN_IDLE" ] && [ "$cur" -lt "$AUTOSCALE_MAX" ]; then
@@ -863,6 +868,34 @@ autoscale_tick() {
     fi
   else
     echo 0 > "$statef"
+  fi
+}
+
+# one autoscaling evaluation: keep AUTOSCALE_MIN_IDLE warm runners, within [MIN,MAX]
+autoscale_tick() {
+  [ "$AUTOSCALE" = "true" ] || return 0
+  crf_storage_pressure_cleanup
+  reap_dead_runners || return 1  # drop dead containers first so idle accounting is real
+  local rc=0 pool failed=0 floored=0
+  if pool_mode_enabled; then
+    validate_runner_mode || return 1
+    # Each pool scales independently with its own min, max and idle target.
+    while IFS= read -r pool; do
+      [ -n "$pool" ] || continue
+      rc=0
+      (
+        CRF_SCALE_POOL="$pool"
+        AUTOSCALE_MIN="$(pool_min "$pool")" && AUTOSCALE_MAX="$(pool_max "$pool")" \
+          && AUTOSCALE_MIN_IDLE="$(pool_idle "$pool")" && pool_activate "$pool" || exit 1
+        autoscale_scale_step
+      ) || rc=$?
+      case "$rc" in 0) ;; 3) floored=1 ;; *) err "autoscale: pool $pool could not be scaled this tick"; failed=1 ;; esac
+    done < <(pool_records | cut -d'|' -f2)
+    [ "$failed" -eq 0 ] || return 1
+    [ "$floored" -eq 0 ] || return 0
+  else
+    autoscale_scale_step || rc=$?
+    case "$rc" in 0) ;; 3) return 0 ;; *) return "$rc" ;; esac
   fi
   # Self-heal build-poisoned slots after the scale math: healing stop/starts an
   # idle container inside the tick, which would otherwise perturb the idle/busy
@@ -2017,7 +2050,7 @@ start_configured_capacity() {
     while IFS= read -r rec; do
       pool="$(printf '%s' "$rec" | cut -d'|' -f2)"
       pool_activate "$pool" || { failed=1; continue; }
-      startn="$(pool_fixed "$pool")" || { failed=1; continue; }
+      startn="$(pool_configured_target "$pool")" || { failed=1; continue; }
       if [ "$IMAGE_SOURCE" = remote ] && provider_remote_image_host_pull_required; then
         registry_login || { failed=1; continue; }
         provider_prepare_remote_image "$(effective_image)" >/dev/null \
@@ -2830,7 +2863,9 @@ cmd_credential_clear_registry_token() {
 
 cmd_scale() {
   local target="$1" failed=0
-  pool_mode_enabled && { err "manual scale is not available in named-pool mode; edit each pool's fixed capacity and restart the fleet"; return 1; }
+  if pool_mode_enabled && [ -z "${CRF_SCALE_POOL:-}" ]; then
+    err "manual scale is not available in named-pool mode; edit each pool's fixed capacity and restart the fleet"; return 1
+  fi
   # Server-side validate + clamp. The form's max="20" is presentation-only, so a
   # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
   # a container + a minted GitHub registration token per iteration (host / API
@@ -2875,7 +2910,7 @@ cmd_scale() {
     # Remove actual highest-numbered slots; count-derived names are wrong when
     # the fleet contains holes (for example {1,4}).
     local c names snapshot id provider role index gen
-    names="$(managed_names)" || return 1
+    names="$(scale_names)" || return 1
     for c in $(printf '%s\n' "$names" | sort -rV); do
       current="$(current_count)" || return 1
       [ "$current" -le "$target" ] && break

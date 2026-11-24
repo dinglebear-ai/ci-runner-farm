@@ -37,6 +37,7 @@ bash tests/boot-log.sh
 bash tests/editorconfig.sh
 bash tests/runner-pools.sh
 bash tests/autoscale-queue.sh
+bash tests/pool-autoscale.sh
 bash tests/imageupdate-drift.sh
 bash tests/github-liveness.sh
 bash tests/github-rate-budget.sh
