@@ -5,15 +5,14 @@
 # its account runs. When GH_APP_ID and GH_APP_INSTALLATION_ID are set and the
 # App's private key is installed at $GITHUB_APP_KEY_FILE, the Farm uses a
 # one-hour installation token instead, which has its own limit. The token is
-# minted by bin/ci-runner-capacity into $GITHUB_APP_TOKEN_FILE on tmpfs, so the
+# minted by bin/ci-runner-github-app into $GITHUB_APP_TOKEN_FILE on tmpfs, so the
 # hourly rotation never writes the boot flash, and reused until it is within
 # GITHUB_APP_REFRESH_SECONDS of expiry.
 #
-# Every consumer reads the same minted file: the shell engine through
-# ACCESS_TOKEN, and the PHP queue reader and native capacity binary through
-# CRF_GITHUB_TOKEN_FILE, which this file exports. App mode never falls back to
-# the PAT: without a valid installation token ACCESS_TOKEN is empty, so GitHub
-# work pauses (as it does with no token) until a refresh succeeds.
+# The shell engine reads the minted file through ACCESS_TOKEN. App mode never
+# falls back to the PAT: without a valid installation token ACCESS_TOKEN is
+# empty, so GitHub work pauses (as it does with no token) until a refresh
+# succeeds.
 # Sourced by runner-farm.sh before credentials are first loaded.
 
 GITHUB_APP_KEY_FILE="${CFGDIR}/github-app-key.pem"
@@ -52,7 +51,7 @@ github_app_mint() {
       exec 6>>"$GITHUB_APP_TOKEN_FILE.refresh" || exit 0
       flock -n 6 || exit 0
     fi
-    if "${CRF_GITHUB_APP_MINTER:-$SCRIPT_DIR/../bin/ci-runner-capacity}" github-app-token \
+    if "${CRF_GITHUB_APP_MINTER:-$SCRIPT_DIR/../bin/ci-runner-github-app}" github-app-token \
         "$GH_APP_ID" "$GH_APP_INSTALLATION_ID" "$GITHUB_APP_KEY_FILE" "$GITHUB_APP_TOKEN_FILE" \
         >/dev/null 2>"$RUNDIR/github-app-token.err"; then
       rm -f "$GITHUB_APP_TOKEN_FILE.retry"
@@ -85,11 +84,9 @@ github_app_load_token() {
 github_app_select() {
   if github_app_configured; then
     GITHUB_APP_MODE=true
-    export CRF_GITHUB_TOKEN_FILE="$GITHUB_APP_TOKEN_FILE"
     github_app_load_token
   else
     GITHUB_APP_MODE=false
-    unset CRF_GITHUB_TOKEN_FILE
     ACCESS_TOKEN="$(read_secret_file "$TOKEN_FILE")"
   fi
 }

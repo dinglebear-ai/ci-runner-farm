@@ -48,7 +48,7 @@ REPO="${REPO:-unraid/ci-runner-farm}"
 # (never /usr or a root '.' entry that could clobber system-dir perms on extract;
 # the install step extracts --no-same-owner and chowns root:root regardless).
 make_tgz() {
-  build_native_capacity
+  build_github_app_helper
   local opts=()
   if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
     opts=(--sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner)
@@ -59,19 +59,19 @@ make_tgz() {
 
 # Pin the compiler and strip checkout paths/VCS state so tagged rebuilds produce
 # the same Linux executable. Never package a previously generated helper.
-build_native_capacity() {
+build_github_app_helper() {
   local temporary
-  command -v go >/dev/null 2>&1 || { echo "Go is required to build native capacity" >&2; return 1; }
+  command -v go >/dev/null 2>&1 || { echo "Go is required to build the GitHub App helper" >&2; return 1; }
   temporary="$(mktemp -d)" || return 1
-  if ! GOTOOLCHAIN=go1.26.10 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  if ! GOTOOLCHAIN=go1.26.11 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
-    -o "$temporary/ci-runner-capacity" ./cmd/ci-runner-capacity; then
+    -o "$temporary/ci-runner-github-app" ./cmd/ci-runner-github-app; then
     rm -rf -- "$temporary"
     return 1
   fi
   mkdir -p "$SRCDIR/bin"
-  chmod 755 "$temporary/ci-runner-capacity"
-  mv -f "$temporary/ci-runner-capacity" "$SRCDIR/bin/ci-runner-capacity"
+  chmod 755 "$temporary/ci-runner-github-app"
+  mv -f "$temporary/ci-runner-github-app" "$SRCDIR/bin/ci-runner-github-app"
   rm -rf -- "$temporary"
 }
 
@@ -146,7 +146,7 @@ build_dev_package() {
   mkdir -p "$render_dir/$SRCDIR"
   cp -p build-plg.sh "$render_dir/build-plg.sh"
   cp -p go.mod go.sum "$render_dir/"
-  cp -pR cmd internal pkg "$render_dir/"
+  cp -pR cmd pkg "$render_dir/"
   [ ! -f VERSION ] || cp -p VERSION "$render_dir/VERSION"
   [ ! -f CHANGELOG.md ] || cp -p CHANGELOG.md "$render_dir/CHANGELOG.md"
   cp -pR "$SRCDIR"/. "$render_dir/$SRCDIR/"
@@ -466,7 +466,7 @@ tar -xzf "\$CFGDIR/${PACKAGE_NAME}" --no-same-owner --no-overwrite-dir -C "\$PLG
 chown -R root:root "\$PLGDIR"
 find "\$PLGDIR" -type d -exec chmod 0755 {} +
 find "\$PLGDIR" -type f -exec chmod 0644 {} +
-chmod 0755 "\$PLGDIR/include/runner-farm.sh" "\$PLGDIR/include/runner-job-cleanup.sh" "\$PLGDIR/bin/ci-runner-capacity"
+chmod 0755 "\$PLGDIR/include/runner-farm.sh" "\$PLGDIR/include/runner-job-cleanup.sh" "\$PLGDIR/bin/ci-runner-github-app"
 [ -d "\$PLGDIR/nchan" ] && find "\$PLGDIR/nchan" -type f -exec chmod 0755 {} +
 # Unraid's emhttp_event executes these on Docker service start/stop — must be +x
 [ -d "\$PLGDIR/event" ] && find "\$PLGDIR/event" -type f -exec chmod 0755 {} +

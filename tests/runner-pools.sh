@@ -18,7 +18,7 @@ reject() {
 }
 
 build='v3|build|ci-build|linux,x64|3|2|5|1|2|8g|ghcr.io/unraid/ci-runner-image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-qa='v3|qa-vm|qa-vm-client|linux,x64|2|1|3|1|1.5|4g|ghcr.io/unraid/qa-vm-client@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+qa='v3|large|large-client|linux,x64|2|1|3|1|1.5|4g|ghcr.io/unraid/large-client@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 valid="$build;$qa"
 
 accept single '' repo
@@ -43,9 +43,9 @@ reject pools "$valid" repo github dinglebear-ai $'dinglebear-ai/labby\r'
 reject pools "$valid" repo github dinglebear-ai $'dinglebear-ai/labby\t'
 
 RUNNER_MODE=pools RUNNER_POOLS="$valid" GH_SCOPE=org AUTOSCALE=true
-[ "$(pool_routing_label qa-vm)" = qa-vm-client ] && ok || bad 'routing label mismatch'
-[ "$(pool_effective_labels qa-vm)" = 'qa-vm-client,linux,x64' ] && ok || bad 'effective labels mismatch'
-[ "$(pool_image qa-vm)" = 'ghcr.io/unraid/qa-vm-client@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ] && ok || bad 'pool image mismatch'
+[ "$(pool_routing_label large)" = large-client ] && ok || bad 'routing label mismatch'
+[ "$(pool_effective_labels large)" = 'large-client,linux,x64' ] && ok || bad 'effective labels mismatch'
+[ "$(pool_image large)" = 'ghcr.io/unraid/large-client@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ] && ok || bad 'pool image mismatch'
 [ "$(pool_configured_target build)" = 2 ] && ok || bad 'autoscale target mismatch'
 AUTOSCALE=false
 [ "$(pool_configured_target build)" = 3 ] && ok || bad 'fixed target mismatch'
@@ -59,17 +59,17 @@ reject broken "$valid" org
 reject pools '' org
 reject pools "$valid" repo
 reject pools "${build};${build}" org
-reject pools "${build};v3|qa-vm|ci-build|linux|1|1|1|1|1|1g|builtin" org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|1|1|1|1|1g|' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|1|1|1|1|1g|-bad' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|1|1|1|1|1g|image;bad' org
-reject pools 'v3|qa-vm|qa-vm-client|linux,linux|1|1|1|1|1|1g|builtin' org
-reject pools 'v3|qa-vm|qa-vm-client|qa-vm-client|1|1|1|1|1|1g|builtin' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|2|1|1|1|1g|builtin' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|0|1|2|1|1g|builtin' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|0|1|0|0|1g|builtin' org
-reject pools 'v3|qa-vm|qa-vm-client|linux|1|0|1|0|1|zero|builtin' org
-reject pools $'v3|qa-vm|qa-vm-client|linux|1|0|1|0|1|1g|builtin\n' org
+reject pools "${build};v3|large|ci-build|linux|1|1|1|1|1|1g|builtin" org
+reject pools 'v3|large|large-client|linux|1|1|1|1|1|1g|' org
+reject pools 'v3|large|large-client|linux|1|1|1|1|1|1g|-bad' org
+reject pools 'v3|large|large-client|linux|1|1|1|1|1|1g|image;bad' org
+reject pools 'v3|large|large-client|linux,linux|1|1|1|1|1|1g|builtin' org
+reject pools 'v3|large|large-client|large-client|1|1|1|1|1|1g|builtin' org
+reject pools 'v3|large|large-client|linux|1|2|1|1|1|1g|builtin' org
+reject pools 'v3|large|large-client|linux|1|0|1|2|1|1g|builtin' org
+reject pools 'v3|large|large-client|linux|1|0|1|0|0|1g|builtin' org
+reject pools 'v3|large|large-client|linux|1|0|1|0|1|zero|builtin' org
+reject pools $'v3|large|large-client|linux|1|0|1|0|1|1g|builtin\n' org
 
 printf 'runner-pools: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

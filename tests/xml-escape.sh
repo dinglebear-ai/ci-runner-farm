@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 mkdir -p "$tmp/build"
 cp build-plg.sh go.mod go.sum VERSION "$tmp/build/"
-cp -R src cmd internal pkg "$tmp/build/"
+cp -R src cmd pkg "$tmp/build/"
 (
   cd "$tmp/build"
   printf '%s\n' \

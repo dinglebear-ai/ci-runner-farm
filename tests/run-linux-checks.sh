@@ -27,4 +27,3 @@ fi
 # needs a real Docker daemon to launch the pinned official Runner image, so run
 # that gate on the host after the portable suite succeeds.
 bash tests/gitlab-runner-lint.sh
-bash tests/shared-healthcheck-runtime.sh

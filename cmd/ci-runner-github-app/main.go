@@ -1,21 +1,31 @@
-// Package capacitycmd composes Farm's native controller without a QA runtime.
-package capacitycmd
+// Command ci-runner-github-app keeps a current GitHub App installation token:
+// ci-runner-github-app github-app-token <app-id> <installation-id> <private-key-file> <token-file>.
+package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/unraid/ci-runner-farm/pkg/githubapp"
 )
 
-// runGitHubAppToken keeps a token file holding a current installation token:
-// github-app-token <app-id> <installation-id> <private-key-file> <token-file>.
-// It needs neither the capacity lease nor the fleet lock, because minting is
-// independent of capacity state and the token file has its own lock.
+func main() {
+	if len(os.Args) != 6 || os.Args[1] != "github-app-token" {
+		fmt.Fprintln(os.Stderr, "usage: ci-runner-github-app github-app-token <app-id> <installation-id> <private-key-file> <token-file>")
+		os.Exit(2)
+	}
+	if err := runGitHubAppToken(os.Args[2:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "ci-runner-github-app:", err)
+		os.Exit(1)
+	}
+}
+
+// The token file has its own lock, so minting needs no fleet lock.
 func runGitHubAppToken(arguments []string, output io.Writer) error {
 	appID, appErr := strconv.ParseInt(arguments[0], 10, 64)
 	installationID, installationErr := strconv.ParseInt(arguments[1], 10, 64)

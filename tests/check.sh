@@ -30,7 +30,6 @@ done < <(find "$RUNTIME" -type f \( -name '*.php' -o -name '*.page' \) -print | 
 php tests/page-template-syntax.php "$RUNTIME"
 
 echo "== Contracts and package =="
-bash tests/native-lifecycle.sh
 bash tests/config-parity.sh
 bash tests/image-validation.sh
 bash tests/image-build-candidate.sh
@@ -38,6 +37,7 @@ bash tests/boot-log.sh
 bash tests/editorconfig.sh
 bash tests/runner-pools.sh
 bash tests/autoscale-queue.sh
+bash tests/pool-autoscale.sh
 bash tests/imageupdate-drift.sh
 bash tests/github-liveness.sh
 bash tests/github-rate-budget.sh
@@ -51,16 +51,6 @@ bash tests/recommendation-history-integration.sh
 bash tests/nightly-channel.sh
 python3 tests/test-nightly-migration.py
 bash tests/pool-runtime.sh
-bash tests/classic-local-checks.sh
-bash tests/shared-capacity.sh
-bash tests/shared-config-reconcile.sh
-bash tests/resume-queued.sh
-bash tests/shared-observation.sh
-bash tests/elastic-pools.sh
-bash tests/queued-pools.sh
-bash tests/warm-recovery.sh
-php tests/build-demand.php
-bash tests/shared-host-budget.sh
 bash tests/numeric-config.sh
 bash tests/safe-paths.sh
 python3 tests/test-runner-image-startup.py

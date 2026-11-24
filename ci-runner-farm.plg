@@ -48,7 +48,7 @@ tar -xzf "$CFGDIR/ci-runner-farm-2026.10.24.0216.135-1.16.0.tgz" --no-same-owner
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
-chmod 0755 "$PLGDIR/include/runner-farm.sh" "$PLGDIR/include/runner-job-cleanup.sh" "$PLGDIR/bin/ci-runner-capacity"
+chmod 0755 "$PLGDIR/include/runner-farm.sh" "$PLGDIR/include/runner-job-cleanup.sh" "$PLGDIR/bin/ci-runner-github-app"
 [ -d "$PLGDIR/nchan" ] && find "$PLGDIR/nchan" -type f -exec chmod 0755 {} +
 # Unraid's emhttp_event executes these on Docker service start/stop — must be +x
 [ -d "$PLGDIR/event" ] && find "$PLGDIR/event" -type f -exec chmod 0755 {} +
