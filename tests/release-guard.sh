@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory() as temporary:
     build = Path(temporary)
     for name in ("build-plg.sh", "go.mod", "go.sum", "VERSION", "ci-runner-farm.plg", "CHANGELOG.md"):
         shutil.copy2(root / name, build / name)
-    for directory in ("src", "cmd", "internal", "pkg"):
+    for directory in ("src", "cmd", "pkg"):
         shutil.copytree(root / directory, build / directory)
     (build / "VERSION").write_text("1.9.1\n")
     (build / ".release-please-manifest.json").write_text(json.dumps({".": "1.10.0"}))

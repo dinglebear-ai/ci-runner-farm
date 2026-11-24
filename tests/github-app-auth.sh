@@ -14,7 +14,7 @@ PAT='github_pat_long_lived_secret_1234567890'
 
 fail() { printf 'GITHUB APP AUTH FAIL: %s\n' "$*" >&2; exit 1; }
 
-# A counting stand-in for `ci-runner-capacity github-app-token`.
+# A counting stand-in for `ci-runner-github-app github-app-token`.
 MINT_LOG="$tmp/mint.log"; : > "$MINT_LOG"
 cat > "$tmp/minter" <<'EOF'
 #!/usr/bin/env bash
@@ -32,7 +32,6 @@ export MINT_LOG CRF_GITHUB_APP_MINTER="$tmp/minter"
 source src/usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh
 [ "$GITHUB_APP_MODE" = false ] || fail "PAT host entered App mode"
 [ "$ACCESS_TOKEN" = "$PAT" ] || fail "PAT mode did not load the PAT"
-[ -z "${CRF_GITHUB_TOKEN_FILE:-}" ] || fail "PAT mode exported a minted token path"
 [ ! -s "$MINT_LOG" ] || fail "PAT mode ran the minter"
 
 # App ids without a key stay in PAT mode.
@@ -45,7 +44,6 @@ reload_secret_files
 reload_secret_files
 [ "$GITHUB_APP_MODE" = true ] || fail "App mode was not selected"
 [ "$ACCESS_TOKEN" = ghs_MintedInstallationToken000001 ] || fail "App mode did not load the minted token: $ACCESS_TOKEN"
-[ "${CRF_GITHUB_TOKEN_FILE:-}" = "$CRF_RUNDIR/github-token" ] || fail "minted token path was not exported"
 [ "$(wc -l < "$MINT_LOG" | tr -d ' ')" = 1 ] || fail "first App load did not mint exactly once"
 grep -qx "github-app-token 7 42 $CRF_CFGDIR/github-app-key.pem $CRF_RUNDIR/github-token" "$MINT_LOG" \
   || fail "minter arguments changed: $(cat "$MINT_LOG")"
@@ -111,6 +109,5 @@ if grep -qF "$PAT" "$CURL_STDIN"; then fail "gh_api sent the PAT in App mode"; f
 GH_APP_ID=""; GH_APP_INSTALLATION_ID=""
 reload_secret_files
 [ "$GITHUB_APP_MODE" = false ] && [ "$ACCESS_TOKEN" = "$PAT" ] || fail "clearing App settings did not restore PAT mode"
-[ -z "${CRF_GITHUB_TOKEN_FILE:-}" ] || fail "PAT mode kept the minted token export"
 
 echo "github app auth: ok"

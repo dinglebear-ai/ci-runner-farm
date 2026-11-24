@@ -168,7 +168,7 @@ trap 'rm -f -- "$log"; rm -rf -- "$extract_dir" "$mode_fixture"' EXIT HUP INT TE
 tar -xzf "$package" -C "$extract_dir"
 diff -r --exclude=bin "src/usr/local/emhttp/plugins/ci-runner-farm" "$extract_dir" >/dev/null \
   || fail "package contents differ from the runtime source tree"
-python3 - "$extract_dir/bin/ci-runner-capacity" <<'PY'
+python3 - "$extract_dir/bin/ci-runner-github-app" <<'PY'
 import os
 import struct
 import sys
@@ -178,16 +178,16 @@ assert header[:6] == b'\x7fELF\x02\x01'
 assert struct.unpack_from('<H', header, 18)[0] == 62
 assert os.stat(sys.argv[1]).st_mode & 0o111
 PY
-capacity_go="$(go version "$extract_dir/bin/ci-runner-capacity")" \
-  || fail "cannot read capacity helper build info"
-[ "${capacity_go##*: }" = "go1.26.10" ] \
-  || fail "capacity helper was not built with go1.26.10: $capacity_go"
+helper_go="$(go version "$extract_dir/bin/ci-runner-github-app")" \
+  || fail "cannot read GitHub App helper build info"
+[ "${helper_go##*: }" = "go1.26.10" ] \
+  || fail "GitHub App helper was not built with go1.26.10: $helper_go"
 
 # A checkout made with umask 0002 can contain group-writable files. The Linux
 # check environment uses umask 0022, so the renderer must preserve source modes
 # while it copies the tree or its reproducible archive hash changes.
 mkdir -p "$mode_fixture"
-tar -cf - build-plg.sh go.mod go.sum cmd internal pkg VERSION CHANGELOG.md src | tar -xf - -C "$mode_fixture"
+tar -cf - build-plg.sh go.mod go.sum cmd pkg VERSION CHANGELOG.md src | tar -xf - -C "$mode_fixture"
 chmod -R g+w "$mode_fixture"
 (
   cd "$mode_fixture"

@@ -4,8 +4,7 @@
 // system that uses the same account. An installation token has its own limit
 // (15,000 requests an hour on GitHub Enterprise Cloud), lasts one hour, and is
 // scoped to the App's permissions. Minter keeps one current installation token
-// in a private file. Every Farm consumer (the shell engine, the PHP queue
-// reader and the native capacity binary) reads that file exactly as it read the
+// in a private file. The shell engine reads that file exactly as it read the
 // PAT file, so this package is the only place that knows about Apps.
 //
 // Ensure is safe to call on every tick: it reuses the current token until it
@@ -159,7 +158,7 @@ func (m *Minter) lock(ctx context.Context) (func(), error) {
 
 // AcquireCredentialLease reuses token refresh's bounded cross-process flock for
 // protected credential inventories. The caller owns/protects the parent path;
-// it does not create a policy, capacity grant, scheduler or credential request.
+// it does not create a policy, scheduler or credential request.
 func AcquireCredentialLease(ctx context.Context, credentialPath string) (func(), error) {
 	file, err := os.OpenFile(credentialPath+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
