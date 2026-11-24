@@ -46,7 +46,7 @@ assert header[:6] == b'\x7fELF\x02\x01', 'GitHub App helper must be little-endia
 assert struct.unpack_from('<H', header, 18)[0] == 62, 'GitHub App helper must target amd64'
 assert os.stat(sys.argv[1]).st_mode & 0o111, 'GitHub App helper must be executable'
 PY
-go version -m "$tmp/extracted/bin/ci-runner-github-app" | grep -qF 'go1.26.10'
+go version -m "$tmp/extracted/bin/ci-runner-github-app" | grep -qF 'go1.26.11'
 
 # Exercise permissions from the generated install action. Archive permissions
 # alone do not prove that Unraid leaves the GitHub App helper executable.
